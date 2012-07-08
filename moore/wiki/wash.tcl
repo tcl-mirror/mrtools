@@ -105,7 +105,7 @@ moore model wmachine {
 }
 
 # Draw the "as implemented" model
-wmachine draw
+wmachine draw {-Tsvg -o%s.svg -Gsize=7.5,10}
 # Create a state machine from the model
 wmachine machine wm1
 # Set up the parameters for the state machine.

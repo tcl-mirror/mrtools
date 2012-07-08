@@ -2,7 +2,7 @@
 # -- Tcl Module
 
 # @@ Meta Begin
-# Package moore 1.8
+# Package moore 1.9
 # Meta category    Moore State Machine
 # Meta description Moore State Models and Event Dispatch
 # Meta platform    tcl
@@ -26,7 +26,7 @@ package require ralutil
 
 # ACTIVESTATE TEAPOT-PKG BEGIN DECLARE
 
-package provide moore 1.8
+package provide moore 1.9
 
 # ACTIVESTATE TEAPOT-PKG END DECLARE
 # ACTIVESTATE TEAPOT-PKG END TM
@@ -53,7 +53,7 @@ package require logger
 package require textutil::adjust
 
 namespace eval ::moore {
-    variable revision 1.8
+    variable revision 1.9
 
     namespace export model
     namespace export generate
@@ -705,14 +705,14 @@ proc ::moore::Dotfile {modelCmd filename} {
     return
 }
 
-proc ::moore::Draw {modelCmd {dotopts {-Gsize=7.5,10}}} {
+proc ::moore::Draw {modelCmd {dotopts {-Gsize=7.5,10 -Tps -o%s.ps}}} {
     set basename [namespace tail $modelCmd]
     set dotexec [auto_execok dot]
     if {$dotexec eq {}} {
         error "Cannot find \"dot\" executable"
     }
-    set chan [open "| $dotexec -Tps -Gcenter=1 -Gratio=auto $dotopts\
-            -o $basename.ps" w]
+    set dotopts [string map [list %s $basename] $dotopts]
+    set chan [open "| $dotexec -Gcenter=1 -Gratio=auto $dotopts" w]
     chan puts $chan [Dot $modelCmd]
     chan close $chan
     return
