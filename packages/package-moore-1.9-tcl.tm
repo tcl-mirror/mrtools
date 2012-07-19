@@ -3,14 +3,18 @@
 
 # @@ Meta Begin
 # Package moore 1.9
+# Meta as::author  {Andrew Mangogna}
+# Meta as::origin  chiselapp.com/user/mangoa01/repository/mrtools
 # Meta category    Moore State Machine
 # Meta description Moore State Models and Event Dispatch
+# Meta license     BSD
 # Meta platform    tcl
 # Meta require     {Tcl 8.5}
 # Meta require     logger
 # Meta require     ral
 # Meta require     ralutil
-# Meta subject     States Moore
+# Meta subject     {State machine} {Moore Machine} Events Automata
+# Meta subject     {Finite Automata}
 # Meta summary     Moore type state machines
 # @@ Meta End
 
