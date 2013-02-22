@@ -45,6 +45,20 @@
 #   atangle.tcl -- asciidoc literate programming
 #
 # ABSTRACT:
+#   This file contains a Tcl script that will tangle source code contained
+#   within an "asciidoc" document. It is a literate programming tool. Input
+#   documents are assumed to be valid asciidoc documents that contain source
+#   code within source blocks as defined by asciidoc syntax. This program will
+#   look within source blocks for program chunk definitions. We use "noweb"
+#   syntax, namely:
+#
+#   <<chunk name>>=
+#
+#   defines a chunk and within a chunk definition:
+#
+#   <<chunk name>>
+#
+#   refers to a chunk.
 #
 #*--
 #
@@ -67,11 +81,14 @@ namespace eval ::atangle {
         {level.arg warn {Log debug level}}
         {output.arg - {Output file name}}
         {root.arg * {Root chunk to output}}
+        {report {Issue chuck report}}
     }
     variable options ; array set options {}
 
     logger::initNamespace [namespace current]
 
+    # Define a set of relvars that will hold the parsed chunks and their
+    # references.
     relvar create Chunk {
         Name        string
     } Name
@@ -94,6 +111,9 @@ namespace eval ::atangle {
         Indent      string
     } {Name LineNo Offset}
 
+    # This is a weak association on the "Chunk" side to allow for the creation
+    # of references to non-existent chunks. We catch that in code, but it is
+    # convenient to allow such references.
     relvar association R2\
         ChunkRef RefChunk *\
         Chunk Name ?
@@ -102,17 +122,31 @@ namespace eval ::atangle {
         ChunkRef {Name LineNo} *\
         ChunkPart {Name LineNo} 1
 
+    # We define a state model to parse the asciidoc source.
     moore model tangle {
         State InDocument {line num} {
             if {[isSourceMarker $line]} {
-                # Check if the dashes are the same length as the
-                # previous line. If so then the dashes mark a
-                # title. Othewise they mark a source block boundary.
-                set prevlen [string length [$self cget prevline]]
+                # There is an ambiguity associated with dashes and one form of
+                # title markup. We examine the previous line and if it is a
+                # command or the number of dashes is more than two off from the
+                # length of the title text, then we assume the dashes mark a
+                # source boundary.  This is to handle cases such as:
+                #
+                # My Title
+                # --------
+                #
+                # and allow cases such as:
+                #
+                # .Paragraph Title
+                # ----
+                #
+                set prevline [$self cget prevline]
+                set prevlen [string length $prevline]
                 set linelen [string length $line]
-                set first [string index $line 0]
-                set iscmd [expr {$first in ".\["}]
-                if {$linelen > 0 && (!$iscmd || abs($prevlen - $linelen) > 2)} {
+                set first [string index $prevline 0]
+                set iscmd [expr {$first in {. [}}]
+                if {$iscmd || abs($prevlen - $linelen) > 2} {
+                    log::debug "line = \"$line\", num = \"$num\""
                     $self configure prevline {}
                     $self receive SourceMark
                     return
@@ -128,6 +162,7 @@ namespace eval ::atangle {
         Transition InSource - NewLine -> BeginSource
 
         State BeginSource {line num} {
+            log::debug "line = \"$line\", num = \"$num\""
             if {[regexp -- {^<<([^>]+)>>=$} $line match name]} {
                 startChunk $self $name $line $num
                 $self receive ChunkMark
@@ -149,6 +184,8 @@ namespace eval ::atangle {
                 endChunk $self
                 $self receive SourceMark
             } elseif {[regexp -- {^<<([^>]+)>>=$} $line match name]} {
+                # We allow for multiple chunks to be defined within the same
+                # source block.
                 endChunk $self
                 startChunk $self $name $line $num
                 $self receive ChunkMark
@@ -201,6 +238,8 @@ proc ::atangle::endChunk {self} {
     return
 }
 
+# asciidoc markup requires at least 4 dashes to indicate the start or
+# end of a source block.
 proc ::atangle::isSourceMarker {line} {
     return [regexp -- {^-{4,}\s*$} $line]
 }
@@ -210,9 +249,11 @@ proc ::atangle::main {} {
     variable options
     global argv
 
+    # Parse options
     array set options [::cmdline::getoptions argv $optlist]
     ::logger::setlevel $options(level)
 
+    # First scan the input asciidoc file finding the chunks.
     set infilename [lindex $argv 0]
     if {$infilename eq {}} {
         usage
@@ -220,15 +261,17 @@ proc ::atangle::main {} {
     log::debug "infilename = \"$infilename\""
     set ichan [open $infilename r]
 
-    # First scan the file finding the chunks.
     try {
         tangle machine t
         t configure prevline {}
         t configure trace true
         set lineno 1
         relvar eval {
+            # We read the file, line by line so that we can count the
+            # lines for diagnostic purposes.
             for {set lcnt [chan gets $ichan line]} {$lcnt >= 0}\
                     {set lcnt [chan gets $ichan line]} {
+                # Simple synchronous push of events to the parsing state model.
                 t receive NewLine $line $lineno
                 incr lineno
             }
@@ -238,7 +281,7 @@ proc ::atangle::main {} {
         log::debug \n[relformat $::atangle::ChunkRef ChunkRef]
         t destroy
     } on error {result opts} {
-        puts stderr $result
+        chan puts stderr $result
         return -options $opts
     } finally {
         chan close $ichan
@@ -253,37 +296,87 @@ proc ::atangle::main {} {
     }]
     log::debug \n[relformat $undefs undefs]
 
-    relation foreach undef $undefs {
+    relation foreach undef $undefs -ascending LineNo {
         relation assign $undef
         # +1 to go from offsets to line numbers
         log::notice "$infilename: line: [expr {$LineNo + $Offset + 1}],\
-            in chunk \"$Name\": reference to chunk, \"$RefChunk\",\
+            in chunk \"$Name\": reference to chunk, <<$RefChunk>>,\
             that does not exist"
     }
 
+    # Emit the tangled code
     if {$options(output) ne "-"} {
-        set ochan [file open $options(output) w]
+        set ochan [open $options(output) w]
     } else {
         set ochan stdout
     }
-    # Emit the tangled code
     try {
         set root [pipe {
             relvar set Chunk |
             relation restrictwith ~ {$Name eq $options(root)}
         }]
         if {[relation isempty $root]} {
-            error "no chunk named, \"$options(root)\", was found"
+            error "no root chunk named, <<$options(root)>>, was found"
         }
         foreach line [gatherChunk $options(root)] {
-            puts $ochan $line
+            chan puts $ochan $line
         }
     } on error {result opts} {
-        puts stderr $result
+        chan puts stderr $result
         return -options $opts
     } finally {
         chan close $ochan
     }
+
+    # Output a report if requested.
+    if {$options(report)} {
+        chan puts stderr "Tangle Report"
+        chan puts stderr =======================================\n
+
+        chan puts stderr "Chunk Definitions"
+        set chunks [pipe {
+            relvar set ChunkPart |
+            relation eliminate ~ Content |
+            relation group ~ LineNos LineNo |
+            relation extend ~ cp Lines list {
+                [relation list [tuple extract $cp LineNos]\
+                    LineNo -ascending LineNo]} |
+            relation project ~ Name Lines |
+            relation rename ~ Name "Chunk Name" Lines "Defined On Line(s)"
+        }]
+        chan puts stderr [relformat $chunks {} {{Chunk Name}}]
+
+        set missing [pipe {
+            relvar set Chunk |
+            relation restrictwith ~ {$Name ne $options(root)} |
+            relation semiminus ~ [relvar set ChunkRef] -using {Name RefChunk} |
+            relation extend ~ rf "Referenced At" int {
+                [tuple extract $rf LineNo] + [tuple extract $rf Offset] + 1
+            } |
+            relation project ~ RefChunk "Referenced At" |
+            relation rename ~ RefChunk "Chunk Name"
+        }]
+        chan puts stderr =======================================\n
+        chan puts stderr "Chunks Referenced but not Defined"
+        chan puts stderr [relformat $missing {} {{Chunk Name}}]
+
+        set orphans [pipe {
+            relvar set Chunk |
+            relation restrictwith ~ {$Name ne $options(root)} |
+            relation rename ~ Name RefChunk |
+            rvajoin ~ [relvar set ChunkRef] Refs |
+            relation restrict ~ r {[relation isempty [tuple extract $r Refs]]} |
+            relation project ~ RefChunk |
+            relation semijoin ~ [relvar set ChunkPart] -using {RefChunk Name} |
+            relation project ~ Name LineNo |
+            relation rename ~ Name "Chunk Name" LineNo "Defined on Line"
+        }]
+        chan puts stderr =======================================\n
+        chan puts stderr "Chunks Defined but not Referenced"
+        chan puts stderr [relformat $orphans {} {{Chunk Name}}]
+    }
+
+    exit 0
 }
 
 proc ::atangle::gatherChunk {chunk} {
@@ -293,6 +386,9 @@ proc ::atangle::gatherChunk {chunk} {
         relation restrictwith ~ {$Name eq $chunk}
     }]
     set gathered [list]
+    if {[relation isempty $parts]} {
+        log::notice "elided output for reference to unknown chunk, <<$chunk>>"
+    }
     relation foreach part $parts -ascending LineNo {
         set content [relation extract $part Content]
         set refs [pipe {
@@ -324,7 +420,7 @@ proc ::atangle::gatherChunk {chunk} {
 
 proc ::atangle::usage {} {
     variable optlist
-    puts stderr [cmdline::usage $optlist\
+    chan puts stderr [cmdline::usage $optlist\
         "<options> <file>\noptions:"]
     exit 1
 }
