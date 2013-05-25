@@ -1,3 +1,36 @@
+# ACTIVESTATE TEAPOT-PKG BEGIN TM -*- tcl -*-
+# -- Tcl Module
+
+# @@ Meta Begin
+# Package oomoore 1.0
+# Meta category    State Model
+# Meta description This package contains the defintion of a TclOO
+# Meta description meta-class that can be used to configure state behavior
+# Meta description into other classes.
+# Meta platform    tcl
+# Meta require     {Tcl 8.6}
+# Meta require     logger
+# Meta require     oo::util
+# Meta require     uevent
+# Meta summary     oomoore -- Moore type state machines in TclOO
+# @@ Meta End
+
+
+# ACTIVESTATE TEAPOT-PKG BEGIN REQUIREMENTS
+
+package require Tcl 8.6
+package require logger
+package require oo::util
+package require uevent
+
+# ACTIVESTATE TEAPOT-PKG END REQUIREMENTS
+
+# ACTIVESTATE TEAPOT-PKG BEGIN DECLARE
+
+package provide oomoore 1.0
+
+# ACTIVESTATE TEAPOT-PKG END DECLARE
+# ACTIVESTATE TEAPOT-PKG END TM
 # This software is copyrighted 2012 by G. Andrew Mangogna.
 # The following terms apply to all files associated with the software unless
 # explicitly disclaimed in individual files.
