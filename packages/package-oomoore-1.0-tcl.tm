@@ -31,7 +31,7 @@ package provide oomoore 1.0
 
 # ACTIVESTATE TEAPOT-PKG END DECLARE
 # ACTIVESTATE TEAPOT-PKG END TM
-# This software is copyrighted 2012 by G. Andrew Mangogna.
+# This software is copyrighted 2013 by G. Andrew Mangogna.
 # The following terms apply to all files associated with the software unless
 # explicitly disclaimed in individual files.
 # 
@@ -85,12 +85,17 @@ package provide oomoore 1.0
 #*--
 #
 package require Tcl 8.6
-package require oo::util
 # The tcllib uevent package is used to generate events to the state
 # machines.
 package require uevent
-# Transitions are logged with the logger package.
+# Transitions are logged with the logger package at the info level.
 package require logger
+
+package require oo::util
+# The mixin of "oo::class.Delegate", interacts badly with meta-classes that
+# have constructor arguments. So we eliminate the oo::class mixins here. This
+# will mean that you can't define class methods.
+::oo::define oo::class self mixin
 
 namespace eval ::oomoore {
     namespace export model
@@ -107,7 +112,7 @@ namespace eval ::oomoore {
 ::oo::class create ::oomoore::model {
     superclass ::oo::class
 
-    constructor {} {
+    constructor {model} {
         # Class level variables. These hold the states, events and
         # transitions, etc. All objects of an ::oomoore::model class
         # have the same state behavior.
@@ -117,24 +122,58 @@ namespace eval ::oomoore {
         set states [list]
         my variable events
         set events [list]
-        my variable initialstate
-        set initialstate {}
         my variable defaulttrans
         set defaulttrans CH
 
+        # Link the unexported methods to ordinary commands. This forms
+        # the model configuration mini-language.
+        link\
+            {state State}\
+            {transition Transition}\
+            {defaultTrans DefaultTrans}\
+            {initialState InitialState}
+
+        # Build the data structures needed for the event dispatch.
+        my eval $model
+
+        # Check that the model was defined correctly and consistently.
+        foreach s $states {
+            foreach e $events {
+                if {[info exists transitions($s,$e)]} {
+                    if {$transitions($s,$e) ni $states} {
+                        throw [list OOMOORE UNKNOWN_STATE $transitions($s,$e)]\
+                            "unknown destination state in transition,\
+                            \"$s - $e -> $transitions($s,$e)\""
+                    }
+                } else {
+                    set transitions($s,$e) $defaulttrans
+                }
+            }
+        }
+        # Define the inital state or check the definition provided.
+        my variable initialstate
+        if {[info exists initialstate]} {
+            if {$initialstate ni $states} {
+                throw [list OOMOORE UNKNOWN_STATE $initialstate]\
+                        "unknown initial state, \"$initialstate\""
+            }
+        } else {
+            set initialstate [lindex $states 0]
+        }
+
+        # Now define the methods that the instances will have.
         define [self] constructor {{startState {}}} {
             my variable currentState
+            classvariable states
             if {$startState eq {}} {
                 classvariable initialstate
                 set currentState $initialstate
+            } elseif {$startState ni $states} {
+                set msg "unknown initial state, \"$startState\""
+                log::error $msg
+                throw [list OOMOORE UNKNOWN_STATE $startState] $msg
             } else {
                 set currentState $startState
-            }
-            classvariable states
-            if {$currentState ni $states} {
-                set msg "unknown initial state, \"$currentState\""
-                log::error $msg
-                throw [list OOMOORE UNKNOWN_STATE $currentState] $msg
             }
 
             my variable evttoken
@@ -152,21 +191,11 @@ namespace eval ::oomoore {
 
         # Receive an event synchronously.
         define [self] method receive {event args} {
-            classvariable events
-            if {$event ni $events} {
-                set msg "unknown event, \"$event\""
-                log::error $msg
-                throw [list OOMOORE UNKNOWN_EVENT $event] $msg
-            }
+            my ValidateEvent $event
 
             my variable currentState
             classvariable transitions
-            if {![info exists transitions($currentState,$event)]} {
-                classvariable defaulttrans
-                set newState $defaulttrans
-            } else {
-                set newState $transitions($currentState,$event)
-            }
+            set newState $transitions($currentState,$event)
 
             log::info "Transition: [self]: $currentState - $event \{$args\} ->\
                     $newState"
@@ -175,12 +204,6 @@ namespace eval ::oomoore {
                 log::error $msg
                 throw [list OOMOORE CH_TRANSITION $currentState $event] $msg
             } elseif {$newState ne "IG"} {
-                classvariable states
-                if {$newState ni $states} {
-                    set msg "transition to undefined state, \"$newState\""
-                    log::error $msg
-                    throw [list OOMOORE UNKNOWN_STATE $newState] $msg
-                }
                 set currentState $newState
                 my STATE_$newState {*}$args
             }
@@ -196,11 +219,13 @@ namespace eval ::oomoore {
 
         # Signal an event.
         define [self] method signal {event args} {
+            my ValidateEvent $event
             ::uevent generate [self] dispatch [list $event $args]
         }
 
         # Signal an event after some time.
         define [self] method delayedSignal {time event args} {
+            my ValidateEvent $event
             return [::after $time [list ::uevent generate [self] dispatch\
                     [list $event $args]]]
         }
@@ -222,18 +247,23 @@ namespace eval ::oomoore {
             log::info "Dispatch: $event -> [self]"
             my receive $event {*}$params
         }
+
+        define [self] method ValidateEvent {event} {
+            classvariable events
+            if {$event ni $events} {
+                set msg "unknown event, \"$event\""
+                log::error $msg
+                throw [list OOMOORE UNKNOWN_EVENT $event] $msg
+            }
+        }
     }
 
     # Define a state model state.
-    method state {name argList body} {
+    method State {name argList body} {
         my variable states
         if {$name ni $states} {
             lappend states $name
             oo::define [self] method STATE_$name $argList $body
-            my variable initialstate
-            if {$initialstate eq {}} {
-                set initialstate $name
-            }
         } else {
             throw [list OOMOORE DUPLICATE_STATE $name]\
                 "duplicate state, \"$name\""
@@ -242,7 +272,7 @@ namespace eval ::oomoore {
 
     # Define a state model transition
     # The "-" and "->" parameters are syntactic sugar.
-    method transition {current - event -> new} {
+    method Transition {current - event -> new} {
         my variable events
         if {$event ni $events} {
             lappend events $event
@@ -256,7 +286,7 @@ namespace eval ::oomoore {
         }
     }
 
-    method defaultTrans {trans} {
+    method DefaultTrans {trans} {
         if {$trans eq "IG" || $trans eq "CH"} {
             my variable defaulttrans
             set defaulttrans $trans
@@ -267,7 +297,7 @@ namespace eval ::oomoore {
         }
     }
 
-    method initialState {state} {
+    method InitialState {state} {
         my variable initialstate
         set initialstate $state
     }
