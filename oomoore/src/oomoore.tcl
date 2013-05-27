@@ -57,6 +57,7 @@ package require Tcl 8.6
 package require uevent
 # Transitions are logged with the logger package at the info level.
 package require logger
+package require textutil::adjust
 
 package require oo::util
 # The mixin of "oo::class.Delegate", interacts badly with meta-classes that
@@ -172,7 +173,7 @@ namespace eval ::oomoore {
                 throw [list OOMOORE CH_TRANSITION $currentState $event] $msg
             } elseif {$newState ne "IG"} {
                 set currentState $newState
-                my STATE_$newState {*}$args
+                my __STATE_$newState {*}$args
             }
         }
 
@@ -181,7 +182,7 @@ namespace eval ::oomoore {
             my variable currentState
             log::info "Force: $currentState -> $state"
             set currentState $state
-            my STATE_$newState {*}$args
+            my __STATE_$newState {*}$args
         }
 
         # Signal an event.
@@ -211,7 +212,7 @@ namespace eval ::oomoore {
         # All the real work is done in the receive method.
         define [self] method Dispatch {obj event details} {
             lassign $details event params
-            log::info "Dispatch: $event -> [self]"
+            log::info "Signal: $event -> [self]"
             my receive $event {*}$params
         }
 
@@ -224,16 +225,111 @@ namespace eval ::oomoore {
             }
         }
     }
+    method states {} {
+        my variable states
+        return $states
+    }
+    method events {} {
+        my variable events
+        return $events
+    }
+    method transitions {} {
+        my variable transitions
+        set result [list]
+        foreach {key value} [array get transitions] {
+            lappend result [list {*}[split $key ,] $value]
+        }
+    }
+    # Draw state model graph with "dot"
+    method dot {} {
+        set result {}
+        append result "digraph [namespace tail [self]] \{" \n
+        append result "    node\[shape=\"box\"]" \n
+
+        my variable states
+        foreach state $states {
+            lassign [info class definition [self] __STATE_$state] arguments body
+            set code "$state \{$arguments\} \{"
+            append code\
+                    [textutil::adjust::indent [textutil::adjust::undent $body]\
+                    "    "]
+            append code "\n\}"
+            #puts "code = \"$code\""
+            set labelCode {}
+            foreach line [split $code \n] {
+                # We need to escape certain characters to keep "dot"
+                # away from them.
+                set quoted {}
+                foreach c [split $line {}] {
+                    if {$c eq "\\" || $c eq "\""} {
+                        append quoted "\\"
+                    }
+                    append quoted $c
+                }
+                append labelCode $quoted "\\l"
+            }
+            #puts "labelCode = \"$labelCode\""
+            set stProps "label=\"$labelCode\""
+
+            my variable initialstate
+            if {$state eq $initialstate} {
+                append stProps ",style=\"bold\""
+            }
+            append result "    \"$state\"\[$stProps]" \n
+        }
+
+        my variable transitions
+        foreach {trans dststate} [array get transitions] {
+            lassign [split $trans ,] currstate event
+            if {!($dststate eq "IG" || $dststate eq "CH")} {
+                append result "    \"$currstate\" -> \"$dststate\"\
+                        \[label=\"$event\"]" \n
+            }
+        }
+
+        append result "\}"
+
+        return $result
+    }
+
+    method dotfile {filename} {
+        set chan [open $filename w]
+        try {
+            chan puts $chan [my dot]
+        } finally {
+            chan close $chan
+        }
+        return
+    }
+
+    method draw {{dotopts {-Gsize=7.5,10 -Tps -o%s.ps}}} {
+        set basename [namespace tail [self]]
+        set dotexec [auto_execok dot]
+        if {$dotexec eq {}} {
+            error "Cannot find \"dot\" executable"
+        }
+        set dotopts [string map [list %s $basename] $dotopts]
+        set chan [open "| $dotexec -Gcenter=1 -Gratio=auto $dotopts" w]
+        try {
+            chan puts $chan [my dot]
+        } finally {
+            chan close $chan
+        }
+        return
+    }
 
     # Define a state model state.
     method State {name argList body} {
         my variable states
-        if {$name ni $states} {
-            lappend states $name
-            oo::define [self] method STATE_$name $argList $body
-        } else {
+        if {$name in {IG CH}} {
+            throw [list OOMOORE RESERVED_STATE $name]\
+                "states may not be named by the reserved name, \"$name\""
+        } elseif {$name in $states} {
             throw [list OOMOORE DUPLICATE_STATE $name]\
                 "duplicate state, \"$name\""
+        } else {
+            lappend states $name
+            oo::define [self] method __STATE_$name $argList $body
         }
     }
 
