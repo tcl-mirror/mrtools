@@ -58,6 +58,7 @@ package require uevent
 # Transitions are logged with the logger package at the info level.
 package require logger
 package require textutil::adjust
+package require struct::set
 
 package require oo::util
 # The mixin of "oo::class.Delegate", interacts badly with meta-classes that
@@ -80,7 +81,14 @@ namespace eval ::oomoore {
 ::oo::class create ::oomoore::model {
     superclass ::oo::class
 
+    method create {model} {
+        next $model
+    }
+
     constructor {model} {
+        ::logger::init ::oomoore[self]
+        ::logger::import -all -namespace log ::oomoore[self]
+
         # Class level variables. These hold the states, events and
         # transitions, etc. All objects of an ::oomoore::model class
         # have the same state behavior.
@@ -105,13 +113,38 @@ namespace eval ::oomoore {
         my eval $model
 
         # Check that the model was defined correctly and consistently.
+        # Check for isolated states, i.e. those with no inbound or
+        # outbound transition.
+        set outstates [list]
+        set instates [list]
+        foreach {trans dst} [array get transitions] {
+            lassign [split $trans ,] src event
+            ::struct::set include outstates $src
+            if {$dst ne "IG" && $dst ne "CH"} {
+                ::struct::set include instates $dst
+            }
+        }
+        set noincoming [::struct::set difference $states $instates]
+        set nooutgoing [::struct::set difference $states $outstates]
+        set isostates [::struct::set intersect $noincoming $nooutgoing]
+        if {![::struct::set empty $isostates]} {
+            set errmsg "state model has isolated state(s):\
+                    \"[join $isostates {, }]\""
+            log::error $errmsg
+            throw [list OOMOORE ISOLATED $isostates] $errmsg
+        }
+        # Check that transitions are to known states and fill out the
+        # transition matrix completely using the default transition for those
+        # transitions not defined explicitly.
         foreach s $states {
             foreach e $events {
                 if {[info exists transitions($s,$e)]} {
-                    if {$transitions($s,$e) ni $states} {
-                        throw [list OOMOORE UNKNOWN_STATE $transitions($s,$e)]\
-                            "unknown destination state in transition,\
+                    if {$transitions($s,$e) ni [concat $states {IG CH}]} {
+                        set errmsg "unknown destination state in transition,\
                             \"$s - $e -> $transitions($s,$e)\""
+                        log::error $errmsg
+                        throw [list OOMOORE UNKNOWN_STATE $transitions($s,$e)]\
+                            $errmsg
                     }
                 } else {
                     set transitions($s,$e) $defaulttrans
@@ -131,6 +164,9 @@ namespace eval ::oomoore {
 
         # Now define the methods that the instances will have.
         define [self] constructor {{startState {}}} {
+            ::logger::init ::oomoore[self]
+            ::logger::import -all -namespace log ::oomoore[self]
+
             my variable currentState
             classvariable states
             if {$startState eq {}} {
@@ -145,16 +181,19 @@ namespace eval ::oomoore {
             }
 
             my variable evttoken
-            set evttoken [::uevent bind [self] dispatch [mymethod Dispatch]]
-
-            set log [::logger::init oomoore[self]]
-            ::logger::import -all -namespace log oomoore[self]
-            log::setlevel warn
+            set evttoken [::uevent bind [self] event [mymethod Dispatch]]
+            my variable delaytoken
+            set delaytoken [::uevent bind [self] delayed\
+                    [mymethod DelayedDispatch]]
+            my variable event_queue
+            set event_queue [list]
         }
 
         define [self] destructor {
             my variable evttoken
             ::uevent unbind $evttoken
+            my variable delaytoken
+            ::uevent unbind $delaytoken
         }
 
         # Receive an event synchronously.
@@ -185,17 +224,32 @@ namespace eval ::oomoore {
             my __STATE_$newState {*}$args
         }
 
+        # Obtain the current state
+        define [self] method currentstate {} {
+            my variable currentState
+            return $currentState
+        }
+
         # Signal an event.
-        define [self] method signal {event args} {
+        define [self] method signal {src event args} {
             my ValidateEvent $event
-            ::uevent generate [self] dispatch [list $event $args]
+            set details [list $src $event $args]
+            my variable event_queue
+            if {$src eq [self]} {
+                set event_queue [linsert $event_queue 0 $details]
+            } else {
+                lappend event_queue $details
+            }
+            if {[llength $event_queue] == 1} {
+                ::uevent generate [self] event
+            }
         }
 
         # Signal an event after some time.
-        define [self] method delayedSignal {time event args} {
+        define [self] method delayedSignal {time src event args} {
             my ValidateEvent $event
-            return [::after $time [list ::uevent generate [self] dispatch\
-                    [list $event $args]]]
+            return [::after $time [list ::uevent generate [self] delayed\
+                    [list $src $event $args]]]
         }
 
         # Control the logging level.
@@ -208,12 +262,34 @@ namespace eval ::oomoore {
             return $currlevel
         }
 
-        # All signal dispatch comes here.
+        # Dispatch of non-delayed events comes here
         # All the real work is done in the receive method.
-        define [self] method Dispatch {obj event details} {
-            lassign $details event params
-            log::info "Signal: $event -> [self]"
-            my receive $event {*}$params
+        define [self] method Dispatch {obj event empty} {
+            my variable event_queue
+            if {[llength $event_queue] != 0} {
+                set details [lindex $event_queue 0]
+                set event_queue [lrange $event_queue 1 end]
+
+                lassign $details src eventName params
+                log::info "Signal: [list $src] - $eventName -> [self]"
+                my receive $eventName {*}$params
+
+                if {[llength $event_queue] != 0} {
+                    ::uevent generate [self] event
+                }
+            }
+        }
+
+        # Dispatch of delayed events comes here
+        define [self] method DelayedDispatch {obj event details} {
+            my variable event_queue
+            if {[llength $event_queue] == 0} {
+                lassign $details src eventName params
+                log::info "Signal: [list $src] - $eventName -> [self]"
+                my receive $eventName {*}$params
+            } else {
+                lappend event_queue $details
+            }
         }
 
         define [self] method ValidateEvent {event} {
@@ -239,6 +315,15 @@ namespace eval ::oomoore {
         foreach {key value} [array get transitions] {
             lappend result [list {*}[split $key ,] $value]
         }
+        return $result
+    }
+    method initialstate {} {
+        my variable initialstate
+        return $initialstate
+    }
+    method defaulttransition {} {
+        my variable defaulttrans
+        return $defaulttrans
     }
     # Draw state model graph with "dot"
     method dot {} {
