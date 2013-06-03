@@ -81,10 +81,6 @@ namespace eval ::oomoore {
 ::oo::class create ::oomoore::model {
     superclass ::oo::class
 
-    method create {model} {
-        next $model
-    }
-
     constructor {model} {
         set svcname ::oomoore[self]
         ::logger::init $svcname
@@ -387,17 +383,13 @@ namespace eval ::oomoore {
             append code "\n\}"
             #puts "code = \"$code\""
             set labelCode {}
+            set escapemap [list \\ \\\\ \" \\\"]
             foreach line [split $code \n] {
                 # We need to escape certain characters to keep "dot"
                 # away from them.
-                set quoted {}
-                foreach c [split $line {}] {
-                    if {$c eq "\\" || $c eq "\""} {
-                        append quoted "\\"
-                    }
-                    append quoted $c
-                }
-                append labelCode $quoted "\\l"
+                append labelCode\
+                    [string map $escapemap $line]\
+                    "\\l"
             }
             #puts "labelCode = \"$labelCode\""
             set stProps "label=\"$labelCode\""
