@@ -172,173 +172,188 @@ namespace eval ::oomoore {
         }
 
         # Now define the methods that the new class will have.
-        define [self] constructor {{startState {}}} {
-            ::logger::init ::oomoore[self]
-            ::logger::import -all -namespace log ::oomoore[self]
+        define [self] {
+            constructor {{startState {}}} {
+                ::logger::init ::oomoore[self]
+                ::logger::import -all -namespace log ::oomoore[self]
 
-            my variable currentState
-            classvariable states
-            # Set the initial state to that provided or the default if none is
-            # provided.
-            if {$startState eq {}} {
-                classvariable initialstate
-                set currentState $initialstate
-            } elseif {$startState ni $states} {
-                set msg "unknown initial state, \"$startState\""
-                log::error $msg
-                throw [list OOMOORE UNKNOWN_STATE $startState] $msg
-            } else {
-                set currentState $startState
+                my variable currentState
+                classvariable states
+                # Set the initial state to that provided or the default if none
+                # is provided.
+                if {$startState eq {}} {
+                    classvariable initialstate
+                    set currentState $initialstate
+                } elseif {$startState ni $states} {
+                    set msg "unknown initial state, \"$startState\""
+                    log::error $msg
+                    throw [list OOMOORE UNKNOWN_STATE $startState] $msg
+                } else {
+                    set currentState $startState
+                }
+
+                # Set up the uevent package event bindings. We use two
+                # different event bindings depending upon whether the event
+                # being dispatched is delayed or not.
+                my variable evttoken
+                set evttoken [::uevent bind [self] event [mymethod Dispatch]]
+                my variable delaytoken
+                set delaytoken [::uevent bind [self] delayed\
+                        [mymethod DelayedDispatch]]
+                # We keep a queue of events as a simple list.
+                my variable event_queue
+                set event_queue [list]
             }
 
-            # Set up the uevent package event bindings. We use two different
-            # event bindings depending upon whether the event being dispatched
-            # is delayed or not.
-            my variable evttoken
-            set evttoken [::uevent bind [self] event [mymethod Dispatch]]
-            my variable delaytoken
-            set delaytoken [::uevent bind [self] delayed\
-                    [mymethod DelayedDispatch]]
-            # We keep a queue of events as a simple list.
-            my variable event_queue
-            set event_queue [list]
-        }
+            destructor {
+                my variable evttoken
+                ::uevent unbind $evttoken
+                my variable delaytoken
+                ::uevent unbind $delaytoken
+            }
 
-        define [self] destructor {
-            my variable evttoken
-            ::uevent unbind $evttoken
-            my variable delaytoken
-            ::uevent unbind $delaytoken
-        }
+            # Receive an event synchronously. This causes immediate dispatch of
+            # the state action as a synchronous procedure invocation.
+            method receive {event args} {
+                my ValidateEvent $event
 
-        # Receive an event synchronously. This causes immediate dispatch of the
-        # state action as a synchronous procedure invocation.
-        define [self] method receive {event args} {
-            my ValidateEvent $event
+                my variable currentState
+                classvariable transitions
+                set newState $transitions($currentState,$event)
 
-            my variable currentState
-            classvariable transitions
-            set newState $transitions($currentState,$event)
+                log::info "Transition: [self]:\
+                        $currentState - $event -> $newState"
+                if {$newState eq "CH"} {
+                    set msg "can't happen transition:\
+                            $currentState - $event -> CH"
+                    log::error $msg
+                    throw [list OOMOORE CH_TRANSITION $currentState $event] $msg
+                } elseif {$newState ne "IG"} {
+                    set currentState $newState
+                    my __STATE_$newState {*}$args
+                }
+            }
 
-            log::info "Transition: [self]: $currentState - $event \{$args\} ->\
-                    $newState"
-            if {$newState eq "CH"} {
-                set msg "can't happen transition: $currentState - $event -> CH"
-                log::error $msg
-                throw [list OOMOORE CH_TRANSITION $currentState $event] $msg
-            } elseif {$newState ne "IG"} {
-                set currentState $newState
+            # Force a machine to a given state, executing its action.
+            method force {state args} {
+                my variable currentState
+                log::info "Force: $currentState -> $state \{$args\}"
+                set currentState $state
                 my __STATE_$newState {*}$args
             }
-        }
 
-        # Force a machine to a given state, executing its action.
-        define [self] method force {state args} {
-            my variable currentState
-            log::info "Force: $currentState -> $state"
-            set currentState $state
-            my __STATE_$newState {*}$args
-        }
-
-        # Obtain the current state
-        define [self] method currentstate {} {
-            my variable currentState
-            return $currentState
-        }
-
-        # Signal an event.
-        define [self] method signal {src event args} {
-            my ValidateEvent $event
-            set details [list $src $event $args]
-            my variable event_queue
-            # Self directed events are queued to the front.
-            if {$src eq [self]} {
-                set event_queue [linsert $event_queue 0 $details]
-            } else {
-                lappend event_queue $details
+            # Obtain the current state
+            method currentstate {} {
+                my variable currentState
+                return $currentState
             }
-            # Prime the event dispatch if this is the first event queued.
-            if {[llength $event_queue] == 1} {
-                ::uevent generate [self] event
-            }
-        }
 
-        # Signal an event after some time.
-        define [self] method delayedSignal {time src event args} {
-            my ValidateEvent $event
-            return [::after $time [list ::uevent generate [self] delayed\
-                    [list $src $event $args]]]
-        }
-
-        # Control the logging level.
-        define [self] method loglevel {{level {}}} {
-            set currlevel [log::currentloglevel]
-            if {$level ne {}} {
-                log::setlevel $level
-                set currlevel $level
-            }
-            return $currlevel
-        }
-
-        #############################
-        #
-        # Unexported methods
-        #
-        #############################
-
-        # Dispatch of non-delayed events comes here.
-        # The event queue is emptied by generating an event after each one is
-        # dispatched until the queue goes empty. So when we enter here, if the
-        # queue is already not empty, then there must be a pending event.
-        define [self] method Dispatch {obj event empty} {
-            my variable event_queue
-            # The event queue should contain something here, but we test anyway.
-            if {[llength $event_queue] != 0} {
-                # Pull the event from the front of the queue
-                set details [lindex $event_queue 0]
-                set event_queue [lrange $event_queue 1 end]
-                # Generate another event if we have more events to dispatch.
-                if {[llength $event_queue] != 0} {
+            # Signal an event.
+            method signal {event args} {
+                my ValidateEvent $event
+                # Determine the caller of the method. We use this to determine
+                # whether the event is self-directed. "self caller" throws
+                # an error if the caller is not a method.
+                if {[catch {lindex [self caller] 1} src]} {
+                    set src {}
+                }
+                set details [list $src $event $args]
+                my variable event_queue
+                # Self directed events are queued to the front.
+                if {$src eq [self]} {
+                    set event_queue [linsert $event_queue 0 $details]
+                } else {
+                    lappend event_queue $details
+                }
+                # Prime the event dispatch if this is the first event queued.
+                if {[llength $event_queue] == 1} {
                     ::uevent generate [self] event
                 }
-                tailcall my DeliverEvent $details
             }
-        }
 
-        # Dispatch of delayed events comes here. For delayed events, we queue
-        # them normally, except if the event queue is already empty. Since here
-        # we executing out of the event loop anyway, there is no reason to
-        # generate another event just to get the already delayed event
-        # dispatched. Hence, we deliver the event immediately if there are no
-        # other events pending.
-        define [self] method DelayedDispatch {obj event details} {
-            my variable event_queue
-            if {[llength $event_queue] == 0} {
-                tailcall my DeliverEvent $details
-            } else {
-                lappend event_queue $details
+            # Signal an event after some time.
+            method delayedSignal {time event args} {
+                my ValidateEvent $event
+                if {[catch {lindex [self caller] 1} src]} {
+                    set src {}
+                }
+                return [::after $time [list ::uevent generate [self] delayed\
+                        [list $src $event $args]]]
             }
-        }
 
-        # Actually do the event delivery
-        define [self] method DeliverEvent {details} {
-            lassign $details src eventName params
-            log::info "Signal: [list $src] - $eventName -> [self]"
-            # All the real work is done in the receive method.
-            tailcall my receive $eventName {*}$params
-        }
+            # Control the logging level.
+            method loglevel {{level {}}} {
+                set currlevel [log::currentloglevel]
+                if {$level ne {}} {
+                    log::setlevel $level
+                    set currlevel $level
+                }
+                return $currlevel
+            }
 
-        # Make sure we are dealing with a known event.
-        define [self] method ValidateEvent {event} {
-            classvariable events
-            if {$event ni $events} {
-                set msg "unknown event, \"$event\""
-                log::error $msg
-                throw [list OOMOORE UNKNOWN_EVENT $event] $msg
+            #############################
+            #
+            # Unexported methods
+            #
+            #############################
+
+            # Dispatch of non-delayed events comes here.  The event queue is
+            # emptied by generating an event after each one is dispatched until
+            # the queue goes empty. So when we enter here, if the queue is
+            # already not empty, then there must be a pending event.
+            method Dispatch {obj event empty} {
+                my variable event_queue
+                # The event queue should contain something here, but we test
+                # anyway.
+                if {[llength $event_queue] != 0} {
+                    # Pull the event from the front of the queue
+                    set details [lindex $event_queue 0]
+                    set event_queue [lrange $event_queue 1 end]
+                    # Generate another event if we have more events to dispatch.
+                    if {[llength $event_queue] != 0} {
+                        ::uevent generate [self] event
+                    }
+                    tailcall my DeliverEvent $details
+                }
+            }
+
+            # Dispatch of delayed events comes here. For delayed events, we
+            # queue them normally, except if the event queue is already empty.
+            # Since here we executing out of the event loop anyway, there is no
+            # reason to generate another event just to get the already delayed
+            # event dispatched. Hence, we deliver the event immediately if
+            # there are no other events pending.
+            method DelayedDispatch {obj event details} {
+                my variable event_queue
+                if {[llength $event_queue] == 0} {
+                    tailcall my DeliverEvent $details
+                } else {
+                    lappend event_queue $details
+                }
+            }
+
+            # Actually do the event delivery
+            method DeliverEvent {details} {
+                lassign $details src eventName params
+                log::info "Signal:\
+                        [list $src] - $eventName \{$params\} -> [self]"
+                # All the real work is done in the receive method.
+                tailcall my receive $eventName {*}$params
+            }
+
+            # Make sure we are dealing with a known event.
+            method ValidateEvent {event} {
+                classvariable events
+                if {$event ni $events} {
+                    set msg "unknown event, \"$event\""
+                    log::error $msg
+                    throw [list OOMOORE UNKNOWN_EVENT $event] $msg
+                }
             }
         }
     }
 
+    # Remaining methods on the new class itself.
     method states {} {
         my variable states
         return $states
@@ -367,6 +382,7 @@ namespace eval ::oomoore {
         my variable defaulttrans
         return $defaulttrans
     }
+
     # Draw state model graph with "dot"
     method dot {} {
         set result {}
@@ -440,6 +456,11 @@ namespace eval ::oomoore {
         }
         return
     }
+
+    # The following methods define the mini-language used to specify the
+    # state model. They are linked to procedure names that are lower case so
+    # that the state model definitions appear more conventional and don't
+    # require the use of the "my" command.
 
     # Define a state model state.
     method State {name argList body} {

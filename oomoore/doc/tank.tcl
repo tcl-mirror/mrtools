@@ -12,7 +12,7 @@ package require oomoore
     transition empty - pump -> filling
 
     state filling {} {
-        my delayedSignal 500 [self] full   ; # drive my self to the next state
+        my delayedSignal 500 full   ; # drive my self to the next state
         my variable count
         chan puts "filling $count"
         incr count
@@ -20,7 +20,7 @@ package require oomoore
     transition filling - full -> full
 
     state full {} {
-        my delayedSignal 500 [self] pump
+        my delayedSignal 500 pump
         my variable count
         chan puts "full $count"
         incr count
@@ -28,7 +28,7 @@ package require oomoore
     transition full - pump -> emptying
 
     state emptying {} {
-        my delayedSignal 500 [self] empty
+        my delayedSignal 500 empty
         my variable count
         chan puts "emptying $count"
         incr count
@@ -52,6 +52,6 @@ tank create mytank
 # Log the transitions
 mytank loglevel info
 # Kick things off
-mytank signal {} pump
+mytank signal pump
 # Wait for one cycle to complete
 vwait ::done
