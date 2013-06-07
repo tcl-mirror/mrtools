@@ -97,10 +97,13 @@ namespace eval ::oomoore {
         set events [list]
         my variable defaulttrans
         set defaulttrans CH
+        my variable delayedSignals
+        array set delayedSignals {}
 
         # Link the unexported methods required to define the state model to
         # ordinary commands that can be used within the "model" specification.
-        # This forms the model configuration mini-language.
+        # This forms the model configuration mini-language. N.B. "link" is an
+        # oo::util command.
         link\
             {state State}\
             {transition Transition}\
@@ -113,9 +116,10 @@ namespace eval ::oomoore {
         # Check that the model was defined correctly and consistently.
         #
         # Check for isolated states, i.e. those with no inbound or outbound
-        # transition. Here we find all the state with no outbound transitions
+        # transition. Here we find all the states with no outbound transitions
         # and all those with no inbound transition. The intersection is then
-        # the set of isolated states.
+        # the set of isolated states. We start by accumulating as list of
+        # states that have outbound or inbound transitions.
         set outstates [list]
         set instates [list]
         foreach {trans dst} [array get transitions] {
@@ -141,8 +145,13 @@ namespace eval ::oomoore {
                 }
             }
         }
+        # The set of states with no inbound transitions is then the difference
+        # between the set of all states and those that do have inbound
+        # transitions. Similarly for outbound transitions.
         set noincoming [::struct::set difference $states $instates]
         set nooutgoing [::struct::set difference $states $outstates]
+        # The intersection then determines those states with neither inbound
+        # nor outbound transitions, hence isolated.
         set isostates [::struct::set intersect $noincoming $nooutgoing]
         if {![::struct::set empty $isostates]} {
             set errmsg "state model has isolated state(s):\
@@ -160,12 +169,14 @@ namespace eval ::oomoore {
                 }
             }
         }
-        # Define the inital state or check the definition provided.
+        # If it has been defined, check the initial state. Otherwise,
+        # we set it to the first state that was lexically defined.
         my variable initialstate
         if {[info exists initialstate]} {
             if {$initialstate ni $states} {
-                throw [list OOMOORE UNKNOWN_STATE $initialstate]\
-                        "unknown initial state, \"$initialstate\""
+                set errmsg "unknown initial state, \"$initialstate\""
+                log::error $errmsg
+                throw [list OOMOORE UNKNOWN_STATE $initialstate] $errmsg
             }
         } else {
             set initialstate [lindex $states 0]
@@ -185,9 +196,9 @@ namespace eval ::oomoore {
                     classvariable initialstate
                     set currentState $initialstate
                 } elseif {$startState ni $states} {
-                    set msg "unknown initial state, \"$startState\""
-                    log::error $msg
-                    throw [list OOMOORE UNKNOWN_STATE $startState] $msg
+                    set errmsg "unknown initial state, \"$startState\""
+                    log::error $errmsg
+                    throw [list OOMOORE UNKNOWN_STATE $startState] $errmsg
                 } else {
                     set currentState $startState
                 }
@@ -206,10 +217,16 @@ namespace eval ::oomoore {
             }
 
             destructor {
+                # Unbind the events used for asynchronous signal delivery.
                 my variable evttoken
                 ::uevent unbind $evttoken
                 my variable delaytoken
                 ::uevent unbind $delaytoken
+                # Cancel any outstanding delayed signals.
+                my variable delayedSignals
+                foreach {sigid sigdetails} [array get delayedSignals] {
+                    after cancel [lindex $sigdetails 0]
+                }
             }
 
             # Receive an event synchronously. This causes immediate dispatch of
@@ -224,10 +241,11 @@ namespace eval ::oomoore {
                 log::info "Transition: [self]:\
                         $currentState - $event -> $newState"
                 if {$newState eq "CH"} {
-                    set msg "can't happen transition:\
+                    set errmsg "can't happen transition:\
                             $currentState - $event -> CH"
-                    log::error $msg
-                    throw [list OOMOORE CH_TRANSITION $currentState $event] $msg
+                    log::error $errmsg
+                    throw [list OOMOORE CH_TRANSITION $currentState $event]\
+                        $errmsg
                 } elseif {$newState ne "IG"} {
                     set currentState $newState
                     my __STATE_$newState {*}$args
@@ -273,12 +291,43 @@ namespace eval ::oomoore {
 
             # Signal an event after some time.
             method delayedSignal {time event args} {
-                my ValidateEvent $event
                 if {[catch {lindex [self caller] 1} src]} {
                     set src {}
                 }
-                return [::after $time [list ::uevent generate [self] delayed\
+                # Cancel any existing delayed signal that might have been in
+                # place.
+                my CancelDelayedSignal $src $event
+                my variable delayedSignals
+                set timerid [::after $time\
+                        [list ::uevent generate [self] delayed\
                         [list $src $event $args]]]
+                set expiretime [expr {[clock milliseconds] + $time}]
+                set delayedSignals($src,$event) [list $timerid $expiretime]
+                return
+            }
+
+            # Cancel a delayed signal.
+            method cancel {event} {
+                if {[catch {lindex [self caller] 1} src]} {
+                    set src {}
+                }
+                return [my CancelDelayedSignal $src $event]
+            }
+
+            # Time remaining for a delayed signal
+            method remaining {event} {
+                if {[catch {lindex [self caller] 1} src]} {
+                    set src {}
+                }
+                my variable delayedSignals
+                if {[info exists delayedSignals($src,$event)]} {
+                    set expiretime [lindex $delayedSignals($src,$event) 1]
+                    set currtime [clock milliseconds]
+                    set remaintime [expr {max($expiretime - $currtime, 0)}]
+                } else {
+                    set remaintime 0
+                }
+                return $remaintime
             }
 
             # Control the logging level.
@@ -322,8 +371,24 @@ namespace eval ::oomoore {
             # Since here we executing out of the event loop anyway, there is no
             # reason to generate another event just to get the already delayed
             # event dispatched. Hence, we deliver the event immediately if
-            # there are no other events pending.
-            method DelayedDispatch {obj event details} {
+            # there are no other events pending. If other events are pending,
+            # the there is a pending ::uevent already in the works.
+            method DelayedDispatch {obj delayed details} {
+                # Now that the delayed event is delivered, we have to do the
+                # bookkeeping on the set of outstanding delayed events.
+                my variable delayedSignals
+                lassign $details src event
+                if {[info exists delayedSignals($src,$event)]} {
+                    unset delayedSignals($src,$event)
+                } else {
+                    # This should never happen. Somehow we got to dispatch the
+                    # delayed event but it is not recorded in the outstanding
+                    # set.
+                    set errmsg "unexpected delayed event,\
+                        [list $src] - $event -> [self]"
+                    log::error $errmsg
+                    throw [list OOMOORE UNKNOWN_DELAYED $src $event] $errmsg
+                }
                 my variable event_queue
                 if {[llength $event_queue] == 0} {
                     tailcall my DeliverEvent $details
@@ -341,13 +406,44 @@ namespace eval ::oomoore {
                 tailcall my receive $eventName {*}$params
             }
 
+            method CancelDelayedSignal {src event} {
+                my ValidateEvent $event
+                # Check if we have the delayed signal. It might not exist
+                # or have already been dispatched. We return an indication
+                # of whether the signal was indeed canceled.
+                my variable delayedSignals
+                if {[info exists delayedSignals($src,$event)]} {
+                    after cancel [lindex $delayedSignals($src,$event) 0]
+                    unset delayedSignals($src,$event)
+                    set result true
+                    log::info "Cancel: [list $src] - $event -> [self]"
+                } else {
+                    # If the signal has already been delivered, it might be in
+                    # the event queue. Iterate across the event queue and
+                    # remove the event if we find it.
+                    my variable event_queue
+                    set queue_index 0
+                    foreach event $event_queue {
+                        lassign $event eventSrc eventName
+                        if {$eventSrc eq $src && $eventName eq $event} {
+                            set event_queue [lreplace $event_queue\
+                                    $queue_index $queue_index]
+                            return true
+                        }
+                        incr queue_index
+                    }
+                    set result false
+                }
+                return $result
+            }
+
             # Make sure we are dealing with a known event.
             method ValidateEvent {event} {
                 classvariable events
                 if {$event ni $events} {
-                    set msg "unknown event, \"$event\""
-                    log::error $msg
-                    throw [list OOMOORE UNKNOWN_EVENT $event] $msg
+                    set errmsg "unknown event, \"$event\""
+                    log::error $errmsg
+                    throw [list OOMOORE UNKNOWN_EVENT $event] $errmsg
                 }
             }
         }
@@ -464,13 +560,18 @@ namespace eval ::oomoore {
 
     # Define a state model state.
     method State {name argList body} {
+        # The "states" variable holds the set of defined states. Order is
+        # important here because we may need to use the first defined state
+        # as the default initial state.
         my variable states
         if {$name in {IG CH}} {
-            throw [list OOMOORE RESERVED_STATE $name]\
-                "states may not be named by the reserved name, \"$name\""
+            set errmsg "states may not be named by the reserved name, \"$name\""
+            log::error $errmsg
+            throw [list OOMOORE RESERVED_STATE $name] $errmsg
         } elseif {$name in $states} {
-            throw [list OOMOORE DUPLICATE_STATE $name]\
-                "duplicate state, \"$name\""
+            set errmsg "duplicate state, \"$name\""
+            log::error $errmsg
+            throw [list OOMOORE DUPLICATE_STATE $name] $errmsg
         } else {
             lappend states $name
             oo::define [self] method __STATE_$name $argList $body
@@ -486,8 +587,9 @@ namespace eval ::oomoore {
         }
         my variable transitions
         if {[info exists transitions($current,$event)]} {
-            throw [list OOMOORE DUPLICATE_TRANS $current $event]\
-                "duplicate transition, \"$current - $event\""
+            set errmsg "duplicate transition, \"$current - $event\""
+            log::error $errmsg
+            throw [list OOMOORE DUPLICATE_TRANS $current $event] $errmsg
         } else {
             set transitions($current,$event) $new
         }
@@ -498,9 +600,10 @@ namespace eval ::oomoore {
             my variable defaulttrans
             set defaulttrans $trans
         } else {
-            throw {OOMOORE BAD_DEFAULT_TRANS {unknown transition name}}\
-                "unknown transition name, \"$trans\": must be one of\
+            set errmsg "unknown transition name, \"$trans\": must be one of\
                     \"IG\" or \"CH\""
+            log::error $errmsg
+            throw {OOMOORE BAD_DEFAULT_TRANS {unknown transition name}} $errmsg
         }
     }
 
