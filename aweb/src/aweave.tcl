@@ -42,23 +42,9 @@
 #   mrtools
 #
 # MODULE:
-#   atangle.tcl -- asciidoc literate programming
+#   aweave.tcl -- asciidoc literate programming
 #
 # ABSTRACT:
-#   This file contains a Tcl script that will tangle source code contained
-#   within an "asciidoc" document. It is a literate programming tool. Input
-#   documents are assumed to be valid asciidoc documents that contain source
-#   code within source blocks as defined by asciidoc syntax. This program will
-#   look within source blocks for program chunk definitions. We use "noweb"
-#   syntax, namely:
-#
-#   <<chunk name>>=
-#
-#   defines a chunk and within a chunk definition:
-#
-#   <<chunk name>>
-#
-#   refers to a chunk.
 #
 #*--
 #
@@ -76,7 +62,7 @@ if {$iswrapped} {
 
 source [file join $top aweb.tcl]
 
-namespace eval ::atangle {
+namespace eval ::aweave {
     namespace export main
     namespace ensemble create
 
@@ -89,7 +75,6 @@ namespace eval ::atangle {
         {version {Print version and license, then exit}}
         {level.arg warn {Log debug level}}
         {output.arg - {Output file name}}
-        {root.arg * {Root chunk to output}}
         {report {Issue chuck report}}
     }
     variable options ; array set options {}
@@ -97,18 +82,13 @@ namespace eval ::atangle {
     logger::initNamespace [namespace current]
 }
 
-proc ::atangle::main {} {
+proc ::aweave::main {} {
     variable optlist
     variable options
     global argv
 
     # Parse options
-    array set options [::cmdline::getoptions ::argv $optlist]
-    if {$options(version)} {
-        versionInfo
-        exit
-    }
-
+    array set options [::cmdline::getoptions argv $optlist]
     ::logger::setlevel $options(level)
 
     # First scan the input asciidoc file finding the chunks.
@@ -117,20 +97,22 @@ proc ::atangle::main {} {
         chan puts stderr [cmdline::usage $optlist "<options> <file>\noptions:"]
         exit 1
     }
+    log::debug "infilename = \"$infilename\""
+    set ichan [open $infilename r]
 
-    tangler create t
-    t loglevel $options(level)
-    t parse $infilename
-    t reportUndefined
+    weaver create w
+    w loglevel $options(level)
+    w parse $infilename
+    w reportUndefined
 
-    # Emit the tangled code
+    # Emit the woven document
     if {$options(output) ne "-"} {
         set ochan [open $options(output) w]
     } else {
         set ochan stdout
     }
     try {
-        t tangle $ochan $options(root)
+        w weave $infilename $ochan
     } on error {result opts} {
         chan puts stderr $result
         return -options $opts
@@ -142,16 +124,16 @@ proc ::atangle::main {} {
 
     # Output a report if requested.
     if {$options(report)} {
-        t reportChunks stderr $options(root)
+        w reportChunks stderr $options(root)
     }
 
-    t destroy
+    w destroy
     exit 0
 }
 
-proc ::atangle::versionInfo {} {
+proc ::aweave::versionInfo {} {
     variable version
-    puts "atangle: version: $version"
+    puts "aweave: version: $version"
     puts {
 This software is copyrighted 2013 by G. Andrew Mangogna.
 The following terms apply to all files associated with the software unless
@@ -194,7 +176,7 @@ terms specified in this license.
 }
 }
 
-::oo::class create ::atangle::tangler {
+::oo::class create ::aweave::weaver {
     superclass ::aweb::parser
 
     constructor {} {
@@ -205,63 +187,73 @@ terms specified in this license.
         next
     }
 
-    method tangle {ochan root} {
-        set exists [pipe {
-            relvar set Chunk |
-            relation restrictwith ~ {$Name eq $root} |
-            relation isnotempty
-        }]
-        if {$exists} {
-            foreach line [my GatherChunk $root] {
+    # We copy the input file to the output, line by line.  When the number
+    # matches that of the beginning of a chunk, then we emit a reference tag
+    # for the chunk.  When a line number matches that for the end of a chunk,
+    # we emit definition text and any references that the chunk makes.
+    method weave {infilename ochan} {
+        set ichan [open $infilename r]
+        try {
+            set lineno 1
+            for {set lcnt [chan gets $ichan line]} {$lcnt >= 0}\
+                    {set lcnt [chan gets $ichan line]} {
+                set chunks [pipe {
+                    relvar restrictone ChunkBlock BeginLineNum $lineno |
+                    relation semijoin ~ [relvar set Chunk]\
+                        -using {BeginLineNum BlockLineNum}
+                }]
+                log::debug \n[relformat $chunks chunks]
+                relation foreach chunk $chunks {
+                    relation assign $chunk Name
+                    chan puts $ochan "\[\[[my CleanUpChunkName $Name],$Name\]\]"
+                }
+
                 chan puts $ochan $line
+
+                set chunks [pipe {
+                    relvar restrictone ChunkBlock EndLineNum $lineno |
+                    relation semijoin ~ [relvar set Chunk]\
+                        -using {BeginLineNum BlockLineNum}
+                }]
+                if {[relation isnotempty $chunks]} {
+                    chan puts $ochan "Defines Chunk(s)::"
+                    set defs [pipe {
+                        relation project $chunks Name |
+                        relation list
+                    }]
+                    chan puts $ochan "  [join $defs {, }]"
+                }
+                set chunkrefs [pipe {
+                    relvar restrictone ChunkBlock EndLineNum $lineno |
+                    relation semijoin ~ [relvar set ChunkRef]\
+                        -using {BeginLineNum ChunkLineNum}
+                }]
+                if {[relation isnotempty $chunkrefs]} {
+                    chan puts $ochan "References Chunk(s)::"
+                    set refs [pipe {
+                        relation project $chunkrefs RefToChunk |
+                        relation extend ~ rf Reference string {\
+                            "<<[my CleanUpChunkName\
+                            [tuple extract $rf RefToChunk]]>>"} |
+                        relation project ~ Reference |
+                        relation list
+                    }]
+                    chan puts $ochan "  [join $refs {, }]"
+                }
+
+                incr lineno
             }
-        } else {
-            error "no root chunk named, <<$root>>, was found"
+        } on error {result opts} {
+            chan puts stderr $result
+            return -options $opts
+        } finally {
+            chan close $ichan
         }
     }
 
-    method GatherChunk {chunk} {
-        set parts [pipe {
-            relvar set Chunk |
-            relation restrictwith ~ {$Name eq $chunk}
-        }]
-        set gathered [list]
-        if {[relation isempty $parts]} {
-            log::notice "elided output for reference to unknown chunk,\
-                    <<$chunk>>"
-        }
-        relation foreach part $parts -ascending {BlockLineNum Offset} {
-            set content [relation extract $part Content]
-            set refs [pipe {
-                relvar set ChunkRef |
-                relation semijoin $part ~\
-                    -using {BlockLineNum ChunkLineNum Offset ChunkOffset}
-            }]
-            #log::debug "\n[relformat $refs "Refs in $chunk"]"
-            if {[relation isempty $refs]} {
-                lappend gathered {*}$content
-            } else {
-                set prevOffset 0
-                relation foreach ref $refs -ascending RefOffset {
-                    relation assign $ref RefOffset RefToChunk Indent
-                    log::debug "prevOffset = $prevOffset,\
-                            RefOffset = $RefOffset"
-                    lappend gathered\
-                        {*}[lrange $content $prevOffset $RefOffset-1]
-                    set prevOffset [expr {$RefOffset + 1}]
-
-                    set reflines [my GatherChunk $RefToChunk]
-                    set indentlines [list]
-                    foreach refline $reflines {
-                        lappend indentlines ${Indent}$refline
-                    }
-                    lappend gathered {*}$indentlines
-                }
-                lappend gathered {*}[lrange $content $prevOffset end]
-            }
-        }
-        return $gathered
+    method CleanUpChunkName {cname} {
+        return [string map [list * root { } _] $cname]
     }
 }
 
-atangle main
+aweave main
