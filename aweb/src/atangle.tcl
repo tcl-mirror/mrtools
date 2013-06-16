@@ -109,13 +109,10 @@ proc ::atangle::main {} {
         exit
     }
 
-    ::logger::setlevel $options(level)
-
     # First scan the input asciidoc file finding the chunks.
     set infilename [lindex $argv 0]
     if {$infilename eq {}} {
-        chan puts stderr [cmdline::usage $optlist "<options> <file>\noptions:"]
-        exit 1
+        set infilename -
     }
 
     tangler create t

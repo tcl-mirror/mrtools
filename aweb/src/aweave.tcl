@@ -197,48 +197,56 @@ terms specified in this license.
             set lineno 1
             for {set lcnt [chan gets $ichan line]} {$lcnt >= 0}\
                     {set lcnt [chan gets $ichan line]} {
-                set chunks [pipe {
-                    relvar restrictone ChunkBlock BeginLineNum $lineno |
-                    relation semijoin ~ [relvar set Chunk]\
+                set block [relvar restrictone ChunkBlock BeginLineNum $lineno]
+                log::debug \n[relformat $block block]
+                if {[relation isnotempty $block]} {
+                    relation assign $block BeginLineNum
+                    chan puts $ochan "\[\[chunk_block_$BeginLineNum\]\]"
+                }
+                set chdefs [pipe {
+                    relvar set Chunk |
+                    relation semijoin $block ~\
                         -using {BeginLineNum BlockLineNum}
                 }]
-                log::debug \n[relformat $chunks chunks]
-                relation foreach chunk $chunks {
-                    relation assign $chunk Name
-                    chan puts $ochan "\[\[[my CleanUpChunkName $Name],$Name\]\]"
+                relation foreach chdef $chdefs {
+                    chan puts $ochan\
+                            "(((chunk,[relation extract $chdef Name])))"
                 }
 
                 chan puts $ochan $line
 
+                set block [relvar restrictone ChunkBlock EndLineNum $lineno]
                 set chunks [pipe {
-                    relvar restrictone ChunkBlock EndLineNum $lineno |
-                    relation semijoin ~ [relvar set Chunk]\
+                    relvar set Chunk |
+                    relation semijoin $block ~\
                         -using {BeginLineNum BlockLineNum}
                 }]
                 if {[relation isnotempty $chunks]} {
-                    chan puts $ochan "Defines Chunk(s)::"
+                    chan puts $ochan "\[horizontal\]"
+                    chan puts -nonewline $ochan "Defines::  "
                     set defs [pipe {
                         relation project $chunks Name |
                         relation list
                     }]
                     chan puts $ochan "  [join $defs {, }]"
                 }
+
                 set chunkrefs [pipe {
-                    relvar restrictone ChunkBlock EndLineNum $lineno |
-                    relation semijoin ~ [relvar set ChunkRef]\
-                        -using {BeginLineNum ChunkLineNum}
+                    relvar set ChunkRef |
+                    relation semijoin $block ~\
+                        -using {BeginLineNum ChunkLineNum} |
+                    relation semijoin ~ [relvar set Chunk]\
+                        -using {RefToChunk Name} |
+                    relation project ~ Name BlockLineNum |
+                    relation tag ~ Line -ascending BlockLineNum -within Name |
+                    relation restrictwith ~ {$Line == 0} |
+                    relation extend ~ rf Reference string {\
+"<<chunk_block_[tuple extract $rf BlockLineNum],[tuple extract $rf Name]>>"} |
+                    relation list ~ Reference
                 }]
-                if {[relation isnotempty $chunkrefs]} {
-                    chan puts $ochan "References Chunk(s)::"
-                    set refs [pipe {
-                        relation project $chunkrefs RefToChunk |
-                        relation extend ~ rf Reference string {\
-                            "<<[my CleanUpChunkName\
-                            [tuple extract $rf RefToChunk]]>>"} |
-                        relation project ~ Reference |
-                        relation list
-                    }]
-                    chan puts $ochan "  [join $refs {, }]"
+                if {[llength $chunkrefs] != 0} {
+                    chan puts -nonewline $ochan "References::  "
+                    chan puts $ochan "  [join $chunkrefs {, }]"
                 }
 
                 incr lineno
