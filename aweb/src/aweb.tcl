@@ -66,7 +66,6 @@
 package require Tcl 8.6
 package require ral
 package require ralutil
-package require cmdline
 package require logger
 package require oomoore
 
@@ -119,8 +118,7 @@ namespace eval ::aweb {
         transition InSourceBlock - ChunkMarker -> InChunk
 
         state InChunk {line num} {
-            regexp -- {^<<([^>]+)>>=$} $line match name
-            my StartChunk $name $line $num
+            my StartChunk $line $num
             my variable refOffset
             set refOffset 0
         }
@@ -130,9 +128,8 @@ namespace eval ::aweb {
         transition InChunk - ChunkMarker -> EndChunk
 
         state EndChunk {line num} {
-            my EndChunk $num
-            regexp -- {^<<([^>]+)>>=$} $line match name
-            my StartChunk $name $line $num
+            my EndChunk
+            my StartChunk $line $num
             my variable refOffset
             set refOffset 0
         }
@@ -164,7 +161,7 @@ namespace eval ::aweb {
         transition GatheringChunk - ChunkMarker -> EndChunk
 
         state EndSourceBlock {line num} {
-            my EndChunk $num
+            my EndChunk
             my EndBlock $num
         }
         transition EndSourceBlock - NewLine -> InDocument
@@ -173,11 +170,57 @@ namespace eval ::aweb {
         transition EndSourceBlock - ChunkMarker -> InDocument
     }]
 
+    #########################
+    #
+    # Methods used in the state actions
+    #
+    #########################
+
+    method StartBlock {num} {
+        log::debug "Block start @ $num"
+        my variable blockBeginNum
+        set blockBeginNum $num
+        return
+    }
+
+    method EndBlock {num} {
+        log::debug "Block end @ $num"
+        my variable blockBeginNum
+        relvar insert ChunkBlock [list\
+            BeginLineNum    $blockBeginNum\
+            EndLineNum      $num\
+        ]
+        return
+    }
+
+    method StartChunk {line num} {
+        regexp -- {^<<([^>]+)>>=$} $line match name
+        log::debug "Chunk start @ $num: \"$line\", name = $name"
+        my variable chunkName chunkOffset chunkContents blockBeginNum
+        set chunkName $name
+        set chunkOffset [expr {$num - $blockBeginNum}]
+        set chunkContents [list]
+        return
+    }
+
+    method EndChunk {} {
+        log::debug "Chunk end"
+        my variable chunkName chunkOffset chunkContents blockBeginNum
+        relvar insert Chunk [list\
+            Name            $chunkName\
+            Content         $chunkContents\
+            BlockLineNum    $blockBeginNum\
+            Offset          $chunkOffset\
+        ]
+        return
+    }
+
     constructor {} {
         next
 
         namespace import ::ral::*
         namespace import ::ralutil::*
+
         # Define a set of relvars that will hold the parsed chunks and their
         # references.
 
@@ -187,9 +230,7 @@ namespace eval ::aweb {
         # holds the chunk.  There may be multiple chunk definition in one
         # asciidoc block.  Knowing the block boundaries allows us to insert
         # anchors and cross references during the weaving process.  Those
-        # insertions must happen before and after the block itself and there
-        # may be multiple chunk definition and references in each asciidoc
-        # source block.
+        # insertions must happen before and after the source block itself.
 
         relvar create ChunkBlock {
             BeginLineNum    int
@@ -197,6 +238,9 @@ namespace eval ::aweb {
         } BeginLineNum EndLineNum
 
         # A Chunk is the literate program text.
+        # "Offset" is the line offset in the ChunkBlock where the chunk
+        # defintion begins. "Content" contains all the chunk defintion
+        # without the chunk marker that signifies the start of the chunk.
         relvar create Chunk {
             Name            string
             Content         list
@@ -204,12 +248,16 @@ namespace eval ::aweb {
             Offset          int
         } {BlockLineNum Offset}
 
-        # Chunks must occur in ChunkBlocks
+        # Chunks must occur in ChunkBlocks. A ChunkBlock must contain
+        # at least on Chunk. Source blocks that do not contain chunks
+        # are ignored during the parsing.
         relvar association R1\
             Chunk BlockLineNum +\
             ChunkBlock BeginLineNum 1
 
         # Chunks may contain references to other Chunks
+        # "RefOffset" is the offset in lines within the Chunk Content
+        # where the reference  begins.
         relvar create ChunkRef {
             ChunkLineNum    int
             ChunkOffset     int
@@ -218,20 +266,11 @@ namespace eval ::aweb {
             Indent          string
         } {ChunkLineNum ChunkOffset RefOffset}
 
-        # This is a weak association on the "Chunk" side to allow for the
-        # creation of references to non-existent chunks. We catch that in code,
-        # but it is convenient to allow such references.
+        # A ChunkRef must be contained withing a Chunk but Chunks may 
+        # make no references.
         relvar association R2\
             ChunkRef {ChunkLineNum ChunkOffset} *\
-            Chunk {BlockLineNum Offset} ?
-
-        # Chunks may contain zero or more references.
-        relvar association R3\
-            ChunkRef {ChunkLineNum ChunkOffset} *\
             Chunk {BlockLineNum Offset} 1
-
-        my variable prevline
-        set prevline {}
     }
 
     destructor {
@@ -303,7 +342,7 @@ namespace eval ::aweb {
         }
     }
 
-    # Generate a report on the chunks found.
+    # Generate a report on the chunks found, missing, etc.
     method reportChunks {chan root} {
         chan puts $chan "Chunk Report"
         chan puts $chan =======================================\n
@@ -357,41 +396,5 @@ namespace eval ::aweb {
         chan puts $chan =======================================\n
         chan puts $chan "Chunks Defined but not Referenced"
         chan puts $chan [relformat $orphans {} {{Chunk Name}}]
-    }
-
-    method StartBlock {num} {
-        log::debug "Block start @ $num"
-        my variable blockBeginNum
-        set blockBeginNum $num
-    }
-
-    method EndBlock {num} {
-        log::debug "Block end @ $num"
-        my variable blockBeginNum
-        relvar insert ChunkBlock [list\
-            BeginLineNum    $blockBeginNum\
-            EndLineNum      $num\
-        ]
-    }
-
-    method StartChunk {name line num} {
-        log::debug "Chunk start @ $num: \"$line\", name = $name"
-        my variable chunkName chunkOffset chunkContents blockBeginNum
-        set chunkName $name
-        set chunkOffset [expr {$num - $blockBeginNum}]
-        set chunkContents [list]
-        return
-    }
-
-    method EndChunk {num} {
-        log::debug "Chunk end @ $num"
-        my variable chunkName chunkOffset chunkContents blockBeginNum
-        relvar insert Chunk [list\
-            Name            $chunkName\
-            Content         $chunkContents\
-            BlockLineNum    $blockBeginNum\
-            Offset          $chunkOffset\
-        ]
-        return
     }
 }
