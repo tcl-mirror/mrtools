@@ -60,6 +60,7 @@ if {$iswrapped} {
     set top [file dirname [info script]]
 }
 
+# Pull in the common code
 source [file join $top aweb.tcl]
 
 namespace eval ::aweave {
@@ -73,9 +74,9 @@ namespace eval ::aweave {
 
     variable optlist {
         {version {Print version and license, then exit}}
-        {level.arg warn {Log debug level}}
         {output.arg - {Output file name}}
         {report {Issue chuck report}}
+        {level.arg warn {Log debug level}}
     }
     variable options ; array set options {}
 
@@ -91,7 +92,8 @@ proc ::aweave::main {} {
     array set options [::cmdline::getoptions argv $optlist]
     ::logger::setlevel $options(level)
 
-    # First scan the input asciidoc file finding the chunks.
+    # First scan the input asciidoc file finding the chunks.  This will be a
+    # two pass undertaking.
     set infilename [lindex $argv 0]
     if {$infilename eq {}} {
         chan puts stderr [cmdline::usage $optlist "<options> <file>\noptions:"]
@@ -105,7 +107,8 @@ proc ::aweave::main {} {
     w parse $infilename
     w reportUndefined
 
-    # Emit the woven document
+    # Now that we have identified all the chunks and their references we can
+    # then weave in the cross reference information.
     if {$options(output) ne "-"} {
         set ochan [open $options(output) w]
     } else {
@@ -176,6 +179,8 @@ terms specified in this license.
 }
 }
 
+# Making the weaver class a subclass of the parser gives us access to
+# the parsed information that we need.
 ::oo::class create ::aweave::weaver {
     superclass ::aweb::parser
 
@@ -197,56 +202,71 @@ terms specified in this license.
             set lineno 1
             for {set lcnt [chan gets $ichan line]} {$lcnt >= 0}\
                     {set lcnt [chan gets $ichan line]} {
+                # Check if this line start a source block that contains a
+                # chunk. Here we have to emit some additional asciidoc
+                # markup before the beginning of the block.
                 set block [relvar restrictone ChunkBlock BeginLineNum $lineno]
                 log::debug \n[relformat $block block]
+                # If so, emit an anchor defintion.
                 if {[relation isnotempty $block]} {
                     relation assign $block BeginLineNum
                     chan puts $ochan "\[\[chunk_block_$BeginLineNum\]\]"
-                }
-                set chdefs [pipe {
-                    relvar set Chunk |
-                    relation semijoin $block ~\
-                        -using {BeginLineNum BlockLineNum}
-                }]
-                relation foreach chdef $chdefs {
-                    chan puts $ochan\
-                            "(((chunk,[relation extract $chdef Name])))"
+
+                    # Emit index entries for each chunk defined in the source
+                    # block.
+                    set chdefs [pipe {
+                        relvar set Chunk |
+                        relation semijoin $block ~\
+                            -using {BeginLineNum BlockLineNum}
+                    }]
+                    relation foreach chdef $chdefs {
+                        chan puts $ochan\
+                                "(((chunk,[relation extract $chdef Name])))"
+                    }
                 }
 
+                # Output the line itself.
                 chan puts $ochan $line
 
+                # Check if this line is the end of a source block that contains
+                # a chunk definition. If so, then emit cross reference
+                # information about the chunk that was just define.
                 set block [relvar restrictone ChunkBlock EndLineNum $lineno]
-                set chunks [pipe {
-                    relvar set Chunk |
-                    relation semijoin $block ~\
-                        -using {BeginLineNum BlockLineNum}
-                }]
-                if {[relation isnotempty $chunks]} {
-                    chan puts $ochan "\[horizontal\]"
-                    chan puts -nonewline $ochan "Defines::  "
-                    set defs [pipe {
-                        relation project $chunks Name |
-                        relation list
+                if {[relation isnotempty $block]} {
+                    set chunks [pipe {
+                        relvar set Chunk |
+                        relation semijoin $block ~\
+                            -using {BeginLineNum BlockLineNum}
                     }]
-                    chan puts $ochan "  [join $defs {, }]"
-                }
+                    if {[relation isnotempty $chunks]} {
+                        chan puts $ochan "\[horizontal\]"
+                        chan puts -nonewline $ochan "Defines::  "
+                        set defs [pipe {
+                            relation project $chunks Name |
+                            relation list
+                        }]
+                        chan puts $ochan "  [join $defs {, }]"
+                    }
 
-                set chunkrefs [pipe {
-                    relvar set ChunkRef |
-                    relation semijoin $block ~\
-                        -using {BeginLineNum ChunkLineNum} |
-                    relation semijoin ~ [relvar set Chunk]\
-                        -using {RefToChunk Name} |
-                    relation project ~ Name BlockLineNum |
-                    relation tag ~ Line -ascending BlockLineNum -within Name |
-                    relation restrictwith ~ {$Line == 0} |
-                    relation extend ~ rf Reference string {\
-"<<chunk_block_[tuple extract $rf BlockLineNum],[tuple extract $rf Name]>>"} |
-                    relation list ~ Reference
-                }]
-                if {[llength $chunkrefs] != 0} {
-                    chan puts -nonewline $ochan "References::  "
-                    chan puts $ochan "  [join $chunkrefs {, }]"
+                    set chunkrefs [pipe {
+                        relvar set ChunkRef |
+                        relation semijoin $block ~\
+                            -using {BeginLineNum ChunkLineNum} |
+                        relation semijoin ~ [relvar set Chunk]\
+                            -using {RefToChunk Name} |
+                        relation project ~ Name BlockLineNum |
+                        relation tag ~ Line -ascending BlockLineNum\
+                            -within Name |
+                        relation restrictwith ~ {$Line == 0} |
+                        relation extend ~ rf Reference string {\
+    "<<chunk_block_[tuple extract $rf BlockLineNum],[tuple extract $rf Name]>>"\
+                        } |
+                        relation list ~ Reference -ascending Name
+                    }]
+                    if {[llength $chunkrefs] != 0} {
+                        chan puts -nonewline $ochan "References::  "
+                        chan puts $ochan "  [join $chunkrefs {, }]"
+                    }
                 }
 
                 incr lineno
@@ -259,6 +279,8 @@ terms specified in this license.
         }
     }
 
+    # Turn a chunk name into something that will work as an asciidoc
+    # element identifier.
     method CleanUpChunkName {cname} {
         return [string map [list * root { } _] $cname]
     }
