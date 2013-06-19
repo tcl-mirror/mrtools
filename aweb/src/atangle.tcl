@@ -236,8 +236,10 @@ terms specified in this license.
                     -using {BlockLineNum ChunkLineNum Offset ChunkOffset}
             }]
             #log::debug "\n[relformat $refs "Refs in $chunk"]"
-            lappend gathered [my LineDirective\
-                    [expr {$BlockLineNum + $Offset +1}]]
+            set linectrl [my LineDirective [expr {$BlockLineNum + $Offset +1}]]
+            if {$linectrl ne {}} {
+                lappend gathered $linectrl
+            }
             if {[relation isempty $refs]} {
                 lappend gathered {*}$Content
             } else {
