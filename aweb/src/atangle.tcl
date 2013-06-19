@@ -90,6 +90,7 @@ namespace eval ::atangle {
         {level.arg warn {Log debug level}}
         {output.arg - {Output file name}}
         {root.arg * {Root chunk to output}}
+        {line.arg {} {Emit line markers}}
         {report {Issue chuck report}}
     }
     variable options ; array set options {}
@@ -110,7 +111,7 @@ proc ::atangle::main {} {
     }
 
     # First scan the input asciidoc file finding the chunks.
-    set infilename [lindex $argv 0]
+    variable infilename [lindex $argv 0]
     if {$infilename eq {}} {
         set infilename -
     }
@@ -213,7 +214,7 @@ terms specified in this license.
                 chan puts $ochan $line
             }
         } else {
-            error "no root chunk named, <<$root>>, was found"
+            error "no root chunk definition of, <<$root>>=, was found"
         }
     }
 
@@ -228,15 +229,17 @@ terms specified in this license.
                     <<$chunk>>"
         }
         relation foreach part $parts -ascending {BlockLineNum Offset} {
-            set content [relation extract $part Content]
+            relation assign $part Content BlockLineNum Offset
             set refs [pipe {
                 relvar set ChunkRef |
                 relation semijoin $part ~\
                     -using {BlockLineNum ChunkLineNum Offset ChunkOffset}
             }]
             #log::debug "\n[relformat $refs "Refs in $chunk"]"
+            lappend gathered [my LineDirective\
+                    [expr {$BlockLineNum + $Offset +1}]]
             if {[relation isempty $refs]} {
-                lappend gathered {*}$content
+                lappend gathered {*}$Content
             } else {
                 set prevOffset 0
                 relation foreach ref $refs -ascending RefOffset {
@@ -244,7 +247,7 @@ terms specified in this license.
                     log::debug "prevOffset = $prevOffset,\
                             RefOffset = $RefOffset"
                     lappend gathered\
-                        {*}[lrange $content $prevOffset $RefOffset-1]
+                        {*}[lrange $Content $prevOffset $RefOffset-1]
                     set prevOffset [expr {$RefOffset + 1}]
 
                     set reflines [my GatherChunk $RefToChunk]
@@ -254,10 +257,18 @@ terms specified in this license.
                     }
                     lappend gathered {*}$indentlines
                 }
-                lappend gathered {*}[lrange $content $prevOffset end]
+                lappend gathered {*}[lrange $Content $prevOffset end]
             }
         }
         return $gathered
+    }
+
+    method LineDirective {linenum} {
+        namespace upvar ::atangle options(line) linedir
+        namespace upvar ::atangle infilename filename
+        set result [regsub -all -- {%f%} $linedir $filename]
+        set result [regsub -all -- {%l%} $result $linenum]
+        return $result
     }
 }
 

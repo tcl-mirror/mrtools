@@ -80,7 +80,24 @@ namespace eval ::aweb {
 ::oo::class create ::aweb::parser {
     # Create the state model directly in line. We give it a name so that we can
     # refer to it later in case we wish to "draw" the model, etc.
+    #
+    # There is an ambiguity associated with dashes and one form of title
+    # markup. We examine the previous line and if it is a command or the number
+    # of dashes is more than two off from the length of the title text, then we
+    # assume the dashes mark a source boundary.  This is to handle cases such
+    # as:
+    #
+    # My Title
+    # --------
+    #
+    # and allow cases such as:
+    #
+    # .Paragraph Title
+    # ----
+    #
     superclass [::oomoore model create ::aweb::parserSM {
+        # While in the InDocument state we are processing ordinary
+        # source lines
         state InDocument {line num} {
             my variable lineLength
             set lineLength [string length $line]
@@ -90,6 +107,12 @@ namespace eval ::aweb {
         transition InDocument - BlockMarker -> CheckingForTitle
         transition InDocument - ChunkMarker -> IG
 
+        # We get to the CheckingForTitle state if we see something that looks
+        # like a source block marker, but it has been preceded by an ordinary
+        # line. In this case, we see if the number of dashes is approximately
+        # the same as the length of the preceding line.  If so, then we
+        # conclude we say a two line title. Otherwise, we think we have seen a
+        # source block marker.
         state CheckingForTitle {line num} {
             my variable lineLength
             set markerLength [string length $line]
@@ -102,6 +125,9 @@ namespace eval ::aweb {
         transition CheckingForTitle - BlockMarker -> InSourceBlock
         transition CheckingForTitle - ChunkMarker -> InDocument
 
+        # If a source block marker is preceded by some directive, then it is
+        # not a candidate for being a title. The GotControlLine state remembers
+        # that we have seen such a line while scanning.
         state GotControlLine {line num} {
         }
         transition GotControlLine - NewLine -> InDocument
@@ -109,6 +135,8 @@ namespace eval ::aweb {
         transition GotControlLine - BlockMarker -> InSourceBlock
         transition GotControlLine - ChunkMarker -> InDocument
 
+        # We enter the InSourceBlock state when we have determined that we are
+        # at the beginning of an asciidoc source block.
         state InSourceBlock {line num} {
             my StartBlock $num
         }
@@ -117,6 +145,8 @@ namespace eval ::aweb {
         transition InSourceBlock - BlockMarker -> InDocument
         transition InSourceBlock - ChunkMarker -> InChunk
 
+        # If we are in a source block and see a chunk definition then we enter
+        # the InChunk state.
         state InChunk {line num} {
             my StartChunk $line $num
             my variable refOffset
@@ -127,6 +157,9 @@ namespace eval ::aweb {
         transition InChunk - BlockMarker -> EndSourceBlock
         transition InChunk - ChunkMarker -> EndChunk
 
+        # At the end of a chunk, we enter the EndChunk state. Chunks are ended
+        # either by the end of the source block or the beginning of a new chunk
+        # definition.
         state EndChunk {line num} {
             my EndChunk
             my StartChunk $line $num
@@ -138,6 +171,8 @@ namespace eval ::aweb {
         transition EndChunk - BlockMarker -> EndSourceBlock
         transition EndChunk - ChunkMarker -> EndChunk
 
+        # In the GatheringChunk state we accumulate the content of the chunk
+        # and record any chunk references that we encounter.
         state GatheringChunk {line num} {
             my variable chunkContents refOffset
             lappend chunkContents $line
@@ -160,6 +195,8 @@ namespace eval ::aweb {
         transition GatheringChunk - BlockMarker -> EndSourceBlock
         transition GatheringChunk - ChunkMarker -> EndChunk
 
+        # After entering a source block, another block marker will take us to
+        # the EndSourceBlock state.
         state EndSourceBlock {line num} {
             my EndChunk
             my EndBlock $num
