@@ -75,7 +75,6 @@ namespace eval ::aweave {
     variable optlist {
         {version {Print version and license, then exit}}
         {output.arg - {Output file name}}
-        {report {Issue chuck report}}
         {level.arg warn {Log debug level}}
     }
     variable options ; array set options {}
@@ -90,6 +89,11 @@ proc ::aweave::main {} {
 
     # Parse options
     array set options [::cmdline::getoptions argv $optlist]
+    if {$options(version)} {
+        versionInfo
+        exit
+    }
+
     ::logger::setlevel $options(level)
 
     # First scan the input asciidoc file finding the chunks.  This will be a
@@ -123,11 +127,6 @@ proc ::aweave::main {} {
         if {$ochan ne "stdout"} {
             chan close $ochan
         }
-    }
-
-    # Output a report if requested.
-    if {$options(report)} {
-        w reportChunks stderr $options(root)
     }
 
     w destroy
