@@ -70,7 +70,7 @@ namespace eval ::aweave {
     namespace import ::ral::*
     namespace import ::ralutil::*
 
-    variable version 1.1
+    variable version 1.2
 
     variable optlist {
         {version {Print version and license, then exit}}
@@ -199,29 +199,39 @@ terms specified in this license.
         set ichan [open $infilename r]
         try {
             set lineno 1
+            set beginLines [pipe {
+                relvar set ChunkBlock |
+                relation project ~ BeginLineNum |
+                relation list ~ BeginLineNum -ascending BeginLineNum
+            }]
+            set blockBegin [lindex $beginLines 0]
+            set endLines [pipe {
+                relvar set ChunkBlock |
+                relation project ~ EndLineNum |
+                relation list ~ EndLineNum -ascending EndLineNum
+            }]
+            set blockEnd [lindex $endLines 0]
             for {set lcnt [chan gets $ichan line]} {$lcnt >= 0}\
                     {set lcnt [chan gets $ichan line]} {
                 # Check if this line start a source block that contains a
                 # chunk. Here we have to emit some additional asciidoc
                 # markup before the beginning of the block.
-                set block [relvar restrictone ChunkBlock BeginLineNum $lineno]
-                log::debug \n[relformat $block block]
-                # If so, emit an anchor defintion.
-                if {[relation isnotempty $block]} {
-                    relation assign $block BeginLineNum
-                    chan puts $ochan "\[\[chunk_block_$BeginLineNum\]\]"
-
-                    # Emit index entries for each chunk defined in the source
-                    # block.
+                if {$lineno == $blockBegin} {
+                    chan puts $ochan "\[\[chunk_block_$blockBegin\]\]"
+                    # Emit index entries for each chunk defined in the
+                    # source block.
                     set chdefs [pipe {
-                        relvar set Chunk |
-                        relation semijoin $block ~\
+                        relvar restrictone ChunkBlock BeginLineNum $lineno |
+                        relation semijoin ~ [relvar set Chunk]\
                             -using {BeginLineNum BlockLineNum}
                     }]
                     relation foreach chdef $chdefs {
                         chan puts $ochan\
                                 "(((chunk,[relation extract $chdef Name])))"
                     }
+                    # Line number of next block beginning.
+                    set beginLines [lrange $beginLines 1 end]
+                    set blockBegin [lindex $beginLines 0]
                 }
 
                 # Output the line itself.
@@ -230,8 +240,8 @@ terms specified in this license.
                 # Check if this line is the end of a source block that contains
                 # a chunk definition. If so, then emit cross reference
                 # information about the chunk that was just define.
-                set block [relvar restrictone ChunkBlock EndLineNum $lineno]
-                if {[relation isnotempty $block]} {
+                if {$lineno == $blockEnd} {
+                    set block [relvar restrictone ChunkBlock EndLineNum $lineno]
                     set chunks [pipe {
                         relvar set Chunk |
                         relation semijoin $block ~\
@@ -266,6 +276,9 @@ terms specified in this license.
                         chan puts -nonewline $ochan "References::  "
                         chan puts $ochan "  [join $chunkrefs {, }]"
                     }
+                    # Line number of next block end.
+                    set endLines [lrange $endLines 1 end]
+                    set blockEnd [lindex $endLines 0]
                 }
 
                 incr lineno
