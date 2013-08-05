@@ -27,6 +27,9 @@ The following sections describe the methods available to *elffile* objects.
 (((elffile methods,exported,constructor)))
 
 === Constructor
+The constructor for the +elffile+ class only performs some initialization.
+It creates some internal data structures that are used to hold the
+ELF file data for subsequent queries.
 ----
 <<elf file methods>>=
 constructor {} {
@@ -37,58 +40,133 @@ constructor {} {
     namespace import ::ral::*
     namespace import ::ralutil::*
 
-    my variable elfdata
-    set elfdata {}
-    my variable position
-    set position 0
-
-    relvar create ElfSecHeader {
-        sh_index int
-        sh_name string
-        sh_type int
-        sh_flags int
-        sh_addr int
-        sh_offset int
-        sh_size int
-        sh_link int
-        sh_info int
-        sh_addralign int
-        sh_entsize int
-    } sh_index sh_name
-
-    relvar create ElfProgHeader {
-        p_index int
-        p_type int
-        p_offset int
-        p_vaddr int
-        p_paddr int
-        p_filesz int
-        p_memsz int
-        p_flags int
-        p_align int
-    } p_index
-
-    relvar create ElfSymbolTable {
-        st_index int
-        st_name string
-        st_value int
-        st_size int
-        st_info int
-        st_other int
-        st_shndx int
-    } st_index
+    <<elf file data structures>>
 }
 ----
+
+The design of this class is to decode the binary ELF data into internal
+data structures which can then be used to query information about the
+executable.
+We hold the ELF data as a large string and use a variable to track
+our +position+ in that string where binary decoding operations take place.
+
+.ELF Data
+----
+<<elf file data structures>>=
+my variable elfdata
+set elfdata {}
+my variable position
+set position 0
+----
+
+The ELF format defines a set of data structures and, naturally enough,
+the data used here mirror, but are not identical to, the one defined
+in the ELF format specification
+
+The ELF file starts with a header.
+We hold the header as a +dict+ with the following keys:
++ei_class+,
++ei_data+,
++ei_version+,
++e_type+,
++e_machine+,
++e_version+,
++e_entry+,
++e_phoff+,
++e_shoff+,
++e_flags+,
++e_ehsize+,
++e_phentsize+,
++e_phnum+,
++e_shentsize+,
++e_shnum+ and
++e_shstrndx+.
+The meaning of the keys is available from the ELF format specification.
+
+The remainder of the ELF data is in the form of sections.
+There are section headers, program headers and a symbol table.
+Naming information is in the form of integer offsets into
+a string table.
+All the string information is collected into the string table.
+Since the header information is very tabular oriented,
+we define some TclRAL ++relvar++s to hold the headers.
+The ++relvar++s are also convenient for query operations.
+
+.ELF Section Header
+----
+<<elf file data structures>>=
+relvar create ElfSecHeader {
+    sh_index int
+    sh_name string
+    sh_type int
+    sh_flags int
+    sh_addr int
+    sh_offset int
+    sh_size int
+    sh_link int
+    sh_info int
+    sh_addralign int
+    sh_entsize int
+} sh_index
+----
+
+The ELF section header attributes names are taken from the ELF format
+specification.
+The +sh_name+ attribute is the name of the section as a string and has
+been resolved through the string table.
+
+.ELF Program Header
+----
+<<elf file data structures>>=
+relvar create ElfProgHeader {
+    p_index int
+    p_type int
+    p_offset int
+    p_vaddr int
+    p_paddr int
+    p_filesz int
+    p_memsz int
+    p_flags int
+    p_align int
+} p_index
+----
+
+The ELF program header attributes names are also taken from the specification.
+
+.ELF Symbol Table
+----
+<<elf file data structures>>=
+relvar create ElfSymbolTable {
+    st_index int
+    st_name string
+    st_value int
+    st_size int
+    st_info int
+    st_other int
+    st_shndx int
+} st_index
+----
+
+And finally, the symbol table attribute names are also taken from the
+specification.
+The +st_name+ is a string table resolved name for the symbol.
+Note also that symbol names are _not_ unique, only the index into the
+symbol table is guaranteed to be unique.
+
+[float]
+=== Exported Methods
 
 (((elffile methods,exported,readFile)))
 
 === readFile
+Several methods are provided to obtain the data from and ELF file.
+The +readFile+ method will read the data directly from a named file.
 ----
 <<elf file methods>>=
 method readFile {fname} {
     set elfchan [::open $fname rb]
     try {
-        my readChan $elfchan
+        return [my decodeData [chan read $elfchan]]
     } finally {
         chan close $elfchan
     }
@@ -98,16 +176,22 @@ method readFile {fname} {
 (((elffile methods,exported,readChan)))
 
 === readChan
+The +readChan+ method allow you to open a Tcl channel by some other means
+and have it supply the ELF file data.
 ----
 <<elf file methods>>=
 method readChan {chan} {
-    my decodeData [chan read $chan]
+    # Make sure we are in binary mode!
+    chan configure $chan -translation binary
+    return [my decodeData [chan read $chan]]
 }
 ----
 
 (((elffile methods,exported,decodeData)))
 
 === decodeData
+And finally, the +decodeData+ method does the real work of decoding the
+binary ELF data and building up the internal data structures.
 ----
 <<elf file methods>>=
 method decodeData {data} {
@@ -123,38 +207,116 @@ method decodeData {data} {
         my ReadProgHeaders $e_phoff $e_phnum $e_phentsize
         my ReadSymTable
     }
+    return $elfheader
 }
 ----
 
-(((elffile methods,exported,getSectionHeader)))
+(((elffile methods,exported,getSectionHeaderByName)))
 
-=== getSectionHeader
+=== getSectionHeaderByName
+The +getSectionHeaderByName+ method returns a list of dictionaries of attributes
+of the section header given by +name+.
 ----
 <<elf file methods>>=
-method getSectionHeader {name} {
-    set header [relvar restrictone ElfSecHeader sh_name $name]
+method getSectionHeaderByName {name} {
+    return [pipe {
+        relvar set ElfSecHeader |
+        relation restrictwith ~ {$sh_name eq $name} |
+        relation body ~
+    }]
+}
+----
+
+(((elffile methods,exported,getSectionHeaderByIndex)))
+
+=== getSectionHeaderByIndex
+----
+<<elf file methods>>=
+method getSectionHeaderByIndex {index} {
+    set header [relvar restrictone ElfSecHeader sh_index $index]
     if {[relation isempty $header]} {
-        error "no such section named, \"$name\""
+        error "no section header with index, \"$index\""
     }
-    return [tuple get [relation tuple $header]]
+    return [tuple get [relation tuple $headers]]
 }
 ----
 
-(((elffile methods,exported,getSectionData)))
+(((elffile methods,exported,foreachSectionHeader)))
 
-=== getSectionData
+=== foreachSectionHeader
+
 ----
 <<elf file methods>>=
-method getSectionData {name} {
-    set header [my getSectionHeader $name]
+method foreachSectionHeader {varname script} {
+    upvar 1 $varname header
+    foreach header [relation body [relvar set ElfSecHeader]] {
+        uplevel 1 $script
+    }
+}
+----
+
+(((elffile methods,exported,getSectionDataByIndex)))
+
+=== getSectionDataByIndex
+The +getSectionData+ method returns a string containing the binary
+information contained in the section given by +index+.
+----
+<<elf file methods>>=
+method getSectionDataByIndex {index} {
+    set header [my getSectionHeaderByIndex $index]
     my Seek [dict get $header sh_offset]
     return [my Read [dict get $header sh_size]]
 }
 ----
 
+(((elffile methods,exported,getSectionDataByName)))
+
+=== getSectionDataByName
+The +getSectionData+ method returns a string containing the binary
+information contained in the section given by +index+.
+----
+<<elf file methods>>=
+method getSectionDataByName {name} {
+    set headers [my getSectionHeaderByName $name]
+    if {[llength $headers] != 1} {
+        error "cannot find unique section named, \"$name\""
+    }
+    set header [lindex $headers 0]
+    my Seek [dict get $header sh_offset]
+    return [my Read [dict get $header sh_size]]
+}
+----
+
+(((elffile methods,exported,getSymbol)))
+
+=== getSymbolByName
+The +getSymbolByName+ method returns a list of dictionaries of attributes
+of the symbol given by +name+.
+Since symbol names are not unique,
+the returned list may have a length greater than one.
+----
+<<elf file methods>>=
+method getSymbolByName {name} {
+    return [pipe {
+        relvar set ElfSymbolTable |
+        relation restrictwith ~ {$st_name eq $name} |
+        relation body ~
+    }]
+}
+----
+
+[float]
+=== Unexported Methods
+
 (((elffile methods,unexported,ReadElfHeader)))
 
 === ReadELFHeader
+The +ReadELFHeader+ method reads the header that is the beginning of an
+ELF file and converts the binary information into other data types.
+It checks that the ELF identification is correct to insure that we are
+actually dealing with an ELF formatted file.
+
+Note that we limit ourselves to 32-bit ELF files that are little endian.
 ----
 <<elf file methods>>=
 method ReadElfHeader {} {
@@ -341,75 +503,79 @@ method ReadStringTable {sh_offset sh_size} {
 ----
 <<elf file methods>>=
 method ReadSymTable {} {
-    set symsec [relvar restrictone ElfSecHeader sh_name .symtab]
-    if {[relation isempty $symsec]} {
+    set symsecs [my getSectionHeaderByName .symtab]
+    if {[llength $symsecs] != 1} {
         log::info "cannot find symbol table section named, \".symtab\""
         return
     }
-    relation assign $symsec sh_type sh_offset sh_size sh_entsize
-    if {$sh_type != 2} {
-        error "expected symbol table section type of \"2\",\
-                got \"$sh_type\""
-    }
-    if {$sh_entsize == 0} {
-        error "expected non-zero symbol table entry size,\
-                got \"$sh_entsize\""
-    }
-    my Seek $sh_offset
-    set symtuples [list]
-    set symindex 0
-    for {set nSyms [expr {$sh_size / $sh_entsize}]} {$nSyms > 0}\
-            {incr nSyms -1} {
-        my Convert [my Read $sh_entsize] "iu iu iu cu cu su"\
-            st_index st_value st_size st_info st_other st_shndx
-        set st_bind [expr {$st_info >> 4}]
-        set st_type [expr {$st_info & 0xf}]
-        # The "zero" string index is undefined and implies the symbol
-        # has not name. We discard those.
-        if {$st_index == 0} {
-            log::info "discarding unnamed symbol table entry,\
-                    \"$symindex\", value = $st_value"
-            continue
+    set symheader [lindex $symsecs 0]
+    dict with symheader {
+        if {$sh_type != 2} {
+            error "expected symbol table section type of \"2\",\
+                    got \"$sh_type\""
         }
-        lappend symtuples [list\
-            st_index    $symindex\
-            st_nindex   $st_index\
-            st_value    $st_value\
-            st_size     $st_size\
-            st_info     $st_info\
-            st_other    $st_other\
-            st_shndx    $st_shndx\
-        ]
-        incr symindex
+        if {$sh_entsize == 0} {
+            error "expected non-zero symbol table entry size,\
+                    got \"$sh_entsize\""
+        }
+        my Seek $sh_offset
+        set symtuples [list]
+        set symindex 0
+        for {set nSyms [expr {$sh_size / $sh_entsize}]} {$nSyms > 0}\
+                {incr nSyms -1} {
+            my Convert [my Read $sh_entsize] "iu iu iu cu cu su"\
+                st_index st_value st_size st_info st_other st_shndx
+            set st_bind [expr {$st_info >> 4}]
+            set st_type [expr {$st_info & 0xf}]
+            # The "zero" string index is undefined and implies the symbol
+            # has not name. We discard those.
+            if {$st_index == 0} {
+                log::info "discarding unnamed symbol table entry,\
+                        \"$symindex\", value = $st_value"
+                continue
+            }
+            lappend symtuples [list\
+                st_index    $symindex\
+                st_nindex   $st_index\
+                st_value    $st_value\
+                st_size     $st_size\
+                st_info     $st_info\
+                st_other    $st_other\
+                st_shndx    $st_shndx\
+            ]
+            incr symindex
+        }
+        # Create a relation with the symbol information.
+        set syms [relation create {
+            st_index int
+            st_nindex int
+            st_value int
+            st_size int
+            st_info int
+            st_other int
+            st_shndx int} {*}$symtuples]
+        #log::debug \n[relformat $syms syms]
+        # Now we want to read the string table and resolve the index
+        # values into actual names.
+        # First, find the string table.
+        set strsecs [my getSectionHeaderByName .strtab]
+        if {[llength $strsecs] != 1} {
+            log::info "cannot find string table section named, \".strtab\""
+            return
+        }
+        set strheader [lindex $strsecs 0]
+        dict with strheader {
+            if {$sh_type != 3} {
+                error "expected symbol table section type of \"3\",\
+                        got \"$sh_type\""
+            }
+            if {$sh_entsize != 0} {
+                error "expected zero string table entry size,\
+                        got \"$sh_entsize\""
+            }
+            set symnames [my ReadStringTable $sh_offset $sh_size]
+        }
     }
-    # Create a relation with the symbol information.
-    set syms [relation create {
-        st_index int
-        st_nindex int
-        st_value int
-        st_size int
-        st_info int
-        st_other int
-        st_shndx int} {*}$symtuples]
-    #log::debug \n[relformat $syms syms]
-    # Now we want to read the string table and resolve the index
-    # values into actual names.
-    # First, find the string table.
-    set strsec [relvar restrictone ElfSecHeader sh_name .strtab]
-    if {[relation isempty $strsec]} {
-        log::info "cannot find string table section named, \".strtab\""
-        return
-    }
-    relation assign $strsec sh_type sh_offset sh_size sh_entsize
-    if {$sh_type != 3} {
-        error "expected symbol table section type of \"3\",\
-                got \"$sh_type\""
-    }
-    if {$sh_entsize != 0} {
-        error "expected zero string table entry size,\
-                got \"$sh_entsize\""
-    }
-    set symnames [my ReadStringTable $sh_offset $sh_size]
     relvar set ElfSymbolTable [pipe {
         relation join $syms $symnames -using {st_nindex st_index} |
         relation eliminate ~ st_nindex |
