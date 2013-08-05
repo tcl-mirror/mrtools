@@ -1,0 +1,547 @@
+= Decoding ELF Format Files
+
+== Introduction
+
+This document describes a Tcl package named, *elfdecode*.
+The *elfdecode* package is used to decode ELF files that contain program
+executable information.
+ELF is a common executable format used in Unix and Linux operating systems.
+
+The primary use case for this package is to obtain symbolic information
+about an executable.
+The package does _not_ contain any capabilities to generate ELF files.
+
+== Representing an ELF File
+
+The *elfdecode* package uses TclOO to represent the ELF file as an object.
+
+----
+<<elf file class>>=
+::oo::class create ::elfdecode::elffile {
+    <<elf file methods>>
+}
+----
+
+The following sections describe the methods available to *elffile* objects.
+
+(((elffile methods,exported,constructor)))
+
+=== Constructor
+----
+<<elf file methods>>=
+constructor {} {
+    set svcname ::elfdecode[self]
+    ::logger::init $svcname
+    ::logger::import -all -namespace log $svcname
+
+    namespace import ::ral::*
+    namespace import ::ralutil::*
+
+    my variable elfdata
+    set elfdata {}
+    my variable position
+    set position 0
+
+    relvar create ElfSecHeader {
+        sh_index int
+        sh_name string
+        sh_type int
+        sh_flags int
+        sh_addr int
+        sh_offset int
+        sh_size int
+        sh_link int
+        sh_info int
+        sh_addralign int
+        sh_entsize int
+    } sh_index sh_name
+
+    relvar create ElfProgHeader {
+        p_index int
+        p_type int
+        p_offset int
+        p_vaddr int
+        p_paddr int
+        p_filesz int
+        p_memsz int
+        p_flags int
+        p_align int
+    } p_index
+
+    relvar create ElfSymbolTable {
+        st_index int
+        st_name string
+        st_value int
+        st_size int
+        st_info int
+        st_other int
+        st_shndx int
+    } st_index
+}
+----
+
+(((elffile methods,exported,readFile)))
+
+=== readFile
+----
+<<elf file methods>>=
+method readFile {fname} {
+    set elfchan [::open $fname rb]
+    try {
+        my readChan $elfchan
+    } finally {
+        chan close $elfchan
+    }
+}
+----
+
+(((elffile methods,exported,readChan)))
+
+=== readChan
+----
+<<elf file methods>>=
+method readChan {chan} {
+    my decodeData [chan read $chan]
+}
+----
+
+(((elffile methods,exported,decodeData)))
+
+=== decodeData
+----
+<<elf file methods>>=
+method decodeData {data} {
+    my variable elfdata
+    set elfdata $data
+    my variable position
+    set position 0
+    my variable elfheader
+    set elfheader [my ReadElfHeader]
+    log::debug "ELF header = \"$elfheader\""
+    dict with elfheader {
+        my ReadSecHeaders $e_shoff $e_shnum $e_shentsize $e_shstrndx
+        my ReadProgHeaders $e_phoff $e_phnum $e_phentsize
+        my ReadSymTable
+    }
+}
+----
+
+(((elffile methods,exported,getSectionHeader)))
+
+=== getSectionHeader
+----
+<<elf file methods>>=
+method getSectionHeader {name} {
+    set header [relvar restrictone ElfSecHeader sh_name $name]
+    if {[relation isempty $header]} {
+        error "no such section named, \"$name\""
+    }
+    return [tuple get [relation tuple $header]]
+}
+----
+
+(((elffile methods,exported,getSectionData)))
+
+=== getSectionData
+----
+<<elf file methods>>=
+method getSectionData {name} {
+    set header [my getSectionHeader $name]
+    my Seek [dict get $header sh_offset]
+    return [my Read [dict get $header sh_size]]
+}
+----
+
+(((elffile methods,unexported,ReadElfHeader)))
+
+=== ReadELFHeader
+----
+<<elf file methods>>=
+method ReadElfHeader {} {
+    # Read the 16 byte identifier field and make sure we are dealing
+    # with an ELF file
+    my Seek 0
+    my Convert [my Read 16] "cu a3 cu cu cu cu*"\
+        elfmag0 elfmagName ei_class ei_data ei_version ei_pad]
+
+    if {$elfmag0 != 0x7f || $elfmagName ne "ELF"} {
+        error "bad ELF magic number, [format %#x $elfmag0] $elfmagName"
+    }
+
+    # Here we only support 32-bit ELF.
+    if {$ei_class != 1} {
+        error "expected 32-bit elf class of \"1\", got \"$ei_class\""
+    }
+    # We also only support little endian data encoding.
+    if {$ei_data != 1} {
+        error "expected LSB data encoding of \"1\", got \"$ei_data\""
+    }
+
+    # Convert the remainder of the header.
+    my Convert [my Read 36] "su su iu iu iu iu iu su su su su su su"\
+        e_type e_machine e_version e_entry e_phoff e_shoff e_flags\
+        e_ehsize e_phentsize e_phnum e_shentsize e_shnum e_shstrndx
+
+    # At this point we know we have a good ELF file.
+    return [dict create\
+        ei_class $ei_class\
+        ei_data $ei_data\
+        ei_version $ei_version\
+        e_type $e_type\
+        e_machine $e_machine\
+        e_version $e_version\
+        e_entry $e_entry\
+        e_phoff $e_phoff\
+        e_shoff $e_shoff\
+        e_flags $e_flags\
+        e_ehsize $e_ehsize\
+        e_phentsize $e_phentsize\
+        e_phnum $e_phnum\
+        e_shentsize $e_shentsize\
+        e_shnum $e_shnum\
+        e_shstrndx $e_shstrndx\
+    ]
+}
+----
+
+(((elffile methods,unexported,ReadSecHeaders)))
+
+=== ReadSecHeaders
+----
+<<elf file methods>>=
+method ReadSecHeaders {e_shoff e_shnum e_shentsize e_shstrndx} {
+    if {$e_shnum == 0} {
+        return
+    }
+    # Seek to where the section header table is located.
+    my Seek $e_shoff
+
+    set sectuples [list]
+    # Read and convert the entire array of section headers.
+    for {set secNo 0} {$secNo < $e_shnum} {incr secNo} {
+        my Convert [my Read $e_shentsize] "iu iu iu iu iu iu iu iu iu iu"\
+                sh_name sh_type sh_flags sh_addr sh_offset\
+                sh_size sh_link sh_info sh_addralign sh_entsize
+
+        # The first entry in the section header has a type of 0 and
+        # does not contain any useful information.
+        if {$sh_type == 0} {
+            continue
+        }
+        lappend sectuples [list\
+            sh_index        $secNo\
+            sh_name         $sh_name\
+            sh_type         $sh_type\
+            sh_flags        $sh_flags\
+            sh_addr         $sh_addr\
+            sh_offset       $sh_offset\
+            sh_size         $sh_size\
+            sh_link         $sh_link\
+            sh_info         $sh_info\
+            sh_addralign    $sh_addralign\
+            sh_entsize      $sh_entsize\
+        ]
+    }
+    set sections [relation create {
+        sh_index int
+        sh_name int
+        sh_type int
+        sh_flags int
+        sh_addr int
+        sh_offset int
+        sh_size int
+        sh_link int
+        sh_info int
+        sh_addralign int
+        sh_entsize int
+    } {*}$sectuples]
+    #log::debug \n[relformat $sections sections]
+
+    # Now we want to update the information stored with the section
+    # headers to replace the string index used as the name with
+    # a real string that is the section name.
+    set shstrsec [relation restrictwith $sections\
+            {$sh_index == $e_shstrndx}]
+    if {[relation isnotempty $shstrsec]} {
+        relation assign $shstrsec sh_type sh_offset sh_size
+        if {$sh_type == 3} {
+            set shnames [my ReadStringTable $sh_offset $sh_size]
+            #log::debug \n[relformat $shnames SectionNames]
+            relvar set ElfSecHeader [pipe {
+                relation join $sections $shnames -using {sh_name st_index} |
+                relation eliminate ~ sh_name |
+                relation rename ~ st_string sh_name
+            }]
+        }
+    }
+    log::debug \n[relformat [relvar set ElfSecHeader] ElfSecHeader]
+}
+----
+
+(((elffile methods,unexported,ReadProgHeaders)))
+
+=== ReadProgHeaders
+----
+<<elf file methods>>=
+method ReadProgHeaders {e_phoff e_phnum e_phentsize} {
+    if {$e_phnum == 0} {
+        return
+    }
+    # Seek to where the section header table is
+    my Seek $e_phoff
+
+    for {set phNo 0} {$phNo < $e_phnum} {incr phNo} {
+        my Convert [my Read $e_phentsize] "iu iu iu iu iu iu iu iu"\
+                p_type p_offset p_vaddr p_paddr\
+                p_filesz p_memsz p_flags p_align
+
+        relvar insert ElfProgHeader [list\
+            p_index     $phNo\
+            p_type      $p_type\
+            p_offset    $p_offset\
+            p_vaddr     $p_vaddr\
+            p_paddr     $p_paddr\
+            p_filesz    $p_filesz\
+            p_memsz     $p_memsz\
+            p_flags     $p_flags\
+            p_align     $p_align\
+        ]
+    }
+    log::debug \n[relformat [relvar set ElfProgHeader] ElfProgHeader]
+}
+----
+
+(((elffile methods,unexported,ReadStringTable)))
+
+=== ReadStringTable
+----
+<<elf file methods>>=
+method ReadStringTable {sh_offset sh_size} {
+    # seek to the file location
+    my Seek $sh_offset
+    set strings [my Read $sh_size]
+    set strOff 0
+    # The strings are just packed NUL terminated ASCII strings.
+    # Just split on the NUL character to unbundle the them.
+    set tuples [list]
+    foreach s [split $strings "\0"] {
+        if {[string length $s] != 0} {
+            lappend tuples [list st_index $strOff st_string $s]
+        }
+        incr strOff [expr {[string length $s] + 1}]
+    }
+
+    return [relation create {st_index int st_string string} {*}$tuples]
+}
+----
+
+(((elffile methods,unexported,ReadSymbolTable)))
+
+=== ReadSymbolTable
+----
+<<elf file methods>>=
+method ReadSymTable {} {
+    set symsec [relvar restrictone ElfSecHeader sh_name .symtab]
+    if {[relation isempty $symsec]} {
+        log::info "cannot find symbol table section named, \".symtab\""
+        return
+    }
+    relation assign $symsec sh_type sh_offset sh_size sh_entsize
+    if {$sh_type != 2} {
+        error "expected symbol table section type of \"2\",\
+                got \"$sh_type\""
+    }
+    if {$sh_entsize == 0} {
+        error "expected non-zero symbol table entry size,\
+                got \"$sh_entsize\""
+    }
+    my Seek $sh_offset
+    set symtuples [list]
+    set symindex 0
+    for {set nSyms [expr {$sh_size / $sh_entsize}]} {$nSyms > 0}\
+            {incr nSyms -1} {
+        my Convert [my Read $sh_entsize] "iu iu iu cu cu su"\
+            st_index st_value st_size st_info st_other st_shndx
+        set st_bind [expr {$st_info >> 4}]
+        set st_type [expr {$st_info & 0xf}]
+        # The "zero" string index is undefined and implies the symbol
+        # has not name. We discard those.
+        if {$st_index == 0} {
+            log::info "discarding unnamed symbol table entry,\
+                    \"$symindex\", value = $st_value"
+            continue
+        }
+        lappend symtuples [list\
+            st_index    $symindex\
+            st_nindex   $st_index\
+            st_value    $st_value\
+            st_size     $st_size\
+            st_info     $st_info\
+            st_other    $st_other\
+            st_shndx    $st_shndx\
+        ]
+        incr symindex
+    }
+    # Create a relation with the symbol information.
+    set syms [relation create {
+        st_index int
+        st_nindex int
+        st_value int
+        st_size int
+        st_info int
+        st_other int
+        st_shndx int} {*}$symtuples]
+    #log::debug \n[relformat $syms syms]
+    # Now we want to read the string table and resolve the index
+    # values into actual names.
+    # First, find the string table.
+    set strsec [relvar restrictone ElfSecHeader sh_name .strtab]
+    if {[relation isempty $strsec]} {
+        log::info "cannot find string table section named, \".strtab\""
+        return
+    }
+    relation assign $strsec sh_type sh_offset sh_size sh_entsize
+    if {$sh_type != 3} {
+        error "expected symbol table section type of \"3\",\
+                got \"$sh_type\""
+    }
+    if {$sh_entsize != 0} {
+        error "expected zero string table entry size,\
+                got \"$sh_entsize\""
+    }
+    set symnames [my ReadStringTable $sh_offset $sh_size]
+    relvar set ElfSymbolTable [pipe {
+        relation join $syms $symnames -using {st_nindex st_index} |
+        relation eliminate ~ st_nindex |
+        relation rename ~ st_string st_name
+    }]
+    log::debug \n[relformat [relvar set ElfSymbolTable] ElfSymbolTable]
+    return
+}
+----
+
+(((elffile methods,unexported,Seek)))
+
+=== Seek
+----
+<<elf file methods>>=
+method Seek {offset} {
+    my variable elfdata
+    my variable position
+
+    if {$offset < 0} {
+        set position 0
+    } elseif {$offset > [string length $elfdata]} {
+        set position [string length $elfdata]
+    } else {
+        set position $offset
+    }
+}
+----
+
+(((elffile methods,unexported,Read)))
+
+=== Read
+----
+<<elf file methods>>=
+method Read {count} {
+    my variable elfdata
+    my variable position
+
+    set end [expr {$position + $count - 1}]
+    if {$end >= [string length $elfdata]} {
+        error "attempt to read beyond end of ELF data"
+    }
+    set data [string range $elfdata $position $end]
+    set position [expr {$end + 1}]
+    return $data
+}
+----
+
+(((elffile methods,unexported,Convert)))
+
+=== Convert
+The *Convert* method is a simple control structure wrapper around
+the *binary scan* command.
+Here we perform the conversion into variables that are passed by name.
+This gives us a chance to check that the conversion did indeed happen properly.
+----
+<<elf file methods>>=
+method Convert {str fmt args} {
+    foreach arg $args {
+        upvar 1 $arg $arg
+    }
+    set cvtd [binary scan $str $fmt {*}$args]
+    if {$cvtd != [llength $args]} {
+        error "expected to convert \"[llength $args]\" values,\
+            actually converted \"$cvtd\""
+    }
+}
+----
+
+== Code Organization
+
+Describe
+
+----
+<<elfdecode.tcl>>=
+# DO NOT EDIT THIS FILE!
+# THIS FILE IS AUTOMATICALLY GENERATED FROM A LITERATE PROGRAM SOURCE FILE.
+#
+# This software is copyrighted by G. Andrew Mangogna.
+# The following terms apply to all files associated with the software unless
+# explicitly disclaimed in individual files.
+# 
+# The authors hereby grant permission to use, copy, modify, distribute,
+# and license this software and its documentation for any purpose, provided
+# that existing copyright notices are retained in all copies and that this
+# notice is included verbatim in any distributions. No written agreement,
+# license, or royalty fee is required for any of the authorized uses.
+# Modifications to this software may be copyrighted by their authors and
+# need not follow the licensing terms described here, provided that the
+# new terms are clearly indicated on the first page of each file where
+# they apply.
+# 
+# IN NO EVENT SHALL THE AUTHORS OR DISTRIBUTORS BE LIABLE TO ANY PARTY FOR
+# DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES ARISING
+# OUT OF THE USE OF THIS SOFTWARE, ITS DOCUMENTATION, OR ANY DERIVATIVES
+# THEREOF, EVEN IF THE AUTHORS HAVE BEEN ADVISED OF THE POSSIBILITY OF
+# SUCH DAMAGE.
+# 
+# THE AUTHORS AND DISTRIBUTORS SPECIFICALLY DISCLAIM ANY WARRANTIES,
+# INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.  THIS SOFTWARE
+# IS PROVIDED ON AN "AS IS" BASIS, AND THE AUTHORS AND DISTRIBUTORS HAVE
+# NO OBLIGATION TO PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS,
+# OR MODIFICATIONS.
+# 
+# GOVERNMENT USE: If you are acquiring this software on behalf of the
+# U.S. government, the Government shall have only "Restricted Rights"
+# in the software and related documentation as defined in the Federal
+# Acquisition Regulations (FARs) in Clause 52.227.19 (c) (2).  If you
+# are acquiring the software on behalf of the Department of Defense,
+# the software shall be classified as "Commercial Computer Software"
+# and the Government shall have only "Restricted Rights" as defined in
+# Clause 252.227-7013 (c) (1) of DFARs.  Notwithstanding the foregoing,
+# the authors grant the U.S. Government and others acting in its behalf
+# permission to use and distribute the software in accordance with the
+# terms specified in this license.
+
+package require Tcl 8.6
+package require logger
+package require ral
+package require ralutil
+
+namespace eval ::elfdecode {
+    namespace export elffile
+    namespace ensemble create
+
+    logger::initNamespace [namespace current]
+
+    variable version 1.0
+}
+
+<<elf file class>>
+
+package provide elfdecode $::elfdecode::version
+----

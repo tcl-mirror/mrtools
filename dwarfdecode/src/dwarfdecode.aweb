@@ -1,0 +1,853 @@
+= Decoding Dwarf Debugging Information
+
+== Introduction
+
+This document describes a Tcl package named, *dwarfdecode*.
+
+== Representing Dwarf Information
+
+----
+<<dwarf info class>>=
+::oo::class create ::dwarfdecode::dwarfinfo {
+    <<dwarf info methods>>
+}
+----
+
+The following sections describe the methods available to *dwarfinfo* objects.
+
+(((dwarfinfo methods,exported,constructor)))
+
+=== Constructor
+----
+<<dwarf info methods>>=
+constructor {fileobj} {
+    set svcname ::dwarfdecode[self]
+    ::logger::init $svcname
+    ::logger::import -all -namespace log $svcname
+
+    my variable debugInfoObj
+    set debugInfoObj [::dwarfdecode::DebugInfo\
+            [$fileobj getSectionData .debug_info]]
+    my variable abbrevInfoObj
+    set abbrefInfoObj [::dwafdecode::AbbrevInfo\
+            [$fileobj getSectionData .debug_abbrev]]
+}
+
+destructor {
+    my variable debugInfoObj
+    $debugInfoObj destroy
+    my variable abbrevInfoObj
+    $abbrevInfoObj destroy
+}
+----
+
+== Dwarf Debug Information
+
+----
+<<dwarf debug info class>>=
+::oo::class create ::dwarfdecode::DebugInfo {
+    <<dwarf debug info methods>>
+}
+----
+
+(((DebugInfo methods,exported,constructor)))
+
+=== Constructor
+----
+<<dwarf debug info methods>>=
+variable infoStream infoTree
+
+constructor {debugData} {
+    set svcname ::dwarfdecode[self]
+    ::logger::init $svcname
+    ::logger::import -all -namespace log $svcname
+
+    set infoStream [::dwarfdecode::InfoStream new $debugData]
+    set infoTree [::struct::tree]
+}
+
+destructor {
+    $infoStream destroy
+    $infoTree destroy
+}
+----
+
+=== decodeDebugInfo
+----
+<<dwarf debug info methods>>=
+method decodeDebugInfo {abbrevInfoObj} {
+    while {[$infoStream remain] > 0} {
+        log::debug "remain = [$infoStream remain]"
+        set cuHeaderBegin [$infoStream where]
+        log::debug "cuHeaderBegin = $cuHeaderBegin"
+        # get the length of the compilation unit
+        $infoStream convert 4 iu cuLength
+
+        set endOffset [expr {[$infoStream where] + $cuLength}]
+
+        # get the remainder of the compilation unit header
+        $infoStream convert 7 "su iu cu" cuVersion cuAbbrOffset cuAddrSize
+        log::debug "compilation unit header: length = $cuLength,\
+                version = $cuVersion, abbrOffset = $cuAbbrOffset,\
+                addrSize = $cuAddrSize"
+
+        # Get the abbreviation information.
+        my variable abbrInfo
+        set abbrInfo [$abbrevInfoObj getAbbrevInfo $cuAbbrOffset]
+
+        # Iterate across the debug info building the tree of information
+        # about each compilation unit
+        while {[$infoStream where] < $endOffset} {
+            my decodeDebugInfoEntry $cuHeaderBegin root
+        }
+    }
+
+    return
+}
+----
+
+----
+<<dwarf debug info methods>>=
+method decodeDebugInfoEntry {base parent} {
+    set refNum [$infoStream where]
+    set entryNum [expr {$refNum - $base}]
+    set abbrCode [$infoStream unsignedLEB128]
+
+    if {$abbrCode != 0} {
+        log::debug "entry = $entryNum, reference = $refNum, code = $abbrCode"
+        set infonode [$infoTree insert $parent end ref$refNum]
+        log::debug "$infonode at depth [$infoTree depth $infonode]"
+        $infoTree set $infonode reference $refNum
+        $infoTree set $infonode entry $entryNum
+        my variable abbrInfo
+        set abbrEntry [dict get $abbrInfo $abbrCode]
+        dict with abbrEntry {
+            $infoTree set $infonode tag $tag
+            foreach {attr form} $attrs {
+                set attrvalue [my DecodeValueForm $form]
+                log::debug "$attr ==> $attrvalue ($form)"
+                set attrnode [$infoTree insert $infonode end]
+                $infoTree set $attrnode attr $attr
+                $infoTree set $attrnode form $form
+                $infoTree set $attrnode value $attrvalue
+            }
+        }
+        if {$hasChildren} {
+            log::debug "child begin at [$infoStream where]"
+            set childCode [my decodeDebugInfoEntry $base $infonode]
+            log::debug "child end at [$infoStream where]"
+            while {$childCode != 0} {
+                log::debug "child begin at [$infoStream where]"
+                set childCode [my decodeDebugInfoEntry $base $infonode]
+                log::debug "child end at [$infoStream where]"
+            }
+        }
+    }
+
+    return $abbrCode
+}
+----
+
+----
+<<dwarf debug info methods>>=
+method printDebugInfo {{ochan stdout}} {
+    my variable infoTree
+
+    $infoTree walk root -order pre -type dfs {action node} {
+        set values [$infoTree getall $node]
+        set leader [string repeat {   } [$infoTree depth $node]]
+        foreach {name value} $values {
+            puts $ochan "$leader$name $value"
+        }
+    }
+}
+----
+
+=== Decoding Attribute Data
+
+----
+<<dwarf debug info methods>>=
+method DecodeValueForm {form} {
+    set methname Decode_$form
+    if {$methname ni [info object methods [self] -all -private]} {
+        error "unrecognized attribute form, \"$form\""
+    }
+    return [my $methname]
+}
+----
+
+----
+<<dwarf debug info methods>>=
+# Form value =0x01
+method Decode_DW_FORM_addr {} {
+    $infoStream convert 4 iu value
+    return $value
+}
+
+# Form value =0x03
+method Decode_DW_FORM_block2 {} {
+    $infoStream convert 2 su blockLen
+    $infoStream convert $blockLen cu$blockLen value
+    return $value
+}
+
+# Form value =0x04
+method Decode_DW_FORM_block4 {} {
+    $infoStream convert 4 iu blockLen
+    $infoStream convert $blockLen cu$blockLen value
+    return $value
+}
+
+# Form value =0x05
+method Decode_DW_FORM_data2 {} {
+    $infoStream convert 2 su value
+    return $value
+}
+
+# Form value =0x06
+method Decode_DW_FORM_data4 {} {
+    $infoStream convert 4 iu value
+    return $value
+}
+
+# Form value =0x07
+method Decode_DW_FORM_data8 {} {
+    $infoStream convert 3 wu value
+    return $value
+}
+
+# Form value =0x08
+method Decode_DW_FORM_string {} {
+    set strcount [expr {[$infoStream first \0] - [$infoStream where]}]
+    $infoStream convert $strcount a$strcount value
+    # +1 to point past the NUL byte
+    $infoStream advance 1
+    return $value
+}
+
+# Form value =0x09
+method Decode_DW_FORM_block {} {
+    set blockLen [$infoStream unsignedLEB128]
+    $infoStream convert $blockLen cu$blockLen value
+    return $value
+}
+
+# Form value =0x0a
+method Decode_DW_FORM_block1 {} {
+    $infoStream convert 1 cu blockLen
+    $infoStream convert $blockLen cu$blockLen value
+    return $value
+}
+
+# Form value =0x0b
+method Decode_DW_FORM_data1 {} {
+    $infoStream convert 1 cu value
+    return $value
+}
+
+# Form value =0x0c
+method Decode_DW_FORM_flag {} {
+    $infoStream convert 1 cu value
+    return $value
+}
+
+# Form value =0x0d
+method Decode_DW_FORM_sdata {} {
+    return [$infoStream signedLEB128]
+}
+
+# Form value =0x0e
+method Decode_DW_FORM_strp {} {
+    $infoStream convert 4 iu value
+    return $value
+}
+
+# Form value =0x0f
+method Decode_DW_FORM_udata {} {
+    return [$infoStream unsignedLEB128]
+}
+
+# Form value =0x10
+method Decode_DW_FORM_ref_addr {} {
+    $infoStream convert 4 iu value
+    return $value
+}
+
+# Form value =0x11
+method Decode_DW_FORM_ref1 {} {
+    $infoStream convert 1 cu value
+    return $value
+}
+
+# Form value =0x12
+method Decode_DW_FORM_ref2 {} {
+    $infoStream convert 2 su value
+    return $value
+}
+
+# Form value =0x13
+method Decode_DW_FORM_ref4 {} {
+    $infoStream convert 4 iu value
+    return $value
+}
+
+# Form value =0x14
+method Decode_DW_FORM_ref8 {} {
+    $infoStream convert 8 wu value
+    return $value
+}
+
+# Form value =0x15
+method Decode_DW_FORM_ref_udata {} {
+    return [$infoStream unsignedLEB128]
+}
+
+# Form value =0x16
+method Decode_DW_FORM_indirect {} {
+    set form [my FormNumToStr [$infoStream unsignedLEB128]]
+    return [my DecodeValueForm $form]
+}
+----
+
+== Dwarf Abbreviations Information
+
+----
+<<dwarf abbrev info class>>=
+::oo::class create ::dwarfdecode::AbbrevInfo {
+    <<dwarf abbrev info methods>>
+}
+----
+
+(((AbbrevInfo methods,exported,constructor)))
+
+=== Constructor
+----
+<<dwarf abbrev info methods>>=
+constructor {abbrevData} {
+    set svcname ::dwarfdecode[self]
+    ::logger::init $svcname
+    ::logger::import -all -namespace log $svcname
+
+
+    my variable infoStream
+    set infoStream [::dwarfdecode::InfoStream new $abbrevData]
+
+    my variable decodedAbbrevs
+    set decodedAbbrevs [dict create]
+}
+
+destructor {
+    my variable infoStream
+    $infoStream destroy
+}
+----
+
+----
+<<dwarf abbrev info methods>>=
+method getAbbrevInfo {offset} {
+    my variable decodedAbbrevs
+    set canonical [format %u $offset]
+    # Get the abbreviation information.
+    if {![dict exists $decodedAbbrevs $canonical]} {
+        dict set decodedAbbrevs $canonical [my DecodeAbbrSet $canonical]
+    }
+    return [dict get $decodedAbbrevs $canonical]
+}
+----
+
+=== decodeAbbrInfo
+----
+<<dwarf abbrev info methods>>=
+method DecodeAbbrSet {offset} {
+    my variable infoStream
+    $infoStream seek $offset
+
+    set abbrSet [dict create]
+    for {set code [$infoStream unsignedLEB128]} {$code != 0}\
+            {set code [$infoStream unsignedLEB128]} {
+        set abbrEntry [my DecodeAbbrEntry]
+        dict set abbrSet $code $abbrEntry
+        log::debug "code = $code, abbrev = $abbrEntry"
+    }
+    return $abbrSet
+}
+----
+
+----
+<<dwarf abbrev info methods>>=
+method DecodeAbbrEntry {} {
+    my variable infoStream
+    set abbrEntry [dict create]
+
+    set tag [my TagNumToStr [$infoStream unsignedLEB128]]
+    dict set abbrEntry tag $tag
+
+    $infoStream convert 1 cu hasChildren
+    dict set abbrEntry hasChildren $hasChildren
+
+    set attrs [list]
+    for {set attrname [$infoStream unsignedLEB128] ;\
+            set attrform [$infoStream unsignedLEB128]}\
+            {!($attrname == 0 && $attrform == 0)}\
+            {set attrname [$infoStream unsignedLEB128] ;\
+            set attrform [$infoStream unsignedLEB128]} {
+        lappend attrs [my AttrNumToStr $attrname] [my FormNumToStr $attrform]
+    }
+    dict set abbrEntry attrs $attrs
+
+    return $abbrEntry
+}
+----
+
+----
+<<dwarf abbrev info methods>>=
+method TagNumToStr {tagnum} {
+    if {$tagnum >= 0x4080 && $tagrnum <= 0x4fff} {
+        return [format DW_TAG_user(%#x) $tagnum]
+    } elseif {$tagnum >= [llength $::dwarfdecode::tagStrMap]} {
+        error "invalid tag number, \"[format %#x $tagnum]\""
+    } else {
+        set tagname [lindex $::dwarfdecode::tagStrMap $tagnum]
+        if {$tagname eq {}} {
+            error "tag number, \"$tagnum\", has no string mapping"
+        }
+        return $tagname
+    }
+}
+----
+
+----
+<<dwarf data encodings>>=
+variable tagStrMap {
+    {}
+    DW_TAG_array_type
+    DW_TAG_class_type 
+    DW_TAG_entry_point 
+    DW_TAG_enumeration_type 
+    DW_TAG_formal_parameter 
+    {}
+    {}
+    DW_TAG_imported_declaration 
+    {}
+    DW_TAG_label 
+    DW_TAG_lexical_block 
+    {}
+    DW_TAG_member 
+    {}
+    DW_TAG_pointer_type 
+    DW_TAG_reference_type 
+    DW_TAG_compile_unit 
+    DW_TAG_string_type 
+    DW_TAG_structure_type 
+    {}
+    DW_TAG_subroutine_type 
+    DW_TAG_typedef 
+    DW_TAG_union_type 
+    DW_TAG_unspecified_parameters 
+    DW_TAG_variant 
+    DW_TAG_common_block 
+    DW_TAG_common_inclusion 
+    DW_TAG_inheritance 
+    DW_TAG_inlined_subroutine 
+    DW_TAG_module 
+    DW_TAG_ptr_to_member_type 
+    DW_TAG_set_type 
+    DW_TAG_subrange_type 
+    DW_TAG_with_stmt 
+    DW_TAG_access_declaration 
+    DW_TAG_base_type 
+    DW_TAG_catch_block 
+    DW_TAG_const_type 
+    DW_TAG_constant 
+    DW_TAG_enumerator 
+    DW_TAG_file_type 
+    DW_TAG_friend 
+    DW_TAG_namelist 
+    DW_TAG_namelist_item 
+    DW_TAG_packed_type 
+    DW_TAG_subprogram 
+    DW_TAG_template_type_parameter 
+    DW_TAG_template_value_parameter 
+    DW_TAG_thrown_type 
+    DW_TAG_try_block 
+    DW_TAG_variant_part 
+    DW_TAG_variable 
+    DW_TAG_volatile_type 
+    DW_TAG_dwarf_procedure 
+    DW_TAG_restrict_type 
+    DW_TAG_interface_type 
+    DW_TAG_namespace 
+    DW_TAG_imported_module 
+    DW_TAG_unspecified_type 
+    DW_TAG_partial_unit 
+    DW_TAG_imported_unit 
+    DW_TAG_condition 
+    DW_TAG_shared_type 
+}
+----
+
+----
+<<dwarf abbrev info methods>>=
+method AttrNumToStr {attrnum} {
+    if {$attrnum >= 0x2000 && $attrnum <= 0x3fff} {
+        return [format DW_AT_user(%#x) $attrnum]
+    } elseif {$attrnum >= [llength $::dwarfdecode::attrStrMap]} {
+        error "invalid attribute number, \"[format %#x $attrnum]\""
+    } else {
+        set attrname [lindex $::dwarfdecode::attrStrMap $attrnum]
+        if {$attrname eq {}} {
+            error "attribute number, \"$attrnum\", has no string mapping"
+        }
+        return $attrname
+    }
+}
+----
+
+----
+<<dwarf data encodings>>=
+variable attrStrMap {
+    {}
+    DW_AT_sibling
+    DW_AT_location
+    DW_AT_name
+    {}
+    {}
+    {}
+    {}
+    {}
+    DW_AT_ordering
+    {}
+    DW_AT_byte_size
+    DW_AT_bit_offset
+    DW_AT_bit_size
+    {}
+    {}
+    DW_AT_stmt_list
+    DW_AT_low_pc
+    DW_AT_high_pc
+    DW_AT_language
+    {}
+    DW_AT_discr
+    DW_AT_discr_value
+    DW_AT_visibility
+    DW_AT_import
+    DW_AT_string_length
+    DW_AT_common_reference
+    DW_AT_comp_dir
+    DW_AT_const_value
+    DW_AT_containing_type
+    DW_AT_default_value
+    {}
+    DW_AT_inline
+    DW_AT_is_optional
+    DW_AT_lower_bound
+    {}
+    {}
+    DW_AT_producer
+    {}
+    DW_AT_prototyped
+    {}
+    {}
+    DW_AT_return_addr
+    {}
+    DW_AT_start_scope
+    {}
+    DW_AT_bit_stride
+    DW_AT_upper_bound
+    {}
+    DW_AT_abstract_origin
+    DW_AT_accessibility
+    DW_AT_address_class
+    DW_AT_artificial
+    DW_AT_base_types
+    DW_AT_calling_convention
+    DW_AT_count
+    DW_AT_data_member_location
+    DW_AT_decl_column
+    DW_AT_decl_file
+    DW_AT_decl_line
+    DW_AT_declaration
+    DW_AT_discr_list
+    DW_AT_encoding
+    DW_AT_external
+    DW_AT_frame_base
+    DW_AT_friend
+    DW_AT_identifier_case
+    DW_AT_macro_info
+    DW_AT_namelist_item
+    DW_AT_priority
+    DW_AT_segment
+    DW_AT_specification
+    DW_AT_static_link
+    DW_AT_type
+    DW_AT_use_location
+    DW_AT_variable_parameter
+    DW_AT_virtuality
+    DW_AT_vtable_elem_location
+    DW_AT_allocated
+    DW_AT_associated
+    DW_AT_data_location
+    DW_AT_byte_stride
+    DW_AT_entry_pc
+    DW_AT_use_UTF8
+    DW_AT_extension
+    DW_AT_ranges
+    DW_AT_trampoline
+    DW_AT_call_column
+    DW_AT_call_file
+    DW_AT_call_line
+    DW_AT_description
+    DW_AT_binary_scale
+    DW_AT_decimal_scale
+    DW_AT_small
+    DW_AT_decimal_sign
+    DW_AT_digit_count
+    DW_AT_picture_string
+    DW_AT_mutable
+    DW_AT_threads_scaled
+    DW_AT_explicit
+    DW_AT_object_pointer
+    DW_AT_endianity
+    DW_AT_elemental
+    DW_AT_pure
+    DW_AT_recursive
+}
+----
+
+----
+<<dwarf abbrev info methods>>=
+method FormNumToStr {formnum} {
+    if {$formnum >= [llength $::dwarfdecode::formStrMap]} {
+        error "invalid form number, \"[format %#x $formnum]\""
+    } else {
+        set formname [lindex $::dwarfdecode::formStrMap $formnum]
+        if {$formname eq {}} {
+            error "form number, \"$formnum\", has no string mapping"
+        }
+        return $formname
+    }
+}
+----
+
+----
+<<dwarf data encodings>>=
+variable formStrMap {
+    {}
+    DW_FORM_addr
+    {}
+    DW_FORM_block2
+    DW_FORM_block4
+    DW_FORM_data2
+    DW_FORM_data4
+    DW_FORM_data8
+    DW_FORM_string
+    DW_FORM_block
+    DW_FORM_block1
+    DW_FORM_data1
+    DW_FORM_flag
+    DW_FORM_sdata
+    DW_FORM_strp
+    DW_FORM_udata
+    DW_FORM_ref_addr
+    DW_FORM_ref1
+    DW_FORM_ref2
+    DW_FORM_ref4
+    DW_FORM_ref8
+    DW_FORM_ref_udata
+    DW_FORM_indirect
+}
+----
+
+== Dwarf Information Stream
+
+----
+<<dwarf info stream class>>=
+::oo::class create ::dwarfdecode::InfoStream {
+    <<dwarf info stream methods>>
+}
+----
+----
+<<dwarf info stream methods>>=
+variable binaryInfo infoOffset
+
+constructor {data} {
+    set binaryInfo $data
+    set infoOffset 0
+}
+----
+
+----
+<<dwarf info stream methods>>=
+method where {} {
+    return $infoOffset
+}
+----
+
+----
+<<dwarf info stream methods>>=
+method first {ch} {
+    set chIndex [string first $ch $binaryInfo $infoOffset]
+    if {$chIndex == -1} {
+        error "cannot find \"$ch\" in info"
+    }
+    return $chIndex
+}
+----
+
+----
+<<dwarf info stream methods>>=
+method remain {} {
+    return [expr {[string length $binaryInfo] - $infoOffset}]
+}
+----
+
+----
+<<dwarf info stream methods>>=
+method seek {offset} {
+    if {$offset >= [string length $binaryInfo]} {
+        error "attempt to seek past end of information"
+    }
+    set infoOffset $offset
+}
+----
+
+----
+<<dwarf info stream methods>>=
+method advance {count} {
+    if {$infoOffset + $count >= [string length $binaryInfo]} {
+        error "attempt to advance past end of information"
+    }
+    incr infoOffset $count
+}
+----
+
+(((InfoStream,method,convert)))
+
+=== convert
+----
+<<dwarf info stream methods>>=
+method convert {count fmt args} {
+    foreach arg $args {
+        upvar 1 $arg $arg
+    }
+    set cvtd [binary scan $binaryInfo "@$infoOffset $fmt" {*}$args]
+    if {$cvtd != [llength $args]} {
+        error "expected to convert \"[llength $args]\" values,\
+            actually converted \"$cvtd\""
+    }
+    incr infoOffset $count
+}
+----
+
+=== DecodeLEB128
+----
+<<dwarf info stream methods>>=
+method DecodeLEB128 {} {
+    set shift 0
+    set result 0
+    for {set done false} {!$done} {set done [expr {($byte & 0x80) == 0}]} {
+        my convert 1 cu byte
+        set result [expr {$result | (($byte & 0x7f) << $shift)}]
+        incr shift 7
+    }
+    return $result
+}
+----
+
+=== unsignedLEB128
+----
+<<dwarf info stream methods>>=
+method unsignedLEB128 {} {
+    tailcall my DecodeLEB128
+}
+----
+
+=== signedLEB128
+----
+<<dwarf info stream methods>>=
+method signedLEB128 {} {
+    # Save the value of the offset as we need to know how many
+    # bytes were consumed in order to do the sign extension.
+    set prevOffset $infoOffset
+    set result [my DecodeLEB128]
+    # Sign extend if necessary
+    set shift [expr {($infoOffset - $prevOffset) * 7}]
+    if {($result & (1 << ($shift - 1))) != 0} {
+        set result [expr {$result + (~0 << $shift)}]
+    }
+    return $result
+}
+----
+
+== Code Organization
+
+Describe
+
+----
+<<dwarfdecode.tcl>>=
+# DO NOT EDIT THIS FILE!
+# THIS FILE IS AUTOMATICALLY GENERATED FROM A LITERATE PROGRAM SOURCE FILE.
+#
+# This software is copyrighted by G. Andrew Mangogna.
+# The following terms apply to all files associated with the software unless
+# explicitly disclaimed in individual files.
+# 
+# The authors hereby grant permission to use, copy, modify, distribute,
+# and license this software and its documentation for any purpose, provided
+# that existing copyright notices are retained in all copies and that this
+# notice is included verbatim in any distributions. No written agreement,
+# license, or royalty fee is required for any of the authorized uses.
+# Modifications to this software may be copyrighted by their authors and
+# need not follow the licensing terms described here, provided that the
+# new terms are clearly indicated on the first page of each file where
+# they apply.
+# 
+# IN NO EVENT SHALL THE AUTHORS OR DISTRIBUTORS BE LIABLE TO ANY PARTY FOR
+# DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES ARISING
+# OUT OF THE USE OF THIS SOFTWARE, ITS DOCUMENTATION, OR ANY DERIVATIVES
+# THEREOF, EVEN IF THE AUTHORS HAVE BEEN ADVISED OF THE POSSIBILITY OF
+# SUCH DAMAGE.
+# 
+# THE AUTHORS AND DISTRIBUTORS SPECIFICALLY DISCLAIM ANY WARRANTIES,
+# INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.  THIS SOFTWARE
+# IS PROVIDED ON AN "AS IS" BASIS, AND THE AUTHORS AND DISTRIBUTORS HAVE
+# NO OBLIGATION TO PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS,
+# OR MODIFICATIONS.
+# 
+# GOVERNMENT USE: If you are acquiring this software on behalf of the
+# U.S. government, the Government shall have only "Restricted Rights"
+# in the software and related documentation as defined in the Federal
+# Acquisition Regulations (FARs) in Clause 52.227.19 (c) (2).  If you
+# are acquiring the software on behalf of the Department of Defense,
+# the software shall be classified as "Commercial Computer Software"
+# and the Government shall have only "Restricted Rights" as defined in
+# Clause 252.227-7013 (c) (1) of DFARs.  Notwithstanding the foregoing,
+# the authors grant the U.S. Government and others acting in its behalf
+# permission to use and distribute the software in accordance with the
+# terms specified in this license.
+
+package require Tcl 8.6
+package require logger
+package require ral
+package require ralutil
+package require struct::tree
+
+namespace eval ::dwarfdecode {
+    namespace export dwarfinfo
+    namespace ensemble create
+
+    logger::initNamespace [namespace current]
+
+    variable version 1.0
+
+    <<dwarf data encodings>>
+}
+
+<<dwarf info stream class>>
+<<dwarf abbrev info class>>
+<<dwarf debug info class>>
+<<dwarf info class>>
+
+package provide dwarfdecode $::dwarfdecode::version
+----
