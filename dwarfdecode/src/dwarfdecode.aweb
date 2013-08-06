@@ -3,8 +3,43 @@
 == Introduction
 
 This document describes a Tcl package named, *dwarfdecode*.
+The *dwarfdecode* package interprets dwarf formatted debugging information
+and makes it available in a more convenient form.
+
+The use case for this information is to perform introspection on executable
+files outside of a debugger.
+Conventional source level debuggers use dwarf information to bridge the
+gap between an executable and the program source from which it was derived.
+For embeddeded systems, it is often the case that the information that
+is readily available about the operation of the system is in terms of
+low level addresses and other values.
+The embedded system may not have the resources to store information that
+can be used to relate back to the source.
+This can be be particularly true of run time trace information where objects
+are identified by their address and need to be corollated to the source
+code from which they were derived.
+
+One of the problems in dealing with dwarf information is its sheer volume.
+Even small executable can yield a large amount of dwarf debugging information.
 
 == Representing Dwarf Information
+
+Dwarf information is typically placed into executables as a separate sections.
+The section are given specific names:
+
+* +.debug_abbrev+
+* +.debug_aranges+
+* +.debug_frame+
+* +.debug_info+
+* +.debug_line+
+* +.debug_loc+
+* +.debug_macinfo+
+* +.debug_pubnames+
+* +.debug_pubtypes+
+* +.debug_ranges+
+* +.debug_str+
+
+(((class,dwarfinfo)))
 
 ----
 <<dwarf info class>>=
@@ -29,7 +64,7 @@ constructor {fileobj} {
     set debugInfoObj [::dwarfdecode::DebugInfo\
             [$fileobj getSectionDataByName .debug_info]]
     my variable abbrevInfoObj
-    set abbrefInfoObj [::dwafdecode::AbbrevInfo\
+    set abbrefInfoObj [::dwafdecode::DebugAbbrev\
             [$fileobj getSectionDataByName .debug_abbrev]]
 }
 
@@ -43,39 +78,56 @@ destructor {
 
 == Dwarf Debug Information
 
+(((class,DebugInfo)))
+
 ----
 <<dwarf debug info class>>=
 ::oo::class create ::dwarfdecode::DebugInfo {
+    variable infoStream infoTree
     <<dwarf debug info methods>>
 }
 ----
 
 (((DebugInfo methods,exported,constructor)))
 
-=== Constructor
+=== constructor
 ----
 <<dwarf debug info methods>>=
-variable infoStream infoTree
-
 constructor {debugData} {
     set svcname ::dwarfdecode[self]
     ::logger::init $svcname
     ::logger::import -all -namespace log $svcname
 
+    namespace import ::ral::*
+    namespace import ::ralutil::*
+
+    relvar create DebugInfoIndex {
+        Node        string
+        Offset      int
+        Base        int
+        Item        int
+    } Node Offset {Base Item}
+
     set infoStream [::dwarfdecode::InfoStream new $debugData]
     set infoTree [::struct::tree]
 }
+----
 
+(((DebugInfo methods,exported,destructor)))
+
+=== destructor
+----
+<<dwarf debug info methods>>=
 destructor {
     $infoStream destroy
     $infoTree destroy
 }
 ----
 
-=== decodeDebugInfo
+=== decode
 ----
 <<dwarf debug info methods>>=
-method decodeDebugInfo {abbrevInfoObj} {
+method decode {abbrevInfoObj} {
     while {[$infoStream remain] > 0} {
         log::debug "remain = [$infoStream remain]"
         set cuHeaderBegin [$infoStream where]
@@ -91,16 +143,36 @@ method decodeDebugInfo {abbrevInfoObj} {
                 version = $cuVersion, abbrOffset = $cuAbbrOffset,\
                 addrSize = $cuAddrSize"
 
+        # Create a tree node to contain the header information
+        set headNode [$infoTree insert root end]
+        $infoTree set $headNode tag CUHeader
+        $infoTree set $headNode offset $cuHeaderBegin
+        $infoTree set $headNode base $cuHeaderBegin
+        $infoTree set $headNode item 0
+        $infoTree set $headNode attrs [dict create\
+            unit_length $cuLength\
+            version $cuVersion\
+            debug_abbrev_offset $cuAbbrOffset\
+            address_size $cuAddrSize\
+        ]
+        relvar insert DebugInfoIndex [list\
+            Node        $headNode\
+            Offset      $cuHeaderBegin\
+            Base        $cuHeaderBegin\
+            Item        0\
+        ]
         # Get the abbreviation information.
         my variable abbrInfo
-        set abbrInfo [$abbrevInfoObj getAbbrevInfo $cuAbbrOffset]
+        set abbrInfo [$abbrevInfoObj decode $cuAbbrOffset]
 
         # Iterate across the debug info building the tree of information
         # about each compilation unit
         while {[$infoStream where] < $endOffset} {
-            my decodeDebugInfoEntry $cuHeaderBegin root
+            my decodeDebugInfoEntry $cuHeaderBegin $headNode
         }
     }
+
+    log::debug \n[relformat [relvar set DebugInfoIndex] DebugInfoIndex]
 
     return
 }
@@ -109,16 +181,24 @@ method decodeDebugInfo {abbrevInfoObj} {
 ----
 <<dwarf debug info methods>>=
 method decodeDebugInfoEntry {base parent} {
-    set refNum [$infoStream where]
-    set entryNum [expr {$refNum - $base}]
+    set offset [$infoStream where]
+    set item [expr {$offset - $base}]
     set abbrCode [$infoStream unsignedLEB128]
 
     if {$abbrCode != 0} {
-        log::debug "entry = $entryNum, reference = $refNum, code = $abbrCode"
-        set infonode [$infoTree insert $parent end ref$refNum]
+        log::debug "entry = $item, reference = $offset, code = $abbrCode"
+        set infonode [$infoTree insert $parent end]
         log::debug "$infonode at depth [$infoTree depth $infonode]"
-        $infoTree set $infonode reference $refNum
-        $infoTree set $infonode entry $entryNum
+        $infoTree set $infonode offset $offset
+        $infoTree set $infonode base $base
+        $infoTree set $infonode item $item
+        relvar insert DebugInfoIndex [list\
+            Node        $infonode\
+            Offset      $offset\
+            Base        $base\
+            Item        $item\
+        ]
+
         my variable abbrInfo
         set abbrEntry [dict get $abbrInfo $abbrCode]
         dict with abbrEntry {
@@ -149,7 +229,7 @@ method decodeDebugInfoEntry {base parent} {
 
 ----
 <<dwarf debug info methods>>=
-method printDebugInfo {{ochan stdout}} {
+method print {{ochan stdout}} {
     my variable infoTree
 
     $infoTree walk root -order pre -type dfs {action node} {
@@ -217,11 +297,7 @@ method Decode_DW_FORM_data8 {} {
 
 # Form value =0x08
 method Decode_DW_FORM_string {} {
-    set strcount [expr {[$infoStream first \0] - [$infoStream where]}]
-    $infoStream convert $strcount a$strcount value
-    # +1 to point past the NUL byte
-    $infoStream advance 1
-    return $value
+    return [$infoStream extractNULTermString]
 }
 
 # Form value =0x09
@@ -310,18 +386,20 @@ method Decode_DW_FORM_indirect {} {
 
 == Dwarf Abbreviations Information
 
+(((class,DebugAbbrev)))
+
 ----
-<<dwarf abbrev info class>>=
-::oo::class create ::dwarfdecode::AbbrevInfo {
-    <<dwarf abbrev info methods>>
+<<dwarf debug abbrev class>>=
+::oo::class create ::dwarfdecode::DebugAbbrev {
+    <<dwarf debug abbrev methods>>
 }
 ----
 
-(((AbbrevInfo methods,exported,constructor)))
+(((DebugAbbrev methods,exported,constructor)))
 
-=== Constructor
+=== constructor
 ----
-<<dwarf abbrev info methods>>=
+<<dwarf debug abbrev methods>>=
 constructor {abbrevData} {
     set svcname ::dwarfdecode[self]
     ::logger::init $svcname
@@ -334,7 +412,12 @@ constructor {abbrevData} {
     my variable decodedAbbrevs
     set decodedAbbrevs [dict create]
 }
+----
 
+(((DebugAbbrev methods,exported,destructor)))
+
+=== destructor
+----
 destructor {
     my variable infoStream
     $infoStream destroy
@@ -342,22 +425,22 @@ destructor {
 ----
 
 ----
-<<dwarf abbrev info methods>>=
-method getAbbrevInfo {offset} {
+<<dwarf debug abbrev methods>>=
+method decode {offset} {
     my variable decodedAbbrevs
     set canonical [format %u $offset]
     # Get the abbreviation information.
     if {![dict exists $decodedAbbrevs $canonical]} {
-        dict set decodedAbbrevs $canonical [my DecodeAbbrSet $canonical]
+        dict set decodedAbbrevs $canonical [my DecodeAbbrevSet $canonical]
     }
     return [dict get $decodedAbbrevs $canonical]
 }
 ----
 
-=== decodeAbbrInfo
+=== DecodeAbbrevSet
 ----
-<<dwarf abbrev info methods>>=
-method DecodeAbbrSet {offset} {
+<<dwarf debug abbrev methods>>=
+method DecodeAbbrevSet {offset} {
     my variable infoStream
     $infoStream seek $offset
 
@@ -373,7 +456,7 @@ method DecodeAbbrSet {offset} {
 ----
 
 ----
-<<dwarf abbrev info methods>>=
+<<dwarf debug abbrev methods>>=
 method DecodeAbbrEntry {} {
     my variable infoStream
     set abbrEntry [dict create]
@@ -399,7 +482,7 @@ method DecodeAbbrEntry {} {
 ----
 
 ----
-<<dwarf abbrev info methods>>=
+<<dwarf debug abbrev methods>>=
 method TagNumToStr {tagnum} {
     if {$tagnum >= 0x4080 && $tagrnum <= 0x4fff} {
         return [format DW_TAG_user(%#x) $tagnum]
@@ -486,7 +569,7 @@ variable tagStrMap {
 ----
 
 ----
-<<dwarf abbrev info methods>>=
+<<dwarf debug abbrev methods>>=
 method AttrNumToStr {attrnum} {
     if {$attrnum >= 0x2000 && $attrnum <= 0x3fff} {
         return [format DW_AT_user(%#x) $attrnum]
@@ -614,7 +697,7 @@ variable attrStrMap {
 ----
 
 ----
-<<dwarf abbrev info methods>>=
+<<dwarf debug abbrev methods>>=
 method FormNumToStr {formnum} {
     if {$formnum >= [llength $::dwarfdecode::formStrMap]} {
         error "invalid form number, \"[format %#x $formnum]\""
@@ -657,23 +740,206 @@ variable formStrMap {
 }
 ----
 
+== Dwarf Public Names and Types
+
+(((class,DebugPubnames)))
+
+----
+<<dwarf debug pubnames class>>=
+::oo::class create ::dwarfdecode::DebugPubnames {
+    variable infoStream
+    <<dwarf debug pubnames methods>>
+}
+----
+
+(((DebugPubnames methods,exported,constructor)))
+
+=== constructor
+----
+<<dwarf debug pubnames methods>>=
+constructor {debugData} {
+    set svcname ::dwarfdecode[self]
+    ::logger::init $svcname
+    ::logger::import -all -namespace log $svcname
+
+    namespace import ::ral::*
+    namespace import ::ralutil::*
+
+    relvar create NameEntry {
+        DebugInfoOffset     int
+        Item                int
+        Name                string
+    } {DebugInfoOffset Item}
+
+    set infoStream [::dwarfdecode::InfoStream new $debugData]
+}
+----
+
+(((DebugPubnames methods,exported,destructor)))
+
+=== destructor
+----
+<<dwarf debug pubnames methods>>=
+destructor {
+    $infoStream destroy
+}
+----
+
+(((DebugPubnames methods,exported,decode)))
+
+=== decode
+
+----
+<<dwarf debug pubnames methods>>=
+method decode {} {
+    while {[$infoStream remain] > 0} {
+        # Read in the header
+        # First the length field
+        $infoStream convert 4 iu unit_length
+        # Get the remainder of the header
+        $infoStream convert 10 "su iu iu"\
+                version debug_info_offset debug_info_length
+        log::debug "pubname header:\
+            unit_length $unit_length\
+            version $version\
+            debug_info_offset $debug_info_offset\
+            debug_info_length $debug_info_length"
+
+        incr unit_length -10
+
+        while {$unit_length > 0} {
+            $infoStream convert 4 iu section_offset
+            incr unit_length -4
+            if {$section_offset == 0} {
+                break
+            }
+            set name [$infoStream extractNULTermString]
+            log::debug "pubname: $section_offset $name"
+            relvar insert NameEntry [list\
+                DebugInfoOffset     $debug_info_offset\
+                Item                $section_offset\
+                Name                $name\
+            ]
+
+            # +1 for the NUL terminator
+            incr unit_length [expr {-(1 + [string length $name])}]
+        }
+        $infoStream advance $unit_length
+    }
+    #log::debug \n[relformat [relvar set NameEntry] NameEntry]
+}
+----
+
+== Dwarf Public Names and Types
+
+(((class,DebugAranges)))
+
+----
+<<dwarf debug aranges class>>=
+::oo::class create ::dwarfdecode::DebugAranges {
+    variable infoStream
+    <<dwarf debug aranges methods>>
+}
+----
+
+(((DebugAranges methods,exported,constructor)))
+
+=== constructor
+----
+<<dwarf debug aranges methods>>=
+constructor {debugData} {
+    set svcname ::dwarfdecode[self]
+    ::logger::init $svcname
+    ::logger::import -all -namespace log $svcname
+
+    namespace import ::ral::*
+    namespace import ::ralutil::*
+
+    relvar create AddressRange {
+        DebugInfoOffset     int
+        BeginAddress        int
+        Length              int
+    } DebugInfoOffset
+
+    set infoStream [::dwarfdecode::InfoStream new $debugData]
+}
+----
+
+(((DebugAranges methods,exported,destructor)))
+
+=== destructor
+----
+<<dwarf debug aranges methods>>=
+destructor {
+    $infoStream destroy
+}
+----
+
+(((DebugAranges methods,exported,decode)))
+
+=== decode
+
+----
+<<dwarf debug aranges methods>>=
+method decode {} {
+    while {[$infoStream remain] > 0} {
+        # Read in the header
+        # First the length field
+        $infoStream convert 4 iu unit_length
+        # Get the remainder of the header
+        $infoStream convert 10 "su iu cu cu"\
+                version debug_info_offset address_size segment_size
+        log::debug "arange header:\
+            unit_length $unit_length\
+            version $version\
+            debug_info_offset $debug_info_offset\
+            address_size $address_size\
+            segment_size $segment_size
+
+        incr unit_length -8
+
+        while {$unit_length > 0} {
+            $infoStream convert 8 "iu iu" address length
+            incr unit_length -8
+            if {$address == 0 && $length == 0} {
+                break
+            }
+            log::debug "arange: $address $length"
+            relvar insert AddressRange [list\
+                DebugInfoOffset     $debug_info_offset\
+                BeginAddress        $address\
+                Length              $length\
+            ]
+        }
+        $infoStream advance $unit_length
+    }
+    log::debug \n[relformat [relvar set AddressRange] AddressRange]
+}
+----
+
 == Dwarf Information Stream
+
+(((class,InfoStream)))
 
 ----
 <<dwarf info stream class>>=
 ::oo::class create ::dwarfdecode::InfoStream {
+    variable binaryInfo infoOffset
     <<dwarf info stream methods>>
 }
 ----
+
+(((InfoStream,method,constructor)))
+
 ----
 <<dwarf info stream methods>>=
-variable binaryInfo infoOffset
-
 constructor {data} {
     set binaryInfo $data
     set infoOffset 0
 }
 ----
+
+(((InfoStream,method,where)))
 
 ----
 <<dwarf info stream methods>>=
@@ -682,16 +948,7 @@ method where {} {
 }
 ----
 
-----
-<<dwarf info stream methods>>=
-method first {ch} {
-    set chIndex [string first $ch $binaryInfo $infoOffset]
-    if {$chIndex == -1} {
-        error "cannot find \"$ch\" in info"
-    }
-    return $chIndex
-}
-----
+(((InfoStream,method,remain)))
 
 ----
 <<dwarf info stream methods>>=
@@ -699,6 +956,8 @@ method remain {} {
     return [expr {[string length $binaryInfo] - $infoOffset}]
 }
 ----
+
+(((InfoStream,method,seek)))
 
 ----
 <<dwarf info stream methods>>=
@@ -710,13 +969,16 @@ method seek {offset} {
 }
 ----
 
+(((InfoStream,method,advance)))
+
 ----
 <<dwarf info stream methods>>=
-method advance {count} {
-    if {$infoOffset + $count >= [string length $binaryInfo]} {
-        error "attempt to advance past end of information"
+method advance {amount} {
+    set newOffset [expr {$infoOffset + $amount}]
+    if {$newOffset < 0 || $newOffset > [string length $binaryInfo]} {
+        error "attempt to advance outside of information range"
     }
-    incr infoOffset $count
+    set infoOffset $newOffset
 }
 ----
 
@@ -734,7 +996,22 @@ method convert {count fmt args} {
         error "expected to convert \"[llength $args]\" values,\
             actually converted \"$cvtd\""
     }
-    incr infoOffset $count
+    my advance $count
+}
+----
+
+(((InfoStream,method,extractString)))
+
+=== extractString
+----
+<<dwarf info stream methods>>=
+method extractNULTermString {} {
+    set strcount\
+            [expr {[string first \0 $binaryInfo $infoOffset] - $infoOffset}]
+    binary scan $binaryInfo "@$infoOffset a$strcount" strvalue
+    # +1 to point past the NUL byte
+    my advance [expr {$strcount + 1}]
+    return $strvalue
 }
 ----
 
@@ -844,7 +1121,9 @@ namespace eval ::dwarfdecode {
 }
 
 <<dwarf info stream class>>
-<<dwarf abbrev info class>>
+<<dwarf debug aranges class>>
+<<dwarf debug pubnames class>>
+<<dwarf debug abbrev class>>
 <<dwarf debug info class>>
 <<dwarf info class>>
 
