@@ -70,11 +70,14 @@ namespace eval ::aweave {
     namespace import ::ral::*
     namespace import ::ralutil::*
 
-    variable version 1.2
+    variable version 1.3
 
     variable optlist {
         {version {Print version and license, then exit}}
         {output.arg - {Output file name}}
+        {nodefines {Omit definition list after a chuck}}
+        {noreferences {Omit reference list after a chuck}}
+        {noindex {Omit index entries for chunks}}
         {level.arg warn {Log debug level}}
     }
     variable options ; array set options {}
@@ -119,7 +122,8 @@ proc ::aweave::main {} {
         set ochan stdout
     }
     try {
-        w weave $infilename $ochan
+        w weave $infilename $ochan $options(nodefines) $options(noreferences)\
+            $options(noindex)
     } on error {result opts} {
         chan puts stderr $result
         return -options $opts
@@ -195,7 +199,7 @@ terms specified in this license.
     # matches that of the beginning of a chunk, then we emit a reference tag
     # for the chunk.  When a line number matches that for the end of a chunk,
     # we emit definition text and any references that the chunk makes.
-    method weave {infilename ochan} {
+    method weave {infilename ochan nodef noref noindex} {
         set ichan [open $infilename r]
         try {
             set lineno 1
@@ -218,16 +222,18 @@ terms specified in this license.
                 # markup before the beginning of the block.
                 if {$lineno == $blockBegin} {
                     chan puts $ochan "\[\[chunk_block_$blockBegin\]\]"
-                    # Emit index entries for each chunk defined in the
-                    # source block.
-                    set chdefs [pipe {
-                        relvar restrictone ChunkBlock BeginLineNum $lineno |
-                        relation semijoin ~ [relvar set Chunk]\
-                            -using {BeginLineNum BlockLineNum}
-                    }]
-                    relation foreach chdef $chdefs {
-                        chan puts $ochan\
-                                "(((chunk,[relation extract $chdef Name])))"
+                    if {!$noindex} {
+                        # Emit index entries for each chunk defined in the
+                        # source block.
+                        set chdefs [pipe {
+                            relvar restrictone ChunkBlock BeginLineNum $lineno |
+                            relation semijoin ~ [relvar set Chunk]\
+                                -using {BeginLineNum BlockLineNum}
+                        }]
+                        relation foreach chdef $chdefs {
+                            chan puts $ochan\
+                                    "(((chunk,[relation extract $chdef Name])))"
+                        }
                     }
                     # Line number of next block beginning.
                     set beginLines [lrange $beginLines 1 end]
@@ -242,39 +248,44 @@ terms specified in this license.
                 # information about the chunk that was just define.
                 if {$lineno == $blockEnd} {
                     set block [relvar restrictone ChunkBlock EndLineNum $lineno]
-                    set chunks [pipe {
-                        relvar set Chunk |
-                        relation semijoin $block ~\
-                            -using {BeginLineNum BlockLineNum}
-                    }]
-                    if {[relation isnotempty $chunks]} {
-                        chan puts $ochan "\[horizontal\]"
-                        chan puts -nonewline $ochan "Defines::  "
-                        set defs [pipe {
-                            relation project $chunks Name |
-                            relation list
+                    if {!$nodef} {
+                        set chunks [pipe {
+                            relvar set Chunk |
+                            relation semijoin $block ~\
+                                -using {BeginLineNum BlockLineNum}
                         }]
-                        chan puts $ochan "  [join $defs {, }]"
+                        if {[relation isnotempty $chunks]} {
+                            chan puts $ochan "\[horizontal\]"
+                            chan puts -nonewline $ochan "Defines::  "
+                            set defs [pipe {
+                                relation project $chunks Name |
+                                relation list
+                            }]
+                            chan puts $ochan "  [join $defs {, }]"
+                        }
                     }
 
-                    set chunkrefs [pipe {
-                        relvar set ChunkRef |
-                        relation semijoin $block ~\
-                            -using {BeginLineNum ChunkLineNum} |
-                        relation semijoin ~ [relvar set Chunk]\
-                            -using {RefToChunk Name} |
-                        relation project ~ Name BlockLineNum |
-                        relation tag ~ Line -ascending BlockLineNum\
-                            -within Name |
-                        relation restrictwith ~ {$Line == 0} |
-                        relation extend ~ rf Reference string {\
-    "<<chunk_block_[tuple extract $rf BlockLineNum],[tuple extract $rf Name]>>"\
-                        } |
-                        relation list ~ Reference -ascending Name
-                    }]
-                    if {[llength $chunkrefs] != 0} {
-                        chan puts -nonewline $ochan "References::  "
-                        chan puts $ochan "  [join $chunkrefs {, }]"
+                    if {!$noref} {
+                        set chunkrefs [pipe {
+                            relvar set ChunkRef |
+                            relation semijoin $block ~\
+                                -using {BeginLineNum ChunkLineNum} |
+                            relation semijoin ~ [relvar set Chunk]\
+                                -using {RefToChunk Name} |
+                            relation project ~ Name BlockLineNum |
+                            relation tag ~ Line -ascending BlockLineNum\
+                                -within Name |
+                            relation restrictwith ~ {$Line == 0} |
+                            relation extend ~ rf Reference string {\
+                                "<<chunk_block_[tuple extract $rf\
+                                BlockLineNum],[tuple extract $rf Name]>>"\
+                            } |
+                            relation list ~ Reference -ascending Name
+                        }]
+                        if {[llength $chunkrefs] != 0} {
+                            chan puts -nonewline $ochan "References::  "
+                            chan puts $ochan "  [join $chunkrefs {, }]"
+                        }
                     }
                     # Line number of next block end.
                     set endLines [lrange $endLines 1 end]

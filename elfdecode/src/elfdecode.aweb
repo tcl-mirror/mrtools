@@ -3,35 +3,50 @@
 == Introduction
 
 This document describes a Tcl package named, *elfdecode*.
+This document is also a literate program and contains both the
+descriptive material as well as the source code for the package.
 The *elfdecode* package is used to decode ELF files that contain program
 executable information.
 ELF is a common executable format used in Unix and Linux operating systems.
 
+=== Scope
 The primary use case for this package is to obtain symbolic information
 about an executable.
 The package does _not_ contain any capabilities to generate ELF files.
+This package does not attempt to be comprehensive in the same way
+that +libelf+ is.
 
 == Representing an ELF File
 
 The *elfdecode* package uses TclOO to represent the ELF file as an object.
 
+(((classes,elffile)))
+
 ----
-<<elf file class>>=
+<<elffile class>>=
 ::oo::class create ::elfdecode::elffile {
-    <<elf file methods>>
+    <<elffile methods>>
 }
 ----
 
+The design of this class is to decode the binary ELF data into internal
+data structures which can then be used to query information about the
+executable.
+
 The following sections describe the methods available to *elffile* objects.
+
+[float]
+=== Exported Methods
 
 (((elffile methods,exported,constructor)))
 
 === Constructor
-The constructor for the +elffile+ class only performs some initialization.
-It creates some internal data structures that are used to hold the
-ELF file data for subsequent queries.
+The constructor for the +elffile+ class only performs initialization.
+Other methods are used to read in the contents of an ELF file.
+It does create some internal data structures that are used for subsequent
+queries.
 ----
-<<elf file methods>>=
+<<elffile methods>>=
 constructor {} {
     set svcname ::elfdecode[self]
     ::logger::init $svcname
@@ -40,23 +55,17 @@ constructor {} {
     namespace import ::ral::*
     namespace import ::ralutil::*
 
-    <<elf file data structures>>
+    <<elffile data structures>>
 }
 ----
 
-The design of this class is to decode the binary ELF data into internal
-data structures which can then be used to query information about the
-executable.
+.+elffile+ Variables
 We hold the ELF data as a large string and use a variable to track
 our +position+ in that string where binary decoding operations take place.
-
-.ELF Data
 ----
-<<elf file data structures>>=
+<<elffile data structures>>=
 my variable elfdata
-set elfdata {}
 my variable position
-set position 0
 ----
 
 The ELF format defines a set of data structures and, naturally enough,
@@ -94,7 +103,7 @@ The ++relvar++s are also convenient for query operations.
 
 .ELF Section Header
 ----
-<<elf file data structures>>=
+<<elffile data structures>>=
 relvar create ElfSecHeader {
     sh_index int
     sh_name string
@@ -110,6 +119,7 @@ relvar create ElfSecHeader {
 } sh_index
 ----
 
+Each section is described by ELF a section header.
 The ELF section header attributes names are taken from the ELF format
 specification.
 The +sh_name+ attribute is the name of the section as a string and has
@@ -117,7 +127,7 @@ been resolved through the string table.
 
 .ELF Program Header
 ----
-<<elf file data structures>>=
+<<elffile data structures>>=
 relvar create ElfProgHeader {
     p_index int
     p_type int
@@ -131,30 +141,33 @@ relvar create ElfProgHeader {
 } p_index
 ----
 
+The ELF program header describes how an executable is to be loaded
+into memory.
 The ELF program header attributes names are also taken from the specification.
+Since we are not particularly concerned with running the program program
+contained in the ELF file, we only parse the header.
 
 .ELF Symbol Table
 ----
-<<elf file data structures>>=
+<<elffile data structures>>=
 relvar create ElfSymbolTable {
     st_index int
     st_name string
     st_value int
     st_size int
     st_info int
+    st_bind string
+    st_type string
     st_other int
     st_shndx int
 } st_index
 ----
 
-And finally, the symbol table attribute names are also taken from the
+Finally, the symbol table attribute names are also taken from the
 specification.
 The +st_name+ is a string table resolved name for the symbol.
 Note also that symbol names are _not_ unique, only the index into the
 symbol table is guaranteed to be unique.
-
-[float]
-=== Exported Methods
 
 (((elffile methods,exported,readFile)))
 
@@ -162,7 +175,7 @@ symbol table is guaranteed to be unique.
 Several methods are provided to obtain the data from and ELF file.
 The +readFile+ method will read the data directly from a named file.
 ----
-<<elf file methods>>=
+<<elffile methods>>=
 method readFile {fname} {
     set elfchan [::open $fname rb]
     try {
@@ -179,7 +192,7 @@ method readFile {fname} {
 The +readChan+ method allow you to open a Tcl channel by some other means
 and have it supply the ELF file data.
 ----
-<<elf file methods>>=
+<<elffile methods>>=
 method readChan {chan} {
     # Make sure we are in binary mode!
     chan configure $chan -translation binary
@@ -190,10 +203,10 @@ method readChan {chan} {
 (((elffile methods,exported,decodeData)))
 
 === decodeData
-And finally, the +decodeData+ method does the real work of decoding the
-binary ELF data and building up the internal data structures.
+And finally, the +decodeData+ method does the real work of sequencing the
+decoding of the binary ELF data and building up the internal data structures.
 ----
-<<elf file methods>>=
+<<elffile methods>>=
 method decodeData {data} {
     my variable elfdata
     set elfdata $data
@@ -210,14 +223,20 @@ method decodeData {data} {
     return $elfheader
 }
 ----
+After reading in the header,
+the section headers, program headers and symbol table are
+parsed out of the binary data.
 
 (((elffile methods,exported,getSectionHeaderByName)))
 
 === getSectionHeaderByName
 The +getSectionHeaderByName+ method returns a list of dictionaries of attributes
 of the section header given by +name+.
+ELF section names are not guaranteed to be unique only section indices are
+unique.
+So it is possible that the returned list has more than one element.
 ----
-<<elf file methods>>=
+<<elffile methods>>=
 method getSectionHeaderByName {name} {
     return [pipe {
         relvar set ElfSecHeader |
@@ -230,8 +249,11 @@ method getSectionHeaderByName {name} {
 (((elffile methods,exported,getSectionHeaderByIndex)))
 
 === getSectionHeaderByIndex
+The +getSectionHeaderByIndex+ method returns a dictionary of the
+attribute of the section header given by +index+.
+ELF section header indices are unique.
 ----
-<<elf file methods>>=
+<<elffile methods>>=
 method getSectionHeaderByIndex {index} {
     set header [relvar restrictone ElfSecHeader sh_index $index]
     if {[relation isempty $header]} {
@@ -244,9 +266,13 @@ method getSectionHeaderByIndex {index} {
 (((elffile methods,exported,foreachSectionHeader)))
 
 === foreachSectionHeader
-
+The +foreachSectionHeader+ method provides a control structure that
+iterates across each section header.
+The +varname+ argument is the name of a variable to which a dictionary
+value is assigned that contains a section heading.
+The +script+ is then executed.
 ----
-<<elf file methods>>=
+<<elffile methods>>=
 method foreachSectionHeader {varname script} {
     upvar 1 $varname header
     foreach header [relation body [relvar set ElfSecHeader]] {
@@ -261,7 +287,7 @@ method foreachSectionHeader {varname script} {
 The +getSectionData+ method returns a string containing the binary
 information contained in the section given by +index+.
 ----
-<<elf file methods>>=
+<<elffile methods>>=
 method getSectionDataByIndex {index} {
     set header [my getSectionHeaderByIndex $index]
     my Seek [dict get $header sh_offset]
@@ -273,9 +299,10 @@ method getSectionDataByIndex {index} {
 
 === getSectionDataByName
 The +getSectionData+ method returns a string containing the binary
-information contained in the section given by +index+.
+information contained in the section given by +name+.
+If the section given by +name+ is not unique, then an error is thrown.
 ----
-<<elf file methods>>=
+<<elffile methods>>=
 method getSectionDataByName {name} {
     set headers [my getSectionHeaderByName $name]
     if {[llength $headers] != 1} {
@@ -295,7 +322,7 @@ of the symbol given by +name+.
 Since symbol names are not unique,
 the returned list may have a length greater than one.
 ----
-<<elf file methods>>=
+<<elffile methods>>=
 method getSymbolByName {name} {
     return [pipe {
         relvar set ElfSymbolTable |
@@ -318,37 +345,39 @@ actually dealing with an ELF formatted file.
 
 Note that we limit ourselves to 32-bit ELF files that are little endian.
 ----
-<<elf file methods>>=
+<<elffile methods>>=
 method ReadElfHeader {} {
     # Read the 16 byte identifier field and make sure we are dealing
-    # with an ELF file
-    my Seek 0
-    my Convert [my Read 16] "cu a3 cu cu cu cu*"\
-        elfmag0 elfmagName ei_class ei_data ei_version ei_pad]
+    # with an ELF file. The header is of a fixed 16 byte format.
+    # We need to squirrel away the class and data type information
+    # so we can distinguish between the various file types and byte orders.
+    my variable ei_class ei_data
+    my ConvertIdentifier\
+        elfmag0 elfmagName ei_class ei_data ei_version ei_osabi\
+        ei_abiversion ei_pad
 
     if {$elfmag0 != 0x7f || $elfmagName ne "ELF"} {
         error "bad ELF magic number, [format %#x $elfmag0] $elfmagName"
     }
 
-    # Here we only support 32-bit ELF.
-    if {$ei_class != 1} {
-        error "expected 32-bit elf class of \"1\", got \"$ei_class\""
-    }
-    # We also only support little endian data encoding.
-    if {$ei_data != 1} {
-        error "expected LSB data encoding of \"1\", got \"$ei_data\""
-    }
+    set ei_class [my XlateEnumValue ei_class $ei_class]
+    set ei_data [my XlateEnumValue ei_data $ei_data]
 
     # Convert the remainder of the header.
-    my Convert [my Read 36] "su su iu iu iu iu iu su su su su su su"\
+    my Convert header\
         e_type e_machine e_version e_entry e_phoff e_shoff e_flags\
         e_ehsize e_phentsize e_phnum e_shentsize e_shnum e_shstrndx
+    my Advance [expr {$e_ehsize -16}]
+
+    set e_type [my XlateEnumValue e_type $e_type]
 
     # At this point we know we have a good ELF file.
     return [dict create\
         ei_class $ei_class\
         ei_data $ei_data\
         ei_version $ei_version\
+        ei_osabi $ei_osabi\
+        ei_abiversion $ei_abiversion\
         e_type $e_type\
         e_machine $e_machine\
         e_version $e_version\
@@ -370,7 +399,7 @@ method ReadElfHeader {} {
 
 === ReadSecHeaders
 ----
-<<elf file methods>>=
+<<elffile methods>>=
 method ReadSecHeaders {e_shoff e_shnum e_shentsize e_shstrndx} {
     if {$e_shnum == 0} {
         return
@@ -381,7 +410,7 @@ method ReadSecHeaders {e_shoff e_shnum e_shentsize e_shstrndx} {
     set sectuples [list]
     # Read and convert the entire array of section headers.
     for {set secNo 0} {$secNo < $e_shnum} {incr secNo} {
-        my Convert [my Read $e_shentsize] "iu iu iu iu iu iu iu iu iu iu"\
+        my Convert section\
                 sh_name sh_type sh_flags sh_addr sh_offset\
                 sh_size sh_link sh_info sh_addralign sh_entsize
 
@@ -390,7 +419,7 @@ method ReadSecHeaders {e_shoff e_shnum e_shentsize e_shstrndx} {
         if {$sh_type == 0} {
             continue
         }
-        lappend sectuples [list\
+        set secheader [list\
             sh_index        $secNo\
             sh_name         $sh_name\
             sh_type         $sh_type\
@@ -403,6 +432,8 @@ method ReadSecHeaders {e_shoff e_shnum e_shentsize e_shstrndx} {
             sh_addralign    $sh_addralign\
             sh_entsize      $sh_entsize\
         ]
+        log::debug "section header: $secheader"
+        lappend sectuples $secheader
     }
     set sections [relation create {
         sh_index int
@@ -417,7 +448,7 @@ method ReadSecHeaders {e_shoff e_shnum e_shentsize e_shstrndx} {
         sh_addralign int
         sh_entsize int
     } {*}$sectuples]
-    #log::debug \n[relformat $sections sections]
+    log::info \n[relformat $sections sections]
 
     # Now we want to update the information stored with the section
     # headers to replace the string index used as the name with
@@ -428,7 +459,7 @@ method ReadSecHeaders {e_shoff e_shnum e_shentsize e_shstrndx} {
         relation assign $shstrsec sh_type sh_offset sh_size
         if {$sh_type == 3} {
             set shnames [my ReadStringTable $sh_offset $sh_size]
-            #log::debug \n[relformat $shnames SectionNames]
+            #log::info \n[relformat $shnames SectionNames]
             relvar set ElfSecHeader [pipe {
                 relation join $sections $shnames -using {sh_name st_index} |
                 relation eliminate ~ sh_name |
@@ -436,7 +467,7 @@ method ReadSecHeaders {e_shoff e_shnum e_shentsize e_shstrndx} {
             }]
         }
     }
-    log::debug \n[relformat [relvar set ElfSecHeader] ElfSecHeader]
+    log::info \n[relformat [relvar set ElfSecHeader] ElfSecHeader]
 }
 ----
 
@@ -444,7 +475,7 @@ method ReadSecHeaders {e_shoff e_shnum e_shentsize e_shstrndx} {
 
 === ReadProgHeaders
 ----
-<<elf file methods>>=
+<<elffile methods>>=
 method ReadProgHeaders {e_phoff e_phnum e_phentsize} {
     if {$e_phnum == 0} {
         return
@@ -453,7 +484,7 @@ method ReadProgHeaders {e_phoff e_phnum e_phentsize} {
     my Seek $e_phoff
 
     for {set phNo 0} {$phNo < $e_phnum} {incr phNo} {
-        my Convert [my Read $e_phentsize] "iu iu iu iu iu iu iu iu"\
+        my Convert prog\
                 p_type p_offset p_vaddr p_paddr\
                 p_filesz p_memsz p_flags p_align
 
@@ -469,7 +500,7 @@ method ReadProgHeaders {e_phoff e_phnum e_phentsize} {
             p_align     $p_align\
         ]
     }
-    log::debug \n[relformat [relvar set ElfProgHeader] ElfProgHeader]
+    log::info \n[relformat [relvar set ElfProgHeader] ElfProgHeader]
 }
 ----
 
@@ -477,7 +508,7 @@ method ReadProgHeaders {e_phoff e_phnum e_phentsize} {
 
 === ReadStringTable
 ----
-<<elf file methods>>=
+<<elffile methods>>=
 method ReadStringTable {sh_offset sh_size} {
     # seek to the file location
     my Seek $sh_offset
@@ -501,8 +532,9 @@ method ReadStringTable {sh_offset sh_size} {
 
 === ReadSymbolTable
 ----
-<<elf file methods>>=
+<<elffile methods>>=
 method ReadSymTable {} {
+    log::debug [info level 0]
     set symsecs [my getSectionHeaderByName .symtab]
     if {[llength $symsecs] != 1} {
         log::info "cannot find symbol table section named, \".symtab\""
@@ -520,30 +552,18 @@ method ReadSymTable {} {
         }
         my Seek $sh_offset
         set symtuples [list]
-        set symindex 0
-        for {set nSyms [expr {$sh_size / $sh_entsize}]} {$nSyms > 0}\
-                {incr nSyms -1} {
-            my Convert [my Read $sh_entsize] "iu iu iu cu cu su"\
-                st_index st_value st_size st_info st_other st_shndx
-            set st_bind [expr {$st_info >> 4}]
-            set st_type [expr {$st_info & 0xf}]
-            # The "zero" string index is undefined and implies the symbol
-            # has not name. We discard those.
-            if {$st_index == 0} {
-                log::info "discarding unnamed symbol table entry,\
-                        \"$symindex\", value = $st_value"
+        set nSyms [expr {$sh_size / $sh_entsize}]
+        my variable ei_class
+        for {set symindex 0} {$symindex < $nSyms} {incr symindex} {
+            set sym [expr {$ei_class eq "ELFCLASS32" ?\
+                [my ReadElf32Sym] : [my ReadElf64Sym]}]
+            my Advance $sh_entsize
+            if {[dict size $sym] == 0} {
+                log::info "discarding unnamed symbol table entry, \"$symindex\""
                 continue
             }
-            lappend symtuples [list\
-                st_index    $symindex\
-                st_nindex   $st_index\
-                st_value    $st_value\
-                st_size     $st_size\
-                st_info     $st_info\
-                st_other    $st_other\
-                st_shndx    $st_shndx\
-            ]
-            incr symindex
+            dict set sym st_index $symindex
+            lappend symtuples $sym
         }
         # Create a relation with the symbol information.
         set syms [relation create {
@@ -552,9 +572,11 @@ method ReadSymTable {} {
             st_value int
             st_size int
             st_info int
+            st_bind string
+            st_type string
             st_other int
             st_shndx int} {*}$symtuples]
-        #log::debug \n[relformat $syms syms]
+        log::debug \n[relformat $syms syms]
         # Now we want to read the string table and resolve the index
         # values into actual names.
         # First, find the string table.
@@ -581,8 +603,56 @@ method ReadSymTable {} {
         relation eliminate ~ st_nindex |
         relation rename ~ st_string st_name
     }]
-    log::debug \n[relformat [relvar set ElfSymbolTable] ElfSymbolTable]
+    log::info \n[relformat [relvar set ElfSymbolTable] ElfSymbolTable]
     return
+}
+----
+
+----
+<<elffile methods>>=
+method ReadElf32Sym {} {
+    my Convert symbol st_index st_value st_size st_info st_other st_shndx
+    # The "zero" string index is undefined and implies the symbol
+    # has not name. We discard those.
+    if {$st_index == 0} {
+        return
+    }
+    set st_bind [expr {$st_info >> 4}]
+    set st_type [expr {$st_info & 0xf}]
+    return [list\
+        st_nindex   $st_index\
+        st_value    $st_value\
+        st_size     $st_size\
+        st_info     $st_info\
+        st_bind     $st_bind\
+        st_type     $st_type\
+        st_other    $st_other\
+        st_shndx    $st_shndx\
+    ]
+}
+----
+
+----
+<<elffile methods>>=
+method ReadElf64Sym {} {
+    my Convert symbol st_index st_info st_other st_shndx st_value st_size
+    # The "zero" string index is undefined and implies the symbol
+    # has not name. We discard those.
+    if {$st_index == 0} {
+        return
+    }
+    set st_bind [expr {$st_info >> 4}]
+    set st_type [expr {$st_info & 0xf}]
+    return [list\
+        st_nindex   $st_index\
+        st_value    $st_value\
+        st_size     $st_size\
+        st_info     $st_info\
+        st_bind     $st_bind\
+        st_type     $st_type\
+        st_other    $st_other\
+        st_shndx    $st_shndx\
+    ]
 }
 ----
 
@@ -590,10 +660,9 @@ method ReadSymTable {} {
 
 === Seek
 ----
-<<elf file methods>>=
+<<elffile methods>>=
 method Seek {offset} {
-    my variable elfdata
-    my variable position
+    my variable elfdata position
 
     if {$offset < 0} {
         set position 0
@@ -602,6 +671,28 @@ method Seek {offset} {
     } else {
         set position $offset
     }
+    #log::debug "seek to $position"
+}
+----
+
+(((elffile methods,unexported,Advance)))
+
+=== Advance
+----
+<<elffile methods>>=
+method Advance {offset} {
+    my variable elfdata
+    my variable position
+    set newpos [expr {$position + $offset}]
+
+    if {$newpos < 0} {
+        set position 0
+    } elseif {$newpos > [string length $elfdata]} {
+        set position [string length $elfdata]
+    } else {
+        set position $newpos
+    }
+    #log::debug "advance to $position"
 }
 ----
 
@@ -609,7 +700,7 @@ method Seek {offset} {
 
 === Read
 ----
-<<elf file methods>>=
+<<elffile methods>>=
 method Read {count} {
     my variable elfdata
     my variable position
@@ -624,6 +715,147 @@ method Read {count} {
 }
 ----
 
+=== Conversion Specification
+In order to support both 64 bit and 32 bit ELF files and both little
+endian and big endian formats,
+we need different binary conversion specification strings.
+We will define some class data and class based methods to obtain the
+proper format information.
+We will organize the format specifiers by name with variations
+for 32 / 64 bits and for little / big endian.
+Class methods then provide a means to lookup the proper format specifier.
+
+----
+<<elffile class data>>=
+namespace eval [info object namespace ::elfdecode::elffile] {
+    namespace import ::ral::*
+    namespace import ::ralutil::*
+
+    <<elffile data definitions>>
+}
+----
+
+----
+<<elffile data definitions>>=
+relvar create FormatSpec {
+    Name        string
+    Class       string
+    DataType    string
+    Format      string
+    Size        int
+} {Name Class DataType}
+
+relvar insert FormatSpec {
+    Name        header
+    Class       ELFCLASS32
+    DataType    ELFDATA2LSB
+    Format      {su su iu iu iu iu iu su su su su su su}
+    Size        0
+} {
+    Name        header
+    Class       ELFCLASS32
+    DataType    ELFDATA2MSB
+    Format      {Su Su Iu Iu Iu Iu Iu Su Su Su Su Su Su}
+    Size        0
+} {
+    Name        header
+    Class       ELFCLASS64
+    DataType    ELFDATA2LSB
+    Format      {su su iu wu wu wu iu su su su su su su}
+    Size        0
+} {
+    Name        header
+    Class       ELFCLASS64
+    DataType    ELFDATA2MSB
+    Format      {Su Su Iu Wu Wu Wu Iu Su Su Su Su Su Su}
+    Size        0
+} {
+    Name        section
+    Class       ELFCLASS32
+    DataType    ELFDATA2LSB
+    Format      {iu iu iu iu iu iu iu iu iu iu}
+    Size        40
+} {
+    Name        section
+    Class       ELFCLASS32
+    DataType    ELFDATA2MSB
+    Format      {Iu Iu Iu Iu Iu Iu Iu Iu Iu Iu}
+    Size        40
+} {
+    Name        section
+    Class       ELFCLASS64
+    DataType    ELFDATA2LSB
+    Format      {iu iu wu wu wu wu iu iu wu wu}
+    Size        64
+} {
+    Name        section
+    Class       ELFCLASS64
+    DataType    ELFDATA2MSB
+    Format      {Iu Iu Wu Wu Wu Wu Iu Iu Wu Wu}
+    Size        64
+} {
+    Name        prog
+    Class       ELFCLASS32
+    DataType    ELFDATA2LSB
+    Format      {iu iu iu iu iu iu iu iu}
+    Size        32
+} {
+    Name        prog
+    Class       ELFCLASS32
+    DataType    ELFDATA2MSB
+    Format      {Iu Iu Iu Iu Iu Iu Iu Iu}
+    Size        32
+} {
+    Name        prog
+    Class       ELFCLASS64
+    DataType    ELFDATA2LSB
+    Format      {iu iu wu wu wu wu wu wu}
+    Size        56
+} {
+    Name        prog
+    Class       ELFCLASS64
+    DataType    ELFDATA2MSB
+    Format      {Iu Iu Wu Wu Wu Wu Wu Wu}
+    Size        56
+} {
+    Name        symbol
+    Class       ELFCLASS32
+    DataType    ELFDATA2LSB
+    Format      {iu iu iu cu cu su}
+    Size        0
+} {
+    Name        symbol
+    Class       ELFCLASS32
+    DataType    ELFDATA2MSB
+    Format      {Iu Iu Iu cu cu Su}
+    Size        0
+} {
+    Name        symbol
+    Class       ELFCLASS64
+    DataType    ELFDATA2LSB
+    Format      {iu cu cu su wu wu}
+    Size        0
+} {
+    Name        symbol
+    Class       ELFCLASS64
+    DataType    ELFDATA2MSB
+    Format      {Iu cu cu Su Wu Wu}
+    Size        0
+}
+----
+
+----
+<<elffile class methods>>=
+::oo::objdefine ::elfdecode::elffile method findFormat {name class datatype} {
+    set fmt [relvar restrictone FormatSpec Name $name Class $class\
+            DataType $datatype]
+    if {[relation isempty $fmt]} {
+        error "unknown format specification, \"$name $class $datatype\""
+    }
+    return [tuple get [relation tuple $fmt]]
+}
+----
+
 (((elffile methods,unexported,Convert)))
 
 === Convert
@@ -631,17 +863,161 @@ The *Convert* method is a simple control structure wrapper around
 the *binary scan* command.
 Here we perform the conversion into variables that are passed by name.
 This gives us a chance to check that the conversion did indeed happen properly.
+
 ----
-<<elf file methods>>=
-method Convert {str fmt args} {
-    foreach arg $args {
-        upvar 1 $arg $arg
+<<elffile methods>>=
+method Convert {fmtname args} {
+    my variable ei_class ei_data
+    set fmtrel [relvar restrictone [classns]::FormatSpec\
+        Name        $fmtname\
+        Class       $ei_class\
+        DataType    $ei_data\
+    ]
+    if {[relation isempty $fmtrel]} {
+        error "cannot find format specification,\
+                \"$fmtname $ei_class $ei_data\""
     }
-    set cvtd [binary scan $str $fmt {*}$args]
-    if {$cvtd != [llength $args]} {
-        error "expected to convert \"[llength $args]\" values,\
+    my Scan [relation extract $fmtrel Format] $args
+    my Advance [relation extract $fmtrel Size]
+}
+----
+
+----
+<<elffile methods>>=
+method ConvertIdentifier {args} {
+    my Scan {cu a3 cu cu cu cu cu cu7} $args
+    my Advance 16
+}
+----
+
+----
+<<elffile methods>>=
+method Scan {fmt arglist} {
+    my variable elfdata
+    my variable position
+
+    foreach arg $arglist {
+        upvar 2 $arg $arg
+    }
+    set cvtd [binary scan $elfdata "@$position $fmt" {*}$arglist]
+    if {$cvtd != [llength $arglist]} {
+        error "expected to convert \"[llength $arglist]\" values,\
             actually converted \"$cvtd\""
     }
+}
+----
+
+== Enumerated Values
+Since Tcl encourages the use of strings,
+there are several conversions from binary that are best represented
+as string data.
+This is data such as enumerated values that is better consumed as strings
+and is defined by the ELF format.
+The data consists of a set of constant values and so we define them
+directly into the namespace of the class.
+It is often the case that these values have both a fixed set of enumerator
+plus allowances for vendors and operating systems to include specific
+values.
+The decoding of these specific values is determined by the generator of
+the ELF file, but they must fall within a given numeric range.
+Here we define some data structures that can be used to decode
+this type of symbolic information.
+----
+<<elffile data definitions>>=
+relvar create ELFEnumerator {
+    SymbolType  string
+    Enumerator  string
+    Value       int
+} {SymbolType Enumerator} {SymbolType Value}
+
+relvar create ELFEnumRange {
+    SymbolType  string
+    Enumerator  string
+    LowValue    int
+    HighValue   int
+} {SymbolType Enumerator} {SymbolType LowValue}
+----
+
+----
+<<elffile methods>>=
+method XlateEnumValue {symtype etor} {
+    set enum [relvar restrictone [classns]::ELFEnumerator\
+            SymbolType $symtype Value $etor]
+    if {[relation isnotempty $enum]} {
+        return [relation extract $enum Enumerator]
+    }
+    set range [pipe {
+        relvar set [classns]::ELFEnumRange |
+        relation restrictwith ~ {
+            $SymbolType eq $symtype && $LowValue >= $etor &&\
+            $etor <= $HighValue}
+    }]
+    if {[relation isnotempty $range]} {
+        relation assign $range Enumerator LowValue
+        return $Enumerator\[[expr {$etor - $LowValue}]\]
+    } else {
+        error "unknown ELF symbol type, \"$symtype\""
+    }
+}
+----
+
+=== Class Data
+----
+<<elffile data definitions>>=
+relvar insert ELFEnumerator {
+    SymbolType  ei_class
+    Enumerator  ELFCLASS32
+    Value       1
+} {
+    SymbolType  ei_class
+    Enumerator  ELFCLASS64
+    Value       2
+} {
+    SymbolType  ei_data
+    Enumerator  ELFDATA2LSB
+    Value       1
+} {
+    SymbolType  ei_data
+    Enumerator  ELFDATA2MSB
+    Value       2
+}
+----
+
+=== Object File Types
+----
+<<elffile data definitions>>=
+relvar insert ELFEnumerator {
+    SymbolType  e_type
+    Enumerator  ET_NONE
+    Value       0
+} {
+    SymbolType  e_type
+    Enumerator  ET_REL
+    Value       1
+} {
+    SymbolType  e_type
+    Enumerator  ET_EXEC
+    Value       2
+} {
+    SymbolType  e_type
+    Enumerator  ET_DYN
+    Value       3
+} {
+    SymbolType  e_type
+    Enumerator  ET_CORE
+    Value       4
+}
+
+relvar insert ELFEnumRange {
+    SymbolType  e_type
+    Enumerator  ET_LOOS
+    LowValue    0xfe00
+    HighValue   0xfeff
+} {
+    SymbolType  e_type
+    Enumerator  ET_LOPROC
+    LowValue    0xff00
+    HighValue   0xffff
 }
 ----
 
@@ -654,7 +1030,7 @@ Describe
 # DO NOT EDIT THIS FILE!
 # THIS FILE IS AUTOMATICALLY GENERATED FROM A LITERATE PROGRAM SOURCE FILE.
 #
-# This software is copyrighted by G. Andrew Mangogna.
+# This software is copyrighted 2013 by G. Andrew Mangogna.
 # The following terms apply to all files associated with the software unless
 # explicitly disclaimed in individual files.
 # 
@@ -694,6 +1070,7 @@ Describe
 # terms specified in this license.
 
 package require Tcl 8.6
+package require oo::util
 package require logger
 package require ral
 package require ralutil
@@ -707,7 +1084,14 @@ namespace eval ::elfdecode {
     variable version 1.0
 }
 
-<<elf file class>>
+proc ::oo::Helpers::classns {} {
+    return [info object namespace [uplevel 1 {self class}]]
+}
+
+<<elffile class>>
+
+<<elffile class data>>
+<<elffile class methods>>
 
 package provide elfdecode $::elfdecode::version
 ----

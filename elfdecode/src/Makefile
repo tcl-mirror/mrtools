@@ -83,10 +83,11 @@ DBLATEX_PARAMS	=\
 
 EXTRAS =\
 	docinfo.xml\
+	elfdecode-docinfo.xml\
 	$(NULL)
 
 ASCIIDOC_ATTRS	=\
-		docinfo1\
+		docinfo2\
 		$(NULL)
 
 
