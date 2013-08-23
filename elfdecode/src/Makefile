@@ -100,15 +100,20 @@ ASCIIDOC_OPTS	=\
 		$(patsubst %,--attribute=%,$(ASCIIDOC_ATTRS))\
 		$(NULL)
 
-all : doc code
+all : doc code package
 
 doc : $(PDF)
 
 code : $(TCLSRC)
 
+package : pkgIndex.tcl
+
 $(PDF) : $(DOCSRC) $(EXTRAS)
 
 $(TCLSRC) : $(DOCSRC)
+
+pkgIndex.tcl : $(DOCSRC)
+	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
 
 clean :
 	$(RM) $(CLEANFILES)
