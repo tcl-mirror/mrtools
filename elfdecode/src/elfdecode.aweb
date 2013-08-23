@@ -16,6 +16,11 @@ The package does _not_ contain any capabilities to generate ELF files.
 This package does not attempt to be comprehensive in the same way
 that +libelf+ is.
 
+=== Background
+
+.ELF File Format
+image::elfformat.png[]
+
 == Representing an ELF File
 
 The *elfdecode* package uses TclOO to represent the ELF file as an object.
@@ -40,7 +45,7 @@ The following sections describe the methods available to *elffile* objects.
 
 (((elffile methods,exported,constructor)))
 
-=== Constructor
+=== constructor
 The constructor for the +elffile+ class only performs initialization.
 Other methods are used to read in the contents of an ELF file.
 It does create some internal data structures that are used for subsequent
@@ -69,8 +74,9 @@ my variable position
 ----
 
 The ELF format defines a set of data structures and, naturally enough,
-the data used here mirror, but are not identical to, the one defined
-in the ELF format specification
+the names and structures used here mirror,
+but are not identical to,
+the one defined in the ELF format specification
 
 The ELF file starts with a header.
 We hold the header as a +dict+ with the following keys:
@@ -107,8 +113,8 @@ The ++relvar++s are also convenient for query operations.
 relvar create ElfSecHeader {
     sh_index int
     sh_name string
-    sh_type int
-    sh_flags int
+    sh_type string
+    sh_flags string
     sh_addr int
     sh_offset int
     sh_size int
@@ -130,13 +136,13 @@ been resolved through the string table.
 <<elffile data structures>>=
 relvar create ElfProgHeader {
     p_index int
-    p_type int
+    p_type string
     p_offset int
     p_vaddr int
     p_paddr int
     p_filesz int
     p_memsz int
-    p_flags int
+    p_flags string
     p_align int
 } p_index
 ----
@@ -223,6 +229,7 @@ method decodeData {data} {
     return $elfheader
 }
 ----
+
 After reading in the header,
 the section headers, program headers and symbol table are
 parsed out of the binary data.
@@ -245,6 +252,9 @@ method getSectionHeaderByName {name} {
     }]
 }
 ----
+
+The implementation is a query on the +ElfSecHeader+ relvar, returning
+the body of the resulting relation, which is a list of dictionaries.
 
 (((elffile methods,exported,getSectionHeaderByIndex)))
 
@@ -276,7 +286,15 @@ The +script+ is then executed.
 method foreachSectionHeader {varname script} {
     upvar 1 $varname header
     foreach header [relation body [relvar set ElfSecHeader]] {
-        uplevel 1 $script
+        try {
+            uplevel 1 $script
+        } on error {result opts} {
+            return -options $opts $result
+        } on break {
+            return -level 0 -code break
+        } on continue {
+            return -level 0 -code continue
+        }
     }
 }
 ----
@@ -343,7 +361,6 @@ ELF file and converts the binary information into other data types.
 It checks that the ELF identification is correct to insure that we are
 actually dealing with an ELF formatted file.
 
-Note that we limit ourselves to 32-bit ELF files that are little endian.
 ----
 <<elffile methods>>=
 method ReadElfHeader {} {
@@ -370,6 +387,7 @@ method ReadElfHeader {} {
     my Advance [expr {$e_ehsize -16}]
 
     set e_type [my XlateEnumValue e_type $e_type]
+    set e_version [expr {$e_version == 1 ? "EV_CURRENT" : "EV_NONE"}]
 
     # At this point we know we have a good ELF file.
     return [dict create\
@@ -398,6 +416,19 @@ method ReadElfHeader {} {
 (((elffile methods,unexported,ReadSecHeaders)))
 
 === ReadSecHeaders
+The +ReadSecHeaders+ method reads the section headers from the ELF file.
+This method also resolves the section name into a string rather than
+just leaving it as an index into the string table.
+Section header names are found in the string table given by the +e_shstrndx+
+value in the ELF header.
+
+The strategy here is to parse out the section header information into
+a list of dictionaries.
+Then we create a relation value using the list of dictionaries as the
+body of the relation.
+Next, we read the string table that contains the section header names.
+Finally, the section index values are replaced with names and
+the +ElfSecHeader+ relvar is assigned.
 ----
 <<elffile methods>>=
 method ReadSecHeaders {e_shoff e_shnum e_shentsize e_shstrndx} {
@@ -414,11 +445,13 @@ method ReadSecHeaders {e_shoff e_shnum e_shentsize e_shstrndx} {
                 sh_name sh_type sh_flags sh_addr sh_offset\
                 sh_size sh_link sh_info sh_addralign sh_entsize
 
+        set sh_type [my XlateEnumValue sh_type $sh_type]
         # The first entry in the section header has a type of 0 and
         # does not contain any useful information.
-        if {$sh_type == 0} {
+        if {$sh_type eq "SHT_NULL"} {
             continue
         }
+        set sh_flags [my XlateFlagBits sh_flags $sh_flags]
         set secheader [list\
             sh_index        $secNo\
             sh_name         $sh_name\
@@ -435,11 +468,12 @@ method ReadSecHeaders {e_shoff e_shnum e_shentsize e_shstrndx} {
         log::debug "section header: $secheader"
         lappend sectuples $secheader
     }
+    # Create a relation with all the section header information.
     set sections [relation create {
         sh_index int
         sh_name int
-        sh_type int
-        sh_flags int
+        sh_type string
+        sh_flags string
         sh_addr int
         sh_offset int
         sh_size int
@@ -448,16 +482,16 @@ method ReadSecHeaders {e_shoff e_shnum e_shentsize e_shstrndx} {
         sh_addralign int
         sh_entsize int
     } {*}$sectuples]
-    log::info \n[relformat $sections sections]
+    #log::info \n[relformat $sections sections]
 
     # Now we want to update the information stored with the section
     # headers to replace the string index used as the name with
-    # a real string that is the section name.
+    # the string that is the section name.
     set shstrsec [relation restrictwith $sections\
             {$sh_index == $e_shstrndx}]
     if {[relation isnotempty $shstrsec]} {
         relation assign $shstrsec sh_type sh_offset sh_size
-        if {$sh_type == 3} {
+        if {$sh_type eq "SHT_STRTAB"} {
             set shnames [my ReadStringTable $sh_offset $sh_size]
             #log::info \n[relformat $shnames SectionNames]
             relvar set ElfSecHeader [pipe {
@@ -474,6 +508,9 @@ method ReadSecHeaders {e_shoff e_shnum e_shentsize e_shstrndx} {
 (((elffile methods,unexported,ReadProgHeaders)))
 
 === ReadProgHeaders
+The +ReadProgHeaders+ method reads in the program headers.
+Program headers don't have naming information, so we can insert into the
++ElfProgHeader+ relvar directly.
 ----
 <<elffile methods>>=
 method ReadProgHeaders {e_phoff e_phnum e_phentsize} {
@@ -488,6 +525,8 @@ method ReadProgHeaders {e_phoff e_phnum e_phentsize} {
                 p_type p_offset p_vaddr p_paddr\
                 p_filesz p_memsz p_flags p_align
 
+        set p_type [my XlateEnumValue p_type $p_type]
+        set p_flags [my XlateFlagBits p_flags $p_flags]
         relvar insert ElfProgHeader [list\
             p_index     $phNo\
             p_type      $p_type\
@@ -507,6 +546,16 @@ method ReadProgHeaders {e_phoff e_phnum e_phentsize} {
 (((elffile methods,unexported,ReadStringTable)))
 
 === ReadStringTable
+The +ReadStringTable+ method parses a string table section and returns
+a relation value containing the section information.
+
+[NOTE]
+=====
+Initially this was implemented by finding the +NUL+ terminating characters
+using +string first+ and then scanning the non-++NUL++ characters.
+This turned out to be rather slow, so this implementation uses +split+
+to convert the binary data into a list of strings.
+=====
 ----
 <<elffile methods>>=
 method ReadStringTable {sh_offset sh_size} {
@@ -534,7 +583,6 @@ method ReadStringTable {sh_offset sh_size} {
 ----
 <<elffile methods>>=
 method ReadSymTable {} {
-    log::debug [info level 0]
     set symsecs [my getSectionHeaderByName .symtab]
     if {[llength $symsecs] != 1} {
         log::info "cannot find symbol table section named, \".symtab\""
@@ -542,8 +590,8 @@ method ReadSymTable {} {
     }
     set symheader [lindex $symsecs 0]
     dict with symheader {
-        if {$sh_type != 2} {
-            error "expected symbol table section type of \"2\",\
+        if {$sh_type ne "SHT_SYMTAB"} {
+            error "expected symbol table section type of \"SHT_SYMTAB\",\
                     got \"$sh_type\""
         }
         if {$sh_entsize == 0} {
@@ -563,6 +611,11 @@ method ReadSymTable {} {
                 continue
             }
             dict set sym st_index $symindex
+            dict set sym st_bind [my XlateEnumValue st_bind\
+                [dict get $sym st_bind]]
+            dict set sym st_type [my XlateEnumValue st_type\
+                [dict get $sym st_type]]
+
             lappend symtuples $sym
         }
         # Create a relation with the symbol information.
@@ -576,7 +629,8 @@ method ReadSymTable {} {
             st_type string
             st_other int
             st_shndx int} {*}$symtuples]
-        log::debug \n[relformat $syms syms]
+        #log::debug \n[relformat $syms syms]
+
         # Now we want to read the string table and resolve the index
         # values into actual names.
         # First, find the string table.
@@ -587,8 +641,8 @@ method ReadSymTable {} {
         }
         set strheader [lindex $strsecs 0]
         dict with strheader {
-            if {$sh_type != 3} {
-                error "expected symbol table section type of \"3\",\
+            if {$sh_type ne "SHT_STRTAB"} {
+                error "expected symbol table section type of \"SHT_STRTAB\",\
                         got \"$sh_type\""
             }
             if {$sh_entsize != 0} {
@@ -735,6 +789,17 @@ namespace eval [info object namespace ::elfdecode::elffile] {
 }
 ----
 
+To convert the ELF data properly,
+you need to know the type of header, whether the file is 32-bit or 64-bit
+and whether the data is little endian or bit endian.
+So we build up a relvar that is identified by these three values and
+contains the +binary scan+ format string needed for the conversion.
+The size of the entry is also included.
+Sometimes this +Size+ attribute is set to zero.
+This implies that the size is known from some other information.
+For example, the size of symbol table entries is known from the
+section header.
+
 ----
 <<elffile data definitions>>=
 relvar create FormatSpec {
@@ -844,25 +909,11 @@ relvar insert FormatSpec {
 }
 ----
 
-----
-<<elffile class methods>>=
-::oo::objdefine ::elfdecode::elffile method findFormat {name class datatype} {
-    set fmt [relvar restrictone FormatSpec Name $name Class $class\
-            DataType $datatype]
-    if {[relation isempty $fmt]} {
-        error "unknown format specification, \"$name $class $datatype\""
-    }
-    return [tuple get [relation tuple $fmt]]
-}
-----
-
 (((elffile methods,unexported,Convert)))
 
 === Convert
-The *Convert* method is a simple control structure wrapper around
-the *binary scan* command.
-Here we perform the conversion into variables that are passed by name.
-This gives us a chance to check that the conversion did indeed happen properly.
+The *Convert* method finds the conversion format, convert the binary data
+and advances our notion of where we are in the data.
 
 ----
 <<elffile methods>>=
@@ -882,6 +933,10 @@ method Convert {fmtname args} {
 }
 ----
 
+The first 16 bytes of an ELF file contain a file identifier.
+We convert it with a separate method since it is always of a fixed size
+and format.
+
 ----
 <<elffile methods>>=
 method ConvertIdentifier {args} {
@@ -889,6 +944,11 @@ method ConvertIdentifier {args} {
     my Advance 16
 }
 ----
+
+The *Scan* method is a simple control structure wrapper around
+the *binary scan* command.
+Here we perform the conversion into variables that are passed by name.
+This gives us a chance to check that the conversion did indeed happen properly.
 
 ----
 <<elffile methods>>=
@@ -908,16 +968,18 @@ method Scan {fmt arglist} {
 ----
 
 == Enumerated Values
-Since Tcl encourages the use of strings,
+Since Tcl encourages the use of strings and strings are easier to
+handle than integer encoded data,
 there are several conversions from binary that are best represented
 as string data.
-This is data such as enumerated values that is better consumed as strings
-and is defined by the ELF format.
+These are fields and flags that have enumerated values defined
+by the ELF format specification.
 The data consists of a set of constant values and so we define them
 directly into the namespace of the class.
-It is often the case that these values have both a fixed set of enumerator
-plus allowances for vendors and operating systems to include specific
-values.
+
+It is often the case that these enumerated values have both a fixed set of
+enumerators plus allowances for vendors and operating systems to include
+specific values within ranges of the enumeration.
 The decoding of these specific values is determined by the generator of
 the ELF file, but they must fall within a given numeric range.
 Here we define some data structures that can be used to decode
@@ -938,6 +1000,10 @@ relvar create ELFEnumRange {
 } {SymbolType Enumerator} {SymbolType LowValue}
 ----
 
+The processing to do the decoding looks first in the set of distinct
+enumerated values and then in the range values.
+If nothing is found, then the original value is simply returned.
+
 ----
 <<elffile methods>>=
 method XlateEnumValue {symtype etor} {
@@ -949,17 +1015,24 @@ method XlateEnumValue {symtype etor} {
     set range [pipe {
         relvar set [classns]::ELFEnumRange |
         relation restrictwith ~ {
-            $SymbolType eq $symtype && $LowValue >= $etor &&\
+            $SymbolType eq $symtype && $etor >= $LowValue &&\
             $etor <= $HighValue}
     }]
     if {[relation isnotempty $range]} {
         relation assign $range Enumerator LowValue
-        return $Enumerator\[[expr {$etor - $LowValue}]\]
+        return $Enumerator\[[format %#x $etor]\]
     } else {
-        error "unknown ELF symbol type, \"$symtype\""
+        # If all else fails, just return the original value.
+        return $etor
     }
 }
 ----
+
+In the sections below,
+we define the tediously long list of enumerated values for the
+various header and section fields.
+We follow the convention of naming the symbols the same as the
+field we are converting.
 
 === Class Data
 ----
@@ -1018,6 +1091,278 @@ relvar insert ELFEnumRange {
     Enumerator  ET_LOPROC
     LowValue    0xff00
     HighValue   0xffff
+}
+----
+
+=== Section Types Types
+----
+<<elffile data definitions>>=
+relvar insert ELFEnumerator {
+    SymbolType  sh_type
+    Enumerator  SHT_NULL
+    Value       0
+} {
+    SymbolType  sh_type
+    Enumerator  SHT_PROGBITS
+    Value       1
+} {
+    SymbolType  sh_type
+    Enumerator  SHT_SYMTAB
+    Value       2
+} {
+    SymbolType  sh_type
+    Enumerator  SHT_STRTAB
+    Value       3
+} {
+    SymbolType  sh_type
+    Enumerator  SHT_RELA
+    Value       4
+} {
+    SymbolType  sh_type
+    Enumerator  SHT_HASH
+    Value       5
+} {
+    SymbolType  sh_type
+    Enumerator  SHT_DYNAMIC
+    Value       6
+} {
+    SymbolType  sh_type
+    Enumerator  SHT_NOTE
+    Value       7
+} {
+    SymbolType  sh_type
+    Enumerator  SHT_NOBITS
+    Value       8
+} {
+    SymbolType  sh_type
+    Enumerator  SHT_REL
+    Value       9
+} {
+    SymbolType  sh_type
+    Enumerator  SHT_SHLIB
+    Value       10
+} {
+    SymbolType  sh_type
+    Enumerator  SHT_DYNSYM
+    Value       11
+}
+
+relvar insert ELFEnumRange {
+    SymbolType  sh_type
+    Enumerator  SHT_LOOS
+    LowValue    0x60000000
+    HighValue   0x6fffffff
+} {
+    SymbolType  sh_type
+    Enumerator  SHT_LOPROC
+    LowValue    0x70000000
+    HighValue   0x7fffffff
+}
+----
+
+=== Program Segment Types
+----
+<<elffile data definitions>>=
+relvar insert ELFEnumerator {
+    SymbolType  p_type
+    Enumerator  PT_NULL
+    Value       0
+} {
+    SymbolType  p_type
+    Enumerator  PT_LOAD
+    Value       1
+} {
+    SymbolType  p_type
+    Enumerator  PT_DYNAMIC
+    Value       2
+} {
+    SymbolType  p_type
+    Enumerator  PT_INTERP
+    Value       3
+} {
+    SymbolType  p_type
+    Enumerator  PT_NOTE
+    Value       4
+} {
+    SymbolType  p_type
+    Enumerator  PT_SHLIB
+    Value       5
+} {
+    SymbolType  p_type
+    Enumerator  PT_PHDR
+    Value       6
+}
+
+relvar insert ELFEnumRange {
+    SymbolType  p_type
+    Enumerator  PT_LOOS
+    LowValue    0x60000000
+    HighValue   0x6fffffff
+} {
+    SymbolType  p_type
+    Enumerator  PT_LOPROC
+    LowValue    0x70000000
+    HighValue   0x7fffffff
+}
+----
+
+=== Symbol Binding
+----
+<<elffile data definitions>>=
+relvar insert ELFEnumerator {
+    SymbolType  st_bind
+    Enumerator  STB_LOCAL
+    Value       0
+} {
+    SymbolType  st_bind
+    Enumerator  STB_GLOBAL
+    Value       1
+} {
+    SymbolType  st_bind
+    Enumerator  STB_WEAK
+    Value       2
+}
+
+relvar insert ELFEnumRange {
+    SymbolType  st_bind
+    Enumerator  STB_LOOS
+    LowValue    10
+    HighValue   12
+} {
+    SymbolType  st_bind
+    Enumerator  STB_LOPROC
+    LowValue    13
+    HighValue   15
+}
+----
+
+=== Symbol Types
+----
+<<elffile data definitions>>=
+relvar insert ELFEnumerator {
+    SymbolType  st_type
+    Enumerator  STT_NOTYPE
+    Value       0
+} {
+    SymbolType  st_type
+    Enumerator  STT_OBJECT
+    Value       1
+} {
+    SymbolType  st_type
+    Enumerator  STT_FUNC
+    Value       2
+} {
+    SymbolType  st_type
+    Enumerator  STT_SECTION
+    Value       3
+} {
+    SymbolType  st_type
+    Enumerator  STT_FILE
+    Value       4
+}
+
+relvar insert ELFEnumRange {
+    SymbolType  st_type
+    Enumerator  STT_LOOS
+    LowValue    10
+    HighValue   12
+} {
+    SymbolType  st_type
+    Enumerator  STT_LOPROC
+    LowValue    13
+    HighValue   15
+}
+----
+
+== Bit Encoded Values
+----
+<<elffile data definitions>>=
+relvar create ELFBitSymbol {
+    SymbolType  string
+    SymbolName  string
+    Offset      int
+    Length      int
+} {SymbolType SymbolName} {SymbolType Offset}
+----
+
+----
+<<elffile methods>>=
+method XlateFlagBits {symtype value} {
+    set result [list]
+    set bitsyms [pipe {
+        relvar set [classns]::ELFBitSymbol |
+        relation restrictwith ~ {$SymbolType eq $symtype}
+    }]
+    relation foreach bitsym $bitsyms -ascending Offset {
+        relation assign $bitsym SymbolName Offset Length
+        set mask [expr {((1 << $Length) - 1) <<  $Offset}]
+        set mvalue [expr {$value & $mask}]
+        if {$mvalue != 0} {
+            if {$Length == 1} {
+                lappend result $SymbolName
+            } else {
+                lappend result "$SymbolName\([expr {$mvalue >> $Offset}]\)"
+            }
+        }
+    }
+    return $result
+}
+----
+
+=== Section Attribute Flags
+----
+<<elffile data definitions>>=
+relvar insert ELFBitSymbol {
+    SymbolType  sh_flags
+    SymbolName  SHF_WRITE
+    Offset      0
+    Length      1
+} {
+    SymbolType  sh_flags
+    SymbolName  SHF_ALLOC
+    Offset      1
+    Length      1
+} {
+    SymbolType  sh_flags
+    SymbolName  SHF_EXECINST
+    Offset      2
+    Length      1
+} {
+    SymbolType  sh_flags
+    SymbolName  SHF_MASKPROC
+    Offset      28
+    Length      4
+}
+----
+
+=== Program Attribute Flags
+----
+<<elffile data definitions>>=
+relvar insert ELFBitSymbol {
+    SymbolType  p_flags
+    SymbolName  PF_X
+    Offset      0
+    Length      1
+} {
+    SymbolType  p_flags
+    SymbolName  PF_W
+    Offset      1
+    Length      1
+} {
+    SymbolType  p_flags
+    SymbolName  PF_R
+    Offset      2
+    Length      1
+} {
+    SymbolType  p_flags
+    SymbolName  PF_MASKOS
+    Offset      16
+    Length      8
+} {
+    SymbolType  p_flags
+    SymbolName  PF_MASKPROC
+    Offset      24
+    Length      8
 }
 ----
 

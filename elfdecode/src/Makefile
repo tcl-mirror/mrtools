@@ -93,6 +93,7 @@ ASCIIDOC_ATTRS	=\
 
 DBLATEX_OPTS	=\
 		--dblatex-opts="$(patsubst %,--param=%,$(DBLATEX_PARAMS))"\
+		--dblatex-opts=--fig-path=.\
 		$(NULL)
 
 ASCIIDOC_OPTS	=\
