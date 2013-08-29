@@ -48,21 +48,42 @@
 #*--
 #
 
+DOCDIR	= ../doc
+TESTDIR = ../tests
+
+vpath %.pdf $(DOCDIR)
+vpath %.man $(DOCDIR)
+vpath %.html $(DOCDIR)
+vpath %.test $(TESTDIR)
+
 DOCSRC 	=\
 	pecoffdecode.aweb\
 	$(NULL)
-
-PDF 	=\
-     	../doc/$(patsubst %.aweb,%.pdf,$(DOCSRC))\
-     	$(NULL)
 
 TCLSRC	=\
      	$(patsubst %.aweb,%.tcl,$(DOCSRC))\
 	$(NULL)
 
+PDF 	=\
+     	$(patsubst %.aweb,%.pdf,$(DOCSRC))\
+     	$(NULL)
+
+MAN	=\
+     	$(patsubst %.aweb,%.man,$(DOCSRC))\
+     	$(NULL)
+
+HTMLMAN	=\
+     	$(patsubst %.aweb,%.html,$(DOCSRC))\
+     	$(NULL)
+
+TESTS	=\
+     	$(patsubst %.aweb,%.test,$(DOCSRC))\
+	$(NULL)
+
 CLEANFILES =\
-	$(PDF)\
 	$(TCLSRC)\
+	$(DOCDIR)/$(PDF)\
+	$(TESTDIR)/$(TESTS)\
 	$(NULL)
 
 A2XOPTS =\
@@ -99,27 +120,50 @@ ASCIIDOC_OPTS	=\
 		$(patsubst %,--attribute=%,$(ASCIIDOC_ATTRS))\
 		$(NULL)
 
-all : doc code
+.PHONY : all doc code tests runtests clean manual manpage
+
+all : doc code tests manual manpage
 
 doc : $(PDF)
 
 code : $(TCLSRC)
 
-$(PDF) : $(DOCSRC) $(EXTRAS)
+tests : code $(TESTS)
 
-$(TCLSRC) : $(DOCSRC)
+manual : $(MAN) $(HTMLMAN)
+
+manpage : manual $(HTMLMAN)
+
+runtests : tests
+	cd $(TESTDIR) ; tclsh $(TESTS) -verbose bet -level debug -file rfcm.exe
 
 clean :
 	$(RM) $(CLEANFILES)
 
-../doc/%.pdf : %.aweb
+$(PDF) : $(DOCSRC) $(EXTRAS)
+
+$(TCLSRC) : $(DOCSRC)
+
+$(MAN) : $(DOCSRC)
+
+%.pdf : %.aweb
 	aweave -output $*.txt $<
-	a2x $(A2XOPTS) --doctype=article  --format=pdf --destination-dir=../doc\
+	a2x $(A2XOPTS) --doctype=article  --format=pdf\
+	    --destination-dir=$(DOCDIR)\
 	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) $*.txt
 	$(RM) $*.txt
 
 %.tcl : %.aweb
 	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
+
+%.test : %.aweb
+	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $(TESTDIR)/$@ $<
+
+%.man : %.aweb
+	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $(DOCDIR)/$@ $<
+
+%.html : %.man
+	dtplite -o $(DOCDIR)/$@ HTML $(DOCDIR)/$<
 
 #
 # vim :set sw=8 ts=8 sts=8 noexpandtab:

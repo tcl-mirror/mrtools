@@ -45,8 +45,8 @@
 This document describes a Tcl package named, *pecoffdecode*.
 This document is also a literate program and contains both the
 descriptive material as well as the source code for the package.
-The *pecoffdecode* package is used to decode Microsoft PECOFF files that contain program
-executable information.
+The *pecoffdecode* package is used to decode Microsoft PECOFF files that
+contain program executable information.
 
 === Scope
 The primary use case for this package is to obtain symbolic information
@@ -60,14 +60,1123 @@ The *pecoffdecode* package uses TclOO to represent the PECOFF file as an object.
 
 ----
 <<pecofffile class>>=
-::oo::class create ::elfdecode::pecofffile {
+::oo::class create ::pecoffdecode::pecofffile {
     <<pecofffile methods>>
+}
+----
+
+The design of this class is to decode the binary PECOFF data into internal
+data structures which can then be used to query information.
+The next section describes those data structures.
+Following that we describe the methods available to *pecofffile* objects.
+
+=== Data Structures
+
+==== Object Variables
+We hold the PECOFF data simply as a large binary string and use a variable to
+track our +position+ in that string where binary decoding operations take
+place.
+Several <<bin-data-methods, methods>> are used to track the data and
+implement the notion of a cursor into the data.
+
+----
+<<pecofffile data structures>>=
+my variable pecoffdata
+my variable position
+----
+
+The PECOFF format defines a set of data structures and, naturally enough,
+the names and structures used here mirror,
+but are not identical to,
+the one defined in the PECOFF format specification
+
+The PECOFF file starts with a header.
+We hold the header as a +dict+ with the following keys:
+
+* +Machine+
+* +NumberOfSections+
+* +TimeDateStamp+
+* +PointerToSymbolTable+
+* +NumberOfSymbols+
+* +SizeOfOptionalHeader+
+* +Characteristics+
+
+The meaning of the keys is available from the PECOFF format specification.
+
+The remainder of the PECOFF data is in the form of sections.
+These sections naturally form a table so we use TclRAL ++relvar++s to
+hold the information.
+
+(((relvar,SectionHeader)))
+
+==== Section Header
+
+Each section in the PECOFF file is described by a section header.
+The PECOFF section header attributes names are taken from the PECOFF format
+specification.
+We have added a +SectionNumber+ attribute since some sections use a
+section number as a reference.
+
+----
+<<pecofffile data structures>>=
+relvar create SectionHeader {
+    SectionNumber           int
+    Name                    string
+    VirtualSize             int
+    VirtualAddress          int
+    SizeOfRawData           int
+    PointerToRawData        int
+    PointerToRelocations    int
+    PointerToLinenumbers    int
+    NumberOfRelocations     int
+    NumberOfLinenumbers     int
+    Characteristics         int
+} Name
+----
+
+(((relvar,Symbol)))
+
+==== Symbol Table
+The structure of the symbol table also follows that given in the
+PECOFF specification.
+
+----
+<<pecofffile data structures>>=
+relvar create Symbol {
+    Id                  int
+    Name                string
+    Value               int
+    SectionNumber       string
+    Type                string
+    StorageClass        string
+    NumberOfAuxSymbols  int
+} Id
+----
+
+PECOFF allows symbols to have an Auxiliary symbol table entry.
+
+(((relvar,FileAuxSymbol)))
+
+----
+<<pecofffile data structures>>=
+relvar create FileAuxSymbol {
+    Id          int
+    FileName    string
+} Id
+----
+
+Strings in the PECOFF file are held indirectly,
+_i.e._ they are placed in one section and referenced by an integer
+value.
+This allows the entries in section tables
+to be of a fixed size even if the string lengths vary.
+
+(((relvar,StringTable)))
+
+==== String Table
+----
+<<pecofffile data structures>>=
+relvar create StringTable {
+    Offset int
+    String string
+} Offset
+----
+
+=== Exported Methods
+
+(((pecofffile methods,exported,constructor)))
+
+==== constructor
+----
+<<pecofffile interface>>=
+[call [cmd "pecoffdecode pecofffile"] [method create ] [arg cfobj]]
+[call [cmd "pecoffdecode pecofffile"] [method new ]]
+Construct a [method pecofffile] object.
+----
+
+The constructor for the +pecofffile+ class only performs initialization.
+Other methods are used to read in the contents of an PECOFF file.
+It does create some internal data structures that are used for subsequent
+queries.
+
+----
+<<pecofffile methods>>=
+constructor {} {
+    set svcname ::pecoffdecode[self]
+    ::logger::init $svcname
+    ::logger::import -all -namespace log $svcname
+
+    namespace import ::ral::*
+    namespace import ::ralutil::*
+
+    <<pecofffile data structures>>
+}
+----
+
+(((pecofffile methods,exported,readFile)))
+
+==== readFile
+----
+<<pecofffile interface>>=
+[call [cmd [arg cfobj]] [method readFile ] [arg filename]]
+Reads [arg filename] as a PECOFF file,
+decodes the data within the file and returns a dictionary
+containing the PECOFF header.
+----
+
+Several methods are provided to obtain the data from and PECOFF file.
+The +readFile+ method will read the data directly from a named file.
+This method returns a dictionary containing the PECOFF file header.
+----
+<<pecofffile methods>>=
+method readFile {fname} {
+    set pecoffchan [::open $fname rb]
+    try {
+        return [my decodeData [chan read $pecoffchan]]
+    } finally {
+        chan close $pecoffchan
+    }
+}
+----
+
+(((pecofffile methods,exported,readChan)))
+
+==== readChan
+----
+<<pecofffile interface>>=
+[call [cmd [arg cfobj]] [method readChan ] [arg chan]]
+Reads the Tcl channel, [arg chan], assuming that it represents a PECOFF file
+and decodes the data returning a dictionary containing the PECOFF header.
+
+----
+The +readChan+ method allow you to open a Tcl channel by some other means
+and have it supply the PECOFF file data.
+This method returns a dictionary containing the PECOFF file header.
+----
+<<pecofffile methods>>=
+method readChan {chan} {
+    # Make sure we are in binary mode!
+    chan configure $chan -translation binary
+    return [my decodeData [chan read $chan]]
+}
+----
+
+(((pecofffile methods,exported,decodeData)))
+
+==== decodeData
+----
+<<pecofffile interface>>=
+[call [cmd [arg cfobj]] [method decodeData ] [arg data]]
+Treats [arg data] as a binary string of PECOFF file data and
+decodes the data returning a dictionary containing the PECOFF header.
+
+----
+And finally, the +decodeData+ method does the real work of sequencing the
+decoding of the binary PECOFF data and building up the internal data structures.
+This method returns a dictionary containing the PECOFF file header.
+----
+<<pecofffile methods>>=
+method decodeData {data} {
+    my variable pecoffdata
+    set pecoffdata $data
+    my variable position
+    set position 0
+
+    # Read the header
+    my variable pecoffheader
+    set pecoffheader [my ReadHeader]
+    log::info "PECOFF header = \"$pecoffheader\""
+
+    # Read the string table and read it.
+    # We need to have the string table available to resolve section
+    # header names.
+    my ReadStringTable
+    log::info \n[relformat [relvar set StringTable]]
+
+    # Read the section headers.
+    my ReadSectionHeaders
+    log::info \n[relformat [relvar set SectionHeader]]
+
+    # Read the symbol information.
+    my ReadSymbolTable
+    log::info \n[relformat [relvar set Symbol]]
+    log::info \n[relformat [relvar set FileAuxSymbol]]
+}
+----
+
+After reading in the header,
+the section headers, program headers and symbol table are
+parsed out of the binary data.
+
+----
+<<exported tests>>=
+test decodeData-1.0 {
+    Decode PECOFF file data
+} -setup {
+    set pef [pecoffdecode pecofffile new]
+} -cleanup {
+    $pef destroy
+} -body {
+    $pef readFile $options(file)
+} -result {}
+----
+
+=== Unexported Methods
+
+(((pecofffile methods,unexported,ReadHeader)))
+==== ReadHeader
+----
+<<pecofffile methods>>=
+method ReadHeader {} {
+    # Read the magic number and make sure it is correct.
+    my Scan 2 a2 magic
+    log::debug "Magic number = \"$magic\""
+    if {$magic ne "MZ"} {
+        error "expected magic number \"MZ\", got \"$magic\""
+    }
+
+    # Read the offset to the PE signature.
+    # 0x3c is the "magic" offset into the MS-DOS stub that contains the
+    # offset to where the PE signatures begins.
+    my Seek 0x3c
+    my variable sigoffset
+    my Scan 4 iu sigoffset
+    log::debug "PE Signature offset = \"$sigoffset\""
+
+    # Read the PE signature
+    my Seek $sigoffset
+    my Scan 4 A4 pesig
+    if {$pesig ne "PE"} {
+        error "expected PE signature of \"PE\", got \"$pesig\""
+    }
+
+    my Scan 20 "su su iu iu iu su su"\
+            machine numsecs timestamp symtable numsyms optheader chars
+
+    set timestamp [clock format $timestamp -format %+ -timezone :UTC]
+    return [dict create\
+            Machine $machine\
+            NumberOfSections $numsecs\
+            TimeDateStamp $timestamp\
+            PointerToSymbolTable $symtable\
+            NumberOfSymbols $numsyms\
+            SizeOfOptionalHeader $optheader\
+            Characteristics $chars]
+}
+----
+
+(((pecofffile methods,unexported,ReadStringTable)))
+
+==== ReadStringTable
+----
+<<pecofffile methods>>=
+method ReadStringTable {} {
+    my variable pecoffheader
+    # The string table is placed after the symbol table. So we compute its
+    # offset here. Each symbol table entries is 18 bytes.
+    my Seek [expr {[dict get $pecoffheader PointerToSymbolTable] +\
+        [dict get $pecoffheader NumberOfSymbols] * 18}]
+
+    # The first entry in the string table is the size of the table as a
+    # 4 byte quantity. The size value includes itself, so the minimum
+    # expected size is 4.
+    my Scan 4 iu tabsize
+    log::debug "size of string table = $tabsize"
+    if {$tabsize > 4} {
+        incr tabsize -4
+        set stringinfo [my Read $tabsize]
+        set stroffset 4
+        # The strings are just packed NUL terminated ASCII strings.
+        # Just split on the NUL character to unbundle the them.
+        foreach s [split $stringinfo "\0"] {
+            relvar insert StringTable [list\
+                Offset $stroffset\
+                String $s\
+            ]
+            incr stroffset [expr {[string length $s] + 1}]
+        }
+    }
+    return
+}
+----
+
+(((pecofffile methods,unexported,ReadSectionHeaders)))
+
+==== ReadSectionHeaders
+----
+<<pecofffile methods>>=
+method ReadSectionHeaders {} {
+    my variable pecoffheader
+    my variable sigoffset
+
+    # The section headers begin after the COFF file header, which is after
+    # the PE signature. The signature is 4 bytes and the COFF header is 20.
+    # We also must skip over any optional header.
+    my Seek [expr {$sigoffset + 4 + 20 +\
+            [dict get $pecoffheader SizeOfOptionalHeader]}]
+
+    set numsecs [dict get $pecoffheader NumberOfSections]
+    for {set secnum 1} {$secnum <= $numsecs} {incr secnum} {
+        my Scan 40 "A8 iu iu iu iu iu iu su su iu"\
+            name vsize vaddr datasize dataptr relptr lnumptr numrel numlnum\
+            chars
+        # Look up any indirectly referenced names in the string table.
+        if {[string index $name 0] eq "/"} {
+            set resolved [my LookupString [string range $name 1 end]]
+            if {$resolved ne {}} {
+                set name $resolved
+            }
+        }
+        relvar insert SectionHeader [list\
+            SectionNumber           $secnum\
+            Name                    $name\
+            VirtualSize             $vsize\
+            VirtualAddress          $vaddr\
+            SizeOfRawData           $datasize\
+            PointerToRawData        $dataptr\
+            PointerToRelocations    $relptr\
+            PointerToLinenumbers    $lnumptr\
+            NumberOfRelocations     $numrel\
+            NumberOfLinenumbers     $numlnum\
+            Characteristics         $chars\
+        ]
+    }
+    return
+}
+----
+
+(((pecofffile methods,unexported,ReadSymbolTable)))
+
+==== ReadSymbolTable
+----
+<<pecofffile methods>>=
+method ReadSymbolTable {} {
+    my variable pecoffheader
+
+    my Seek [dict get $pecoffheader PointerToSymbolTable]
+    set numsyms [dict get $pecoffheader NumberOfSymbols]
+
+    for {set i 0} {$i < $numsyms} {incr i} {
+        my Scan 0 iu longname
+        if {$longname == 0} {
+            my Advance 4
+            my Scan 14 "iu iu s su c cu" stroffset value secnum type class aux
+            set name [my LookupString $stroffset]
+        } else {
+            my Scan 18 "A8 iu s su c cu" name value secnum type class aux
+        }
+        if {$aux == 1} {
+            # Deal with auxiliary symbol records.
+            # For now we only deal with file name aux symbols.
+            if {$name eq ".file" && $class == 103} {
+                # At least GNU compilers under cygwin can generate file names
+                # contained in an Aux Symbol that are formatted like regular
+                # symbol names. So if the first four bytes are 0 then the next
+                # 4 bytes are an index into the string table.  Otherwise, the
+                # entire Aux Symbol entry is treated as a string.
+                my Scan 0 iu auxname
+                if {$auxname == 0} {
+                    my Advance 4
+                    my Scan 14 iu auxindex
+                    set fname [my LookupString $auxindex]
+                } else {
+                    my Scan 18 A18 fname
+                }
+                relvar insert FileAuxSymbol [list\
+                    Id          $i\
+                    FileName    $fname\
+                ]
+                set name $fname
+            } else {
+                # Just skip unknown aux symbol types.
+                my Advance 18
+            }
+        } elseif {$aux > 1} {
+            error "unexpected auxiliary symbol count, \"$aux\""
+        }
+
+        relvar insert Symbol [list\
+            Id                  $i\
+            Name                $name\
+            Value               $value\
+            SectionNumber       [my XlateEnumValue SectionNumber $secnum]\
+            Type                [my XlateSectionType $type]\
+            StorageClass        [my XlateEnumValue StorageClass $class]\
+            NumberOfAuxSymbols  $aux\
+        ]
+
+        incr i
+    }
+}
+----
+
+(((pecofffile methods,unexported,ReadSymbolTable)))
+
+==== ReadSymbolTable
+----
+<<pecofffile methods>>=
+method LookupString {offset} {
+    set ref [relvar restrictone StringTable Offset $offset]
+    return [expr {[relation isnotempty $ref] ?\
+            [relation extract $ref String] : {}}]
+}
+----
+
+(((pecofffile methods,unexported,XlateSectionType)))
+
+==== XlateSectionType
+----
+<<pecofffile methods>>=
+method XlateSectionType {type} {
+    set result [list]
+    set basetype [expr {$type & 0xf}]
+    if {$basetype != 0} {
+        lappend result [my XlateEnumValue BaseType $basetype]
+    }
+    lappend result [my XlateEnumValue ComplexType [expr {$type >> 4}]]
+    return $result
+}
+----
+
+==== Scan
+
+The *Scan* method is a simple control structure wrapper around
+the *binary scan* command.
+Here we perform the conversion into variables that are passed by name.
+This gives us a chance to check that the conversion did indeed happen properly.
+
+----
+<<pecofffile methods>>=
+method Scan {count fmt args} {
+    my variable pecoffdata
+    my variable position
+
+    foreach arg $args {
+        upvar 1 $arg $arg
+    }
+    set cvtd [binary scan $pecoffdata "@$position $fmt" {*}$args]
+    if {$cvtd != [llength $args]} {
+        error "expected to convert \"[llength $args]\" values,\
+            actually converted \"$cvtd\""
+    }
+    my Advance $count
+}
+----
+
+----
+<<unexported tests>>=
+test Scan-1.0 {
+    Convert binary data
+} -setup {
+    set pef [pecoffdecode pecofffile new]
+} -cleanup {
+    $pef destroy
+} -body {
+    namespace eval [info object namespace $pef] {
+        set pecoffdata "\x01\x02\0\0"
+        set position 0
+        my Scan 4 iu value
+        expr {$value == 0x0201 && $position == 4}
+    }
+} -result {1}
+----
+
+----
+<<unexported tests>>=
+test Scan-2.0 {
+    Convert binary data with insufficient data
+} -setup {
+    set pef [pecoffdecode pecofffile new]
+} -cleanup {
+    $pef destroy
+} -body {
+    namespace eval [info object namespace $pef] {
+        set pecoffdata ABCD
+        set position 0
+        my Scan 4 a5 value
+    }
+} -result {expected to convert "1" values, actually converted "0"}\
+        -returnCodes error
+----
+
+[[bin-data-methods]]
+[float]
+==== Managing a Cursor Into the PECOFF Data
+Since we store the binary PECOFF data as one big string,
+it is useful to be able to track our location in that string and to implement
+the notion of a cursor where the next action will take place.
+The following methods accomplish that.
+
+(((pecofffile methods,unexported,Seek)))
+
+==== Seek
+----
+<<pecofffile methods>>=
+method Seek {offset} {
+    my variable pecoffdata position
+
+    if {$offset < 0} {
+        set position 0
+    } elseif {$offset > [string length $pecoffdata]} {
+        set position [string length $pecoffdata]
+    } else {
+        # We need the position variable in canonical form because it is used in
+        # conjunction with the "binary scan" command.
+        set position [format %u $offset]
+    }
+}
+----
+
+----
+<<unexported tests>>=
+test Seek-1.0 {
+    Seek within the pecoff data string
+} -setup {
+    set pef [pecoffdecode pecofffile new]
+} -cleanup {
+    $pef destroy
+} -body {
+    namespace eval [info object namespace $pef] {
+        set pecoffdata "\x1\x2\x3\x4"
+        set position 0
+        my Seek 2
+        set position
+    }
+} -result {2}
+----
+
+----
+<<unexported tests>>=
+test Seek-2.0 {
+    Seek outside the pecoff data string
+} -setup {
+    set pef [pecoffdecode pecofffile new]
+} -cleanup {
+    $pef destroy
+} -body {
+    namespace eval [info object namespace $pef] {
+        set pecoffdata "\x1\x2\x3\x4"
+        set position 0
+        my Seek 5
+        set position
+    }
+} -result {4}
+----
+
+----
+<<unexported tests>>=
+test Seek-3.0 {
+    Seek before the pecoff data string
+} -setup {
+    set pef [pecoffdecode pecofffile new]
+} -cleanup {
+    $pef destroy
+} -body {
+    namespace eval [info object namespace $pef] {
+        set pecoffdata "\x1\x2\x3\x4"
+        set position 0
+        my Seek -1
+        set position
+    }
+} -result {0}
+----
+
+(((pecofffile methods,unexported,Advance)))
+
+==== Advance
+----
+<<pecofffile methods>>=
+method Advance {offset} {
+    my variable position
+    my Seek [expr {$position + $offset}]
+}
+----
+
+----
+<<unexported tests>>=
+test Advance-1.0 {
+    Advance cursor with the pecoff data string
+} -setup {
+    set pef [pecoffdecode pecofffile new]
+} -cleanup {
+    $pef destroy
+} -body {
+    namespace eval [info object namespace $pef] {
+        set pecoffdata "\x1\x2\x3\x4"
+        set position 0
+        my Advance 1
+        set position
+    }
+} -result {1}
+----
+
+----
+<<unexported tests>>=
+test Advance-2.0 {
+    Advance cursor outside the pecoff data string
+} -setup {
+    set pef [pecoffdecode pecofffile new]
+} -cleanup {
+    $pef destroy
+} -body {
+    namespace eval [info object namespace $pef] {
+        set pecoffdata "\x1\x2\x3\x4"
+        set position 0
+        my Advance 5
+        set position
+    }
+} -result {4}
+----
+
+----
+<<unexported tests>>=
+test Advance-3.0 {
+    Advance cursor to before the pecoff data string
+} -setup {
+    set pef [pecoffdecode pecofffile new]
+} -cleanup {
+    $pef destroy
+} -body {
+    namespace eval [info object namespace $pef] {
+        set pecoffdata "\x1\x2\x3\x4"
+        set position 0
+        my Advance -1
+        set position
+    }
+} -result {0}
+----
+
+(((pecofffile methods,unexported,Read)))
+
+==== Read
+----
+<<pecofffile methods>>=
+method Read {count} {
+    my variable pecoffdata
+    my variable position
+
+    set end [expr {$position + $count}]
+    if {$end > [string length $pecoffdata]} {
+        error "attempt to read beyond end of PECOFF data"
+    }
+    set data [string range $pecoffdata $position $end-1]
+    set position $end
+    return $data
+}
+----
+
+----
+<<unexported tests>>=
+test Read-1.0 {
+    Read bytes out of the pecoff data string
+} -setup {
+    set pef [pecoffdecode pecofffile new]
+} -cleanup {
+    $pef destroy
+} -body {
+    namespace eval [info object namespace $pef] {
+        set pecoffdata "\x1\x2\x3\x4"
+        set position 0
+        set read [my Read 3]
+        string equal $read "\x1\x2\x3"
+    }
+} -result {1}
+----
+
+----
+<<unexported tests>>=
+test Read-2.0 {
+    Read all bytes in the pecoff data string
+} -setup {
+    set pef [pecoffdecode pecofffile new]
+} -cleanup {
+    $pef destroy
+} -body {
+    namespace eval [info object namespace $pef] {
+        set pecoffdata "\x1\x2\x3\x4"
+        set position 0
+        set read [my Read 4]
+        string equal $read "\x1\x2\x3\x4"
+    }
+} -result {1}
+----
+
+----
+<<unexported tests>>=
+test Read-3.0 {
+    Read past end of data
+} -setup {
+    set pef [pecoffdecode pecofffile new]
+} -cleanup {
+    $pef destroy
+} -body {
+    namespace eval [info object namespace $pef] {
+        set pecoffdata "\x1\x2\x3\x4"
+        set position 0
+        set read [my Read 5]
+    }
+} -result {attempt to read beyond end of PECOFF data} -returnCodes error
+----
+
+== Class data
+
+----
+<<pecofffile class data>>=
+namespace eval [info object namespace ::pecoffdecode::pecofffile] {
+    namespace import ::ral::*
+    namespace import ::ralutil::*
+
+    <<pecofffile data definitions>>
+}
+----
+
+=== Enumerated Values
+Some of the fields of the PECOFF file contains symbolically named
+values.
+Since Tcl encourages the use of strings and strings are easier to
+understand than integer encoded data,
+there are several conversions from binary that are best represented
+as string data.
+
+(((relvar,PecoffEnumerator)))
+
+----
+<<pecofffile data definitions>>=
+relvar create PecoffEnumerator {
+    SymbolType  string
+    Enumerator  string
+    Value       int
+} {SymbolType Enumerator} {SymbolType Value}
+----
+
+The processing to do the decoding searches the set of enumerated values.
+If nothing is found, then the original value is simply returned.
+
+(((pecofffile methods,unexported,XlateEnumValue)))
+
+----
+<<pecofffile methods>>=
+method XlateEnumValue {symtype etor} {
+    set enum [relvar restrictone [classns]::PecoffEnumerator\
+            SymbolType $symtype Value $etor]
+    return [expr {[relation isnotempty $enum] ?\
+            [relation extract $enum Enumerator] : $etor}]
+}
+----
+
+----
+<<unexported tests>>=
+test XlateEnumValue-1.0 {
+    translate an enumeration
+} -setup {
+    set pef [pecoffdecode pecofffile new]
+} -cleanup {
+    $pef destroy
+} -body {
+    namespace eval [info object namespace $pef] {
+        my XlateEnumValue SectionNumber 0
+    }
+} -result {IMAGE_SYM_UNDEFINED}
+----
+
+----
+<<unexported tests>>=
+test XlateEnumValue-2.0 {
+    translate an enumeration that doesn't exist
+} -setup {
+    set pef [pecoffdecode pecofffile new]
+} -cleanup {
+    $pef destroy
+} -body {
+    namespace eval [info object namespace $pef] {
+        my XlateEnumValue SectionNumber 10
+    }
+} -result {10}
+----
+
+=== Bit Encoded Values
+Some of the fields in an PECOFF file are bit encoded.
+These fields are usually referred to as _flags_.
+Here we define a +relvar+ to hold the bit field definition and its
+associated symbolic name.
+
+(((relvar,PecoffBitSymbol)))
+
+----
+<<elffile data definitions>>=
+relvar create PecoffBitSymbol {
+    SymbolType  string
+    SymbolName  string
+    Offset      int
+    Length      int
+} {SymbolType SymbolName} {SymbolType Offset}
+----
+
+To translate a bit field,
+we find all the bit field definitions associated with the
+symbol and iterate across them to test if they are set.
+For all the bit fields that have a value,
+we include the symbolic name.
+In the end we have a list of symbol names for all the fields that are set.
+
+(((pecofffile methods,unexported,XlateFlagBits)))
+
+----
+<<pecofffile methods>>=
+method XlateFlagBits {symtype value} {
+    set result [list]
+    set bitsyms [pipe {
+        relvar set [classns]::ElfBitSymbol |
+        relation restrictwith ~ {$SymbolType eq $symtype}
+    }]
+    relation foreach bitsym $bitsyms -ascending Offset {
+        relation assign $bitsym SymbolName Offset Length
+        # Compute a mask from the bit field definition.
+        set mask [expr {((1 << $Length) - 1) <<  $Offset}]
+        set mvalue [expr {$value & $mask}]
+        if {$mvalue != 0} {
+            # We treat single bit fields differently. Multi-bit fields have a
+            # value associated with them.
+            if {$Length == 1} {
+                lappend result $SymbolName
+            } else {
+                lappend result "$SymbolName\([expr {$mvalue >> $Offset}]\)"
+            }
+        }
+    }
+    return $result
+}
+----
+
+In the sections below,
+we define the tediously long list of enumerated values for the
+various section fields and flags.
+We follow the convention of giving the symbol types the same name as the
+field we are converting.
+
+=== Section Number Values
+----
+<<pecofffile data definitions>>=
+relvar insert PecoffEnumerator {
+    SymbolType  SectionNumber
+    Enumerator  IMAGE_SYM_UNDEFINED
+    Value       0
+} {
+    SymbolType  SectionNumber
+    Enumerator  IMAGE_SYM_ABSOLUTE
+    Value       -1
+} {
+    SymbolType  SectionNumber
+    Enumerator  IMAGE_SYM_DEBUG
+    Value       -2
+}
+----
+
+=== Symbol Types
+----
+<<pecofffile data definitions>>=
+relvar insert PecoffEnumerator {
+    SymbolType  BaseType
+    Enumerator  IMAGE_SYM_TYPE_NULL
+    Value       0
+} {
+    SymbolType  BaseType
+    Enumerator  IMAGE_SYM_TYPE_VOID
+    Value       1
+} {
+    SymbolType  BaseType
+    Enumerator  IMAGE_SYM_TYPE_CHAR
+    Value       2
+} {
+    SymbolType  BaseType
+    Enumerator  IMAGE_SYM_TYPE_SHORT
+    Value       3
+} {
+    SymbolType  BaseType
+    Enumerator  IMAGE_SYM_TYPE_INT
+    Value       4
+} {
+    SymbolType  BaseType
+    Enumerator  IMAGE_SYM_TYPE_LONG
+    Value       5
+} {
+    SymbolType  BaseType
+    Enumerator  IMAGE_SYM_TYPE_FLOAT
+    Value       6
+} {
+    SymbolType  BaseType
+    Enumerator  IMAGE_SYM_TYPE_DOUBLE
+    Value       7
+} {
+    SymbolType  BaseType
+    Enumerator  IMAGE_SYM_TYPE_STRUCT
+    Value       8
+} {
+    SymbolType  BaseType
+    Enumerator  IMAGE_SYM_TYPE_UNION
+    Value       9
+} {
+    SymbolType  BaseType
+    Enumerator  IMAGE_SYM_TYPE_ENUM
+    Value       10
+} {
+    SymbolType  BaseType
+    Enumerator  IMAGE_SYM_TYPE_MOE
+    Value       11
+} {
+    SymbolType  BaseType
+    Enumerator  IMAGE_SYM_TYPE_BYTE
+    Value       12
+} {
+    SymbolType  BaseType
+    Enumerator  IMAGE_SYM_TYPE_WORD
+    Value       13
+} {
+    SymbolType  BaseType
+    Enumerator  IMAGE_SYM_TYPE_UINT
+    Value       14
+} {
+    SymbolType  BaseType
+    Enumerator  IMAGE_SYM_TYPE_DWORD
+    Value       15
+}
+
+relvar insert PecoffEnumerator {
+    SymbolType  ComplexType
+    Enumerator  IMAGE_SYM_DTYPE_NULL
+    Value       0
+} {
+    SymbolType  ComplexType
+    Enumerator  IMAGE_SYM_DTYPE_POINTER
+    Value       1
+} {
+    SymbolType  ComplexType
+    Enumerator  IMAGE_SYM_DTYPE_FUNCTION
+    Value       2
+} {
+    SymbolType  ComplexType
+    Enumerator  IMAGE_SYM_DTYPE_ARRAY
+    Value       3
+}
+----
+
+=== Storage Class Values
+----
+<<pecofffile data definitions>>=
+relvar insert PecoffEnumerator {
+    SymbolType  StorageClass
+    Enumerator  IMAGE_SYM_CLASS_END_OF_FUNCTION
+    Value       -1
+} {
+    SymbolType  StorageClass
+    Enumerator  IMAGE_SYM_CLASS_NULL
+    Value       0
+} {
+    SymbolType  StorageClass
+    Enumerator  IMAGE_SYM_CLASS_AUTOMATIC
+    Value       1
+} {
+    SymbolType  StorageClass
+    Enumerator  IMAGE_SYM_CLASS_EXTERNAL
+    Value       2
+} {
+    SymbolType  StorageClass
+    Enumerator  IMAGE_SYM_CLASS_STATIC
+    Value       3
+} {
+    SymbolType  StorageClass
+    Enumerator  IMAGE_SYM_CLASS_REGISTER
+    Value       4
+} {
+    SymbolType  StorageClass
+    Enumerator  IMAGE_SYM_CLASS_EXTERNAL_DEF
+    Value       5
+} {
+    SymbolType  StorageClass
+    Enumerator  IMAGE_SYM_CLASS_LABEL
+    Value       6
+} {
+    SymbolType  StorageClass
+    Enumerator  IMAGE_SYM_CLASS_UNDEFINED_LABEL
+    Value       7
+} {
+    SymbolType  StorageClass
+    Enumerator  IMAGE_SYM_CLASS_MEMBER_OF_STRUCT
+    Value       8
+} {
+    SymbolType  StorageClass
+    Enumerator  IMAGE_SYM_CLASS_ARGUMENT
+    Value       9
+} {
+    SymbolType  StorageClass
+    Enumerator  IMAGE_SYM_CLASS_STRUCT_TAG
+    Value       10
+} {
+    SymbolType  StorageClass
+    Enumerator  IMAGE_SYM_CLASS_MEMBER_OF_UNION
+    Value       11
+} {
+    SymbolType  StorageClass
+    Enumerator  IMAGE_SYM_CLASS_UNION_TAG
+    Value       12
+} {
+    SymbolType  StorageClass
+    Enumerator  IMAGE_SYM_CLASS_TYPE_DEFINITION
+    Value       13
+} {
+    SymbolType  StorageClass
+    Enumerator  IMAGE_SYM_CLASS_UNDEFINED_STATIC
+    Value       14
+} {
+    SymbolType  StorageClass
+    Enumerator  IMAGE_SYM_CLASS_ENUM_TAG
+    Value       15
+} {
+    SymbolType  StorageClass
+    Enumerator  IMAGE_SYM_CLASS_MEMBER_OF_ENUM
+    Value       16
+} {
+    SymbolType  StorageClass
+    Enumerator  IMAGE_SYM_CLASS_REGISTER_PARAM
+    Value       17
+} {
+    SymbolType  StorageClass
+    Enumerator  IMAGE_SYM_CLASS_BIT_FIELD
+    Value       18
+} {
+    SymbolType  StorageClass
+    Enumerator  IMAGE_SYM_CLASS_BLOCK
+    Value       100
+} {
+    SymbolType  StorageClass
+    Enumerator  IMAGE_SYM_CLASS_FUNCTION
+    Value       101
+} {
+    SymbolType  StorageClass
+    Enumerator  IMAGE_SYM_CLASS_END_OF_STRUCT
+    Value       102
+} {
+    SymbolType  StorageClass
+    Enumerator  IMAGE_SYM_CLASS_FILE
+    Value       103
+} {
+    SymbolType  StorageClass
+    Enumerator  IMAGE_SYM_CLASS_SECTION
+    Value       104
+} {
+    SymbolType  StorageClass
+    Enumerator  IMAGE_SYM_CLASS_WEAK_EXTERNAL
+    Value       105
+} {
+    SymbolType  StorageClass
+    Enumerator  IMAGE_SYM_CLASS_CLR_TOKEN
+    Value       107
 }
 ----
 
 == Code Organization
 
-Describe
+=== Source Code
 
 ----
 <<pecoffdecode.tcl>>=
@@ -129,13 +1238,161 @@ namespace eval ::pecoffdecode {
 }
 
 proc ::oo::Helpers::classns {} {
-    return [info object namespace [uplevel 1 {specoff class}]]
+    return [info object namespace [uplevel 1 {self class}]]
 }
 
 <<pecofffile class>>
-
 <<pecofffile class data>>
-<<pecofffile class methods>>
 
 package provide pecoffdecode $::pecoffdecode::version
+----
+
+=== Unit Tests
+
+----
+<<pecoffdecode.test>>=
+# DO NOT EDIT THIS FILE!
+# THIS FILE IS AUTOMATICALLY GENERATED FROM A LITERATE PROGRAM SOURCE FILE.
+#
+# This software is copyrighted 2013 by G. Andrew Mangogna.
+# The following terms apply to all files associated with the software unless
+# explicitly disclaimed in individual files.
+# 
+# The authors hereby grant permission to use, copy, modify, distribute,
+# and license this software and its documentation for any purpose, provided
+# that existing copyright notices are retained in all copies and that this
+# notice is included verbatim in any distributions. No written agreement,
+# license, or royalty fee is required for any of the authorized uses.
+# Modifications to this software may be copyrighted by their authors and
+# need not follow the licensing terms described here, provided that the
+# new terms are clearly indicated on the first page of each file where
+# they apply.
+# 
+# IN NO EVENT SHALL THE AUTHORS OR DISTRIBUTORS BE LIABLE TO ANY PARTY FOR
+# DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES ARISING
+# OUT OF THE USE OF THIS SOFTWARE, ITS DOCUMENTATION, OR ANY DERIVATIVES
+# THEREOF, EVEN IF THE AUTHORS HAVE BEEN ADVISED OF THE POSSIBILITY OF
+# SUCH DAMAGE.
+# 
+# THE AUTHORS AND DISTRIBUTORS SPECIFICALLY DISCLAIM ANY WARRANTIES,
+# INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.  THIS SOFTWARE
+# IS PROVIDED ON AN "AS IS" BASIS, AND THE AUTHORS AND DISTRIBUTORS HAVE
+# NO OBLIGATION TO PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS,
+# OR MODIFICATIONS.
+# 
+# GOVERNMENT USE: If you are acquiring this software on behalf of the
+# U.S. government, the Government shall have only "Restricted Rights"
+# in the software and related documentation as defined in the Federal
+# Acquisition Regulations (FARs) in Clause 52.227.19 (c) (2).  If you
+# are acquiring the software on behalf of the Department of Defense,
+# the software shall be classified as "Commercial Computer Software"
+# and the Government shall have only "Restricted Rights" as defined in
+# Clause 252.227-7013 (c) (1) of DFARs.  Notwithstanding the foregoing,
+# the authors grant the U.S. Government and others acting in its behalf
+# permission to use and distribute the software in accordance with the
+# terms specified in this license.
+
+package require Tcl 8.6
+package require cmdline
+package require logger
+
+source ../src/pecoffdecode.tcl
+chan puts "testing pecoffdecode version: [package require pecoffdecode]"
+
+# Add custom arguments here.
+set optlist {
+    {level.arg warn {Log debug level}}
+    {file.arg {} {PECOFF file to read}}
+}
+array set options [::cmdline::getKnownOptions argv $optlist]
+
+::logger::setlevel $options(level)
+
+package require tcltest
+eval tcltest::configure $argv
+
+namespace eval ::pecoffdecode::test {
+    ::logger::initNamespace [namespace current]
+
+    namespace import ::tcltest::*
+
+    <<unexported tests>>
+    <<exported tests>>
+
+    cleanupTests
+}
+----
+
+=== Reference Manual
+
+----
+<<invocations>>=
+[list_begin definitions]
+<<pecofffile interface>>
+[list_end]
+----
+
+----
+<<pecoffdecode.man>>=
+[manpage_begin pecoffdecode n 1.0]
+[comment {
+# DO NOT EDIT THIS FILE!
+# THIS FILE IS AUTOMATICALLY GENERATED FROM A LITERATE PROGRAM SOURCE FILE.
+#
+# This software is copyrighted 2013 by G. Andrew Mangogna.
+# The following terms apply to all files associated with the software unless
+# explicitly disclaimed in individual files.
+# 
+# The authors hereby grant permission to use, copy, modify, distribute,
+# and license this software and its documentation for any purpose, provided
+# that existing copyright notices are retained in all copies and that this
+# notice is included verbatim in any distributions. No written agreement,
+# license, or royalty fee is required for any of the authorized uses.
+# Modifications to this software may be copyrighted by their authors and
+# need not follow the licensing terms described here, provided that the
+# new terms are clearly indicated on the first page of each file where
+# they apply.
+# 
+# IN NO EVENT SHALL THE AUTHORS OR DISTRIBUTORS BE LIABLE TO ANY PARTY FOR
+# DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES ARISING
+# OUT OF THE USE OF THIS SOFTWARE, ITS DOCUMENTATION, OR ANY DERIVATIVES
+# THEREOF, EVEN IF THE AUTHORS HAVE BEEN ADVISED OF THE POSSIBILITY OF
+# SUCH DAMAGE.
+# 
+# THE AUTHORS AND DISTRIBUTORS SPECIFICALLY DISCLAIM ANY WARRANTIES,
+# INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.  THIS SOFTWARE
+# IS PROVIDED ON AN "AS IS" BASIS, AND THE AUTHORS AND DISTRIBUTORS HAVE
+# NO OBLIGATION TO PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS,
+# OR MODIFICATIONS.
+# 
+# GOVERNMENT USE: If you are acquiring this software on behalf of the
+# U.S. government, the Government shall have only "Restricted Rights"
+# in the software and related documentation as defined in the Federal
+# Acquisition Regulations (FARs) in Clause 52.227.19 (c) (2).  If you
+# are acquiring the software on behalf of the Department of Defense,
+# the software shall be classified as "Commercial Computer Software"
+# and the Government shall have only "Restricted Rights" as defined in
+# Clause 252.227-7013 (c) (1) of DFARs.  Notwithstanding the foregoing,
+# the authors grant the U.S. Government and others acting in its behalf
+# permission to use and distribute the software in accordance with the
+# terms specified in this license.
+# 
+#  *++
+# MODULE:
+#	pecoffdecode -- decoding PECOFF object files
+# ABSTRACT:
+# 
+#  *--
+}]
+[moddesc "pecoffdecode package"]
+[titledesc "Tools for decoding PECOFF files"]
+[copyright "2013 by G. Andrew Mangogna"]
+[description]
+<<descriptions>>
+
+<<invocations>>
+
+[manpage_end]
 ----
