@@ -1,4 +1,4 @@
-# This software is copyrighted by G. Andrew Mangogna.
+# This software is copyrighted 2013 by G. Andrew Mangogna.
 # The following terms apply to all files associated with the software unless
 # explicitly disclaimed in individual files.
 # 
@@ -48,12 +48,22 @@
 #*--
 #
 
+DOCDIR	= ../doc
+TESTDIR = ../tests
+
+vpath %.pdf $(DOCDIR)
+vpath %.test $(TESTDIR)
+
 DOCSRC 	=\
 	dwarfdecode.aweb\
 	$(NULL)
 
 PDF 	=\
-     	../doc/$(patsubst %.aweb,%.pdf,$(DOCSRC))\
+     	$(patsubst %.aweb,%.pdf,$(DOCSRC))\
+     	$(NULL)
+
+TESTS	 = \
+     	$(patsubst %.aweb,%.test,$(DOCSRC))\
      	$(NULL)
 
 TCLSRC	=\
@@ -61,8 +71,9 @@ TCLSRC	=\
 	$(NULL)
 
 CLEANFILES =\
-	$(PDF)\
 	$(TCLSRC)\
+	../doc/$(PDF)\
+	../tests/$(TESTS)\
 	$(NULL)
 
 A2XOPTS =\
@@ -83,10 +94,11 @@ DBLATEX_PARAMS	=\
 
 EXTRAS =\
 	docinfo.xml\
+	dwarfdecode-docinfo.xml\
 	$(NULL)
 
 ASCIIDOC_ATTRS	=\
-		docinfo1\
+		docinfo2\
 		$(NULL)
 
 
@@ -98,27 +110,38 @@ ASCIIDOC_OPTS	=\
 		$(patsubst %,--attribute=%,$(ASCIIDOC_ATTRS))\
 		$(NULL)
 
-all : doc code
+all : doc code tests
 
 doc : $(PDF)
 
 code : $(TCLSRC)
 
+tests : $(TESTS)
+
+runtests : $(TESTS) $(TCLSRC)
+	cd $(TESTDIR) ; tclsh $(TESTS) -verbose bet -level debug
+
 $(PDF) : $(DOCSRC) $(EXTRAS)
 
 $(TCLSRC) : $(DOCSRC)
 
+$(TESTS) : $(DOCSRC)
+
 clean :
 	$(RM) $(CLEANFILES)
 
-../doc/%.pdf : %.aweb
+%.pdf : %.aweb
 	aweave -output $*.txt $<
-	a2x $(A2XOPTS) --doctype=article  --format=pdf --destination-dir=../doc\
+	a2x $(A2XOPTS) --doctype=article  --format=pdf\
+	    --destination-dir=$(DOCDIR)\
 	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) $*.txt
 	$(RM) $*.txt
 
 %.tcl : %.aweb
-	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
+	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $@ $<
+
+%.test : %.aweb
+	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $(TESTDIR)/$@ $<
 
 #
 # vim :set sw=8 ts=8 sts=8 noexpandtab:

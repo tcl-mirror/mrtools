@@ -52,7 +52,7 @@ The following sections describe the methods available to *dwarfinfo* objects.
 
 (((dwarfinfo methods,exported,constructor)))
 
-=== Constructor
+=== constructor
 ----
 <<dwarf info methods>>=
 constructor {fileobj} {
@@ -67,7 +67,13 @@ constructor {fileobj} {
     set abbrefInfoObj [::dwafdecode::DebugAbbrev\
             [$fileobj getSectionDataByName .debug_abbrev]]
 }
+----
 
+(((dwarfinfo methods,exported,destructor)))
+
+=== destructor
+----
+<<dwarf info methods>>=
 destructor {
     my variable debugInfoObj
     $debugInfoObj destroy
@@ -386,6 +392,23 @@ method Decode_DW_FORM_indirect {} {
 
 == Dwarf Abbreviations Information
 
+Dwarf debugging information is split into two parts.
+One part is contained in an *abbreviation table*
+and the other part is simply a sequence of values.
+The interpretation of the values is related to the
+data encoded in the associated abbreviation entry.
+The abbreviation entry describes how to interprete the values
+of a debugging information entry.
+This makes the data self-describing and eliminates the
+repetative nature of the attributes type information.
+
+We represent the abbreviation information in a class.
+The abbreviation information itself must be decoded
+Since each debugging information entry has an associated abbreviation
+table entry,
+we will defer the decoding of the abbreviation information until
+it is actually called upon.
+
 (((class,DebugAbbrev)))
 
 ----
@@ -484,7 +507,7 @@ method DecodeAbbrEntry {} {
 ----
 <<dwarf debug abbrev methods>>=
 method TagNumToStr {tagnum} {
-    if {$tagnum >= 0x4080 && $tagrnum <= 0x4fff} {
+    if {$tagnum >= 0x4080 && $tagnum <= 0x4fff} {
         return [format DW_TAG_user(%#x) $tagnum]
     } elseif {$tagnum >= [llength $::dwarfdecode::tagStrMap]} {
         error "invalid tag number, \"[format %#x $tagnum]\""
@@ -919,6 +942,14 @@ method decode {} {
 
 == Dwarf Information Stream
 
+Decoding dwarf information entails processing streams of binary data.
+For this purpose we create class to support the specific kinds of
+binary decoding required for dwarf information.
+The other classes in the package use the +InfoStream+ class to keep track
+of their position in the binary stream.
+Since dwarf data is divided into several portions there turn out to be
+several objects of this class that are needed.
+
 (((class,InfoStream)))
 
 ----
@@ -929,7 +960,16 @@ method decode {} {
 }
 ----
 
-(((InfoStream,method,constructor)))
+The binary data is held very simply as a string and an offset into
+that string where the next operation will take place.
+Most dwarf data is packed sequentially so keep track of the current
+location makes things more convenient.
+
+(((InfoStream,exported methods,constructor)))
+
+=== constructor
+
+The constructor just initializes the object variables.
 
 ----
 <<dwarf info stream methods>>=
@@ -939,7 +979,11 @@ constructor {data} {
 }
 ----
 
-(((InfoStream,method,where)))
+(((InfoStream,exported methods,where)))
+
+=== where
+
+The +where+ method returns the current offset into the binary string.
 
 ----
 <<dwarf info stream methods>>=
@@ -948,7 +992,25 @@ method where {} {
 }
 ----
 
+----
+<<dwarf info stream tests>>=
+test InfoStream-where-1.0 {
+    Determine current location
+} -setup {
+    set is [dwarfdecode::InfoStream new "\0"]
+} -cleanup {
+    $is destroy
+} -body {
+    $is where
+} -result {0}
+----
+
 (((InfoStream,method,remain)))
+
+=== remain
+
+The +remain+ method returns the number of bytes between the current
+position and the end of the binary string.
 
 ----
 <<dwarf info stream methods>>=
@@ -957,7 +1019,26 @@ method remain {} {
 }
 ----
 
+----
+<<dwarf info stream tests>>=
+test InfoStream-remain-1.0 {
+    Find remaining number of bytes
+} -setup {
+    set is [dwarfdecode::InfoStream new "\x1\x2"]
+} -cleanup {
+    $is destroy
+} -body {
+    $is remain
+} -result {2}
+----
+
 (((InfoStream,method,seek)))
+
+=== seek
+
+The +seek+ method changes the value of the current position to be that
+of _offset_.
+Seeking past the end of the binary data is an error.
 
 ----
 <<dwarf info stream methods>>=
@@ -966,7 +1047,35 @@ method seek {offset} {
         error "attempt to seek past end of information"
     }
     set infoOffset $offset
+    return
 }
+----
+
+----
+<<dwarf info stream tests>>=
+test InfoStream-seek-1.0 {
+    Seek into data
+} -setup {
+    set is [dwarfdecode::InfoStream new "\x1\x2"]
+} -cleanup {
+    $is destroy
+} -body {
+    $is seek 1
+    $is where
+} -result {1}
+----
+
+----
+<<dwarf info stream tests>>=
+test InfoStream-seek-2.0 {
+    Seek past end of data
+} -setup {
+    set is [dwarfdecode::InfoStream new "\x1\x2"]
+} -cleanup {
+    $is destroy
+} -body {
+    $is seek 3
+} -result {attempt to seek past end of information} -returnCodes error
 ----
 
 (((InfoStream,method,advance)))
@@ -985,6 +1094,15 @@ method advance {amount} {
 (((InfoStream,method,convert)))
 
 === convert
+
+The *convert* method is a simple control structure around the *binary scan*
+command.
+There we can consolidate the error checking.
+The +count+ argument is the number of bytes to advance the current
+stream position.
+The +fmt+ is the *binary scan* format string and +args+ is list of
+variable names into which the scanned results are placed.
+
 ----
 <<dwarf info stream methods>>=
 method convert {count fmt args} {
@@ -996,13 +1114,31 @@ method convert {count fmt args} {
         error "expected to convert \"[llength $args]\" values,\
             actually converted \"$cvtd\""
     }
-    my advance $count
+    tailcall my advance $count
 }
+----
+
+----
+<<dwarf info stream tests>>=
+test InfoStream-convert-1.0 {
+    Convert an unsigned 4-byte little-endian integer
+} -setup {
+    set is [dwarfdecode::InfoStream new "\x01\x02\x00\x00"]
+} -cleanup {
+    $is destroy
+} -body {
+    $is convert 4 iu value
+    return [format %#x $value]
+} -result {0x201}
 ----
 
 (((InfoStream,method,extractString)))
 
-=== extractString
+=== extractNULTermString
+
+The *extractNULTermString* method extracts a NUL terminated string from the
+binary data. It searches for the first NUL value from the current position
+
 ----
 <<dwarf info stream methods>>=
 method extractNULTermString {} {
@@ -1015,10 +1151,32 @@ method extractNULTermString {} {
 }
 ----
 
-=== DecodeLEB128
+----
+<<dwarf info stream tests>>=
+test InfoStream-extractNULTermString-1.0 {
+    Extract a "C" style string
+} -setup {
+    set is [dwarfdecode::InfoStream new "Abc\0Def"]
+} -cleanup {
+    $is destroy
+} -body {
+    $is extractNULTermString
+} -result {Abc}
+----
+
+[float]
+=== LEB128 Representation
+
+Dwarf uses something called ``Little Endian Base 128'' to hold numerical
+data of an arbitrary precision but encoded in a way that gives a smaller
+representation for small magnitiude numbers.
+There are both signed and unsigned versions.
+
+=== unsignedLEB128
+
 ----
 <<dwarf info stream methods>>=
-method DecodeLEB128 {} {
+method unsignedLEB128 {} {
     set shift 0
     set result 0
     for {set done false} {!$done} {set done [expr {($byte & 0x80) == 0}]} {
@@ -1030,34 +1188,163 @@ method DecodeLEB128 {} {
 }
 ----
 
-=== unsignedLEB128
 ----
-<<dwarf info stream methods>>=
-method unsignedLEB128 {} {
-    tailcall my DecodeLEB128
-}
+<<dwarf info stream tests>>=
+test InfoStream-unsignedLEB128-1.0 {
+    Decode 0 as unsigned LEB128
+} -setup {
+    set is [dwarfdecode::InfoStream new "\0"]
+} -cleanup {
+    $is destroy
+} -body {
+    $is unsignedLEB128
+} -result {0}
+----
+
+----
+<<dwarf info stream tests>>=
+test InfoStream-unsignedLEB128-2.0 {
+    Decode 1 byte non-zero unsigned LEB128
+} -setup {
+    set is [dwarfdecode::InfoStream new "\x7f"]
+} -cleanup {
+    $is destroy
+} -body {
+    $is unsignedLEB128
+} -result {127}
+----
+
+----
+<<dwarf info stream tests>>=
+test InfoStream-unsignedLEB128-3.0 {
+    Decode 2 byte unsigned LEB128
+} -setup {
+    set is [dwarfdecode::InfoStream new "\x80\x01"]
+} -cleanup {
+    $is destroy
+} -body {
+    $is unsignedLEB128
+} -result {128}
 ----
 
 === signedLEB128
+
+For signed LEB128 integers, we must perform the necessary sign extension.
+The basic decoding is the same.
+
 ----
 <<dwarf info stream methods>>=
 method signedLEB128 {} {
-    # Save the value of the offset as we need to know how many
-    # bytes were consumed in order to do the sign extension.
-    set prevOffset $infoOffset
-    set result [my DecodeLEB128]
-    # Sign extend if necessary
-    set shift [expr {($infoOffset - $prevOffset) * 7}]
+    set shift 0
+    set result 0
+    for {set done false} {!$done} {set done [expr {($byte & 0x80) == 0}]} {
+        my convert 1 cu byte
+        set result [expr {$result | (($byte & 0x7f) << $shift)}]
+        incr shift 7
+    }
+    # Test the sign bit
     if {($result & (1 << ($shift - 1))) != 0} {
-        set result [expr {$result + (~0 << $shift)}]
+        # OR in the bit extensions
+        set result [expr {$result | (~0 << $shift)}]
     }
     return $result
 }
 ----
 
+----
+<<dwarf info stream tests>>=
+test InfoStream-signedLEB128-1.0 {
+    Decode 0 as signed LEB128
+} -setup {
+    set is [dwarfdecode::InfoStream new "\0"]
+} -cleanup {
+    $is destroy
+} -body {
+    $is signedLEB128
+} -result {0}
+----
+
+----
+<<dwarf info stream tests>>=
+test InfoStream-signedLEB128-2.0 {
+    Decode 1 byte positive integer as signed LEB128
+} -setup {
+    set is [dwarfdecode::InfoStream new "\2"]
+} -cleanup {
+    $is destroy
+} -body {
+    $is signedLEB128
+} -result {2}
+----
+
+----
+<<dwarf info stream tests>>=
+test InfoStream-signedLEB128-3.0 {
+    Decode 1 byte negative integer as signed LEB128
+} -setup {
+    set is [dwarfdecode::InfoStream new "\x7e"]
+} -cleanup {
+    $is destroy
+} -body {
+    $is signedLEB128
+} -result {-2}
+----
+
+----
+<<dwarf info stream tests>>=
+test InfoStream-signedLEB128-4.0 {
+    Decode 2 byte positive integer as signed LEB128
+} -setup {
+    set is [dwarfdecode::InfoStream new "\xff\x00"]
+} -cleanup {
+    $is destroy
+} -body {
+    $is signedLEB128
+} -result {127}
+----
+
+----
+<<dwarf info stream tests>>=
+test InfoStream-signedLEB128-4.1 {
+    Decode 2 byte positive integer as signed LEB128
+} -setup {
+    set is [dwarfdecode::InfoStream new "\x80\x01"]
+} -cleanup {
+    $is destroy
+} -body {
+    $is signedLEB128
+} -result {128}
+----
+
+----
+<<dwarf info stream tests>>=
+test InfoStream-signedLEB128-5.0 {
+    Decode 2 byte negative integer as signed LEB128
+} -setup {
+    set is [dwarfdecode::InfoStream new "\x81\x7f"]
+} -cleanup {
+    $is destroy
+} -body {
+    $is signedLEB128
+} -result {-127}
+----
+
+----
+<<dwarf info stream tests>>=
+test InfoStream-signedLEB128-5.0 {
+    Decode 2 byte negative integer as signed LEB128
+} -setup {
+    set is [dwarfdecode::InfoStream new "\x80\x7f"]
+} -cleanup {
+    $is destroy
+} -body {
+    $is signedLEB128
+} -result {-128}
+----
+
 == Code Organization
 
-Describe
+=== Source Code
 
 ----
 <<dwarfdecode.tcl>>=
@@ -1128,4 +1415,102 @@ namespace eval ::dwarfdecode {
 <<dwarf info class>>
 
 package provide dwarfdecode $::dwarfdecode::version
+----
+
+=== Unit Tests
+
+----
+<<unit tests>>=
+<<dwarf info stream tests>>
+----
+
+----
+<<dwarfdecode.test>>=
+#!/usr/bin/env tclsh
+# This software is copyrighted 2013 by G. Andrew Mangogna.
+# The following terms apply to all files associated with the software unless
+# explicitly disclaimed in individual files.
+# 
+# The authors hereby grant permission to use, copy, modify, distribute,
+# and license this software and its documentation for any purpose, provided
+# that existing copyright notices are retained in all copies and that this
+# notice is included verbatim in any distributions. No written agreement,
+# license, or royalty fee is required for any of the authorized uses.
+# Modifications to this software may be copyrighted by their authors and
+# need not follow the licensing terms described here, provided that the
+# new terms are clearly indicated on the first page of each file where
+# they apply.
+# 
+# IN NO EVENT SHALL THE AUTHORS OR DISTRIBUTORS BE LIABLE TO ANY PARTY FOR
+# DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES ARISING
+# OUT OF THE USE OF THIS SOFTWARE, ITS DOCUMENTATION, OR ANY DERIVATIVES
+# THEREOF, EVEN IF THE AUTHORS HAVE BEEN ADVISED OF THE POSSIBILITY OF
+# SUCH DAMAGE.
+# 
+# THE AUTHORS AND DISTRIBUTORS SPECIFICALLY DISCLAIM ANY WARRANTIES,
+# INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.  THIS SOFTWARE
+# IS PROVIDED ON AN "AS IS" BASIS, AND THE AUTHORS AND DISTRIBUTORS HAVE
+# NO OBLIGATION TO PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS,
+# OR MODIFICATIONS.
+# 
+# GOVERNMENT USE: If you are acquiring this software on behalf of the
+# U.S. government, the Government shall have only "Restricted Rights"
+# in the software and related documentation as defined in the Federal
+# Acquisition Regulations (FARs) in Clause 52.227.19 (c) (2).  If you
+# are acquiring the software on behalf of the Department of Defense,
+# the software shall be classified as "Commercial Computer Software"
+# and the Government shall have only "Restricted Rights" as defined in
+# Clause 252.227-7013 (c) (1) of DFARs.  Notwithstanding the foregoing,
+# the authors grant the U.S. Government and others acting in its behalf
+# permission to use and distribute the software in accordance with the
+# terms specified in this license.
+#
+#*++
+# PROJECT:
+#  mrtools
+#
+# MODULE:
+#  dwarfdecode.test -- unit tests for dwarfdecode package
+#
+# ABSTRACT:
+#
+#*--
+#
+
+package require Tcl 8.6
+package require cmdline
+package require logger
+
+source ../../elfdecode/src/elfdecode.tcl
+chan puts "using elfdecode version: [package require elfdecode]"
+
+source ../src/dwarfdecode.tcl
+package require dwarfdecode
+chan puts "testing dwarfdecode version: [package require dwarfdecode]"
+
+# Add custom arguments here.
+set optlist {
+    {level.arg warn {Log debug level}}
+    {file.arg {} {Elf file name}}
+}
+array set options [::cmdline::getKnownOptions argv $optlist]
+
+::dwarfdecode::log::setlevel $options(level)
+#::logger::setlevel $options(level)
+
+package require tcltest
+eval tcltest::configure $argv
+
+namespace eval ::dwarfdecode::test {
+    ::logger::initNamespace [namespace current] $options(level)
+
+    namespace import ::tcltest::*
+
+    <<unit tests>>
+
+    cleanupTests
+}
+
+namespace delete ::dwarfdecode::test
 ----
