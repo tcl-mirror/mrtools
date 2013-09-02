@@ -163,7 +163,7 @@ $(MAN) : $(DOCSRC)
 	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $(DOCDIR)/$@ $<
 
 %.html : %.man
-	dtplite -o $(DOCDIR)/$@ HTML $(DOCDIR)/$<
+	dtplite -o $(DOCDIR)/$@ html $(DOCDIR)/$<
 
 #
 # vim :set sw=8 ts=8 sts=8 noexpandtab:
