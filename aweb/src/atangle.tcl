@@ -83,7 +83,7 @@ namespace eval ::atangle {
     namespace import ::ral::*
     namespace import ::ralutil::*
 
-    variable version 1.1
+    variable version 1.2
 
     variable optlist {
         {version {Print version and license, then exit}}
