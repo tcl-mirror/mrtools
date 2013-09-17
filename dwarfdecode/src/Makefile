@@ -119,7 +119,7 @@ code : $(TCLSRC)
 tests : $(TESTS)
 
 runtests : $(TESTS) $(TCLSRC)
-	cd $(TESTDIR) ; tclsh $(TESTS) -verbose bet -level debug
+	cd $(TESTDIR) ; tclsh $(TESTS) -verbose bet -level debug -file fossil
 
 $(PDF) : $(DOCSRC) $(EXTRAS)
 

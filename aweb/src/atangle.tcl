@@ -89,7 +89,7 @@ namespace eval ::atangle {
         {version {Print version and license, then exit}}
         {level.arg warn {Log debug level}}
         {output.arg - {Output file name}}
-        {root.arg * {Root chunk to output}}
+        {root.arg * {Comma separated list of root chunks to output}}
         {line.arg {} {Emit line markers}}
         {report {Issue chuck report}}
     }
@@ -128,7 +128,10 @@ proc ::atangle::main {} {
         set ochan stdout
     }
     try {
-        t tangle $ochan $options(root)
+        set roots [lmap r [split $options(root) ,] {string trim $r}]
+        foreach root $roots {
+            t tangle $ochan $root
+        }
     } on error {result opts} {
         chan puts stderr $result
         return -options $opts
@@ -140,7 +143,9 @@ proc ::atangle::main {} {
 
     # Output a report if requested.
     if {$options(report)} {
-        t reportChunks stderr $options(root)
+        foreach root $roots {
+            t reportChunks stderr $root
+        }
     }
 
     t destroy
