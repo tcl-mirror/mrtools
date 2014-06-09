@@ -2,46 +2,43 @@ source ../src/oomoore.tcl
 package require oomoore
 
 # State model
-::oomoore model create tank_operation {
-    state empty {} {
-        my variable count
-        chan puts "empty $count"
-        incr count
-        set ::done 1    ; # used to signal the end of a cycle
-    }
-    transition empty - pump -> filling
-
-    state filling {} {
-        my delayedSignal 500 full   ; # drive my self to the next state
-        my variable count
-        chan puts "filling $count"
-        incr count
-    }
-    transition filling - full -> full
-
-    state full {} {
-        my delayedSignal 500 pump
-        my variable count
-        chan puts "full $count"
-        incr count
-    }
-    transition full - pump -> emptying
-
-    state emptying {} {
-        my delayedSignal 500 empty
-        my variable count
-        chan puts "emptying $count"
-        incr count
-    }
-    transition emptying - empty -> empty
-}
-
 ::oo::class create tank {
-    # State machine created as a subclass of the state model.
-    superclass ::tank_operation
+    superclass ::oomoore::model
 
     constructor {} {
-        next
+        next {
+            state empty {} {
+                my variable count
+                chan puts "empty $count"
+                incr count
+                set ::done 1    ; # used to signal the end of a cycle
+            }
+            transition empty - pump -> filling
+
+            state filling {} {
+                my variable count
+                my delayedSignal 500 full   ; # drive my self to the next state
+                chan puts "filling $count"
+                incr count
+            }
+            transition filling - full -> full
+
+            state full {} {
+                my variable count
+                my delayedSignal 500 pump
+                chan puts "full $count"
+                incr count
+            }
+            transition full - pump -> emptying
+
+            state emptying {} {
+                my variable count
+                my delayedSignal 500 empty
+                chan puts "emptying $count"
+                incr count
+            }
+            transition emptying - empty -> empty
+        }
         my variable count
         set count 0
     }
