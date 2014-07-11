@@ -42,22 +42,22 @@ indeed pull large amounts of its code over.
 
 ["ditaa",options="no-shadows",title="STSA Tcl Block Diagram"]
 -----------------------------------------------------------------------------
-+---------------+                                             
-|  STSA Class   |                                             
++---------------+
+|  STSA Class   |
 |  o meta-class |
-+-------+-------+                                             
-        |                                                       
-        | create               +-----------------+
-        V                +-----| Reference Class |              
-+-------+-------+  mixin |     +-----------------+
-|  XUML Class   |<-------+
-+-------+-------+        |     +-------------------+
-        |                +-----| State Model Class |
-        | create/new           +-------------------+
++-------+-------+
+        |
+        | create
         V
-+-------+-------+                                             
++-------+-------+
+|  XUML Class   |
++-------+-------+
+        |
+        | create/new
+        V
++-------+-------+
 |  XMUL Object  |
-+-------+-------+                                             
++-------+-------+
 -----------------------------------------------------------------------------
 
 == STSA Class
@@ -77,7 +77,7 @@ for defining other classes.
     <<stsaclass configuration>>
 }
 ----
-<1> We insist that new STSA classes are named.
+<1> We insist that all STSA classes be named commands.
 
 The idea is for the constructor of the +STSAClass+ to take a script
 that consists of configuration commands.
@@ -106,8 +106,25 @@ constructor {config} {
 
 The configuration language is really just a series of commands
 that are implemented as methods of the class.
-The +oo::util+ package provides the +link+ command to make
-the DSL definitions easier.
+Technically,
+the design is to use the +my eval+ command to evaluate the
+configuration script in the context of the class being created.
+The commands in the configuration script need to resolve correctly
+in that context.
+The +oo::util+ package in +tcllib+ provides the +link+ command to make
+the DSL command definitions easier.
+
+[source,tcl]
+----
+<<required packages>>=
+package require oo::util
+# The mixin of "oo::class.Delegate", interacts badly with meta-classes that
+# have constructor arguments. So we eliminate the oo::class mixins here. This
+# will mean that you can't define class methods.
+::oo::define oo::class self mixin
+
+package require struct::set
+----
 
 [source,tcl]
 ----
@@ -135,15 +152,16 @@ Next we will deal with the more complicated issue of state models.
 ----
 <<stsaclass constructor>>=
 my variable attrInfo
-set attrInfo [list]
+array set attrInfo {}
 
 <<stsaclass configuration>>=
 method Attribute {args} {
     my variable attrInfo
 
     foreach attr $args {
-        if {$attr ni $attrInfo} {
-            lappend attrInfo $attr
+        lassign $attr name default
+        if {![info exists attrInfo($name)]} {
+            set attrInfo($name) $default
         }
     }
 }
@@ -167,14 +185,19 @@ the relationship.
 
 [source,tcl]
 ----
+<<stsaclass constructor>>=
+my variable refInfo
+array set refInfo {}
+
 <<stsaclass configuration>>=
 method Reference {rname type dstclass} {
-    my variable refinfo
-    if {[info exists refinfo($rname)]} {
+    my variable refInfo
+    if {[info exists refInfo($rname)]} {
         error "linkage, \"$rname\", already exists"
     }
-    if {![string match {::*} $dstclass]} {
-        set dstclass [uplevel 3 namespace current]::$dstclass
+    if {[string range $dstclass 0 1] ne "::"} {
+        set dstclass\
+            [string trimright [uplevel 3 namespace current] :]::$dstclass
     }
 
     if {![regexp -- {\A-(>{1,2})(c?)\Z} $type match mult cond]} {
@@ -183,14 +206,12 @@ method Reference {rname type dstclass} {
     set mult [string equal $mult ">>"]
     set cond [string equal $cond "c"]
 
-    set refinfo($rname) [dict create\
+    set refInfo($rname) [dict create\
         type reference\
         dest $dstclass\
         mult $mult\
         cond $cond\
     ]
-    my variable $rname
-    set $rname {}
 }
 ----
 
@@ -198,9 +219,9 @@ method Reference {rname type dstclass} {
 ----
 <<stsaclass configuration>>=
 method Partition {rname args} {
-    my variable refinfo
-    if {[info exists refinfo($rname)]} {
-        error "linkage, \"$rname\", already exists
+    my variable refInfo
+    if {[info exists refInfo($rname)]} {
+        error "linkage, \"$rname\", already exists"
     }
     if {[llength $args] < 2} {
         error "partition, \"$rname\", must have at least two subclasses"
@@ -208,37 +229,45 @@ method Partition {rname args} {
 
     set subs [list]
     foreach sub $args {
-        if {![string match {::*} $sub]} {
-            set sub [uplevel 3 namespace current]::$sub
+        if {[string range $sub 0 1] ne "::"} {
+            set sub\
+                [string trimright [uplevel 3 namespace current] :]::$sub
         }
         lappend subs $sub
     }
-    set refinfo($rname) [dict create\
+    set refInfo($rname) [dict create\
         type partition\
         subclasses $subs\
     ]
 }
 ----
 
+[source,tcl]
+----
+<<stsaclass constructor>>=
+my eval $config
+----
 
 [source,tcl]
 ----
-<<required packages>>=
-package require oo::util
+<<stsaclass constructor>>=
+define [self] variable {*}[array names attrInfo]
 ----
 
 [source,tcl]
 ----
-<<stsaclass configuration>>=
-constructor {body} {
-    my variable refinfo
-    array set refinfo {}
+<<stsaclass constructor>>=
+define [self] constructor {args} {
+    classvariable attrInfo
+    foreach attrName [array names attrInfo] {
+        set $attrName $attrInfo($attrName)
+    }
 
-    link\
-        {reference Reference}\
-        {partition Partition}
-
-    my eval [uplevel 1 [list ::subst $body]]
+    classvariable refInfo
+    foreach refName [array names refInfo] {
+        my variable $refName
+        set $refName {}
+    }
 }
 ----
 
@@ -254,7 +283,7 @@ test constructor-1.0 {
     stsatcl STSAClass create test1 {
         reference R1 -> foo
     }
-    return [set [info object namespace test1]::refinfo(R1)]
+    return [set [info object namespace test1]::refInfo(R1)]
 } -result {type reference dest ::stsatcl::test::foo mult 0 cond 0}
 
 test constructor-2.0 {
@@ -268,124 +297,123 @@ test constructor-2.0 {
 } -result {unknown reference type spec, "->>x"} -returnCodes error
 
 test constructor-3.0 {
-    reference method
+    configure attribute
 } -setup {
 } -cleanup {
     test3 destroy
 } -body {
     stsatcl STSAClass create test3 {
-        reference R1 ->c foo
+        attribute Count {Maximum 20}
     }
-    return [test3 -> R1]
-} -result {}
+    return [set [info object namespace test3]::attrInfo(Maximum)]
+} -result {20}
 
 test constructor-4.0 {
     define partition
 } -setup {
-    oo::class create super {
-        superclass ::stsatcl::STSAClass
-
-        constructor {} {
-            next {
-                partition R1 sub1 sub2
-            }
-        }
+    ::stsatcl STSAClass create super {
+        partition R1 sub1 sub2
     }
 
-    oo::class create sub1 {
-        superclass ::stsatcl::STSAClass
-
-        constructor {} {
-            next {
-                reference R1 -> super
-            }
-        }
+    ::stsatcl STSAClass create sub1 {
+        reference R1 -> super
     }
 
-    oo::class create sub2 {
-        superclass ::stsatcl::STSAClass
-
-        constructor {} {
-            next {
-                reference R1 -> super
-                reference R2 -> ::stsatcl::STSAClass
-            }
-        }
+    ::stsatcl STSAClass create sub2 {
+        reference R1 -> super
     }
 } -cleanup {
-    sup1 destroy
+    super destroy
+    sub1 destroy
+    sub2 destroy
 } -body {
     super create sup1
-    return [set [info object namespace sup1]::refinfo(R1)]
+    return [set [info object namespace super]::refInfo(R1)]
 } -result {type partition subclasses {::stsatcl::test::sub1 ::stsatcl::test::sub2}}
+
+test constructor-5.0 {
+    create an instance
+} -setup {
+    stsatcl STSAClass create test5 {
+        attribute Count {Maximum 20}
+    }
+} -cleanup {
+    test5 destroy
+} -body {
+    test5 create inst5
+    set [info object namespace inst5]::Maximum
+} -result {20}
+----
+
+== Access to Attributes
+
+[source,tcl]
+----
+<<stsaclass constructor>>=
+define [self] method readAttribute {attribute} {
+    return [set $attribute]
+}
 ----
 
 [source,tcl]
 ----
-<<stsaclass configuration>>=
-method CheckRelName {rname} {
-    my variable refinfo
-    if {![info exists refinfo($rname)]} {
-        error "unknown linkage, \"$rname\""
+<<exported tests>>=
+test readAttribute-1.0 {
+    read attribute value
+} -setup {
+    stsatcl STSAClass create test-ra1 {
+        attribute Count {Maximum 27}
     }
-}
-
-method CheckReferenceObj {rname obj} {
-    my variable refinfo
-
-    set objclass [info object class $obj]
-    switch -exact -- [dict get $refinfo($rname) type] {
-        reference {
-            set destclass [dict get $refinfo($rname) dest]
-            if {!($objclass eq $destclass ||\
-                    $destclass in [info class superclasses $objclass])} {
-                error "instance, \"$obj\", is not an instance of class,\
-                        \"[dict get $refinfo($rname) dest]\""
-            }
-        }
-        partition {
-            set subclasses [dict get $refinfo($rname) subclasses]
-            foreach subclass $subclasses {
-                if {$objclass eq $subclass ||\
-                    $subclass in [info class superclasses $objclass]} {
-                    return
-                }
-            }
-            error "instance, \"$obj\", is not an instance of any class,\
-                    \"[join $subclasses {, }]\""
-        }
-        default {
-            error "unknown linkage type, \"[dict get $refinfo($rname) type]\""
-        }
-    }
-}
-
-method ResolveObj {obj} {
-    if {![string match {::*} $obj]} {
-        set obj [uplevel 2 namespace current]::$obj
-    }
-    return $obj
-}
+} -cleanup {
+    test-ra1 destroy
+} -body {
+    test-ra1 create inst1-ra1
+    inst1-ra1 readAttribute Maximum
+} -result {27}
 ----
-
-(((method,STSAClass,link)))
 
 [source,tcl]
 ----
-<<stsaclass configuration>>=
-method link {rname obj} {
+<<stsaclass constructor>>=
+define [self] method updateAttribute {attribute value} {
+    return [set $attribute $value]
+}
+----
+
+[source,tcl]
+----
+<<exported tests>>=
+test updateAttribute-1.0 {
+    update attribute value
+} -setup {
+    stsatcl STSAClass create test-ra2 {
+        attribute Count {Maximum 27}
+    }
+} -cleanup {
+    test-ra2 destroy
+} -body {
+    test-ra2 create inst-ra2
+    inst-ra2 updateAttribute Count 33
+    inst-ra2 readAttribute Count
+} -result {33}
+----
+
+== Relationship Navigation
+
+[source,tcl]
+----
+<<stsaclass constructor>>=
+define [self] method link {rname obj} {
     set obj [my ResolveObj $obj]
-    my variable refinfo
+    classvariable refInfo
     my CheckRelName $rname
     my CheckReferenceObj $rname $obj
 
     my variable $rname
-    switch -exact -- [dict get $refinfo($rname) type] {
+    switch -exact -- [dict get $refInfo($rname) type] {
         reference {
-            if {[dict get $refinfo($rname) mult]} {
-                if {$obj ni [set $rname]} {
-                    lappend $rname $obj
-                }
+            if {[dict get $refInfo($rname) mult]} {
+                ::struct::set include $rname $obj
             } else {
                 set $rname $obj
             }
@@ -394,7 +422,7 @@ method link {rname obj} {
             set $rname $obj
         }
         default {
-            error "unknown linkage type, \"[dict get $refinfo($rname) type]\""
+            error "unknown linkage type, \"[dict get $refInfo($rname) type]\""
         }
     }
     return $obj
@@ -407,72 +435,117 @@ method link {rname obj} {
 test link-1.0 {
     link across singular reference
 } -setup {
-    stsatcl STSAClass create lt1 {
-        reference R1 -> ::stsatcl::STSAClass
+    stsatcl STSAClass create test-lt1 {
+        reference R1 -> test-lt2
     }
-    stsatcl STSAClass create lt2 {
-        reference R1 -> ::stsatcl::STSAClass
+    stsatcl STSAClass create test-lt2 {
+        reference R1 -> test-lt1
     }
 } -cleanup {
-    lt1 destroy
-    lt2 destroy
+    test-lt1 destroy
+    test-lt2 destroy
 } -body {
+    test-lt1 create lt1
+    test-lt2 create lt2
     lt1 link R1 lt2
 } -result {::stsatcl::test::lt2}
-
-test link-2.0 {
-    link across multiple reference
-} -setup {
-    stsatcl STSAClass create lt1 {
-        reference R1 ->> ::stsatcl::STSAClass
-    }
-    stsatcl STSAClass create lt2 {
-        reference R1 -> ::stsatcl::STSAClass
-    }
-    stsatcl STSAClass create lt3 {
-        reference R1 -> ::stsatcl::STSAClass
-    }
-} -cleanup {
-    lt1 destroy
-    lt2 destroy
-    lt3 destroy
-} -body {
-    lt1 link R1 lt2
-    lt1 link R1 lt3
-    llength [set [info object namespace lt1]::R1]
-} -result {2}
-
-test link-3.0 {
-    link across partition
-} -setup {
-    super create sup1
-    sub1 create s1
-} -cleanup {
-    sup1 destroy
-    s1 destroy
-} -body {
-    sup1 link R1 s1
-} -result {::stsatcl::test::s1}
 ----
-
-(((method,STSAClass,unlink)))
 
 [source,tcl]
 ----
-<<stsaclass configuration>>=
-method unlink {rname obj} {
+<<exported tests>>=
+test link-2.0 {
+    link across multiple reference
+} -setup {
+    stsatcl STSAClass create test-lt1 {
+        reference R2 ->> test-lt2
+    }
+    stsatcl STSAClass create test-lt2 {
+        reference R2 -> test-lt1
+    }
+} -cleanup {
+    test-lt1 destroy
+    test-lt2 destroy
+} -body {
+    test-lt1 create inst1
+    test-lt2 create inst2
+    test-lt2 create inst3
+    inst1 link R2 inst2
+    inst1 link R2 inst3
+    llength [set [info object namespace inst1]::R2]
+} -result {2}
+----
+
+[source,tcl]
+----
+<<exported tests>>=
+test link-2.1 {
+    link across multiple reference, duplicate references
+} -setup {
+    stsatcl STSAClass create test-lt1 {
+        reference R2 ->> test-lt2
+    }
+    stsatcl STSAClass create test-lt2 {
+        reference R2 -> test-lt1
+    }
+} -cleanup {
+    test-lt1 destroy
+    test-lt2 destroy
+} -body {
+    test-lt1 create inst1
+    test-lt2 create inst2
+    inst1 link R2 inst2
+    inst1 link R2 inst2
+    llength [set [info object namespace inst1]::R2]
+} -result {1}
+----
+
+[source,tcl]
+----
+<<exported tests>>=
+test link-3.0 {
+    link across partition
+} -setup {
+    ::stsatcl STSAClass create super {
+        partition R3 sub1 sub2
+    }
+
+    ::stsatcl STSAClass create sub1 {
+        reference R3 -> super
+    }
+
+    ::stsatcl STSAClass create sub2 {
+        reference R3 -> super
+    }
+} -cleanup {
+    super destroy
+    sub1 destroy
+    sub2 destroy
+} -body {
+    super create sup1
+    sub1 create inst1
+    sup1 link R3 inst1
+    llength [set [info object namespace sup1]::R3]
+} -result {1}
+----
+
+[source,tcl]
+----
+<<stsaclass constructor>>=
+define [self] method unlink {rname obj} {
     set obj [my ResolveObj $obj]
-    my variable refinfo
+    classvariable refInfo
     my CheckRelName $rname
     my CheckReferenceObj $rname $obj
 
     my variable $rname
-    switch -exact -- [dict get $refinfo($rname) type] {
+    switch -exact -- [dict get $refInfo($rname) type] {
         reference {
-            if {[dict get $refinfo($rname) mult]} {
-                set at [lsearch [set $rname] $obj]
-                if {$at != -1} {
-                    set $rname [lreplace [set $rname] $at $at]
+            if {[dict get $refInfo($rname) mult]} {
+                if {[::struct::set contains [set $rname] $obj]} {
+                    ::struct::set exclude $rname $obj
+                } else {
+                    error "object, \"$obj\", is not linked to \"$rname\""
                 }
             } else {
                 if {$obj eq [set $rname]} {
@@ -492,7 +565,7 @@ method unlink {rname obj} {
             }
         }
         default {
-            error "unknown linkage type, \"[dict get $refinfo($rname) type]\""
+            error "unknown linkage type, \"[dict get $refInfo($rname) type]\""
         }
     }
 
@@ -506,79 +579,90 @@ method unlink {rname obj} {
 test unlink-1.0 {
     unlink across singular reference
 } -setup {
-    stsatcl STSAClass create lt1 {
-        reference R1 ->c ::stsatcl::STSAClass
+    stsatcl STSAClass create test-ul1 {
+        reference R1 ->c test-ul2
     }
-    stsatcl STSAClass create lt2 {
-        reference R1 -> ::stsatcl::STSAClass
+    stsatcl STSAClass create test-ul2 {
+        reference R1 -> test-ul1
     }
 } -cleanup {
-    lt1 destroy
-    lt2 destroy
+    test-ul1 destroy
+    test-ul2 destroy
 } -body {
-    lt1 link R1 lt2
-    lt1 unlink R1 lt2
-    lt1 -> R1
+    test-ul1 create inst-ul1
+    test-ul2 create inst-ul2
+    inst-ul1 link R1 inst-ul2
+    inst-ul1 unlink R1 inst-ul2
+    set [info object namespace inst-ul2]::R1
 } -result {}
+----
 
+[source,tcl]
+----
+<<exported tests>>=
 test unlink-2.0 {
     unlink across multiple reference
 } -setup {
-    stsatcl STSAClass create lt1 {
-        reference R1 ->> ::stsatcl::STSAClass
+    stsatcl STSAClass create test-ul3 {
+        reference R1 ->> test-ul4
     }
-    stsatcl STSAClass create lt2 {
-        reference R1 -> ::stsatcl::STSAClass
-    }
-    stsatcl STSAClass create lt3 {
-        reference R1 -> ::stsatcl::STSAClass
+    stsatcl STSAClass create test-ul4 {
+        reference R1 -> test-ul3
     }
 } -cleanup {
-    lt1 destroy
-    lt2 destroy
-    lt3 destroy
+    test-ul3 destroy
+    test-ul4 destroy
 } -body {
-    lt1 link R1 lt2
-    lt1 link R1 lt3
-    lt1 unlink R1 lt2
-    lt1 -> R1
-} -result {::stsatcl::test::lt3}
+    test-ul3 create inst1
+    test-ul4 create inst2
+    test-ul4 create inst3
+
+    inst1 link R1 inst2
+    inst1 link R1 inst3
+    inst1 unlink R1 inst2
+    llength [info object namespace inst1]::R1
+} -result {1}
 
 test unlink-3.0 {
     unlink across partition
 } -setup {
-    super create sup1
-    sub1 create s1
+    ::stsatcl STSAClass create super {
+        partition R3 sub1 sub2
+    }
+
+    ::stsatcl STSAClass create sub1 {
+        reference R3 -> super
+    }
+
+    ::stsatcl STSAClass create sub2 {
+        reference R3 -> super
+    }
 } -cleanup {
-    sup1 destroy
-    s1 destroy
+    super destroy
+    sub1 destroy
+    sub2 destroy
 } -body {
-    sup1 link R1 s1
-    sup1 unlink R1 s1
+    super create inst-super
+    sub1 create inst-sub1
+    inst-super link R3 inst-sub1
+    inst-super unlink R3 inst-sub1
+    set [info object namespace inst-super]::R3
 } -result {}
 ----
 
 [source,tcl]
 ----
-<<required packages>>=
-package require struct::set
-----
-
-(((method,STSAClass,->)))
-
-[source,tcl]
-----
-<<stsaclass configuration>>=
-method -> {rname args} {
-    my variable refinfo
+<<stsaclass constructor>>=
+define [self] method -> {rname args} {
+    classvariable refInfo
     my CheckRelName $rname
 
     my variable $rname
     set relobjs [set $rname]
 
-    switch -exact -- [dict get $refinfo($rname) type] {
+    switch -exact -- [dict get $refInfo($rname) type] {
         reference {
-            if {![dict get $refinfo($rname) cond] && [llength $relobjs] == 0} {
+            if {![dict get $refInfo($rname) cond] && [llength $relobjs] == 0} {
                 error "reference, \"$rname\", is unconditional, yet no\
                         instances were found"
             }
@@ -602,7 +686,7 @@ method -> {rname args} {
             }
         }
         default {
-            error "unknown linkage type, \"[dict get $refinfo($rname) type]\""
+            error "unknown linkage type, \"[dict get $refInfo($rname) type]\""
         }
     }
 
@@ -617,7 +701,7 @@ method -> {rname args} {
 
     return [expr {[llength $related] < 2 ? [lindex $related 0] : $related}]
 }
-export ->
+define [self] export ->
 ----
 
 [source,tcl]
@@ -627,115 +711,158 @@ test reference-1.0 {
     traverse a singular relationship
 } -setup {
     stsatcl STSAClass create rt1 {
-        reference R1 -> ::stsatcl::STSAClass
+        reference R1 -> rt2
     }
     stsatcl STSAClass create rt2 {
-        reference R1 -> ::stsatcl::STSAClass
+        reference R1 -> rt1
     }
 } -cleanup {
     rt1 destroy
     rt2 destroy
 } -body {
-    rt1 link R1 rt2
-    rt1 -> R1
-} -result {::stsatcl::test::rt2}
+    rt1 create inst1
+    rt2 create inst2
+    inst1 link R1 inst2
+    inst1 -> R1
+} -result {::stsatcl::test::inst2}
+----
 
+[source,tcl]
+----
+<<exported tests>>=
 test reference-1.1 {
     traverse many singular relationships
 } -setup {
     stsatcl STSAClass create rt1 {
-        reference R1 -> ::stsatcl::STSAClass
+        reference R1 -> rt2
     }
     stsatcl STSAClass create rt2 {
-        reference R1 -> ::stsatcl::STSAClass
+        reference R1 -> rt1
     }
 } -cleanup {
     rt1 destroy
     rt2 destroy
 } -body {
-    rt1 link R1 rt2
-    rt2 link R1 rt1
-    rt1 -> R1 R1
-} -result {::stsatcl::test::rt1}
+    rt1 create inst1
+    rt2 create inst2
+    inst1 link R1 inst2
+    inst2 link R1 inst1
 
+    inst1 -> R1 R1
+} -result {::stsatcl::test::inst1}
+----
+
+[source,tcl]
+----
+<<exported tests>>=
 test reference-1.2 {
     traverse many singular relationships -- violate conditionality
 } -setup {
     stsatcl STSAClass create rt1 {
-        reference R1 -> ::stsatcl::STSAClass
+        reference R1 -> rt2
     }
     stsatcl STSAClass create rt2 {
-        reference R1 -> ::stsatcl::STSAClass
+        reference R1 -> rt1
     }
 } -cleanup {
     rt1 destroy
     rt2 destroy
 } -body {
-    rt1 link R1 rt2
-    rt1 -> R1 R1
+    rt1 create inst1
+    rt2 create inst2
+    inst1 link R1 inst2
+    inst1 -> R1 R1
 } -result {reference, "R1", is unconditional, yet no instances were found}\
   -returnCodes error
+----
 
+[source,tcl]
+----
+<<exported tests>>=
 test reference-2.0 {
     traverse a multiple relationship
 } -setup {
     stsatcl STSAClass create rt1 {
-        reference R2 ->> ::stsatcl::STSAClass
+        reference R2 ->> rt2
     }
     stsatcl STSAClass create rt2 {
-        reference R1 -> ::stsatcl::STSAClass
-    }
-    stsatcl STSAClass create rt3 {
-        reference R1 -> ::stsatcl::STSAClass
+        reference R2 -> rt1
     }
 } -cleanup {
     rt1 destroy
     rt2 destroy
-    rt3 destroy
 } -body {
-    rt1 link R2 rt2
-    rt1 link R2 rt3
-    rt1 -> R2
-} -result {::stsatcl::test::rt2 ::stsatcl::test::rt3}
+    rt1 create inst1
+    rt2 create inst2
+    rt2 create inst3
+    inst1 link R2 inst2
+    inst1 link R2 inst3
+    inst1 -> R2
+} -result {::stsatcl::test::inst2 ::stsatcl::test::inst3}
+----
 
+[source,tcl]
+----
+<<exported tests>>=
 test reference-2.1 {
     traverse a multiple relationship, then a singular
 } -setup {
     stsatcl STSAClass create rt1 {
-        reference R2 ->> ::stsatcl::STSAClass
+        reference R2 ->> rt2
     }
     stsatcl STSAClass create rt2 {
-        reference R1 -> ::stsatcl::STSAClass
-    }
-    stsatcl STSAClass create rt3 {
-        reference R1 -> ::stsatcl::STSAClass
+        reference R2 -> rt1
     }
 } -cleanup {
     rt1 destroy
     rt2 destroy
-    rt3 destroy
 } -body {
-    rt1 link R2 rt2
-    rt2 link R1 rt1
+    rt1 create inst1
+    rt2 create inst2
+    rt2 create inst3
+    inst1 link R2 inst2
+    inst1 link R2 inst3
+    inst2 link R2 inst1
+    inst3 link R2 inst1
 
-    rt1 link R2 rt3
-    rt3 link R1 rt1
-    rt1 -> R2 R1
-} -result {::stsatcl::test::rt1}
+    inst1 -> R2 R2
+} -result {::stsatcl::test::inst1}
+----
 
+[source,tcl]
+----
+<<exported tests>>=
 test reference-3.0 {
     traverse across partition
 } -setup {
-    super create sup1
-    sub1 create s1
-} -cleanup {
-    sup1 destroy
-    s1 destroy
-} -body {
-    sup1 link R1 s1
-    sup1 -> R1 sub1
-} -result {::stsatcl::test::s1}
+    ::stsatcl STSAClass create super {
+        partition R3 sub1 sub2
+    }
 
+    ::stsatcl STSAClass create sub1 {
+        reference R3 -> super
+    }
+
+    ::stsatcl STSAClass create sub2 {
+        reference R3 -> super
+    }
+} -cleanup {
+    super destroy
+    sub1 destroy
+    sub2 destroy
+} -body {
+    super create sup1
+    sub1 create inst1
+
+    sup1 link R3 inst1
+    sup1 -> R3 sub1
+} -result {::stsatcl::test::inst1}
+----
+
+[source,tcl]
+----
+<<exported tests>>=
+if 0 {
 test reference-3.1 {
     traverse across partition and single reference
 } -setup {
@@ -766,338 +893,64 @@ test reference-3.2 {
     s1 link R1 sup1
     sup1 -> R1 sub2 R2
 } -result {}
-----
-
-Note that the lamda function is evaluated in the namespace of the object.
-
-[source,tcl]
-----
-<<stsatcl utilities>>=
-proc ::stsatcl::Filter {instances params body args} {
-    if {[llength $args] != [llength $params] - 1} {
-        error "you must supply one less argument than there are parameters,\
-            got [llength $args] arguments,\
-            expected [expr {[llength $params] - 1}]"
-    }
-    set selected [list]
-    foreach instance $instances {
-        # Set up a lamda function to be run in the namespace of the
-        # object.
-        set lambda [list $params $body [info object namespace $instance]]
-        if {[::apply $lambda {*}$args $instance]} {
-            ::struct::set include selected $instance
-        }
-    }
-    return [expr {[llength $selected] < 2 ?\
-            [lindex $selected 0] : $selected}]
-}
-
-proc ::stsatcl::Map {instances params body args} {
-    if {[llength $args] != [llength $params] - 1} {
-        error "you must supply one less argument than there are parameters,\
-            got [llength $args] arguments,\
-            expected [expr {[llength $params] - 1}]"
-    }
-    set result [list]
-    foreach instance $instances {
-        # Same logic as for Filter
-        set lambda [list $params $body [info object namespace $instance]]
-        lappend result [::apply $lambda {*}$args $instance]
-    }
-    return $result
-}
-
-proc ::stsatcl::Apply {instances params body args} {
-    if {[llength $args] != [llength $params] - 1} {
-        error "you must supply one less argument than there are parameters,\
-            got [llength $args] arguments,\
-            expected [expr {[llength $params] - 1}]"
-    }
-    foreach instance $instances {
-        # Same logic as for Filter
-        set lambda [list $params $body [info object namespace $instance]]
-        ::apply $lambda {*}$args $instance
-    }
-    return
-}
-----
-
-It is useful to be able to do *blind* selection of instances
-from a class,
-so we defined some methods attached to the class itself.
-
-[source,tcl]
-----
-<<stsaclass configuration>>=
-classmethod filterInstances {params body args} {
-    tailcall ::stsatcl::Filter [info class instances [self]]\
-            $params $body {*}$args
 }
 ----
 
 [source,tcl]
 ----
-<<exported tests>>=
-test filterInstances-1.0 {
-    blind select instances
-} -setup {
-    ::oo::class create fiClass {
-        superclass ::stsatcl::STSAClass
-
-        constructor {v} {
-            next {}
-            my variable id
-            set id $v
-        }
-
-        method getId {} {
-            my variable id
-            return $id
-        }
-
-        method info {} {
-            my variable id
-            puts "[self]: $id"
-        }
+<<stsaclass constructor>>=
+define [self] method CheckRelName {rname} {
+    classvariable refInfo
+    if {![info exists refInfo($rname)]} {
+        error "unknown linkage, \"$rname\""
     }
-    fiClass create fi1 1
-    fiClass create fi2 2
-    fiClass create fi3 3
-} -cleanup {
-    fi1 destroy
-    fi2 destroy
-    fi3 destroy
-} -body {
-    fiClass filterInstances {value obj} {string equal [$obj getId] $value} 2
-} -result {::stsatcl::test::fi2}
-
-test filterInstances-1.1 {
-    blind select instances using internal variables
-} -setup {
-    fiClass create fi1 1
-    fiClass create fi2 2
-    fiClass create fi3 3
-} -cleanup {
-    fi1 destroy
-    fi2 destroy
-    fi3 destroy
-} -body {
-    fiClass filterInstances {value obj} {
-        my variable id
-        expr {$id eq $value}
-    } 2
-} -result {::stsatcl::test::fi2}
-----
-
-[source,tcl]
-----
-<<stsaclass configuration>>=
-classmethod mapInstances {params body args} {
-    tailcall ::stsatcl::Map [info class instances [self]]\
-        $params $body {*}$args
 }
 ----
 
 [source,tcl]
 ----
-<<exported tests>>=
-test mapInstances-1.0 {
-    apply function to all instances
-} -setup {
-    fiClass create fi1 4
-    fiClass create fi2 5
-    fiClass create fi3 6
-} -cleanup {
-    fi1 destroy
-    fi2 destroy
-    fi3 destroy
-} -body {
-    fiClass mapInstances {obj} {$obj getId}
-} -result {4 5 6}
-----
+<<stsaclass constructor>>=
+define [self] method CheckReferenceObj {rname obj} {
+    classvariable refInfo
 
-[source,tcl]
-----
-<<stsaclass configuration>>=
-classmethod forallInstances {params body args} {
-    tailcall ::stsatcl::Apply [info class instances [self]]\
-            $params $body {*}$args
-}
-----
-
-[source,tcl]
-----
-<<exported tests>>=
-test forallInstances-1.0 {
-    apply function to all instances
-} -setup {
-    fiClass create fi1 4
-    fiClass create fi2 5
-    fiClass create fi3 6
-} -cleanup {
-    fi1 destroy
-    fi2 destroy
-    fi3 destroy
-} -body {
-    fiClass forallInstances {obj} {$obj info}
-} -result {} -output "::stsatcl::test::fi1: 4\n::stsatcl::test::fi2: 5\n::stsatcl::test::fi3: 6\n"
-----
-
-There are some common operations needed for relationship navigation
-and selection.
-Again, the distinction between one and many means that in the former
-case we return immediately when a match is found.
-
-[source,tcl]
-----
-<<stsaclass configuration>>=
-method filterRelatedInstances {traversal params body args} {
-    tailcall ::stsatcl::Filter [my -> {*}$traversal] $params $body {*}$args
-}
-----
-
-[source,tcl]
-----
-<<exported tests>>=
-test filterRelated-1.0 {
-    find a set of related instances
-} -setup {
-    ::oo::class create frClass {
-        superclass ::stsatcl::STSAClass
-
-        constructor {} {
-            next {
-                reference R1 ->> fiClass
+    set objclass [info object class $obj]
+    switch -exact -- [dict get $refInfo($rname) type] {
+        reference {
+            set destclass [dict get $refInfo($rname) dest]
+            if {!($objclass eq $destclass ||\
+                    $destclass in [info class superclasses $objclass])} {
+                error "instance, \"$obj\", is not an instance of class,\
+                        \"[dict get $refInfo($rname) dest]\""
             }
         }
+        partition {
+            set subclasses [dict get $refInfo($rname) subclasses]
+            foreach subclass $subclasses {
+                if {$objclass eq $subclass ||\
+                    $subclass in [info class superclasses $objclass]} {
+                    return
+                }
+            }
+            error "instance, \"$obj\", is not an instance of any class,\
+                    \"[join $subclasses {, }]\""
+        }
+        default {
+            error "unknown linkage type, \"[dict get $refInfo($rname) type]\""
+        }
     }
-    fiClass create fi1 1
-    fiClass create fi2 2
-    fiClass create fi3 3
-    frClass create fr1
-    fr1 link R1 fi1
-    fr1 link R1 fi2
-} -cleanup {
-    fi1 destroy
-    fi2 destroy
-    fi3 destroy
-    fr1 destroy
-} -body {
-    fr1 filterRelatedInstances R1 {value obj} {
-        expr {[$obj getId] <= $value}
-    } 2
-} -result {::stsatcl::test::fi1 ::stsatcl::test::fi2}
-----
-
-[source,tcl]
-----
-<<stsaclass configuration>>=
-method mapRelatedInstances {traversal params body args} {
-    tailcall ::stsatcl::Map [my -> {*}$traversal] $params $body {*}$args
 }
 ----
 
 [source,tcl]
 ----
-<<exported tests>>=
-test mapRelated-1.0 {
-    apply a function to related instances
-} -setup {
-    fiClass create fi1 4
-    fiClass create fi2 5
-    fiClass create fi3 6
-    frClass create fr1
-    fr1 link R1 fi2
-    fr1 link R1 fi3
-} -cleanup {
-    fi1 destroy
-    fi2 destroy
-    fi3 destroy
-    fr1 destroy
-} -body {
-    fr1 mapRelatedInstances R1 {obj} {
-        $obj getId
+<<stsaclass constructor>>=
+define [self] method ResolveObj {obj} {
+    if {[string range $obj 0 1] ne "::"} {
+        set obj\
+            [string trimright [uplevel 2 namespace current] :]::$obj
     }
-} -result {5 6}
-----
-
-[source,tcl]
-----
-<<stsaclass configuration>>=
-method forallRelatedInstances {traversal params body args} {
-    tailcall ::stsatcl::Apply [my -> {*}$traversal] $params $body {*}$args
+    return $obj
 }
-----
-
-[source,tcl]
-----
-<<exported tests>>=
-test forallRelatedInstances-1.0 {
-    invoke a method on related instances
-} -setup {
-    fiClass create fi1 4
-    fiClass create fi2 5
-    fiClass create fi3 6
-    frClass create fr1
-    fr1 link R1 fi2
-    fr1 link R1 fi3
-} -cleanup {
-    fi1 destroy
-    fi2 destroy
-    fi3 destroy
-    fr1 destroy
-} -body {
-    fr1 forallRelatedInstances R1 {obj} {
-        $obj info
-    }
-} -result {} -output "::stsatcl::test::fi2: 5\n::stsatcl::test::fi3: 6\n"
-----
-
-[source,tcl]
-----
-<<stsaclass configuration>>=
-method readAttribute {attribute} {
-    my variable $attribute
-    return [set $attribute]
-}
-----
-
-[source,tcl]
-----
-<<exported tests>>=
-test readAttribute-1.0 {
-    read attribute value
-} -setup {
-    fiClass create fi1 27
-} -cleanup {
-    fi1 destroy
-} -body {
-    fi1 readAttribute id
-} -result {27}
-----
-
-[source,tcl]
-----
-<<stsaclass configuration>>=
-method updateAttribute {attribute value} {
-    my variable $attribute
-    return [set $attribute $value]
-}
-----
-
-[source,tcl]
-----
-<<exported tests>>=
-test updateAttribute-1.0 {
-    update attribute value
-} -setup {
-    fiClass create fi1 27
-} -cleanup {
-    fi1 destroy
-} -body {
-    fi1 updateAttribute id 33
-    fi1 readAttribute id
-} -result {33}
 ----
 
 == Code Organization
@@ -1129,7 +982,6 @@ namespace eval ::stsatcl {
     variable version 1.0
 }
 
-<<stsatcl utilities>>
 <<stsatcl commands>>
 
 package provide stsatcl $::stsatcl::version
@@ -1154,7 +1006,7 @@ package require Tcl 8.6
 package require cmdline
 package require logger
 
-source ../stsatcl.tcl
+source ../src/stsatcl.tcl
 chan puts "testing stsatcl version: [package require stsatcl]"
 
 # Add custom arguments here.
