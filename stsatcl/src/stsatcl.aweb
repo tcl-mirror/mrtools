@@ -2435,20 +2435,29 @@ define [self] method link {rname obj} {
     my variable $rname
     switch -exact -- [dict get $linkInfo $rname type] {
         reference {
-            if {[dict get $linkInfo $rname mult]} {
-                ::struct::set include $rname $obj
-            } else {
-                set $rname $obj
-            }
+            set multiple [dict get $linkInfo $rname mult]
         }
         partition {
-            set $rname $obj
+            set multiple 0
         }
         default {
             set errmsg "unknown linkage type,\
                     \"[dict get $linkInfo $rname type]\""
             throw [list STSACLASS UNKNOWNLINKTYPE\
                     [dict get $linkInfo $rname type] $errmsg] $errmsg
+        }
+    }
+    if {$multiple} {
+        ::struct::set include $rname $obj
+    } else {
+        if {[set $rname] eq {}} {
+            set $rname $obj
+        } else {
+            set errmsg "attempt to over-link:\
+                [self] is currently linked to [set $rname]\
+                across $rname, requested link to $obj"
+            throw [list STSACLASS OVERLINK\
+                $rname [set $rname] $obj $errmsg] $errmsg
         }
     }
     return $obj
@@ -2555,44 +2564,45 @@ test link-3.0 {
 } -result {1}
 ----
 
+==== Unlink Method
+
+(((method,XUMLClass,unlink)))
+
 [source,tcl]
 ----
 <<linkage access methods>>=
 define [self] method unlink {rname obj} {
     set obj [my ResolveObj $obj]
-    classvariable linkInfo
     my CheckRelName $rname
     my CheckReferenceObj $rname $obj
 
+    classvariable linkInfo
     my variable $rname
     switch -exact -- [dict get $linkInfo $rname type] {
         reference {
-            if {[dict get $linkInfo $rname mult]} {
-                if {[::struct::set contains [set $rname] $obj]} {
-                    ::struct::set exclude $rname $obj
-                } else {
-                    error "object, \"$obj\", is not linked to \"$rname\""
-                }
-            } else {
-                if {$obj eq [set $rname]} {
-                    set $rname {}
-                } else {
-                    error "\"$obj\" is not linked to \"$rname\",\
-                            \"[set $rname]\" is"
-                }
-            }
+            set multiple [dict get $linkInfo $rname mult]
+            set match [::struct::set contains [set $rname] $obj]
         }
         partition {
-            if {$obj eq [set $rname]} {
-                set $rname {}
-            } else {
-                error "\"$obj\" is not linked to \"$rname\",\
-                        \"[set $rname]\" is"
-            }
+            set multiple 0
+            set match [expr {$obj eq [set $rname]}]
         }
         default {
-            error "unknown linkage type, \"[dict get $linkInfo $rname type]\""
+            set errmsg "unknown linkage type,\
+                    \"[dict get $linkInfo $rname type]\""
+            throw [list STSACLASS UNKNOWNLINKTYPE\
+                    [dict get $linkInfo $rname type] $errmsg] $errmsg
         }
+    }
+    if {$match} {
+        if {$multiple} {
+            ::struct::set exclude $rname $obj
+        } else {
+            set $rname {}
+        }
+    } else {
+        set errmsg "object, \"$obj\", is not linked to \"$rname\""
+        throw [list STSACLASS NOTLINKED $obj $errmsg] $errmsg
     }
 
     return
@@ -2676,6 +2686,10 @@ test unlink-3.0 {
 } -result {}
 ----
 
+==== Link Traversal Method
+
+(((method,XUMLClass,->)))
+
 [source,tcl]
 ----
 <<linkage access methods>>=
@@ -2712,7 +2726,10 @@ define [self] method -> {rname args} {
             }
         }
         default {
-            error "unknown linkage type, \"[dict get $linkInfo $rname type]\""
+            set errmsg "unknown linkage type,\
+                    \"[dict get $linkInfo $rname type]\""
+            throw [list STSACLASS UNKNOWNLINKTYPE\
+                    [dict get $linkInfo $rname type] $errmsg] $errmsg
         }
     }
 
@@ -2961,7 +2978,39 @@ test reference-3.2 {
 } -result {}
 ----
 
-=== Filter Method
+==== Migrate Method
+
+(((method,XUMLClass,migrate)))
+
+[source,tcl]
+----
+<<linkage access methods>>=
+define [self] method migrate {rname subclass args} {
+    classvariable linkInfo
+    if {[dict get $linkInfo $rname type] ne "partition"} {
+        error "$rname is not a partition"
+    }
+    # HERE !! probably should check that subclass is allowed.
+    # Need to make sure subclass is fully resolved.
+
+    set subinst [my -> $rname]
+    my unlink $rname $subinst
+    # HERE !! unlink might fail in subtype, check first
+    # same with link below
+    $subinst unlink $rname [self]
+    $subinst destroy
+
+    set newinst [$subclass new {*}$args]
+    my link $rname $newinst
+    $newinst link $rname [self]
+
+    return $newinst
+}
+----
+
+=== Instance Selection
+
+==== Filter Method
 
 [source,tcl]
 ----
@@ -3043,7 +3092,7 @@ test findRelatedWhere-1.0 {
 } -result {::stsatcl::test::c3 ::stsatcl::test::c4}
 ----
 
-=== Map Method
+==== Map Method
 
 [source,tcl]
 ----
@@ -3120,6 +3169,8 @@ test mapRelatedInstances-1.0 {
 } -result {2 3 4 5}
 ----
 
+=== State Machine Execution
+
 // HERE Move this to where it is discused with the other state machine stuff.
 
 [source,tcl]
@@ -3153,6 +3204,33 @@ my variable __delaytoken__
 my variable __delayedSignals__
 foreach {sigid sigdetails} [array get __delayedSignals__] {
     after cancel [lindex $sigdetails 0]
+}
+----
+
+[source,tcl]
+----
+<<state model methods>>=
+# Receive an event synchronously. This causes immediate dispatch of
+# the state action as a synchronous procedure invocation.
+define [self] method receive {event args} {
+    my ValidateEvent $event
+
+    my variable currentState
+    classvariable transitions
+    set newState $transitions($currentState,$event)
+
+    log::info "Transition: [self]:\
+            $currentState - $event -> $newState"
+    if {$newState eq "CH"} {
+        set errmsg "can't happen transition:\
+                $currentState - $event -> CH"
+        log::error $errmsg
+        throw [list OOMOORE CH_TRANSITION $currentState $event]\
+            $errmsg
+    } elseif {$newState ne "IG"} {
+        set currentState $newState
+        my __STATE_$newState {*}$args
+    }
 }
 ----
 
