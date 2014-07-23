@@ -17,20 +17,23 @@
 
 DOCDIR	= ../doc
 TESTDIR = ../tests
+IMAGEDIR = ./images
 
 vpath %.pdf $(DOCDIR)
 vpath %.html $(DOCDIR)
 vpath %.test $(TESTDIR)
+vpath %.uxf $(IMAGEDIR)
 
 DOCSRC 	=\
 	stsatcl.aweb\
 	$(NULL)
 
 DIAGRAMS =\
+	trace-schema.uxf\
 	$(NULL)
 
 IMAGES =\
-	$(patsubst %.uxf,%.pdf,$(DIAGRAMS))\
+	$(patsubst %.uxf,$(IMAGEDIR)/%.pdf,$(DIAGRAMS))\
 	$(NULL)
 
 TCLSRC	=\
@@ -85,7 +88,7 @@ ASCIIDOC_ATTRS =\
 
 DBLATEX_OPTS =\
 	--dblatex-opts="$(patsubst %,--param=%,$(DBLATEX_PARAMS))"\
-	--dblatex-opts="--fig-path=./images"\
+	--dblatex-opts="--fig-path=$(IMAGEDIR)"\
 	$(NULL)
 
 ASCIIDOC_OPTS =\
@@ -126,11 +129,9 @@ $(DOCDIR)/%.pdf : %.aweb
 %.test : %.aweb
 	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $(TESTDIR)/$@ $<
 
-%.pdf : %.uxf
+$(IMAGEDIR)/%.pdf : %.uxf
 	javaw -jar $(UMLET_ROOT)/umlet.jar -action=convert -format=pdf\
-		-filename=$< -output=$(basename $@)-portrait
-	pdftk $(basename $@)-portrait.pdf cat 1L output $@
-	$(RM) $(basename $@)-portrait.pdf
+		-filename=$< -output=$(basename $@)
 
 #
 # vim :set sw=8 ts=8 sts=8 noexpandtab:
