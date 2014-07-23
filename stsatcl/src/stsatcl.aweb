@@ -4926,7 +4926,7 @@ method CancelDelayedSignal {src event} {
 }
 ----
 
-=== State Machine Trace
+== State Machine Trace
 
 It's hard to overemphasize the importance of the execution trace
 for a set of state machines.
@@ -4947,7 +4947,8 @@ state machine tracing implemented by this architecture.
 First we lay out some basic rules.
 
 * Tracing can be controlled.
-It is necessary to be able to start and stop the trace capture.
+It is necessary to be able to start and stop the trace capture
+and to clear out any accumulated traces.
 * Tracing must capture all the semantics of event dispatch,
 including polymorphic and creation events.
 * It is only necessary to trace event dispatch.
@@ -4957,7 +4958,7 @@ is not captured.
 including the ability to save the trace data into some persistent form,
 (_e.g._ a file).
 
-==== Trace Data
+=== Trace Data
 
 image::trace-schema.pdf[title="Trace Data Class Model"]
 
@@ -4976,8 +4977,8 @@ namespace import ::ralutil::*
 
 relvar create Trace {
     Trace_Id    int
-    Timestamp   string
-    Object      string
+    Timestamp   bignum
+    Target      string
     Class       string
 } Trace_Id
 
@@ -4985,8 +4986,9 @@ relvar create Creation {
     Trace_Id    int
 } Trace_Id
 
-relvar create Polymorph {
+relvar create Polymorphic {
     Trace_Id    int
+    Source      string
     Linkage     string
     Event       string
 } Trace_Id
@@ -5003,14 +5005,14 @@ relvar create Transition {
 relvar partition R1\
     Trace Trace_Id\
         Creation Trace_Id\
-        Polymorph Trace_Id\
+        Polymorphic Trace_Id\
         Transition Trace_Id
 
 variable traceState off
 variable traceNumber 0
 ----
 
-==== Trace Control
+=== Trace Control
 
 [source,tcl]
 ----
@@ -5031,7 +5033,7 @@ proc ::stsatcl::traceControl {op} {
         }
         clear {
             relvar eval {
-                foreach rvar {Trace Creation Polymorph Transition} {
+                foreach rvar {Trace Creation Polymorphic Transition} {
                     relvar set $rvar [relation emptyof [relvar set $rvar]]
                 }
             }
@@ -5053,44 +5055,32 @@ namespace export traceControl
 BAD_TRACEOP   {unknown trace operation, "%s"}
 ----
 
-==== Trace Population
+=== Trace Population
 
 [source,tcl]
 ----
 <<stsatcl commands>>=
-proc ::stsatcl::NewTrace {obj} {
+proc ::stsatcl::NewTrace {target} {
     variable traceNumber
     incr traceNumber
     relvar insert Trace [list\
         Trace_Id    $traceNumber\
-        Timestamp   [TimeStamp]\
-        Object      $obj\
-        Class       [info object class $obj]\
+        Timestamp   [clock microseconds]\
+        Target      $target\
+        Class       [info object class $target]\
     ]
     return $traceNumber
-}
-
-proc ::stsatcl::TimeStamp {} {
-    set time [clock microseconds]
-
-    set sec [expr {$time / 1000000}]
-    set time [expr {$time % 1000000}]
-
-    set msec [expr {$time / 1000}]
-    set usec [expr {$time % 1000}]
-
-    return [format %ld.%03ld.%03ld $sec $msec $usec]
 }
 ----
 
 [source,tcl]
 ----
 <<stsatcl commands>>=
-proc ::stsatcl::TraceCreation {obj} {
+proc ::stsatcl::TraceCreation {target} {
     variable traceState
     if {$traceState} {
         relvar eval {
-            set traceid [NewTrace $obj]
+            set traceid [NewTrace $target]
             relvar insert Creation [list\
                 Trace_Id    $traceid\
             ]
@@ -5102,13 +5092,14 @@ proc ::stsatcl::TraceCreation {obj} {
 [source,tcl]
 ----
 <<stsatcl commands>>=
-proc ::stsatcl::TracePolymorph {obj link event} {
+proc ::stsatcl::TracePolymorph {target source link event} {
     variable traceState
     if {$traceState} {
         relvar eval {
-            set traceid [NewTrace $obj]
-            relvar insert Polymorph [list\
+            set traceid [NewTrace $target]
+            relvar insert Polymorphic [list\
                 Trace_Id    $traceid\
+                Source      $source\
                 Linkage     $link\
                 Event       $event\
             ]
@@ -5120,11 +5111,11 @@ proc ::stsatcl::TracePolymorph {obj link event} {
 [source,tcl]
 ----
 <<stsatcl commands>>=
-proc ::stsatcl::TraceTransition {obj source event curr new params} {
+proc ::stsatcl::TraceTransition {target source event curr new params} {
     variable traceState
     if {$traceState} {
         relvar eval {
-            set traceid [NewTrace $obj]
+            set traceid [NewTrace $target]
             relvar insert Transition [list\
                 Trace_Id    $traceid\
                 Source      $source\
@@ -5138,53 +5129,20 @@ proc ::stsatcl::TraceTransition {obj source event curr new params} {
 }
 ----
 
-==== Trace Operations
+=== Trace Operations
 
 [source,tcl]
 ----
 <<stsatcl commands>>=
-proc ::stsatcl::formatTraces {} {
-    set traces [relvar set Trace]
-    foreach rvname {Creation Polymorph Transition} {
-        set traces [rvajoin $traces [relvar set $rvname] $rvname]
-    }
-
-    set result [list]
-    relation foreach trace $traces -ascending Trace_Id {
-        relation assign $trace
-        set labeled [dict create\
-            id      $Trace_Id\
-            time    $Timestamp\
-            class   $Class\
-            target  $Object\
-        ]
-        if {[relation isnotempty $Transition]} {
-            relation assign $Transition
-            dict set labeled type transition
-            dict set labeled source $Source
-            dict set labeled event $Event
-            dict set labeled current $CurrState
-            dict set labeled new $NewState
-            dict set labeled params $Params
-        } elseif {[relation isnotempty $Polymorph]} {
-            relation assign $Polymorph
-            dict set labeled type polymorphic
-            dict set labeled event $Event
-            dict set labeled link $Link
-        } elseif {[relation isnotempty $Creation]} {
-            dict set labeled type creation
-        }
-
-        lappend result $labeled
-    }
-    return $result
+proc ::stsatcl::decodeTraces {} {
+    tailcall TracesToRecords [relvar set Trace]
 }
 ----
 
 [source,tcl]
 ----
 <<exported tests>>=
-test formatTraces-2.0 {
+test decodeTraces-1.0 {
     display trace data
 } -setup {
     ::stsatcl STSAClass create tr1 {
@@ -5216,10 +5174,159 @@ test formatTraces-2.0 {
     inst1 signal e1
     inst1 signal e2
     waitForSync
-    set traces [::stsatcl::formatTraces]
+    set traces [::stsatcl::decodeTraces]
     puts $traces
     llength $traces
 } -result {2}
+----
+
+[source,tcl]
+----
+<<stsatcl commands>>=
+proc ::stsatcl::ptraces {tracerecs} {
+    if {[llength $tracerecs] == 0} {
+        return {}
+    }
+    set prevtime [dict get [lindex $tracerecs 0] time]
+    foreach rec $tracerecs {
+        dict with rec {
+            append result "[FormatTimestamp $time]: "
+            append result "[FormatTimeDiff [expr {$time - $prevtime}]]: "
+            set prevtime $time
+            switch -exact -- $type {
+                transition {
+                    append result\
+                        "Transition: "\
+                        "[list $source] - $event\{$params\} -> $target ==> "\
+                        "$current -> $new"
+                }
+                polymorphic {
+                    append result\
+                        "Polymorphic: $link:"\
+                        "$source - $event -> $target"
+                }
+                creation {
+                    append result\
+                        "Creation: $source ==> $target"
+                }
+                default {
+                    DeclError BAD_TRACETYPE $type
+                }
+            }
+            append result \n
+        }
+    }
+    return [string trimright $result]
+}
+----
+
+(((error code,BAD_TRACETYPE)))
+[source,tcl]
+----
+<<error code format>>=
+BAD_TRACETYPE   {unknown trace type, "%s"}
+----
+
+[source,tcl]
+----
+<<exported tests>>=
+test ptraces-1.0 {
+    display human readable trace data
+} -setup {
+    ::stsatcl STSAClass create tr1 {
+        attribute {Count 0} {Max 2}
+        statemodel {
+            state s1 {} {
+                my variable Count Max
+                incr Count
+                if {$Count >= $Max} {
+                    ::stsatcl::test::syncToTest $Count
+                }
+            }
+            transition s1 - e1 -> s2
+
+            state s2 {} {
+                my variable Count
+                incr Count
+            }
+            transition s2 - e2 -> s1
+        }
+    }
+} -cleanup {
+    ::stsatcl traceControl off
+    ::stsatcl traceControl clear
+    tr1 destroy
+} -body {
+    ::stsatcl traceControl on
+    tr1 create inst1
+    inst1 signal e1
+    inst1 signal e2
+    waitForSync
+    set traces [::stsatcl::ptraces [::stsatcl::decodeTraces]]
+    puts $traces
+} -result {}
+----
+
+[source,tcl]
+----
+<<stsatcl commands>>=
+proc ::stsatcl::FormatTimestamp {time} {
+    set sec [clock format [expr {$time / 1000000}] -format %T]
+    set time [expr {$time % 1000000}]
+    set msec [expr {$time / 1000}]
+    set usec [expr {$time % 1000}]
+
+    return [format %s.%03ld.%03ld $sec $msec $usec]
+}
+
+proc ::stsatcl::FormatTimeDiff {time} {
+    set sec [expr {$time / 1000000}]
+    set time [expr {$time % 1000000}]
+    set msec [expr {$time / 1000}]
+    set usec [expr {$time % 1000}]
+
+    return [format %ld.%03ld.%03ld $sec $msec $usec]
+}
+----
+
+[source,tcl]
+----
+<<stsatcl commands>>=
+proc ::stsatcl::TracesToRecords {traces} {
+    foreach rvname {Creation Polymorphic Transition} {
+        set traces [rvajoin $traces [relvar set $rvname] $rvname]
+    }
+
+    set result [list]
+    relation foreach trace $traces -ascending Trace_Id {
+        relation assign $trace
+        set labeled [dict create\
+            id      $Trace_Id\
+            time    $Timestamp\
+            class   $Class\
+            target  $Target\
+        ]
+        if {[relation isnotempty $Transition]} {
+            relation assign $Transition
+            dict set labeled type transition
+            dict set labeled source $Source
+            dict set labeled event $Event
+            dict set labeled current $CurrState
+            dict set labeled new $NewState
+            dict set labeled params $Params
+        } elseif {[relation isnotempty $Polymorphic]} {
+            relation assign $Polymorphic
+            dict set labeled type polymorphic
+            dict set labeled event $Event
+            dict set labeled link $Link
+        } elseif {[relation isnotempty $Creation]} {
+            dict set labeled type creation
+        }
+
+        lappend result $labeled
+    }
+    return $result
+}
 ----
 
 === Utility Methods [[util-methods,utility methods]]
@@ -5318,17 +5425,29 @@ method EventSource {} {
 [source,tcl]
 ----
 <<utility methods>>=
-method ForwardPolyEvent {fwrd event arglist} {
+method ForwardPolyEvent {type event arglist} {
     classvariable partitions
     foreach partition $partitions { # <1>
         my variable $partition
-        [set $partition] $fwrd $event {*}$arglist
-        ::stsatcl::TracePolymorph [self] $partition $event
+        set target [set $partition] ; # <2>
+        if {$target eq {}} {
+            tailcall ::stsatcl::DeclError UNCOND $partition
+        }
+        $target $type $event {*}$arglist ; # <3>
+        ::stsatcl::TracePolymorph $target [self] $partition $event
     }
 }
 ----
 <1> Polymorphic events are propagated down all the partition linkages
 that are specified for the class.
+<2> Polymorphic event dispatch implies a runtime traversal of the
+partition linkage from superclass to subclass.
+However unlike the case of a conventional partition traversal,
+we don't care about the type of the subclass instance.
+All subclasses must be prepared to handle the polymorphic event.
+<3> Despite all the variable substitution,
+this command signals the event to the subclass instance.
+Here _type_ controls whether the signal is delayed.
 
 == Code Organization
 
