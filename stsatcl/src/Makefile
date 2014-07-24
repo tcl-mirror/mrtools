@@ -130,7 +130,7 @@ $(DOCDIR)/%.pdf : %.aweb
 	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $(TESTDIR)/$@ $<
 
 $(IMAGEDIR)/%.pdf : %.uxf
-	umlet -action=convert -format=pdf\
+	-umlet -action=convert -format=pdf\
 		-filename=$< -output=$(basename $@)
 
 #
