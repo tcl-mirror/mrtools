@@ -46,24 +46,19 @@ configuration of the resulting XUML implemenation class to be specified.
 Instances can then be created to generate a population of the model.
 This is shown in the diagram below.
 
-["ditaa",options="no-shadows",title="STSA Tcl Block Diagram"]
+["blockdiag",title="STSA Tcl Block Diagram"]
 -----------------------------------------------------------------------------
-+---------------+
-|  STSA Class   |
-|  o meta-class |
-+-------+-------+
-        |
-        | create
-        V
-+-------+-------+
-|  XUML Class   |
-+-------+-------+
-        |
-        | create/new
-        V
-+-------+-------+
-|  XMUL Object  |
-+-------+-------+
+blockdiag {
+    orientation = portrait ;
+    node_width = 200 ;
+
+    M [label="STSA Meta-Class"]
+    C [label="XUML Implementation Class"]
+    O [label="XUML Implementation Object"]
+
+    M <- C
+    C <- O
+}
 -----------------------------------------------------------------------------
 
 This package follows the common convention of defining a small
@@ -164,8 +159,8 @@ Realistic models and their translation easily become books in themselves.
 
 === Error Reporting
 
-Most software pushes any discussion of errors to the end as if it were
-unimportant or an afterthought (which in many cases it is).
+Often any discussion of errors is pushed to the end as if it were
+unimportant or an afterthought (which, sadly, in many cases it is).
 Here we bring error reporting up front to emphasize its importance.
 
 We will consistently use the +throw+ command to produce errors
@@ -205,6 +200,14 @@ array set errFormats {
     <<error code format>>
 }
 ----
+
+It is also important to realize that programs built upon this
+architecture will perform most of their operations in event callbacks.
+This means that any error encountered will happen as background errors.
+It will be important to install a background error
+handlerfootnote:[See +bgerror+ and +interp bgerror+ commands].
+Attention to the error codes thrown by this package can make coding a
+background error handler much easier.
 
 == STSA Class
 
@@ -6038,6 +6041,247 @@ All subclasses must be prepared to handle the polymorphic event.
 this command signals the event to the subclass instance.
 Here _type_ controls whether the signal is delayed and, if delayed,
 the delay time.
+
+== Introspection
+
+It is very common in the Tcl world to provide the means to query the
+internals of things (_e.g._ the +info+ command).
+Access to this kind of data can provide powerful opportunities for
+meta-programming in addition to aiding testing and debugging.
+
+[source,tcl]
+----
+<<stsaclass constructor>>=
+objdefine [self] {
+    <<class introspection methods>>
+}
+----
+
+=== Info Method
+
+(((method,XUMLClass,info)))
+
+[source,tcl]
+----
+<<class introspection methods>>=
+method info {topic} {
+    switch -exact -- $topic {
+        attributes {
+            my variable attrInfo
+            return $attrInfo
+        }
+        links {
+            my variable linkInfo
+            return $linkInfo
+        }
+        states {
+            my variable states
+            return $states
+        }
+        events {
+            my variable events
+            return $events
+        }
+        polyevents {
+            my variable polyEvents
+            return $polyEvents
+        }
+        initialstate {
+            my variable initialstate
+            return $initialstate
+        }
+        terminals {
+            my variable terminals
+            return $terminals
+        }
+        default {
+            tailcall ::stsatcl::DeclError UNKNOWN_INFO $topic
+        }
+    }
+}
+----
+(((error code,UNKNOWN_INFO)))
+[source,tcl]
+----
+<<error code format>>=
+UNKNOWN_INFO        {unknown information topic, "%s"}
+----
+
+=== Dot Method
+
+Draw state model graph with "dot".
+
+(((method,XUMLClass,dot)))
+
+[source,tcl]
+----
+<<class introspection methods>>=
+method dot {} {
+    set result {}
+    append result "digraph [namespace tail [self]] \{" \n
+    append result "    node\[shape=\"box\"]" \n
+
+    my variable states
+    foreach state $states {
+        if {$state eq "@"} {
+            append result "    \"__pseudo__\"\["\
+                "shape=\"point\""\
+                ",label=\"\""\
+                "\]\n"
+        } else {
+            lassign [info class definition [self] ${state}__STATE__]\
+                    arguments body
+            set code "$state \{$arguments\} \{"
+            append code\
+                    [textutil::adjust::indent [textutil::adjust::undent $body]\
+                    "    "]
+            append code "\n\}"
+            #puts "code = \"$code\""
+            set labelCode {}
+            set escapemap [list \\ \\\\ \" \\\"]
+            foreach line [split $code \n] {
+                # We need to escape certain characters to keep "dot"
+                # away from them.
+                append labelCode\
+                    [string map $escapemap $line]\
+                    "\\l"
+            }
+            #puts "labelCode = \"$labelCode\""
+            set stProps "label=\"$labelCode\""
+
+            my variable initialstate
+            if {$state eq $initialstate} {
+                append stProps ",style=\"bold\""
+            }
+            append result "    \"$state\"\[$stProps]" \n
+        }
+    }
+
+    my variable transitions
+    foreach {trans dststate} [array get transitions] {
+        lassign [split $trans ,] currstate event
+        if {$currstate eq "@"} {
+            set currstate __pseudo__
+        }
+        if {!($dststate eq "IG" || $dststate eq "CH")} {
+            append result "    \"$currstate\" -> \"$dststate\"\
+                    \[label=\"$event\"]" \n
+        }
+    }
+
+    append result "\}"
+
+    return $result
+}
+----
+
+[source,tcl]
+----
+<<required packages>>=
+package require textutil::adjust
+----
+
+(((method,XUMLClass,dotfile)))
+
+[source,tcl]
+----
+<<class introspection methods>>=
+method dotfile {filename} {
+    set chan [open $filename w]
+    try {
+        chan puts $chan [my dot]
+    } finally {
+        chan close $chan
+    }
+    return
+}
+----
+
+(((method,XUMLClass,draw)))
+
+[source,tcl]
+----
+<<class introspection methods>>=
+method draw {{dotopts {-Gcenter=1 -Gratio=auto -Gsize=7.5,10 -Tps -o%F.ps}}} {
+    set basename [namespace tail [self]]
+    set dotexec [auto_execok dot]
+    if {$dotexec eq {}} {
+        tailcall ::stsatcl::DeclError NODOT
+    }
+    set dotopts [string map [list %F $basename] $dotopts]
+    set chan [open "| $dotexec $dotopts" w]
+    try {
+        chan puts $chan [my dot]
+    } finally {
+        chan close $chan
+    }
+    return
+}
+----
+(((error code,NODOT)))
+[source,tcl]
+----
+<<error code format>>=
+NODOT        {cannot find \"dot\" executable}
+----
+
+[float]
+===== Dot Method Tests
+
+[source,tcl]
+----
+<<exported tests>>=
+test dot-1.0 {
+    draw state model with dot
+} -setup {
+    ::stsatcl STSAClass create dot1 {
+        statemodel {
+            state s1 {} {
+                puts "in s1"
+            }
+            transition s1 - e1 -> s2
+
+            state s2 {} {
+                puts "in s2"
+            }
+
+            transition @ - e1 -> s1
+        }
+    }
+} -cleanup {
+    dot1 destroy
+} -body {
+    set diagram [dot1 dot]
+    puts $diagram
+} -result {}
+----
+
+[source,tcl]
+----
+<<exported tests>>=
+test draw-1.0 {
+    draw and render state model with dot
+} -setup {
+    ::stsatcl STSAClass create dot1 {
+        statemodel {
+            state s1 {} {
+                puts "in s1"
+            }
+            transition s1 - e1 -> s2
+
+            state s2 {} {
+                puts "in s2"
+            }
+
+            transition @ - e1 -> s1
+        }
+    }
+} -cleanup {
+    dot1 destroy
+} -body {
+    dot1 draw
+} -result {}
+----
 
 == Code Organization
 
