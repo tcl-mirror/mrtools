@@ -30,6 +30,7 @@ DOCSRC 	=\
 
 DIAGRAMS =\
 	trace-schema.uxf\
+	wmc-class-diagram.uxf\
 	$(NULL)
 
 IMAGES =\
