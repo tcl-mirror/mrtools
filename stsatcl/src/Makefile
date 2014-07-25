@@ -31,6 +31,8 @@ DOCSRC 	=\
 DIAGRAMS =\
 	trace-schema.uxf\
 	wmc-class-diagram.uxf\
+	wm-states.uxf\
+	ct-states.uxf\
 	$(NULL)
 
 IMAGES =\
@@ -98,7 +100,7 @@ ASCIIDOC_OPTS =\
 
 .PHONY : all doc code tests runtests clean
 
-all : doc code tests
+all : doc code tests example
 
 doc : $(PDF)
 
@@ -106,8 +108,14 @@ code : $(TCLSRC) pkgIndex.tcl
 
 tests : code $(TESTS)
 
+example : $(TCLSRC) wmctrl.tcl
+
+
 runtests : tests
 	cd $(TESTDIR) ; tclsh $(TESTS) -verbose bet -level info
+
+runexample : example
+	tclsh wmctrl.tcl
 
 clean :
 	$(RM) $(CLEANFILES)
@@ -117,6 +125,9 @@ $(PDF) : $(DOCSRC) $(EXTRAS) $(IMAGES)
 $(TCLSRC) : $(DOCSRC)
 
 pkgIndex.tcl : $(DOCSRC)
+	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
+
+wmctrl.tcl : $(DOCSRC)
 	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
 
 $(DOCDIR)/%.pdf : %.aweb
