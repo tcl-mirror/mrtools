@@ -110,17 +110,18 @@ tests : code $(TESTS)
 
 example : $(TCLSRC) wmctrl.tcl
 
-
 runtests : tests
 	cd $(TESTDIR) ; tclsh $(TESTS) -verbose bet -level info
 
 runexample : example
-	tclsh wmctrl.tcl
+	tclsh wmctrl.tcl | tee wmctrl-trace.txt
+
+wmctrl-trace.txt : runexample
 
 clean :
 	$(RM) $(CLEANFILES)
 
-$(PDF) : $(DOCSRC) $(EXTRAS) $(IMAGES)
+$(PDF) : $(DOCSRC) $(EXTRAS) $(IMAGES) wmctrl-trace.txt
 
 $(TCLSRC) : $(DOCSRC)
 
