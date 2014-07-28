@@ -1,10 +1,4 @@
 #
-# Copyright 2014, InCube Labs, LLC.
-# All rights reserved.  This file contains unpublished work that is
-# confidential and proprietary to InCube Labs.  This document may not, in
-# whole or in part, be duplicated, disclosed or used for any purposes,
-# whatsoever, without written permission from InCube Labs.
-#
 #*++
 # PROJECT:
 #	Tools
