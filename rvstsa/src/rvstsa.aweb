@@ -1,0 +1,475 @@
+// vim:syntax=asciidoc:
+= rvstsa - Relation Variable Based Single Threaded Software Architecture
+
+== Introduction
+
+Similar to +stsatcl+.
+
+Only built upon relation variables and relational algebra.
+
+== Error Reporting
+
+Often any discussion of errors is pushed to the end as if it were
+unimportant or an afterthought (which, sadly, in many cases it is).
+Here we bring error reporting up front to emphasize its importance.
+
+We will consistently use the +throw+ command to produce errors
+in an effort to insure that reasonable error codes are produced.
+Good error codes are key to programatic recovery from errors.
+The format of the error code will be a list of the following elements:
+
+. The package name in upper case, _i.e._ +RVSTSA+.
+. An error code string.
+. Parameters that are dependent upon the error specifics.
+. A human readable error message.
+
+Although the size of the error code list varies,
+the first two elements and the last element have consistent definitions.
+
+We factor into common code the manipulations required to +throw+
+errors.
+
+[source,tcl]
+----
+<<package commands>>=
+proc ::rvstsa::DeclError {errcode args} {
+    variable errFormats
+    set errmsg [format $errFormats($errcode) {*}$args]
+    tailcall throw [list STSACLASS $errcode {*}$args $errmsg] $errmsg
+}
+----
+
+The mapping of +errcode+ values to format strings is held as
+package data in the namespace of the +rvstsa+ package.
+
+[source,tcl]
+----
+<<package data>>=
+variable errFormats
+array set errFormats {
+    <<error code format>>
+}
+----
+
+It is also important to realize that programs built upon this
+package will perform most of their operations in event callbacks.
+This means that any error encountered,
+for example during a state activity,
+will happen a background error.
+It will be important to install a background error
+handlerfootnote:[See +bgerror+ and +interp bgerror+ commands].
+Attention to the error codes thrown by this package can make coding a
+background error handler much easier.
+
+== RVSTSA Class
+
+(((class,RVSTSA Class)))
+
+[source,tcl]
+----
+<<package commands>>=
+::oo::class create ::rvstsa::RVSTSAClass {
+    unexport new
+    <<rvstsa class configuration>>
+}
+
+<<package exports>>=
+namespace export RVSTSAClass
+----
+
+=== Create
+
+Want to have all the underlying relvars in the same namespace
+and resolve all the objects into the same namespace
+
+(((method,RVSTSAClass,create)))
+
+[source,tcl]
+----
+<<rvstsa class configuration>>=
+self method create {name args} {
+    set name [::rvstsa::ResolveName $name]
+    if {[namespace exists $name]} {
+        ::rvstsa::DeclError DUP_NAME $name
+    }
+    namespace eval $name {}
+    return [my createWithNamespace $name $name {*}$args]
+}
+----
+
+(((error code,DUP_NAME)))
+[source,tcl]
+----
+<<error code format>>=
+DUP_NAME {namespace "%s" already exists}
+----
+
+[float]
+===== Create Method Tests
+
+[source,tcl]
+----
+<<constructor tests>>=
+test create-1.0 {
+    create objects in fixed namespaces
+} -setup {
+    ::rvstsa RVSTSAClass create testns::at1
+} -cleanup {
+    testns::at1 destroy
+} -body {
+    namespace exists [namespace current]::testns::at1
+} -result {1}
+----
+
+=== Constructor
+
+(((method,RVSTSAClass,constructor)))
+
+[source,tcl]
+----
+<<rvstsa class configuration>>=
+constructor {{config {}}} {
+    <<rvstsa class constructor>>
+}
+----
+
+[source,tcl]
+----
+<<required packages>>=
+package require ral
+package require ralutil
+
+<<rvstsa class constructor>>=
+namespace import ::ral::*
+namespace import ::ralutil::*
+----
+
+[source,tcl]
+----
+<<required packages>>=
+package require struct::set
+package require struct::list
+----
+
+[source,tcl]
+----
+<<required packages>>=
+package require oo::util
+# The mixin of "oo::class.Delegate", interacts badly with meta-classes that
+# have constructor arguments. So we eliminate the oo::class mixins here. This
+# will mean that you can't define class methods.
+#::oo::define oo::class self mixin
+----
+
+[source,tcl]
+----
+<<rvstsa class constructor>>=
+link\
+    {attribute Attribute}\
+    {identifier Identifier}\
+    {statemodel Statemodel}
+----
+
+[source,tcl]
+----
+<<rvstsa class constructor>>=
+my variable attrInfo
+set attrInfo [relation create {Name string DataType string DefValue string}]
+----
+
+The implementation of the +Attribute+ method consists of an
+interation over the arguments, validating the attribute names
+and assigning the default values into the +attrInfo+ dictionary.
+
+(((method,STSAClass,Attribute)))
+
+[source,tcl]
+----
+<<rvstsa class configuration>>=
+method Attribute {name datatype {defvalue {}}} {
+    my variable attrInfo
+
+    if {$name eq {}} {
+        tailcall ::rvstsa::DeclError BAD_ATTRIBUTE $name
+    }
+    my CheckDupAttribute $name
+    set attrInfo [relation insert $attrInfo [list\
+        Name        $name\
+        DataType    $datatype\
+        DefValue    $defvalue\
+    ]]
+}
+----
+
+(((error code,BAD_ATTRIBUTE)))
+[source,tcl]
+----
+<<error code format>>=
+BAD_ATTRIBUTE           {invalid attribute name, "%s"}
+----
+
+[source,tcl]
+----
+<<rvstsa class constructor>>=
+my variable idCounter 0
+my variable idInfo
+set idInfo [relation create {IdNum int IdAttrs list}]
+----
+
+(((method,RVSTSAClass,Identifier)))
+
+[source,tcl]
+----
+<<rvstsa class configuration>>=
+method Identifier {args} {
+    foreach attr $args {
+        my CheckDupAttribute $name
+    }
+
+    my variable idCounter
+    my variable idInfo
+    set idInfo [relation insert $idInfo [list\
+        IdNum   [incr idCounter]\
+        IdAttrs $args\
+    ]
+}
+----
+(((error code,UNKNOWN_ATTRIBUTE)))
+[source,tcl]
+----
+<<error code format>>=
+UNKNOWN_ATTRIBUTE        {unknown attribute name, "%s"}
+----
+
+[source,tcl]
+----
+<<rvstsa class constructor>>=
+my eval $config
+----
+
+[source,tcl]
+----
+<<rvstsa class constructor>>=
+if {[relation isnotempty $attrInfo]} {
+    if {[relation isempty $idInfo]} {
+        tailcall ::rvstsa::DeclError NO_IDENTIFIERS [self]
+    }
+    set header [relation body [relation project $attrInfo Name DataType]]
+    set ids [relation list [relation project $idInfo IdAttrs]]
+    relvar create [self] [::struct::list flatten $header] {*}$ids
+}
+----
+
+(((error code,NO_IDENTIFIERS)))
+[source,tcl]
+----
+<<error code format>>=
+NO_IDENTIFIERS  {no identifiers defined for class, "%s"}
+----
+
+== Common Utility Commands
+
+=== Resolve Name
+
+(((proc,ResolveName)))
+
+[source,tcl]
+----
+<<package commands>>=
+proc ::rvstsa::ResolveName {name {level 2}} {
+    if {[string range $name 0 1] ne "::"} {
+        set name\
+            [string trimright [uplevel $level namespace current] :]::$name
+    }
+    return $name
+}
+----
+
+=== Check Dup Attribute
+
+(((proc,CheckDupAttribute)))
+
+[source,tcl]
+----
+<<rvstsa class configuration>>=
+method CheckDupAttribute {name} {
+    my variable attrInfo
+    if {[relation isnotempty\
+            [relation restrictwith $attrInfo {$Name eq $name}]]} {
+        tailcall ::rvstsa::DeclError DUP_ATTRIBUTE $name
+    }
+}
+----
+
+(((error code, DUP_ATTRIBUTE)))
+[source,tcl]
+----
+<<error code format>>=
+DUP_ATTRIBUTE           {duplicate attribute name, "%s"}
+----
+
+== Code Organization
+
+=== Source Code
+
+[source,tcl]
+----
+<<rvstsa.tcl>>=
+# DO NOT EDIT THIS FILE!
+# THIS FILE IS AUTOMATICALLY GENERATED FROM A LITERATE PROGRAM SOURCE FILE.
+#
+# This software is copyrighted 2014 by G. Andrew Mangogna.
+# The following terms apply to all files associated with the software unless
+# explicitly disclaimed in individual files.
+# 
+# The authors hereby grant permission to use, copy, modify, distribute,
+# and license this software and its documentation for any purpose, provided
+# that existing copyright notices are retained in all copies and that this
+# notice is included verbatim in any distributions. No written agreement,
+# license, or royalty fee is required for any of the authorized uses.
+# Modifications to this software may be copyrighted by their authors and
+# need not follow the licensing terms described here, provided that the
+# new terms are clearly indicated on the first page of each file where
+# they apply.
+# 
+# IN NO EVENT SHALL THE AUTHORS OR DISTRIBUTORS BE LIABLE TO ANY PARTY FOR
+# DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES ARISING
+# OUT OF THE USE OF THIS SOFTWARE, ITS DOCUMENTATION, OR ANY DERIVATIVES
+# THEREOF, EVEN IF THE AUTHORS HAVE BEEN ADVISED OF THE POSSIBILITY OF
+# SUCH DAMAGE.
+# 
+# THE AUTHORS AND DISTRIBUTORS SPECIFICALLY DISCLAIM ANY WARRANTIES,
+# INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.  THIS SOFTWARE
+# IS PROVIDED ON AN "AS IS" BASIS, AND THE AUTHORS AND DISTRIBUTORS HAVE
+# NO OBLIGATION TO PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS,
+# OR MODIFICATIONS.
+# 
+# GOVERNMENT USE: If you are acquiring this software on behalf of the
+# U.S. government, the Government shall have only "Restricted Rights"
+# in the software and related documentation as defined in the Federal
+# Acquisition Regulations (FARs) in Clause 52.227.19 (c) (2).  If you
+# are acquiring the software on behalf of the Department of Defense,
+# the software shall be classified as "Commercial Computer Software"
+# and the Government shall have only "Restricted Rights" as defined in
+# Clause 252.227-7013 (c) (1) of DFARs.  Notwithstanding the foregoing,
+# the authors grant the U.S. Government and others acting in its behalf
+# permission to use and distribute the software in accordance with the
+# terms specified in this license.
+
+package require Tcl 8.6
+
+<<required packages>>
+
+namespace eval ::rvstsa {
+    <<package exports>>
+    namespace ensemble create
+
+    variable version 1.0a1
+
+    <<package data>>
+    <<package initialization>>
+    <<package commands>>
+}
+
+package provide rvstsa $::rvstsa::version
+----
+
+=== Unit Tests
+
+[source,tcl]
+----
+<<rvstsa.test>>=
+# DO NOT EDIT THIS FILE!
+# THIS FILE IS AUTOMATICALLY GENERATED FROM A LITERATE PROGRAM SOURCE FILE.
+#
+# This software is copyrighted 2014 by G. Andrew Mangogna.
+# The following terms apply to all files associated with the software unless
+# explicitly disclaimed in individual files.
+# 
+# The authors hereby grant permission to use, copy, modify, distribute,
+# and license this software and its documentation for any purpose, provided
+# that existing copyright notices are retained in all copies and that this
+# notice is included verbatim in any distributions. No written agreement,
+# license, or royalty fee is required for any of the authorized uses.
+# Modifications to this software may be copyrighted by their authors and
+# need not follow the licensing terms described here, provided that the
+# new terms are clearly indicated on the first page of each file where
+# they apply.
+# 
+# IN NO EVENT SHALL THE AUTHORS OR DISTRIBUTORS BE LIABLE TO ANY PARTY FOR
+# DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES ARISING
+# OUT OF THE USE OF THIS SOFTWARE, ITS DOCUMENTATION, OR ANY DERIVATIVES
+# THEREOF, EVEN IF THE AUTHORS HAVE BEEN ADVISED OF THE POSSIBILITY OF
+# SUCH DAMAGE.
+# 
+# THE AUTHORS AND DISTRIBUTORS SPECIFICALLY DISCLAIM ANY WARRANTIES,
+# INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.  THIS SOFTWARE
+# IS PROVIDED ON AN "AS IS" BASIS, AND THE AUTHORS AND DISTRIBUTORS HAVE
+# NO OBLIGATION TO PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS,
+# OR MODIFICATIONS.
+# 
+# GOVERNMENT USE: If you are acquiring this software on behalf of the
+# U.S. government, the Government shall have only "Restricted Rights"
+# in the software and related documentation as defined in the Federal
+# Acquisition Regulations (FARs) in Clause 52.227.19 (c) (2).  If you
+# are acquiring the software on behalf of the Department of Defense,
+# the software shall be classified as "Commercial Computer Software"
+# and the Government shall have only "Restricted Rights" as defined in
+# Clause 252.227-7013 (c) (1) of DFARs.  Notwithstanding the foregoing,
+# the authors grant the U.S. Government and others acting in its behalf
+# permission to use and distribute the software in accordance with the
+# terms specified in this license.
+
+package require Tcl 8.6
+package require cmdline
+package require logger
+
+source ../src/rvstsa.tcl
+chan puts "testing rvstsa version: [package require rvstsa]"
+
+# Add custom arguments here.
+set optlist {
+    {level.arg warn {Log debug level}}
+}
+array set options [::cmdline::getKnownOptions argv $optlist]
+
+package require tcltest
+eval tcltest::configure $argv
+
+namespace eval ::rvstsa::test {
+    ::logger::initNamespace [namespace current] $::options(level)
+
+    namespace import ::tcltest::*
+
+    <<test utility procs>>
+    <<constructor tests>>
+    <<exported methods tests>>
+    <<unexported methods tests>>
+
+    cleanupTests
+}
+----
+
+
+////
+[source,tcl]
+----
+test X-1.0 {
+} -setup {
+} -cleanup {
+} -body {
+} -result {}
+----
+////
+
+=== Package Index
+
+We also provide a root chunk to extract a package index file.
+
+[source,tcl]
+----
+<<pkgIndex.tcl>>=
+package ifneeded rvstsa 1.0 [list source [file join $dir rvstsa.tcl]]
+----
