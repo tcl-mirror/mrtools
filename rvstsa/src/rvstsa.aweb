@@ -110,7 +110,7 @@ DUP_NAME {namespace "%s" already exists}
 [source,tcl]
 ----
 <<constructor tests>>=
-test create-1.0 {
+test obj-create-1.0 {
     create objects in fixed namespaces
 } -setup {
     ::rvstsa RVSTSAClass create testns::at1 {
@@ -124,17 +124,7 @@ test create-1.0 {
 } -result {1}
 ----
 
-=== Constructor
-
-(((method,RVSTSAClass,constructor)))
-
-[source,tcl]
-----
-<<rvstsa class configuration>>=
-constructor {config} {
-    <<rvstsa class constructor>>
-}
-----
+=== Defining RVSTSA Classes
 
 [source,tcl]
 ----
@@ -145,13 +135,6 @@ package require ralutil
 <<rvstsa class constructor>>=
 namespace import ::ral::*
 namespace import ::ralutil::*
-----
-
-[source,tcl]
-----
-<<required packages>>=
-package require struct::set
-package require struct::list
 ----
 
 [source,tcl]
@@ -238,6 +221,8 @@ method Identifier {args} {
     ]]
 }
 ----
+
+=== Defining RVSTSA Class State Models
 
 [source,tcl]
 ----
@@ -330,8 +315,6 @@ DUPLICATE_STATE     {duplicate state, "%s"}
 [source,tcl]
 ----
 <<rvstsa class constructor>>=
-my variable events
-set events [relation create {EventName string}]
 my variable transitions
 set transitions [relation create {FromState string Event string ToState string}]
 ----
@@ -352,8 +335,6 @@ method Transition {fromstate - event -> tostate} {
     if {$tostate eq "@"} {
         tailcall ::rvstsa::DeclError TRANS_DST
     }
-    my variable events
-    set events [relation uinsert $events [list EventName $event]]
 
     my variable transitions
     try {
@@ -383,7 +364,8 @@ DUPLICATE_TRANS     {duplicate transition, "%s - %s -> %s"}
 [source,tcl]
 ----
 <<rvstsa class constructor>>=
-my variable defaulttrans CH
+my variable defaulttrans
+set defaulttrans CH
 ----
 
 (((method,RVSTSAClass,DefaultTrans)))
@@ -472,6 +454,18 @@ BAD_TERM_STATE  {terminal state, "%s", cannot be "IG", "CH", "@" or empty}
 NO_IDENTIFIERS  {no identifiers defined for class, "%s"}
 ----
 
+=== Constructor
+
+(((method,RVSTSAClass,constructor)))
+
+[source,tcl]
+----
+<<rvstsa class configuration>>=
+constructor {config} {
+    <<rvstsa class constructor>>
+}
+----
+
 [source,tcl]
 ----
 <<rvstsa class constructor>>=
@@ -487,20 +481,27 @@ if {[relation isnotempty $attrInfo]} {
     if {[relation isempty $idInfo]} {
         tailcall ::rvstsa::DeclError NO_IDENTIFIERS [self]
     }
-    if {[llength $states] != 0} {
+    if {[relation isnotempty $states] != 0} {
         <<validate transitions>>
         <<validate initial state>>
         <<validate terminal states>>
+        <<compute transition matrix>>
         set attrInfo [relation insert $attrInfo [list\
-            Name        __state__\
+            Name        __State__\
             DataType    string\
             DefValue    $initialstate\
         ]]
+
+        <<event dispatch data setup>>
+        ::oo::objdefine [self] {
+            <<state related methods>>
+        }
     }
     set header [relation dict\
             [relation project $attrInfo Name DataType] Name DataType]
     set ids [relation list [relation project $idInfo IdAttrs]]
     relvar create [self] $header {*}$ids
+    relvar trace add variable [self] insert [mymethod SetDefaultAttrs]
 } else {
     tailcall ::rvstsa::DeclError NO_ATTRIBUTES [self]
 }
@@ -515,21 +516,47 @@ NO_ATTRIBUTES      {class, "%s", defined with no attributes}
 
 [source,tcl]
 ----
+<<rvstsa class configuration>>=
+method SetDefaultAttrs {insert rvname tuple} {
+    my variable attrInfo
+    set missingAttrs [pipe {
+        tuple attributes $tuple |
+        relation fromlist ~ Name string |
+        relation semiminus ~ $attrInfo
+    }]
+
+    if {[relation isnotempty $missingAttrs]} {
+        set missNames [relation list $missingAttrs Name -ascending Name]
+        set missTypes [relation list $missingAttrs DataType -ascending Name]
+        set missValues [relation list $missingAttrs DefValue -ascending Name]
+
+        set missing [list]
+        foreach name $missNames type $missTypes value $missValues {
+            lappend missing $name $type $value
+        }
+        set tuple [tuple extend $tuple {*}$missing]
+    }
+    return $tuple
+}
+----
+
+[source,tcl]
+----
 <<validate transitions>>=
 set missingFrom [relation semiminus $states $transitions\
         -using {StateName FromState}]
 relation foreach badFrom $missingFrom {
     relation assign $badFrom
-    tailcall ::rvstsa::DeclError UNKNOWN_SRC_STATE $FromState $Event $ToState
+    ::rvstsa::DeclError UNKNOWN_SRC_STATE $FromState $Event $ToState
 }
 
-set missingTo [pipe {
-    relation restrictwith $transitions {$ToState ne "IG" && $ToState ne "CH"} |
-    relation semiminus $states ~ -using {StateName ToState}
-}]
+set nodefs [relation restrictwith $transitions {
+    $ToState ne "IG" && $ToState ne "CH"}]
+
+set missingTo [relation semiminus $states $nodefs -using {StateName ToState}]
 relation foreach badTo $missingTo {
     relation assign $badTo
-    tailcall ::rvstsa::DeclError UNKNOWN_DST_STATE $FromState $Event $ToState
+    ::rvstsa::DeclError UNKNOWN_DST_STATE $FromState $Event $ToState
 }
 ----
 
@@ -540,6 +567,27 @@ relation foreach badTo $missingTo {
 <<error code format>>=
 UNKNOWN_SRC_STATE       {unknown source state in transition, "%s - %s -> %s"}
 UNKNOWN_DST_STATE       {unknown target state in transition, "%s - %s -> %s"}
+----
+
+[source,tcl]
+----
+<<validate transitions>>=
+# Compute isolated states
+
+set noout [relation semiminus $transitions $states -using {FromState StateName}]
+set noin [relation semiminus $nodefs $states -using {ToState StateName}]
+set isolated [relation intersect $noout $noin]
+
+if {[relation isnotempty $isolated]} {
+    tailcall ::rvstsa::DeclError ISOLATED [relation list $isolated]
+}
+----
+
+(((error code,ISOLATED)))
+[source,tcl]
+----
+<<error code format>>=
+ISOLATED        {state model has isolated state(s): "%s"}
 ----
 
 [source,tcl]
@@ -561,16 +609,58 @@ UNKNOWN_INIT_STATE      {unknown initial state, "%s"}
 [source,tcl]
 ----
 <<validate terminal states>>=
-if {![::struct::set subsetof $terminals $states]} {
-    set unknown [::struct::set difference $terminals $states]
-    tailcall ::rvstsa::DeclError UNKNOWN_TERM_STATE $unknown
+set missingTerms [pipe {
+    relation semiminus $states $terminals |
+    relation list ~
+}]
+
+if {[llength $missingTerms] != 0} {
+    tailcall ::rvstsa::DeclError UNKNOWN_TERM_STATE $missingTerms
 }
 ----
+
 (((error code,UNKNOWN_TERM_STATE)))
 [source,tcl]
 ----
 <<error code format>>=
 UNKNOWN_TERM_STATE      {unknown terminal states, "%s"}
+----
+
+[source,tcl]
+----
+<<compute transition matrix>>=
+# Hold the transition matrix in a relvar.
+
+set heading [list __State__ string __IsTermState__ boolean]
+set eventNames [relation list [relation project $transitions Event]]
+foreach eventName $eventNames {
+    lappend heading $eventName string
+}
+
+set transRelvar [self]_Transitions
+relvar create $transRelvar $heading __State__
+
+set tuples [list]
+foreach stateName [relation list $states] {
+    set entry [list\
+        __State__       $stateName\
+        __IsTermState__ [relation isnotempty\
+            [relation restrictwith $terminals {$StateName eq $state}]]\
+    ]
+
+    foreach eventName $eventNames {
+        set trans [relation restrictwith $transitions {
+            $FromState eq $stateName && $Event eq $eventName
+        }]
+        set toState [expr {[relation isnotempty $trans] ?\
+            [relation extract $trans ToState] : $defaulttrans}]
+        lappend entry $eventName $toState
+    }
+    lappend tuples $entry
+}
+relvar insert $transRelvar {*}$tuples
+
+#puts [relformat [relvar set $transRelvar] $transRelvar]
 ----
 
 [float]
@@ -620,7 +710,7 @@ test constructor-2.0 {
 [source,tcl]
 ----
 <<constructor tests>>=
-test constructor-2.0 {
+test constructor-3.1 {
     create object with state model -- bad src state
 } -setup {
 } -cleanup {
@@ -639,6 +729,139 @@ test constructor-2.0 {
   -returnCodes error
 ----
 
+[source,tcl]
+----
+<<constructor tests>>=
+test constructor-3.2 {
+    create object with state model -- bad destination state
+} -setup {
+} -cleanup {
+} -body {
+    ::rvstsa RVSTSAClass create UserAccount {
+        attribute UserName string
+        identifier UserName
+        statemodel {
+            state s1 {} {
+                puts "in s1"
+            }
+            transition s1 - e1 -> s3
+        }
+    }
+} -result {unknown target state in transition, "s1 - e1 -> s3"}\
+  -returnCodes error
+----
+
+[source,tcl]
+----
+<<constructor tests>>=
+test constructor-3.3 {
+    create object with state model -- isolated state
+} -setup {
+} -cleanup {
+} -body {
+    ::rvstsa RVSTSAClass create UserAccount {
+        attribute UserName string
+        identifier UserName
+        statemodel {
+            state s1 {} {
+                puts "in s1"
+            }
+            transition s1 - e1 -> s1
+
+            state s2 {} {
+                puts "in s2"
+            }
+        }
+    }
+} -result {state model has isolated state(s): "s2"}\
+  -returnCodes error
+----
+
+[source,tcl]
+----
+<<constructor tests>>=
+test constructor-3.4 {
+    create object with state model -- bad terminal state
+} -setup {
+} -cleanup {
+} -body {
+    ::rvstsa RVSTSAClass create UserAccount {
+        attribute UserName string
+        identifier UserName
+        statemodel {
+            state s1 {} {
+                puts "in s1"
+            }
+            transition s1 - e1 -> s1
+
+            terminal s3
+        }
+    }
+} -result {unknown terminal states, "s3"}\
+  -returnCodes error
+----
+
+[source,tcl]
+----
+<<constructor tests>>=
+test constructor-4.1 {
+    create object with state model -- simple transitions
+} -setup {
+} -cleanup {
+    UserAccount destroy
+} -body {
+    ::rvstsa RVSTSAClass create UserAccount {
+        attribute UserName string
+        identifier UserName
+        statemodel {
+            state s1 {} {
+                puts "in s1"
+            }
+            transition s1 - e1 -> s1
+        }
+    }
+    relation cardinality\
+        [relvar set [namespace current]::UserAccount_Transitions]
+} -result {1}
+----
+
+[source,tcl]
+----
+<<constructor tests>>=
+test constructor-4.2 {
+    create object with state model -- complex transitions
+} -setup {
+} -cleanup {
+    UserAccount destroy
+} -body {
+    ::rvstsa RVSTSAClass create UserAccount {
+        attribute UserName string
+        identifier UserName
+        statemodel {
+            state s1 {} {
+                puts "in s1"
+            }
+            transition s1 - e1 -> s1
+            transition s1 - e2 -> s2
+
+            state s2 {} {
+                puts "in s1"
+            }
+            transition s2 - e2 -> s1
+            transition s2 - e3 -> s3
+
+            state s3 {} {
+                puts "in s1"
+            }
+            transition s3 - e3 -> s3
+            transition s3 - e1 -> s1
+        }
+    }
+    relation cardinality\
+        [relvar set [namespace current]::UserAccount_Transitions]
+} -result {3}
+----
+
 === Destructor
 
 (((method,RVSTSAClass,destructor)))
@@ -647,10 +870,264 @@ test constructor-2.0 {
 ----
 <<rvstsa class configuration>>=
 destructor {
-    if {[relvar names [self]] ne {}} {
+    if {[llength [relvar names [self]]] != 0} {
         relvar unset [self]
     }
+    if {[llength [relvar names [self]_Transitions]] != 0} {
+        <<event dispatch data cleanup>>
+        relvar unset [self]_Transitions
+    }
     namespace delete [self]
+}
+----
+
+=== Creating Instances
+
+(((method,RVSTSAClass,create)))
+
+[source,tcl]
+----
+<<rvstsa class configuration>>=
+method create {args} {
+    tailcall relvar insert [self] $args
+}
+----
+
+(((method,RVSTSAClass,createin)))
+
+[source,tcl]
+----
+<<state related methods>>=
+method createin {state args} {
+    set transrelvar [self]_Transitions
+    if {[relation isempty [relvar restrictone $transrelvar __State__ $state]]} {
+        tailcall ::rvstsa::DeclError UNKNOWN_INIT_STATE $state
+    }
+    tailcall relation eliminate\
+        [relvar insert [self] [list __State__ $state {*}$args]] __State__
+}
+----
+
+=== Dereferences Instances
+
+(((method,RVSTSAClass,deref)))
+
+[source,tcl]
+----
+<<state related methods>>=
+# returns an instance from a reference
+method deref {instref} {
+    tailcall relation semijoin [my refOf $instref] [relvar set [self]]
+}
+
+# returns an reference to an instance
+method refOf {inst} {
+    tailcall relation project $inst {*}[lindex [relvar identifiers [self]] 0]
+}
+----
+
+[float]
+===== Create Tests
+
+[source,tcl]
+----
+<<exported methods tests>>=
+test create-1.0 {
+    create object with attributes
+} -setup {
+    ::rvstsa RVSTSAClass create UserAccount {
+        attribute UserName string
+        attribute Amount int 100
+        identifier UserName
+    }
+} -cleanup {
+    UserAccount destroy
+} -body {
+    set inserted [UserAccount create UserName "John Hughes"]
+    relation extract $inserted Amount
+} -result {100}
+----
+
+[source,tcl]
+----
+<<exported methods tests>>=
+test create-2.0 {
+    create object in a given state
+} -setup {
+    ::rvstsa RVSTSAClass create UserAccount {
+        attribute UserName string
+        attribute Amount int 100
+        identifier UserName
+        statemodel {
+            state closed {} {
+                puts "in closed"
+            }
+            transition closed - open -> opened
+
+            state opened {} {
+                puts "in opened"
+            }
+            transition opened - close -> closed
+            transition opened - timeout -> dormant
+
+            state dormant {} {
+                puts "in dormant"
+            }
+            transition dormant - close -> closed
+        }
+    }
+} -cleanup {
+    UserAccount destroy
+} -body {
+    set inserted [UserAccount createin dormant UserName "Fred Jones"]
+    UserAccount currentstate $inserted
+} -result {dormant}
+----
+
+== State Model Operations
+
+[source,tcl]
+----
+<<event dispatch data setup>>=
+my variable __event_queue__
+set __event_queue__ [list]
+
+
+my variable __eventIdCounter
+set __eventIdCounter 0
+relvar create __signals {EventId int TimerId string} EventId TimerId
+relvar create __delayedSignals {FromState string Event string TimerId string}\
+    {FromState Event} TimerId
+----
+
+[source,tcl]
+----
+<<event dispatch data cleanup>>=
+foreach timerid [relation list [relvar set __signals] TimerId] {
+    after cancel $timerid
+}
+foreach timerid [relation list [relvar set __delayedSignals] TimerId] {
+    after cancel $timerid
+}
+----
+
+(((method,RVSTSAClass,currentstate)))
+
+[source,tcl]
+----
+<<state related methods>>=
+method currentstate {instref} {
+    tailcall relation extract [my deref $instref] __State__
+}
+----
+
+(((method,RVSTSAClass,signal)))
+
+[source,tcl]
+----
+<<state related methods>>=
+method signal {srcinst event dstinsts args} {
+#### HERE, need to work out what the class of the signal target!!!
+    my ValidateEvent $event
+    set srcref [my refTo $srcinst]
+    my variable __event_queue
+
+    relation foreach dstinst $dstinsts {
+        set dstref [my refTo $dstinst]
+        <<create new event>>
+    }
+}
+----
+
+[source,tcl]
+----
+<<create new event>>=
+set eventInfo [dict create\
+    srcref  $srcref\
+    dstref  $dstref\
+    event   $event\
+    params  $params\
+]
+# Self directed events are queued to the front.  However, we handle the
+# case where a state activity may signal multiple self-directed events.
+# In that, admittedly unusual case, we want to preserve the order of
+# the signalled events.
+if {$src eq [self]} {
+    for {set nsindex 0} {$nsindex < [llength $__event_queue__]}\
+            {incr nsindex} {
+        set cmpevent [lindex $__event_queue__ $nsindex]
+        if {[dict get $cmpevent src] ne [self]} {
+            break
+        }
+    }
+    set __event_queue [linsert $__event_queue $nsindex $eventInfo]
+} else {
+    lappend __event_queue $eventInfo
+}
+my variable __eventIdCounter
+relvar insert __signals [list\
+    EventId     [incr __eventIdCounter]\
+    TimerId     [::after 0 [mymethod Dispatch $__eventIdCounter]]\
+]
+----
+
+(((method,RVSTSAClass,Dispatch)))
+
+[source,tcl]
+----
+<<state related methods>>=
+method Dispatch {eventid} {
+    set sig [relvar restrictone __signals EventId $eventid]
+    if {[relation isnotempty $sig]} {
+        relvar deleteone __signals EventId $eventid
+
+        my variable __event_queue
+        if {[llength $__event_queue] != 0} {
+            # Pull the event from the front of the queue.
+            set eventInfo [lindex $__event_queue__ 0]
+            set __event_queue__ [lrange $__event_queue__ 1 end]
+            tailcall my Receive $eventInfo
+        }
+    }
+}
+----
+
+(((method,XUMLClass,Receive)))
+    instref $instref\
+    src $src\
+    event $event\
+    params $params\
+
+[source,tcl]
+----
+<<state related methods>>=
+method Receive {eventInfo} {
+    dict with eventInfo {
+
+        set inst [my deref $instref]
+        set currstate [relation extract $inst __State__]
+        ### HERE
+
+    set newState $transitions($__currentstate__,$event)
+
+    ::stsatcl::TraceTransition [dict get $eventInfo src] $event [self]\
+        $__currentstate__ $newState $params
+
+    if {$newState eq "CH"} {
+        tailcall ::stsatcl::DeclError CH_TRANSITION $__currentstate__ $event
+    } elseif {$newState ne "IG"} {
+        set __currentstate__ $newState
+        try {
+            my ${__currentstate__}__STATE__ {*}$params ;
+        } finally {
+            classvariable terminals ; # <5>
+            if {$__currentstate__ in $terminals} {
+                my destroy
+            }
+        }
+    }
+    return
+    }
 }
 ----
 
@@ -715,6 +1192,28 @@ method CheckAttrExists {name} {
 ----
 <<error code format>>=
 UNKNOWN_ATTRIBUTE        {unknown attribute name, "%s"}
+----
+
+=== Validate Event
+
+(((method,XUMLClass,ValidateEvent)))
+
+[source,tcl]
+----
+<<rvstsa class configuration>>=
+# Make sure we are dealing with a known event.
+method ValidateEvent {event} {
+    my variable transitions
+    if {$event ni [relation list $transitions Event]} {
+        tailcall ::rvstsa::DeclError UNKNOWN_EVENT $event
+    }
+}
+----
+
+[source,tcl]
+----
+<<error code format>>=
+UNKNOWN_EVENT   {unknown event, "%s"}
 ----
 
 == Code Organization
