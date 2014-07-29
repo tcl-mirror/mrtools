@@ -113,7 +113,10 @@ DUP_NAME {namespace "%s" already exists}
 test create-1.0 {
     create objects in fixed namespaces
 } -setup {
-    ::rvstsa RVSTSAClass create testns::at1
+    ::rvstsa RVSTSAClass create testns::at1 {
+        attribute a1 string
+        identifier a1
+    }
 } -cleanup {
     testns::at1 destroy
 } -body {
@@ -128,7 +131,7 @@ test create-1.0 {
 [source,tcl]
 ----
 <<rvstsa class configuration>>=
-constructor {{config {}}} {
+constructor {config} {
     <<rvstsa class constructor>>
 }
 ----
@@ -181,7 +184,7 @@ The implementation of the +Attribute+ method consists of an
 interation over the arguments, validating the attribute names
 and assigning the default values into the +attrInfo+ dictionary.
 
-(((method,STSAClass,Attribute)))
+(((method,RVSTSAClass,Attribute)))
 
 [source,tcl]
 ----
@@ -211,7 +214,8 @@ BAD_ATTRIBUTE           {invalid attribute name, "%s"}
 [source,tcl]
 ----
 <<rvstsa class constructor>>=
-my variable idCounter 0
+my variable idCounter
+set idCounter 0
 my variable idInfo
 set idInfo [relation create {IdNum int IdAttrs list}]
 ----
@@ -223,7 +227,7 @@ set idInfo [relation create {IdNum int IdAttrs list}]
 <<rvstsa class configuration>>=
 method Identifier {args} {
     foreach attr $args {
-        my CheckDupAttribute $name
+        my CheckAttrExists $attr
     }
 
     my variable idCounter
@@ -231,14 +235,241 @@ method Identifier {args} {
     set idInfo [relation insert $idInfo [list\
         IdNum   [incr idCounter]\
         IdAttrs $args\
-    ]
+    ]]
 }
 ----
-(((error code,UNKNOWN_ATTRIBUTE)))
+
+[source,tcl]
+----
+<<helper commands>>=
+proc ::oo::Helpers::linkTo {childns args} {   # <1>
+    set childns [string trim $childns :]    ; # <2>
+    namespace eval $childns {}              ; # <3>
+    set ns [uplevel 1 {namespace current}]
+    foreach link $args {
+	if {[llength $link] == 2} {
+	    lassign $link src dst
+	} else {
+	    lassign $link src
+	    set dst $src
+	}
+	interp alias {} ${ns}::${childns}::$src {} ${ns}::my $dst ; # <4>
+    }
+    return
+}
+----
+<1> _N.B._ we put this procedure into a namespace that is accessible to
+all TclOO objects.
+<2> Clean up any extraneous colon characters. We definitely don't want
+any leading colons as that would imply a fully-qualified namespace name.
+<3> Make sure to create the namespace.
+<4> Use an +alias+ to link the command in the child namespace back to a class
+method.
+
+With the ability to link commands to a child namespace,
+we can now define the state model configuration commands.
+
+[source,tcl]
+----
+<<rvstsa class constructor>>=
+linkTo smdsl\
+    {state State}\
+    {transition Transition}\
+    {defaultTrans DefaultTrans}\
+    {initialState InitialState}\
+    {terminal Terminal}
+----
+
+(((method,RVSTSAClass,Statemodel)))
+
+[source,tcl]
+----
+<<rvstsa class configuration>>=
+method Statemodel {script} {
+    namespace eval [namespace current]::smdsl $script
+    my Attribute __state__ string
+}
+----
+
+[source,tcl]
+----
+<<rvstsa class constructor>>=
+my variable states
+set states [relation create {StateName string}]
+----
+
+(((method,STSAClass,State)))
+
+[source,tcl]
+----
+<<rvstsa class configuration>>=
+method State {name argList body} {
+    my variable states
+    if {$name in {IG CH @}} {
+        tailcall ::rvstsa::DeclError RESERVED_STATE $name
+    }
+    try {
+        set states [relation insert $states [list StateName $name]]
+    } trap {RAL relation insert DUPLICATE_TUPLE} {} {
+        tailcall ::rvstsa::DeclError DUPLICATE_STATE $name
+    }
+    ::oo::objdefine [self] method ${name}__STATE__ $argList $body
+    ::oo::objdefine [self] unexport ${name}__STATE__
+}
+----
+
+(((error code,RESERVED_STATE)))
+(((error code,DUPLICATE_STATE)))
 [source,tcl]
 ----
 <<error code format>>=
-UNKNOWN_ATTRIBUTE        {unknown attribute name, "%s"}
+RESERVED_STATE      {states may not be named by the reserved name, "%s"}
+DUPLICATE_STATE     {duplicate state, "%s"}
+----
+
+[source,tcl]
+----
+<<rvstsa class constructor>>=
+my variable events
+set events [relation create {EventName string}]
+my variable transitions
+set transitions [relation create {FromState string Event string ToState string}]
+----
+
+(((method,STSAClass,Transition)))
+
+[source,tcl]
+----
+<<rvstsa class configuration>>=
+method Transition {fromstate - event -> tostate} {
+    if {$fromstate in {IG CH}} {
+        tailcall ::rvstsa::DeclError TRANS_SRC $fromstate
+    } elseif {$fromstate eq "@"} {
+        my variable states
+        set states [relation uinsert $states [list StateName $fromstate]]
+    }
+
+    if {$tostate eq "@"} {
+        tailcall ::rvstsa::DeclError TRANS_DST
+    }
+    my variable events
+    set events [relation uinsert $events [list EventName $event]]
+
+    my variable transitions
+    try {
+        set transitions [relation insert $transitions [list\
+            FromState   $fromstate\
+            Event       $event\
+            ToState     $tostate\
+        ]]
+    } trap {RAL relation insert DUPLICATE_TUPLE} {} {
+        tailcall ::rvstsa::DeclError DUPLICATE_TRANS $fromstate $event $tostate
+    }
+}
+----
+
+(((error code,TRANS_SRC)))
+(((error code,TRANS_DST)))
+(((error code,DUPLICATE_TRANS)))
+[source,tcl]
+----
+<<error code format>>=
+TRANS_SRC           {a transition cannot originate from the "%s" pseudo-state}
+TRANS_DST           {the initial pseudo-state, "@", cannot be the\
+                     target of a transition}
+DUPLICATE_TRANS     {duplicate transition, "%s - %s -> %s"}
+----
+
+[source,tcl]
+----
+<<rvstsa class constructor>>=
+my variable defaulttrans CH
+----
+
+(((method,RVSTSAClass,DefaultTrans)))
+
+[source,tcl]
+----
+<<rvstsa class configuration>>=
+method DefaultTrans {trans} {
+    if {$trans in {IG CH}} {
+        my variable defaulttrans
+        set defaulttrans $trans
+    } else {
+        tailcall ::rvstsa::DeclError BAD_DEFAULT_TRANS $trans
+    }
+}
+----
+(((error code,BAD_DEFAULT_TRANS)))
+[source,tcl]
+----
+<<error code format>>=
+BAD_DEFAULT_TRANS       {bad default transition name, "%s": must be one of\
+                         "IG" or "CH"}
+----
+
+[source,tcl]
+----
+<<rvstsa class constructor>>=
+my variable initialstate
+set initialstate {}
+----
+
+(((method,RVSTSAClass,InitialState)))
+
+[source,tcl]
+----
+<<rvstsa class configuration>>=
+method InitialState {state} {
+    if {$state in {IG CH @ {}}} {
+        tailcall ::rvstsa::DeclError BAD_INIT_STATE $state
+    }
+    my variable initialstate
+    set initialstate $state
+}
+----
+
+(((error code,BAD_INIT_STATE)))
+[source,tcl]
+----
+<<error code format>>=
+BAD_INIT_STATE      {initial state, "%s", cannot be "IG", "CH", "@" or empty}
+----
+
+[source,tcl]
+----
+<<rvstsa class constructor>>=
+my variable terminals
+set terminals [relation create {StateName string}]
+----
+
+(((method,STSAClass,Terminal)))
+
+[source,tcl]
+----
+<<rvstsa class configuration>>=
+method Terminal {args} {
+    my variable terminals
+    foreach state $args {
+        if {$state in {IG CH @ {}}} {
+            tailcall ::rvstsa::DeclError BAD_TERM_STATE $state
+        }
+        set terminals [relation uinsert $terminals [list StateName $state]]
+    }
+}
+----
+(((error code,BAD_TERM_STATE)))
+[source,tcl]
+----
+<<error code format>>=
+BAD_TERM_STATE  {terminal state, "%s", cannot be "IG", "CH", "@" or empty}
+----
+
+(((error code,NO_IDENTIFIERS)))
+[source,tcl]
+----
+<<error code format>>=
+NO_IDENTIFIERS  {no identifiers defined for class, "%s"}
 ----
 
 [source,tcl]
@@ -247,6 +478,8 @@ UNKNOWN_ATTRIBUTE        {unknown attribute name, "%s"}
 my eval $config
 ----
 
+Build the relvar implied by the attributes
+
 [source,tcl]
 ----
 <<rvstsa class constructor>>=
@@ -254,17 +487,171 @@ if {[relation isnotempty $attrInfo]} {
     if {[relation isempty $idInfo]} {
         tailcall ::rvstsa::DeclError NO_IDENTIFIERS [self]
     }
-    set header [relation body [relation project $attrInfo Name DataType]]
+    if {[llength $states] != 0} {
+        <<validate transitions>>
+        <<validate initial state>>
+        <<validate terminal states>>
+        set attrInfo [relation insert $attrInfo [list\
+            Name        __state__\
+            DataType    string\
+            DefValue    $initialstate\
+        ]]
+    }
+    set header [relation dict\
+            [relation project $attrInfo Name DataType] Name DataType]
     set ids [relation list [relation project $idInfo IdAttrs]]
-    relvar create [self] [::struct::list flatten $header] {*}$ids
+    relvar create [self] $header {*}$ids
+} else {
+    tailcall ::rvstsa::DeclError NO_ATTRIBUTES [self]
 }
 ----
 
-(((error code,NO_IDENTIFIERS)))
+(((error code,BAD_INIT_STATE)))
 [source,tcl]
 ----
 <<error code format>>=
-NO_IDENTIFIERS  {no identifiers defined for class, "%s"}
+NO_ATTRIBUTES      {class, "%s", defined with no attributes}
+----
+
+[source,tcl]
+----
+<<validate transitions>>=
+set missingFrom [relation semiminus $states $transitions\
+        -using {StateName FromState}]
+relation foreach badFrom $missingFrom {
+    relation assign $badFrom
+    tailcall ::rvstsa::DeclError UNKNOWN_SRC_STATE $FromState $Event $ToState
+}
+
+set missingTo [pipe {
+    relation restrictwith $transitions {$ToState ne "IG" && $ToState ne "CH"} |
+    relation semiminus $states ~ -using {StateName ToState}
+}]
+relation foreach badTo $missingTo {
+    relation assign $badTo
+    tailcall ::rvstsa::DeclError UNKNOWN_DST_STATE $FromState $Event $ToState
+}
+----
+
+(((error code,UNKNOWN_SRC_STATE)))
+(((error code,UNKNOWN_DST_STATE)))
+[source,tcl]
+----
+<<error code format>>=
+UNKNOWN_SRC_STATE       {unknown source state in transition, "%s - %s -> %s"}
+UNKNOWN_DST_STATE       {unknown target state in transition, "%s - %s -> %s"}
+----
+
+[source,tcl]
+----
+<<validate initial state>>=
+if {$initialstate eq {}} {
+    set initialstate [lindex $states 0]
+} elseif {$initialstate ni $states} {
+    tailcall ::rvstsa::DeclError UNKNOWN_INIT_STATE $initialstate
+}
+----
+(((error code,UNKNOWN_INIT_STATE)))
+[source,tcl]
+----
+<<error code format>>=
+UNKNOWN_INIT_STATE      {unknown initial state, "%s"}
+----
+
+[source,tcl]
+----
+<<validate terminal states>>=
+if {![::struct::set subsetof $terminals $states]} {
+    set unknown [::struct::set difference $terminals $states]
+    tailcall ::rvstsa::DeclError UNKNOWN_TERM_STATE $unknown
+}
+----
+(((error code,UNKNOWN_TERM_STATE)))
+[source,tcl]
+----
+<<error code format>>=
+UNKNOWN_TERM_STATE      {unknown terminal states, "%s"}
+----
+
+[float]
+===== Constructor Tests
+
+[source,tcl]
+----
+<<constructor tests>>=
+test constructor-1.0 {
+    create object with attributes
+} -setup {
+    ::rvstsa RVSTSAClass create UserAccount {
+        attribute UserName string
+        attribute Amount int
+        identifier UserName
+    }
+} -cleanup {
+    UserAccount destroy
+} -body {
+    relvar names [namespace current]::*
+} -result {::rvstsa::test::UserAccount}
+----
+
+[source,tcl]
+----
+<<constructor tests>>=
+test constructor-2.0 {
+    create object with state model -- duplicate state
+} -setup {
+} -cleanup {
+} -body {
+    ::rvstsa RVSTSAClass create UserAccount {
+        attribute UserName string
+        identifier UserName
+        statemodel {
+            state s1 {} {
+                puts "in s1"
+            }
+            state s1 {} {
+                puts "in s1"
+            }
+        }
+    }
+} -result {duplicate state, "s1"} -returnCodes error
+----
+
+[source,tcl]
+----
+<<constructor tests>>=
+test constructor-2.0 {
+    create object with state model -- bad src state
+} -setup {
+} -cleanup {
+} -body {
+    ::rvstsa RVSTSAClass create UserAccount {
+        attribute UserName string
+        identifier UserName
+        statemodel {
+            state s1 {} {
+                puts "in s1"
+            }
+            transition s3 - e1 -> s1
+        }
+    }
+} -result {unknown source state in transition, "s3 - e1 -> s1"}\
+  -returnCodes error
+----
+
+=== Destructor
+
+(((method,RVSTSAClass,destructor)))
+
+[source,tcl]
+----
+<<rvstsa class configuration>>=
+destructor {
+    if {[relvar names [self]] ne {}} {
+        relvar unset [self]
+    }
+    namespace delete [self]
+}
 ----
 
 == Common Utility Commands
@@ -276,7 +663,7 @@ NO_IDENTIFIERS  {no identifiers defined for class, "%s"}
 [source,tcl]
 ----
 <<package commands>>=
-proc ::rvstsa::ResolveName {name {level 2}} {
+proc ResolveName {name {level 2}} {
     if {[string range $name 0 1] ne "::"} {
         set name\
             [string trimright [uplevel $level namespace current] :]::$name
@@ -285,7 +672,7 @@ proc ::rvstsa::ResolveName {name {level 2}} {
 }
 ----
 
-=== Check Dup Attribute
+=== Check Duplicate Attribute
 
 (((proc,CheckDupAttribute)))
 
@@ -306,6 +693,28 @@ method CheckDupAttribute {name} {
 ----
 <<error code format>>=
 DUP_ATTRIBUTE           {duplicate attribute name, "%s"}
+----
+
+=== Check Attribute Exists
+
+(((proc,CheckAttrExists)))
+
+[source,tcl]
+----
+<<rvstsa class configuration>>=
+method CheckAttrExists {name} {
+    my variable attrInfo
+    if {[relation isempty\
+            [relation restrictwith $attrInfo {$Name eq $name}]]} {
+        tailcall ::rvstsa::DeclError UNKNOWN_ATTRIBUTE $name
+    }
+}
+----
+(((error code,UNKNOWN_ATTRIBUTE)))
+[source,tcl]
+----
+<<error code format>>=
+UNKNOWN_ATTRIBUTE        {unknown attribute name, "%s"}
 ----
 
 == Code Organization
@@ -371,6 +780,7 @@ namespace eval ::rvstsa {
     <<package initialization>>
     <<package commands>>
 }
+<<helper commands>>
 
 package provide rvstsa $::rvstsa::version
 ----
@@ -442,6 +852,8 @@ namespace eval ::rvstsa::test {
     ::logger::initNamespace [namespace current] $::options(level)
 
     namespace import ::tcltest::*
+    namespace import ::ral::*
+    namespace import ::ralutil::*
 
     <<test utility procs>>
     <<constructor tests>>

@@ -111,7 +111,7 @@ wmctrl-trace.txt : runexample
 clean :
 	$(RM) $(CLEANFILES)
 
-$(PDF) : $(DOCSRC) $(EXTRAS) $(IMAGES) wmctrl-trace.txt
+$(PDF) : $(DOCSRC) $(EXTRAS) $(IMAGES)
 
 $(TCLSRC) : $(DOCSRC)
 
