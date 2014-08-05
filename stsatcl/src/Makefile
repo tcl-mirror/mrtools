@@ -29,8 +29,16 @@ DIAGRAMS =\
 	ct-states.uxf\
 	$(NULL)
 
+SEQDIAG	=\
+	wmctrl-seqdiag.diag\
+	$(NULL)
+
 IMAGES =\
 	$(patsubst %.uxf,$(IMAGEDIR)/%.pdf,$(DIAGRAMS))\
+	$(NULL)
+
+SEQIMAGES=\
+	$(patsubst %.diag,$(IMAGEDIR)/%.svg,$(SEQDIAG))\
 	$(NULL)
 
 TCLSRC	=\
@@ -110,12 +118,13 @@ runtests : tests
 runexample : example
 	tclsh wmctrl.tcl | tee wmctrl-trace.txt
 
-wmctrl-trace.txt : runexample
+wmctrl-trace.txt : wmctrl.tcl $(TCLSRC)
+	tclsh wmctrl.tcl | tee wmctrl-trace.txt
 
 clean :
 	$(RM) $(CLEANFILES)
 
-$(PDF) : $(DOCSRC) $(EXTRAS) $(IMAGES) wmctrl-trace.txt
+$(PDF) : $(DOCSRC) $(EXTRAS) $(IMAGES) wmctrl-trace.txt $(SEQIMAGES)
 
 $(TCLSRC) : $(DOCSRC)
 
@@ -137,9 +146,11 @@ $(DOCDIR)/%.pdf : %.aweb
 	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $(TESTDIR)/$@ $<
 
 $(IMAGEDIR)/%.pdf : %.uxf
-	-umlet -action=convert -format=pdf\
+	umlet -action=convert -format=pdf\
 		-filename=$< -output=$(basename $@)
 
+$(IMAGEDIR)/%.svg : %.diag
+	seqdiag --antialias -T svg -o $@ $<
 #
 # vim :set sw=8 ts=8 sts=8 noexpandtab:
 #
