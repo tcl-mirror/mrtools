@@ -92,7 +92,11 @@ self method create {name args} {
     if {[namespace exists $name]} {
         ::rvstsa::DeclError DUP_NAME $name
     }
-    namespace eval $name {}
+
+    set path [namespace eval $name namespace path]
+    lappend path [namespace parent $name]
+    namespace eval $name [list namespace path $path]
+
     return [my createWithNamespace $name $name {*}$args]
 }
 ----
@@ -153,7 +157,8 @@ package require oo::util
 link\
     {attribute Attribute}\
     {identifier Identifier}\
-    {statemodel Statemodel}
+    {statemodel Statemodel}\
+    {classop ClassOp}
 ----
 
 [source,tcl]
@@ -273,6 +278,17 @@ linkTo smdsl\
 method Statemodel {script} {
     namespace eval [namespace current]::smdsl $script
     my Attribute __state__ string
+}
+----
+
+(((method,RVSTSAClass,ClassOp)))
+
+[source,tcl]
+----
+<<rvstsa class configuration>>=
+method ClassOp {name arglist body} {
+    ::oo::objdefine [self] method $name $arglist $body
+    ::oo::objdefine [self] export $name
 }
 ----
 
@@ -922,7 +938,9 @@ method deref {instref} {
 
 # returns an reference to an instance
 method refOf {inst} {
-    tailcall relation project $inst {*}[lindex [relvar identifiers [self]] 0]
+    if {$inst ne {}} {
+        tailcall relation project $inst {*}[lindex [relvar identifiers [self]] 0]
+    }
 }
 ----
 
@@ -1027,15 +1045,18 @@ method currentstate {instref} {
 ----
 <<state related methods>>=
 method signal {srcinst event dstinsts args} {
-#### HERE, need to work out what the class of the signal target!!!
     my ValidateEvent $event
-    set srcref [my refTo $srcinst]
+    set srcclass [my EventSource]
+    set srcref [my refOf $srcinst]
+
     my variable __event_queue
 
     relation foreach dstinst $dstinsts {
-        set dstref [my refTo $dstinst]
+        set dstref [my refOf $dstinst]
         <<create new event>>
     }
+
+    return
 }
 ----
 
@@ -1043,16 +1064,17 @@ method signal {srcinst event dstinsts args} {
 ----
 <<create new event>>=
 set eventInfo [dict create\
+    srcclass $srcclass\
     srcref  $srcref\
     dstref  $dstref\
     event   $event\
-    params  $params\
+    params  $args\
 ]
 # Self directed events are queued to the front.  However, we handle the
 # case where a state activity may signal multiple self-directed events.
 # In that, admittedly unusual case, we want to preserve the order of
 # the signalled events.
-if {$src eq [self]} {
+if {$srcclass eq [self]} {
     for {set nsindex 0} {$nsindex < [llength $__event_queue__]}\
             {incr nsindex} {
         set cmpevent [lindex $__event_queue__ $nsindex]
@@ -1069,6 +1091,56 @@ relvar insert __signals [list\
     EventId     [incr __eventIdCounter]\
     TimerId     [::after 0 [mymethod Dispatch $__eventIdCounter]]\
 ]
+----
+
+[source,tcl]
+----
+<<exported methods tests>>=
+test signal-1.0 {
+    signal an event to an
+} -setup {
+    ::rvstsa RVSTSAClass create UserAccount {
+        attribute UserName string
+        attribute Amount int 100
+        identifier UserName
+        statemodel {
+            state closed {} {
+                puts "in closed"
+            }
+            transition closed - open -> opened
+
+            state opened {} {
+                puts "in opened"
+            }
+            transition opened - close -> closed
+            transition opened - timeout -> dormant
+
+            state dormant {} {
+                puts "in dormant"
+            }
+            transition dormant - close -> closed
+        }
+    }
+    ::rvstsa RVSTSAClass create Banker {
+        attribute Name string
+        identifier Name
+        classop newAccount {user} {
+            puts "ns = [namespace current]"
+            puts "path = [namespace path]"
+            set newuser [::rvstsa::test::UserAccount create UserName $user]
+            ::rvstsa::test::UserAccount signal {} open $newuser
+        }
+    }
+} -cleanup {
+    UserAccount destroy
+    Banker destroy
+} -body {
+    Banker create Name Chuck
+    Banker newAccount "Fred Jones"
+    namespace upvar [info object namespace UserAccount] __event_queue event_queue
+    puts "event_queue = \"$event_queue\""
+    llength $event_queue
+} -result {1}
 ----
 
 (((method,RVSTSAClass,Dispatch)))
@@ -1215,6 +1287,25 @@ method ValidateEvent {event} {
 <<error code format>>=
 UNKNOWN_EVENT   {unknown event, "%s"}
 ----
+
+=== Event Source
+
+(((method,RVSTSAClass,EventSource)))
+
+[source,tcl]
+----
+<<rvstsa class configuration>>=
+method EventSource {} {
+    try {
+        set src [lindex [uplevel 1 {self caller}] 1] ; # <1>
+        puts "EventSource: [uplevel 1 {self caller}]"
+    } on error {} {
+        set src {}
+    }
+    return $src
+}
+----
+<1> +self caller+ throws an error if the caller is not a method.
 
 == Code Organization
 
