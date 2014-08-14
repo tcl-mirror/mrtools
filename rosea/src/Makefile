@@ -65,11 +65,9 @@ ATANGLEOPTS =\
 
 DBLATEX_PARAMS =\
 	doc.publisher.show=0\
-	glossary.numbered=0\
-	index.numbered=0\
 	doc.lot.show=figure,table\
 	toc.section.depth=3\
-	doc.section.depth=0\
+	doc.section.depth=1\
 	$(NULL)
 
 DOCINFO	=\
