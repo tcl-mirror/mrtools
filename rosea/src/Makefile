@@ -131,6 +131,7 @@ $(DOCDIR)/%.pdf : %.aweb
 	a2x $(A2XOPTS) --doctype=article  --format=pdf\
 	    --destination-dir=$(DOCDIR)\
 	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) $<
+	$(RM) $(DOCDIR)/*__[0-9].pdf
 
 %.tcl : %.aweb
 	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
