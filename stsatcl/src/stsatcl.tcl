@@ -118,7 +118,7 @@ namespace eval ::stsatcl {
         NOTSUBCLASS {subclass, "%s", is not a subclass of partition "%s"}
         NOTPARTITION    {linkage "%s" is not a partition}
         INVALIDTIME    {invalid signal delay time, "%ld"}
-        CH_TRANSITION   {can't happen transition: %s - %s -> CH}
+        CH_TRANSITION   {can't happen transition: %s - %s -> %s ==> %s -> CH}
         BAD_TRACEOP     {unknown trace operation, "%s"}
         NO_SAVEFILE     {no save file name provided}
         BAD_TRACETYPE   {unknown trace type, "%s"}
@@ -538,7 +538,7 @@ proc ::stsatcl::DeclError {errcode args} {
                     }
                     my variable __currentstate__
                     set __currentstate__ $state
-                    my ${__currentstate__}__STATE_ {*}$args
+                    my ${__currentstate__}__STATE__ {*}$args
                     return
                 }
                 method currentstate {} {
@@ -547,17 +547,19 @@ proc ::stsatcl::DeclError {errcode args} {
                 }
                 method Receive {eventInfo} {
                     my variable __currentstate__
+                    set src [dict get $eventInfo src]
                     set event [dict get $eventInfo event]
                     set params [dict get $eventInfo params]
                 
                     classvariable transitions
                     set newState [dict get $transitions $__currentstate__ $event] ; # <1>
                 
-                    ::stsatcl::TraceTransition [dict get $eventInfo src] $event [self]\
-                        $__currentstate__ $newState $params
+                    ::stsatcl::TraceTransition $src $event [self] $__currentstate__\
+                            $newState $params
                 
                     if {$newState eq "CH"} { # <2>
-                        tailcall ::stsatcl::DeclError CH_TRANSITION $__currentstate__ $event
+                        tailcall ::stsatcl::DeclError CH_TRANSITION\
+                            [list $src] $event [self] $__currentstate__
                     } elseif {$newState ne "IG"} {
                         set __currentstate__ $newState ; # <3>
                         try {
