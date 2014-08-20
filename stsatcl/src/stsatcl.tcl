@@ -78,7 +78,7 @@ namespace eval ::stsatcl {
     namespace export diagClassTraces
     namespace ensemble create
 
-    variable version 1.0
+    variable version 1.0.2
 
     variable errFormats
     set errFormats [dict create {*}{
@@ -475,7 +475,7 @@ proc ::stsatcl::DeclError {errcode args} {
                         # Self directed events are queued to the front.  However, we handle the
                         # case where a state activity may signal multiple self-directed events.
                         # In that, admittedly unusual case, we want to preserve the order of
-                        # the signalled events.
+                        # the signaled events.
                         if {$src eq [self]} {
                             for {set nsindex 0} {$nsindex < [llength $__event_queue__]}\
                                     {incr nsindex} { # <1>

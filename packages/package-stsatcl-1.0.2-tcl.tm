@@ -2,7 +2,7 @@
 # -- Tcl Module
 
 # @@ Meta Begin
-# Package stsatcl 1.0.1
+# Package stsatcl 1.0.2
 # Meta category    Software Architecture
 # Meta description The stsatcl package is a software execution architecture
 # Meta description intended as the target for translating Executable UML
@@ -49,7 +49,7 @@ package require textutil::adjust
 
 # ACTIVESTATE TEAPOT-PKG BEGIN DECLARE
 
-package provide stsatcl 1.0.1
+package provide stsatcl 1.0.2
 
 # ACTIVESTATE TEAPOT-PKG END DECLARE
 # ACTIVESTATE TEAPOT-PKG END TM
@@ -133,7 +133,7 @@ namespace eval ::stsatcl {
     namespace export diagClassTraces
     namespace ensemble create
 
-    variable version 1.0
+    variable version 1.0.2
 
     variable errFormats
     set errFormats [dict create {*}{
@@ -530,7 +530,7 @@ proc ::stsatcl::DeclError {errcode args} {
                         # Self directed events are queued to the front.  However, we handle the
                         # case where a state activity may signal multiple self-directed events.
                         # In that, admittedly unusual case, we want to preserve the order of
-                        # the signalled events.
+                        # the signaled events.
                         if {$src eq [self]} {
                             for {set nsindex 0} {$nsindex < [llength $__event_queue__]}\
                                     {incr nsindex} { # <1>

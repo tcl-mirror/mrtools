@@ -47,8 +47,6 @@ source stsatcl.tcl
 
 namespace eval ::wmctrl {
 
-    variable version 1.0.1
-
     ::logger::initNamespace [namespace current] info
 
     namespace import ::stsatcl::STSAClass
