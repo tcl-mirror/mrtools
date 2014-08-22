@@ -78,7 +78,7 @@ namespace eval ::stsatcl {
     namespace export diagClassTraces
     namespace ensemble create
 
-    variable version 1.0.2
+    variable version 1.0.3
 
     variable errFormats
     set errFormats [dict create {*}{
@@ -111,12 +111,12 @@ namespace eval ::stsatcl {
         OVERLINK        {attempt to over-link: %s is currently linked to %s across %s,\
                          requested link to %s}
         UNKNOWN_LINKTYPE {unknown linkage type, "%s"}
-        NOTLINKED       {object, "%s", is not linked to "%s"}
-        UNCOND      {reference, "%s", is unconditional, yet no instances were found}
-        NOSUBCLASS  {navigation of "%s" from supertype to subtype\
-                     requires the destination subtype class}
-        NOTSUBCLASS {subclass, "%s", is not a subclass of partition "%s"}
-        NOTPARTITION    {linkage "%s" is not a partition}
+        NOT_LINKED       {object, "%s", is not linked to "%s"}
+        UNCOND          {reference, "%s", is unconditional, yet no instances were found}
+        NOSUBCLASS      {navigation of "%s" from supertype to subtype\
+                         requires the destination subtype class}
+        NOT_SUBCLASS    {subclass, "%s", is not a subclass of partition "%s"}
+        NOT_PARTITION    {linkage "%s" is not a partition}
         INVALIDTIME    {invalid signal delay time, "%ld"}
         CH_TRANSITION   {can't happen transition: %s - %s -> %s ==> %s -> CH}
         BAD_TRACEOP     {unknown trace operation, "%s"}
@@ -126,7 +126,8 @@ namespace eval ::stsatcl {
         NODOT        {cannot find \"dot\" executable}
         UNKNOWN_LINKAGE     {unknown linkage, "%s"}
         NOT_AN_INSTANCE {instance, "%s", is not an instance of class, "%s"}
-        NOT_AN_SUBCLASS {instance, "%s", is not an instance of any subclasses, "%s"}
+        NOT_A_SUBCLASS {instance, "%s", is not an instance of any subclasses, "%s"}
+        CANNOT_RESOLVE_CLASS    {cannot resolve, "%s", to a class}
         UNKNOWN_EVENT {unknown event, "%s"}
     }]
     variable traceInitialized false
@@ -282,7 +283,7 @@ proc ::stsatcl::DeclError {errcode args} {
                             set $rname {}
                         }
                     } else {
-                        tailcall ::stsatcl::DeclError NOTLINKED $target $rname
+                        tailcall ::stsatcl::DeclError NOT_LINKED $target $rname
                     }
                 
                     return
@@ -311,9 +312,9 @@ proc ::stsatcl::DeclError {errcode args} {
                             set subclass [lindex $args 0]
                             set args [lrange $args 1 end]
                 
-                            set subclass [my ResolveObj $subclass]
+                            set subclass [my ResolveClass $subclass] ; # <2>
                             if {$subclass ni [dict get $linkInfo $rname subclasses]} {
-                                tailcall ::stsatcl::DeclError NOTSUBCLASS $subclass $rname
+                                tailcall ::stsatcl::DeclError NOT_SUBCLASS $subclass $rname
                             }
                             if {[llength [info class instances $subclass $relobjs]] == 0} {
                                 set relobjs [list]
@@ -328,13 +329,13 @@ proc ::stsatcl::DeclError {errcode args} {
                     if {[llength $args] != 0} {
                         set related [list]
                         foreach robj $relobjs {
-                            ::struct::set add related [$robj -> {*}$args] ; # <2>
+                            ::struct::set add related [$robj -> {*}$args] ; # <3>
                         }
                     } else {
                         set related $relobjs
                     }
                 
-                    return [expr {[llength $related] < 2 ? [lindex $related 0] : $related}] ; #<3>
+                    return [expr {[llength $related] < 2 ? [lindex $related 0] : $related}] ; #<4>
                 }
                 export ->
                 method migrate {rname subclass args} {
@@ -343,10 +344,10 @@ proc ::stsatcl::DeclError {errcode args} {
                 
                     classvariable linkInfo
                     if {[dict get $linkInfo $rname type] ne "partition"} {
-                        tailcall ::stsatcl::DeclError NOTPARTITION $rname
+                        tailcall ::stsatcl::DeclError NOT_PARTITION $rname
                     }
                     if {$subclass ni [dict get $linkInfo $rname subclasses]} {
-                        tailcall ::stsatcl::DeclError NOTSUBCLASS $subclass $rname
+                        tailcall ::stsatcl::DeclError NOT_SUBCLASS $subclass $rname
                     }
                 
                     my variable $rname
@@ -659,7 +660,7 @@ proc ::stsatcl::DeclError {errcode args} {
                                 return
                             }
                         }
-                        tailcall ::stsatcl::DeclError NOT_AN_SUBCLASS\
+                        tailcall ::stsatcl::DeclError NOT_A_SUBCLASS\
                             $obj [join $subclasses {, }]
                     }
                     default {
@@ -674,6 +675,17 @@ proc ::stsatcl::DeclError {errcode args} {
                         [string trimright [uplevel 2 namespace current] :]::$obj
                 }
                 return $obj
+            }
+            method ResolveClass {class} {
+                if {[string range $class 0 1] ne "::"} {
+                    set myclass [info object class [self]]
+                    set class [namespace qualifiers $myclass]::$class
+                    if {[llength [info commands $class]] == 0 ||
+                            ![info object isa class $class]} {
+                        tailcall ::stsatcl::DeclError CANNOT_RESOLVE_CLASS $class
+                    }
+                }
+                return $class
             }
             method ValidateEvent {event} {
                 classvariable events
