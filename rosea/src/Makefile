@@ -23,6 +23,10 @@ DOCSRC 	=\
 	$(NULL)
 
 DIAGRAMS =\
+	assoc-link.uxf\
+	partition-link.uxf\
+	correl-link.uxf\
+	link-classes.uxf\
 	$(NULL)
 
 SEQDIAG	=\
