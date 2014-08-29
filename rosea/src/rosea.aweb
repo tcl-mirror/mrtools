@@ -361,8 +361,8 @@ proc isRefSingular {instref} {
 ----
 <<helper commands>>=
 proc isRefEqual {ref1 ref2} {
-    lassign ref1 relvar1 inst1
-    lassign ref2 relvar2 inst2
+    lassign $ref1 relvar1 inst1
+    lassign $ref2 relvar2 inst2
     return [expr {$relvar1 eq $relvar2 &&\
             [relation is $inst1 == $inst2]}]
 }
@@ -814,37 +814,52 @@ test findWhere-1.0 {
 proc setupDomain {name} {
     set domns [namespace current]::$name
     namespace eval $domns {}
-    namespace eval ${domns}::__ARCH {}
-    relvar create ${domns}::__ARCH::__STATE {
+    set archns ${domns}::__ARCH
+    namespace eval ${archns} {}
+    relvar create ${archns}::__STATE {
         Class string
         State string
     } {Class State}
-    relvar create ${domns}::__ARCH::__INITIALSTATE {
+    relvar create ${archns}::__EVENT {
+        Class string
+        Event string
+    } {Class Event}
+    relvar create ${archns}::__TRANSITION {
+        Class string
+        State string
+        Event string
+        NewState string
+    } {Class State Event}
+    relvar create ${archns}::__INITIALSTATE {
         Class string
         State string
     } Class
-    relvar create ${domns}::__ARCH::__LINK {
+    relvar create ${archns}::__TERMINAL {
+        Class string
+        State string
+    } {Class State}
+    relvar create ${archns}::__LINK {
         Name            string
         Class           string
         Attrs           list
     } {Name Class}
-    relvar create ${domns}::__ARCH::__ASSOCIATIONLINK {
+    relvar create ${archns}::__ASSOCIATIONLINK {
         Name            string
         SrcClass        string
         DstClass        string
         PrevSrcClass    string
     } {Name SrcClass}
-    relvar create ${domns}::__ARCH::__PARTITIONLINK {
+    relvar create ${archns}::__PARTITIONLINK {
         Name            string
         DstClass        string
         SrcClass        string
     } {Name DstClass}
-    relvar partition ${domns}::__ARCH::R3\
-        ${domns}::__ARCH::__LINK {Name Class}\
-            ${domns}::__ARCH::__ASSOCIATIONLINK {Name SrcClass}\
-            ${domns}::__ARCH::__PARTITIONLINK {Name DstClass}\
+    relvar partition ${archns}::R3\
+        ${archns}::__LINK {Name Class}\
+            ${archns}::__ASSOCIATIONLINK {Name SrcClass}\
+            ${archns}::__PARTITIONLINK {Name DstClass}\
         
-    relvar create ${domns}::__ARCH::__POLYMORPHICEVENT {
+    relvar create ${archns}::__POLYMORPHICEVENT {
         Class           string
         Event           string
     } {Class Event}
@@ -867,11 +882,22 @@ proc addClass {domain class heading id} {
         [concat $idheading [list __State string]]\
         $id
     relvar create ${domns}::$class $heading $id
+    namespace eval ${domns}::${class}::__ACTIVITY {}
 }
 
 proc addState {domain args} {
     dict set args Class [namespace current]::${domain}::[dict get $args Class]
     relvar insert [namespace current]::${domain}::__ARCH::__STATE $args
+}
+
+proc addEvent {domain args} {
+    dict set args Class [namespace current]::${domain}::[dict get $args Class]
+    relvar insert [namespace current]::${domain}::__ARCH::__EVENT $args
+}
+
+proc addTransition {domain args} {
+    dict set args Class [namespace current]::${domain}::[dict get $args Class]
+    relvar insert [namespace current]::${domain}::__ARCH::__TRANSITION $args
 }
 
 proc addInitialState {domain args} {
@@ -1344,37 +1370,81 @@ test findRelated-3.0 {
 <<helper commands>>=
 proc SelfInstRef {{level 2}} {
     upvar $level self srcself
-    return [expr {[info exists srcself] ? $srcself : {}}]
+    return [expr {[info exists srcself] ? $srcself : {{} {{} {}}}}]
 }
 ----
 
 [source,tcl]
 ----
 <<instance commands>>=
-proc signal {destset event args} {
+proc signal {dstset event args} {
     set srcref [SelfInstRef]
-    if {[::rosea::Dispatch::MapPolymorphicEvent ::rosea::Dispatch::SignalEvent\
-            $srcref $destset $event $args]} {
-        return
+    if {![::rosea::Dispatch::MapPolymorphicEvent ::rosea::Dispatch::SignalEvent\
+            $srcref $dstset $event $args]} {
+        ::rosea::Dispatch::SignalEvent $srcref $dstset $event $args
     }
-    ::rosea::Dispatch::SignalEvent $srcref $destset $event $args
+    return
 }
 ----
 
 [source,tcl]
 ----
 <<instance commands>>=
-proc delaysignal {time destset event args} {
+proc delaysignal {time dstset event args} {
     if {!([string is integer -strict $time] && $time >= 0)} {
-        error "invalid time, $time"
+        tailcall DeclError INVALID_TIME $time
     }
     set srcref [SelfInstRef]
-    if {[::rosea::Dispatch::MapPolymorphicEvent\
+    if {![::rosea::Dispatch::MapPolymorphicEvent\
             [list ::rosea::Dispatch::SignalDelayedEvent $time]\
-            $srcref $destset $event $args]} {
-        return
+            $srcref $dstset $event $args]} {
+        ::rosea::Dispatch::SignalDelayedEvent $time $srcref $dstset $event $args
     }
-    ::rosea::Dispatch::SignalDelayedEvent $time $srcref $destset $event $args
+    return
+}
+----
+
+(((error code,INVALID_TIME)))
+[source,tcl]
+----
+<<error code formats>>=
+INVALID_TIME    {invalid time value, "%s"}
+----
+
+[source,tcl]
+----
+<<instance commands>>=
+proc cancel {srcref dstset event} {
+    set srcmult [refMultiplicity $srcref]
+    if {$srcmult > 1} {
+        tailcall DeclError SINGLE_REF_REQUIRED $srcmult
+    }
+    forAllRefs dstref $dstset {
+        ::rosea::Dispatch::CancelDelayedSignal $srcref $event $dstref
+    }
+    return
+}
+----
+
+(((error code,INVALID_TIME)))
+[source,tcl]
+----
+<<error code formats>>=
+SINGLE_REF_REQUIRED     {single valued reference required, %d found}
+----
+
+[source,tcl]
+----
+<<instance commands>>=
+proc remain {srcref dstref event} {
+    set srcmult [refMultiplicity $srcref]
+    if {$srcmult > 1} {
+        tailcall DeclError SINGLE_REF_REQUIRED $srcmult
+    }
+    if {![isRefSingular $dstref]} {
+        tailcall DeclError SINGLE_REF_REQUIRED [refMultiplicity $dstref]
+    }
+    tailcall ::rosea::Dispatch::SignalTimeRemaining $srcref $event $dstref
 }
 ----
 
@@ -1385,7 +1455,7 @@ proc delaysignal {time destset event args} {
 <<dispatch commands namespace>>=
 namespace eval Dispatch {
     <<tclral imports>>
-    namespace path [namespace parent]::Helpers ; # <1>
+    namespace path [namespace parent]::Helpers
     <<dispatch data>>
     <<dispatch commands>>
 }
@@ -1468,14 +1538,14 @@ We want to do this because we know that a superclass instance will reference
 exactly one subclass from among all the subclasses in the generalization and
 it is to that subclass instance that the event will be forwarded.
 
-The heading of result of this query will be:
+The heading of the result of this query will be:
 
-[width="30%",options="header"]
+[width="50%",options="header",title="Heading of Polymorphic Event Mapping Query Result"]
 |=========================
-|Name   |SrcClass   2+^h|DstLinks
-|string |string     2+^|Relation
-|       |           h|DstClass h|Attrs
-|       |           |string     |list
+    |Name       |SrcClass   2+^h|DstLinks
+    |string     |string     2+^|Relation
+1.2+|       1.2+|             h|DstClass     h|Attrs
+                               |string        |list
 |=========================
 
 Note that the *DstLinks* attribute is relation valued.footnote:[That is what
@@ -1530,43 +1600,153 @@ test MapPolymorphicEvent-1.0 {
 ----
 <<dispatch data>>=
 variable event_queue [list]
-variable event_counter 0
-relvar create __SIGNAL {
-    EventId int
-    TimerId string
-} EventId TimerId
+----
 
+[source,tcl]
+----
 <<dispatch commands>>=
-proc SignalEvent {srcref destset event args} {
+proc SignalEvent {srcref dstset event arglist} {
     variable event_queue
-    variable event_counter
-    forAllRefs destref $destset {
+    forAllRefs dstref $dstset {
         set eventInfo [dict create\
             src $srcref\
             event $event\
-            dest $destref\
-            params $args\
+            dst $dstref\
+            params $arglist\
         ]
-        if {[isRefEqual $srcref $destref]} {
-            for {set nsindex 0} {$nsindex < [llength $event_queue]}\
-                    {incr nsindex} {
-                set cmpevent [lindex $event_queue $nsindex]
+        if {[isRefEqual $srcref $dstref]} {
+            set eqindex 0
+            foreach cmpevent $event_queue {
                 if {![isRefEqual [dict get $cmpevent src]\
                         [dict get $cmpevent dst]]} {
                     break
                 }
+                incr eqindex
             }
-            set event_queue [linsert $event_queue $nsindex $eventInfo]
+            set event_queue [linsert $event_queue $eqindex $eventInfo]
         } else {
             lappend event_queue $eventInfo
         }
-        incr event_counter
-        relvar insert __SIGNAL [list\
-            EventId $event_counter\
-            TimerId [::after 0 ::rosea::Dispatch::DispatchEvent $event_counter]\
-        ]
+        ::after 0 [namespace code DispatchEvent]
     }
 }
+----
+
+[source,tcl]
+----
+<<dispatch command tests>>=
+test SignalEvent-1.0 {
+    Signal an event
+} -setup {
+    setupDomain foo
+    addClass foo c1 {A1 int A2 string} A1
+    addState foo Class c1 State s1
+    addState foo Class c1 State s2
+    addEvent foo Class c1 Event e1
+    addInitialState foo Class c1 State s1
+    addTransition foo Class c1 State s1 Event e1 NewState s2
+
+    set ref [rosea::ClassCmds::create [namespace current]::foo::c1 A1 5 A2 baz]
+    rosea::InstCmds::signal $ref e1
+} -cleanup {
+    after cancel [namespace eval ::rosea::Dispatch namespace code DispatchEvent]
+    cleanupDomain foo
+} -body {
+    set event [lindex $::rosea::Dispatch::event_queue 0]
+    dict get $event dst
+} -result {::rosea::test::foo::c1 {{A1 int} {{A1 5}}}} -match ref
+----
+
+[source,tcl]
+----
+<<dispatch commands>>=
+proc DispatchEvent {} {
+    variable event_queue
+    if {[llength $event_queue] != 0} {
+        # Pull the event from the front of the queue.
+        set eventInfo [lindex $event_queue 0]
+        set event_queue [lrange $event_queue 1 end]
+
+        set dstref [dict get $eventInfo dst]
+        lassign $dstref relvar ref
+        lassign [SplitRelvarName $relvar] domain class
+        set archns ${domain}::__ARCH
+
+        set instrelvar ${domain}::__${class}__INSTANCE
+        set state [relation semijoin $ref [relvar set $instrelvar]]
+        if {[relation isempty $state]} {
+            tailcall DeclError EVENT_IN_FLIGHT [dict get $eventInfo event]\
+                $ref
+        }
+        set currstate [relation extract $state __State]
+        set event [dict get $eventInfo event]
+
+        set newState [pipe {
+            relvar restrictone ${archns}::__TRANSITION\
+                Class $relvar State $currstate Event $event |
+            relation extract ~ NewState
+        }]
+
+        if {$newState eq "CH"} {
+            tailcall DeclError CANT_HAPPEN_EVENT [dict get $eventInfo src]\
+                $event $dstref $currstate
+        } elseif {$newState ne "IG"} {
+            set idattrs [tuple get [ral relation tuple $ref]]
+            relvar updateone $instrelvar is $idattrs {
+                tuple update $is __State $newState
+            }
+            try {
+                relvar eval {
+                    ${relvar}::__ACTIVITY::$newState $dstref\
+                            {*}[dict get $eventInfo params]
+                }
+            } finally {
+                set term [relvar restrictone ${domain}::__ARCH::__TERMINAL\
+                        Class $relvar State $newState]
+                if {[relation isnotempty $term]} {
+                    relvar deleteone $relvar {*}$idattrs
+                    relvar deleteone $instrelvar {*}$idattrs
+                }
+            }
+        }
+    }
+    return
+}
+----
+
+(((error code,EVENT_IN_FLIGHT)))
+[source,tcl]
+----
+<<error code formats>>=
+EVENT_IN_FLIGHT     {event, "%s", sent to "%s", which does not exist}
+CANT_HAPPEN_EVENT   {can't happen transition, %s - %s -> %s ==> %s -> CH}
+----
+
+[source,tcl]
+----
+<<dispatch command tests>>=
+test DispatchEvent-1.0 {
+    Dispatch an event and execute a state action
+} -setup {
+    setupDomain foo
+    addClass foo c1 {A1 int A2 string} A1
+    addState foo Class c1 State s1
+    addState foo Class c1 State s2
+    addEvent foo Class c1 Event e1
+    addInitialState foo Class c1 State s1
+    addTransition foo Class c1 State s1 Event e1 NewState s2
+    proc [namespace current]::foo::c1::__ACTIVITY::s2 {self} {
+        set ::done $self
+    }
+
+    set ref [rosea::ClassCmds::create [namespace current]::foo::c1 A1 5 A2 baz]
+    rosea::InstCmds::signal $ref e1
+} -cleanup {
+    cleanupDomain foo
+} -body {
+    vwait ::done
+    set ::done
+} -result {::rosea::test::foo::c1 {{A1 int} {{A1 5}}}} -match ref
 ----
 
 [source,tcl]
@@ -1579,32 +1759,24 @@ relvar create __DELAYEDSIGNAL {
     TimerId         string
     Expire          bignum
 } {SrcInstRef Event DstInstRef}
+----
 
+[source,tcl]
+----
 <<dispatch commands>>=
-proc CancelDelayedSignal {srcref event dstref} {
-    namespace upvar ::rosea::Dispatch __DELAYEDSIGNAL DelayedSignal
-    set sig [relation restrictwith $DelayedSignal {
-            [isRefEqual $SrcInstRef $srcref] && $Event eq $event &&\
-            [isRefEqual $DstInstRef $dstref]}]
-    if {[relation isnotempty $sig]} {
-        ::after cancel [relation extract $sig TimerId]
-        ::rosea::Dispatch::DeleteDelayedSignal $srcref $event $dstref
-    }
-}
-
-proc SignalDelayedEvent {time srcref destset event args} {
-    if {!([string is integer -strict $time] && $time >= 0)} {
-        error "invalid time, $time"
-    }
-    if {[MapPolymorphicEvent [list delaysignal $time] $destset $event\
-            $args]} {
-        return
-    }
-    set srcref [SelfInstRef]
-    forAllRefs destref $destset {
+proc SignalDelayedEvent {time srcref dstset event arglist} {
+    forAllRefs dstref $dstset {
         # Cancel any existing delayed signal that might have been in place.
-        CancelDelayedSignal $srcref $event $destref
-        ::rosea::Dispatch::CreateDelayedSignal $time $srcref $event $destref
+        CancelDelayedSignal $srcref $event $dstref
+        relvar insert __DELAYEDSIGNAL [list\
+            SrcInstRef  $srcref\
+            Event       $event\
+            DstInstRef  $dstref\
+            TimerId     [::after $time\
+                        [list ::rosea::Dispatch::DispatchDelayedEvent\
+                            $srcref $event $dstref $arglist]]\
+            Expire      [expr {entier([clock milliseconds]) + entier($time)}]\
+        ]
     }
     return
 }
@@ -1613,95 +1785,149 @@ proc SignalDelayedEvent {time srcref destset event args} {
 [source,tcl]
 ----
 <<dispatch commands>>=
-proc CreateDelayedSignal {time srcref event dstref} {
-    relvar insert __DELAYEDSIGNAL [list\
-        SrcInstRef  $srcref\
-        Event       $event\
-        DstInstRef $destref\
-        TimerId     [::after $time [list ::rosea::Dispatch::DelayedDispatch\
-                    $srcref $event $destref $args]]\
-        Expire      [expr {entier([clock milliseconds]) + entier($time)}]\
+proc DispatchDelayedEvent {srcref event dstref params} {
+    DeleteDelayedSignal $srcref $event $dstref
+    variable event_queue
+    lappend event_queue [dict create\
+        src $srcref\
+        event $event\
+        dst $dstref\
+        params $params\
     ]
+    tailcall DispatchEvent
 }
+----
 
+[source,tcl]
+----
+<<dispatch command tests>>=
+test DispatchDelayedEvent-1.0 {
+    Dispatch a delayed event and execute a state action
+} -setup {
+    setupDomain foo
+    addClass foo c1 {A1 int A2 string} A1
+    addState foo Class c1 State s1
+    addState foo Class c1 State s2
+    addEvent foo Class c1 Event e1
+    addInitialState foo Class c1 State s1
+    addTransition foo Class c1 State s1 Event e1 NewState s2
+    proc [namespace current]::foo::c1::__ACTIVITY::s2 {self} {
+        set ::done $self
+    }
+
+    set ref [rosea::ClassCmds::create [namespace current]::foo::c1 A1 5 A2 baz]
+    rosea::InstCmds::delaysignal 100 $ref e1
+} -cleanup {
+    cleanupDomain foo
+} -body {
+    vwait ::done
+    set ::done
+} -result {::rosea::test::foo::c1 {{A1 int} {{A1 5}}}} -match ref
+----
+
+[source,tcl]
+----
+<<dispatch commands>>=
+proc CancelDelayedSignal {srcref event dstref} {
+    variable __DELAYEDSIGNAL
+    set sig [FindDelayedSignal $srcref $event $dstref]
+    if {[relation isnotempty $sig]} {
+        ::after cancel [relation extract $sig TimerId]
+        DeleteDelayedSignal $srcref $event $dstref
+    }
+}
+----
+
+[source,tcl]
+----
+<<dispatch command tests>>=
+test CancelDelayedSignal-1.0 {
+    Cancel a delayed event
+} -setup {
+    setupDomain foo
+    addClass foo c1 {A1 int A2 string} A1
+    addState foo Class c1 State s1
+    addState foo Class c1 State s2
+    addEvent foo Class c1 Event e1
+    addInitialState foo Class c1 State s1
+    addTransition foo Class c1 State s1 Event e1 NewState s2
+
+    set ref [rosea::ClassCmds::create [namespace current]::foo::c1 A1 5 A2 baz]
+} -cleanup {
+    cleanupDomain foo
+} -body {
+    rosea::InstCmds::delaysignal 100 $ref e1
+    set src {{} {{} {}}}
+    rosea::InstCmds::cancel $src $ref e1
+    relation cardinality [rosea::Dispatch::FindDelayedSignal $src e1 $ref]
+} -result {0}
+----
+
+[source,tcl]
+----
+<<dispatch commands>>=
+proc SignalTimeRemaining {srcref event dstref} {
+    set sig [FindDelayedSignal $srcref $event $dstref]
+    if {[relation isnotempty $sig]} {
+        set remaining [expr {[relation extract $sig Expire] -\
+            [clock milliseconds]}]
+        if {$remaining < 0} {
+            set remaining 0
+        }
+    } else {
+        set remaining 0
+    }
+
+    return $remaining
+}
+----
+
+[source,tcl]
+----
+<<dispatch command tests>>=
+test SignalTimeRemaining-1.0 {
+    Obtain remaining time on a delayed signal
+} -setup {
+    setupDomain foo
+    addClass foo c1 {A1 int A2 string} A1
+    addState foo Class c1 State s1
+    addState foo Class c1 State s2
+    addEvent foo Class c1 Event e1
+    addInitialState foo Class c1 State s1
+    addTransition foo Class c1 State s1 Event e1 NewState s2
+
+    set ref [rosea::ClassCmds::create [namespace current]::foo::c1 A1 5 A2 baz]
+} -cleanup {
+    cleanupDomain foo
+} -body {
+    rosea::InstCmds::delaysignal 100 $ref e1
+    set src {{} {{} {}}}
+    set remain [rosea::InstCmds::remain $src $ref e1]
+    rosea::InstCmds::cancel $src $ref e1
+    expr {$remain <= 100 && $remain >= 95}
+} -result {1}
+----
+
+[source,tcl]
+----
+<<dispatch commands>>=
+proc FindDelayedSignal {srcref event dstref} {
+    variable __DELAYEDSIGNAL
+    return [relation restrictwith $__DELAYEDSIGNAL {
+            [isRefEqual $SrcInstRef $srcref] && $Event eq $event &&\
+            [isRefEqual $DstInstRef $dstref]}]
+}
+----
+
+[source,tcl]
+----
+<<dispatch commands>>=
 proc DeleteDelayedSignal {srcref event dstref} {
     relvar delete __DELAYEDSIGNAL dsig {
         [isRefEqual [tuple extract $dsig SrcInstRef] $srcref] &&\
-        $Event eq $event &&\
-        [isRefEqual [tuple extract $dsig DstInstRef] $dstref]}
-}
-
-proc Dispatch {eventid} {
-    relvar deleteone __SIGNAL EventId $eventid
-    variable event_queue
-    if {[llength $event_queue] != 0} {
-        # Pull the event from the front of the queue.
-        set eventInfo [lindex $event_queue 0]
-        set event_queue [lrange $event_queue 1 end]
-        tailcall Receive $eventInfo
+        [tuple extract $dsig Event] eq $event &&\
+        [isRefEqual [tuple extract $dsig DstInstRef] $dstref]
     }
-}
-
-proc DelayedDispatch {srcref event destref params} {
-    DeleteDelayedSignal $srcref $event $destref
-    tailcall Receive [dict create\
-        src $srcref\
-        event $event\
-        dest $destref\
-        params $params\
-    ]
-}
-
-proc Receive {eventInfo} {
-    #puts [info level 0]
-    set destref [dict get $eventInfo dest]
-    lassign $destref relvar ref
-    lassign [SplitRelvarName $relvar] domain class
-
-    set instrelvar ${relvar}::__${class}__INSTANCE
-    set state [relation semijoin $ref [relvar set $instrelvar]]
-    if {[relation isempty $state]} {
-        error "can't find current state, $ref"
-    }
-    set currstate [relation extract $state __State]
-
-    set trans [relvar restrictone ${domain}::__ARCH::__TRANSITION\
-            Class $relvar CurrState $currstate\
-            Event [dict get $eventInfo event]]
-    if {[ral relation isempty $trans]} {
-        set deftrans [relvar restrictone ${domain}::__ARCH::__DEFAULTTRANS\
-                Class $relvar]
-        set newState [relation extract $deftrans DefaultTrans]
-    } else {
-        set newState [relation extract $trans NewState]
-    }
-
-    if {$newState eq "CH"} {
-        error "can't happen: $relvar\
-            $currstate - [dict get $eventInfo event] -> CH"
-    } elseif {$newState ne "IG"} {
-        set idattrs [tuple get [ral relation tuple $ref]]
-        relvar updateone $instrelvar is $idattrs {
-            tuple update $is __State $newState
-        }
-        try {
-            relvar eval {
-                ${relvar}::__ACTIVITY::$newState $destref\
-                        {*}[dict get $eventInfo params]
-            }
-        } on error {result opts} {
-            puts "state activity error: $::errorInfo"
-        } finally {
-            set termrelvar ${domain}::__ARCH::__TERMINAL
-            set term [relvar restrictone $termrelvar\
-                    Class $relvar State $newState]
-            if {[relation isnotempty $term]} {
-                relvar deleteone $relvar {*}$idattrs
-                relvar deleteone $instrelvar {*}$idattrs
-            }
-        }
-    }
-    return
 }
 ----
 
