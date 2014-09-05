@@ -27,6 +27,9 @@ DIAGRAMS =\
 	partition-link.uxf\
 	correl-link.uxf\
 	link-classes.uxf\
+	config-domain.uxf\
+	config-classes.uxf\
+	config-relation.uxf\
 	$(NULL)
 
 SEQDIAG	=\
