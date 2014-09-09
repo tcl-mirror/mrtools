@@ -2032,7 +2032,8 @@ One can view that as a type of on-the-fly interpretation.
 * Consume all the DSL commands, storing away any data that is required
 and then generate the run-time structure at the end.
 
-The first approach is certainly simpler but has some decided disadvantages.
+The first approach is certainly simpler to code
+but has some decided disadvantages.
 To create the run-time structure as each command is executed will impose
 a rather strict ordering of the commands.
 For example,
@@ -2063,11 +2064,13 @@ the +domain+ command is used to define each domain.
 The +domain+ command accepts a script body that then defines the
 components of the domain.
 That script will be evaluated in a namespace where the commands that
-define the domain component, _e.g._ +class+ and relationship commands,
+define the domain components, _e.g._ +class+ and relationship commands,
 resolve appropriately.
-This lets us put commands for the nesting in namespaces and prevents
-any problems of accidentially invoking commands that are inappropriate
-in that context of the DSL.
+This lets us put commands for the body specifying a particular component into a
+namespace which prevents any problems of accidentially invoking commands that
+are inappropriate in that context of the DSL.
+
+We layout the +::rosea::Config+ namespace as shown below.
 
 [source,tcl]
 ----
@@ -2092,7 +2095,7 @@ the first error that is encountered will terminate the evaluation.
 This is decidedly inconvenient as you would prefer to continue on and
 come up with a list of errors for the evaluation much like a
 conventional language compiler would do when compiling a source file.
-Discovering errors one at a time is unproductive.
+Discovering errors one at a time is tediously unproductive.
 
 Of course, it is possible to continue evaluating after an error but
 that requires a bit more code.
@@ -2151,7 +2154,7 @@ we have something that has some chance of being a real command.
 set our location counter to where that command starts.
 
 So one of our top level +rosea+ commands is to configure a domain from
-as script.
+a script.
 
 [source,tcl]
 ----
@@ -2193,14 +2196,29 @@ CONFIG_ERRORS     {encountered %d configuration script errors}
 
 === Defining a Domain
 
-...............
-domain name {
-    class name ...
-    relationship name ...
-    operation name params body
-}
-...............
+The _script_ handed to the +configure+ command should contain
+invocations of the +domain+ command.
 
+====
++domain+ _name_ _body_
+====
+
++name+::
+    The name of the domain. A domain name must be a non-empty string.
++body+::
+    A Tcl script containing invocation of the domain definition commands
+    to specify the details of the domain configuration.
+
+As we described above,
+the domain configuration commands will take the data in their
+arguments and store it away.
+After we have finished all the configuration scripts,
+then the +generate+ command is used to layout the data structures
+and namespace as needed.
+
+In this section we start this process by showing some of the data
+structures we will use to store the configuration data as it is
+being collected.
 Below is a UML class diagram for the data that the DSL will populate
 for a domain definition.
 
@@ -2255,7 +2273,7 @@ relvar association R7\
     Domain Name 1
 ----
 
-When configurating the domain,
+When configurating a domain,
 we will evaluate the configuration script in the +DomainDef+ child namespace.
 That namespace will define commands for all the components of the
 domain.
@@ -2271,41 +2289,16 @@ proc domain {name body} {
 
     relvar uinsert ::rosea::Config::Domain [list Name $name] ; # <2>
     try {
+        if {$name eq {}} {
+            tailcall DeclError EMPTY_DOMAIN_NAME
+        }
+
         ConfigEvaluate [namespace current]::DomainDef  $body
 
         # At this point we have the definition of the domain and enough
         # information to tie together the referential attributes and
-        # the relationship definitions.
-        variable ReferencedClass
-        variable ReferringClass
-        variable ReferenceInClass
-
-        log::debug [relformat $ReferenceInClass ReferenceInClass]
-        log::debug [relformat $ReferencedClass ReferencedClass]
-
-        set references [pipe {
-            relation join $ReferencedClass $ReferenceInClass\
-                    -using {Domain Domain Class ReferencedClass\
-                    Relationship Relationship} |
-            relation project ~ Domain Class Relationship Role\
-                    ReferencedAttribute ReferencedIdNumber |
-            relation rename ~ ReferencedAttribute Attribute\
-                    ReferencedIdNumber Number
-        }]
-        relvar union ReferencedIdAttribute $references
-        log::debug [relformat [relvar set ReferencedIdAttribute]\
-                ReferencedIdAttribute]
-
-        log::debug [relformat $ReferringClass ReferringClass]
-        set referrings [pipe {
-            relation join $ReferringClass $ReferenceInClass\
-                -using {Domain Domain Class ReferringClass\
-                    Relationship Relationship} |
-            relation rename ~ Class ReferringClass Role ReferringRole
-        }]
-        relvar union AttributeReference $referrings
-        log::debug [relformat [relvar set AttributeReference]\
-                AttributeReference]
+        # the association definitions.
+        <<bind association references>>
     } on error {result opts} {
         log::error $result
         upvar #0 ::rosea::Config::errcount errcount
@@ -2318,6 +2311,21 @@ implies that all the components defined are to be part of this domain.
 <2> We allow the +domain+ command to be invoked more than once.
 Domains are open ended definitions and the +uinsert+ command will not
 throw an error upon a duplicate.
+
+We will defer the discussion about binding the associations and their
+attribute referenced until later when we have covered those commands.
+For now,
+we will say that there are semantics evaluations and checks that can only
+be done after the entire domain configuration script has been processed.
+The reason for this lies mainly with the way the DSL script commands
+were defined to make them convenient when translating from an XUML model.
+
+(((error code,EMPTY_DOMAIN_NAME)))
+[source,tcl]
+----
+<<error code formats>>=
+EMPTY_DOMAIN_NAME      {domains may not be named by the empty string}
+----
 
 [source,tcl]
 ----
@@ -2334,6 +2342,22 @@ test configure-1.0 {
     }
     relation extract [relvar set ::rosea::Config::Domain] Name
 } -result {foo}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test configure-1.1 {
+    Define domain -- bad name
+} -setup {
+} -cleanup {
+    cleanupConfigData
+} -body {
+    rosea configure {
+        domain {} {
+        }
+    }
+} -result {encountered 1 configuration script errors} -returnCodes error
 ----
 
 We need some more testing support.
@@ -2354,6 +2378,15 @@ proc cleanupConfigData {} {
 
 === Defining Domain Components
 
+In this section we discuss the commands that are used to define
+the components of a domain.
+We define child namespaces for those domain component commands
+that have a nested structure.
+In this case,
+it is the +class+ command that requires additional configuration commands.
+
+We start with the namespace layout for the +DomainDef+ namespace.
+
 [source,tcl]
 ----
 <<domain config namespace layout>>=
@@ -2372,16 +2405,34 @@ namespace eval DomainDef {
 
 === Defining Classes
 
-...............
-class name {
-    attribute name type ?-default <default value>? ?-id <num>?
-    reference <RX> <class>
-        ?-refid <num>?
-        -link {<name> ?<target name>?}
-}
-...............
+====
++class+ _name_ _body_
+====
+
++name+::
+    The name of the class. A class name must be a non-empty string.
++body+::
+    A Tcl script containing invocation of the class definition commands
+    to specify the details of the class configuration.
+
+Below is a UML class diagram of the configuration data for defining
+classes.
+There are a substantial number of rules about what constitutes a
+proper XUML class.
+This diagram is intended to enforce those rules.
+For example,
+every class must have at least one identifier.
+That rule is enforced by relationship, +R4+.
+Every class must have at least one attribute and that rule is
+enforced by relationship, +R3+.
+The use of a schema such as this insures that evaluating a class
+definition script results in a consistent class definition.
 
 image::config-classes.pdf[title="Classes Configuration Class Diagram"]
+
+As before,
+the TclRAL relvar defintions corresponding to the class model are
+are direct text transliteration of the model graphic.
 
 [source,tcl]
 ----
@@ -2473,24 +2524,23 @@ relvar create ReferenceInClass {
 ----
 <<domain config commands>>=
 proc class {name body} {
-    if {$name eq {}} {
-        tailcall DeclError EMPTY_CLASS_NAME
-    }
-
-    namespace upvar [namespace current] DomainName DomainName
+    namespace upvar [namespace current] DomainName DomainName ; # <1>
     namespace upvar ClassDef ClassName ClassName
-
     set ClassName $name
 
-    relvar insert ::rosea::Config::DomainElement [list\
-        Domain  $DomainName\
-        Element $name\
-    ]
-    relvar insert ::rosea::Config::Class [list\
-        Domain  $DomainName\
-        Name    $name\
-    ]
     try {
+        if {$name eq {}} {
+            tailcall DeclError EMPTY_CLASS_NAME
+        }
+        relvar insert ::rosea::Config::DomainElement [list\
+            Domain  $DomainName\
+            Element $name\
+        ]
+        relvar insert ::rosea::Config::Class [list\
+            Domain  $DomainName\
+            Name    $name\
+        ]
+
         ConfigEvaluate [namespace current]::ClassDef  $body
     } on error {result opts} {
         log::error $result
@@ -2499,13 +2549,23 @@ proc class {name body} {
     }
 }
 ----
+<1> Again we arrange for namespace variables to hold the current
+domain and class names to provide the context of the definition.
 
 (((error code,EMPTY_CLASS_NAME)))
 [source,tcl]
 ----
 <<error code formats>>=
-EMPTY_CLASS_NAME      {classes may not be named the empty string}
+EMPTY_CLASS_NAME      {classes may not be named by the empty string}
 ----
+
+=== Defining Classes Components
+
+Since there are several aspects of classes,
+the +class+ command takes a _script_ argument which should
+invoke the commands we discuss in this section.
+Following our pattern,
+we define a namespace where the class body script is evaluated.
 
 [source,tcl]
 ----
@@ -2522,10 +2582,60 @@ namespace eval ClassDef {
 }
 ----
 
+==== Defining Attributes
+
+Within a class definitions,
+the +attribute+ command specifies the attributes of the class.
+
+=====
++attribute+ _name_ _type_ ?_option value_ ...?
+=====
+
++name+::
+    The name of the attribute. Attributes names may not be the empty string.
++type+::
+    The type of the attribute. The _type_ may be any type that is acceptable
+    to the +::ral::tuple+ command.
++option value+::
+    A set of _option/value_ pairs that define the characteristics of the
+    attribute.
+    Valid options are:
+    +-default+ _value_:::
+        Specifies a default value that will be supplied if an instance
+        is created and no value is provided for the attribute.
+    +-id+ _number_:::
+        Specifies that the attribute is part of the identifier given by
+        _number_.
+        All classes must have at least one identifier.
+        Classes may have multiple identifiers and each is given a
+        separate number. Typically, _number_ is a small integer
+        such as 1, 2 or 3.
+
+.A Note About Identifiers
+*******
+For lack of a better way to distinguish identifiers,
+integer numbers are used.
+The most common case is for a class to have a single identifier
+and for that identifier to have a single attribute.
+So typically, one attribute of the class will be marked as +-id 1+.
+Identifiers must also be minimal identifiers,
+_i.e._ one identifier's attributes must not be a subset (proper or improper)
+of the attributes of another identifier.
+The rule of minimal identifiers is _not_ enforced by the class configuration
+UML model but TclRAL will insist upon it when the underlying relvar is
+created.
+*******
+
+The implementation of the +attribute+ command simply creates tuples
+in the relvars to hold the attribute characteristics.
+
 [source,tcl]
 ----
 <<class config commands>>=
 proc attribute {name type args} {
+    if {$name eq {}} {
+        tailcall DeclError EMPTY_ATTRIBUTE_NAME
+    }
     if {[llength $args] % 2 != 0} {
         tailcall DeclError ARG_FORMAT $args
     }
@@ -2564,12 +2674,94 @@ proc attribute {name type args} {
                 ]
             }
             default {
-                tailcall DeclError UNKNOWN_OPTION $option
+                tailcall DeclError UNKNOWN_OPTION attribute $option
             }
         }
     }
 }
+----
 
+(((error code,EMPTY_DOMAIN_NAME)))
+[source,tcl]
+----
+<<error code formats>>=
+EMPTY_ATTRIBUTE_NAME      {attributes may not be named by the empty string}
+----
+
+==== Defining References
+
+One of the more complicated aspects of XUML is understanding
+class relationships and how the fundamental notions of
+referential integrity constraints from relational algebra are implemented.
+For our purposes,
+we have chosen to specify relationships in two pieces:
+
+. Specifying that some attributes are _referential_.
+. Specifying the relationship characteristics for which the referential
+attributes realize.
+
+The reason we have taken this approach is that it corresponds closely
+to the UML graphic that we are translating.
+The referential nature of an attribute is denoted in the graphic as a
+characteristic of the attribute and relationships have a separate graphical
+representation.
+The result of this decision is that the most common case of simple
+associations can be specified with the least amount of text.
+The tradeoff is that the most general case of reflexive, class-based
+association require more specification to resolve the inherent ambiguity.
+
+======
++reference+ _relationship_ _class_ ?_option value_ ...?
+======
+
++relationship+::
+    The name of the relationship to which the reference applies.
++class+::
+    The name of the class to which the reference refers.
++option value+::
+    A set of _option/value_ pairs that define the characteristics of the
+    reference.
+    Valid options are:
+    +-link+ _attribute reference_:::
+        The +-link+ option specifies an attribute reference.
+        The _attribute reference_ value is a one or two element list.
+        The first element is the name of an attribute in the class being
+        defined.
+        The second element is the name of an attribute in the class given
+        by the _class_ argument.
+        The +-link+ option specifies that an attribute in the class being
+        defined is a reference to (_i.e._ will have the same value as)
+        an attribute in the _class_ class.
+        If the second element of the _attribute reference_ is missing,
+        then the name of the referenced attribute is assumed to be
+        the same as the referencing attribute.
+        Multiple +-link+ options may be given for a given _relationships_.
+        The link options define a one-to-one correspondance between the
+        referring attributes and an identifier in _class_.
+    +-refid+ _number_:::
+        The +refid+ option gives the _number_ of the identifier to which
+        the referencing attributes refer.
+        If missing, then +refid+ defaults to 1.
+        Typically, reference in the defined class refer to the primary
+        identifier in _class_.
+        However, if they refer to another identifier, then the +refid+
+        option is necessary.
+        All the attributes given by the +-link+ option, as a group,
+        must reference a specific identifier in _class_.
+
+The decision to specify all the aspects of relationships and their
+realization using attribute references is that we will have to hold
+temporarily the data about references until all the aspects of the domain
+are defined.
+The we will bind the attribute references to the relationship characteristics.
+This is done below.
+For now,
+we show the data structure that we will use to hold the
+attribute reference information.
+
+[source,tcl]
+----
+<<class config commands>>=
 proc reference {relname rclass args} {
     if {[llength $args] % 2 != 0} {
         tailcall DeclError ARG_FORMAT $args
@@ -2579,7 +2771,6 @@ proc reference {relname rclass args} {
     namespace upvar ::rosea::Config::DomainDef::ClassDef ClassName ClassName
 
     set refnum 1
-    set links [dict create]
 
     foreach {option value} $args {
         switch -exact -- $option {
@@ -2591,28 +2782,21 @@ proc reference {relname rclass args} {
                 if {$referenced eq {}} {
                     set referenced $referring
                 }
-                dict set links $referring $referenced
+                relvar insert ::rosea::Config::ReferenceInClass [list\
+                    Domain              $DomainName\
+                    ReferringClass      $ClassName\
+                    ReferringAttribute  $referring\
+                    ReferencedClass     $rclass\
+                    ReferencedAttribute $referenced\
+                    ReferencedRole      target\
+                    ReferencedIdNumber  $refnum\
+                    Relationship        $relname\
+                ]
             }
             default {
-                tailcall DeclError UNKNOWN_OPTION $option
+                tailcall DeclError UNKNOWN_OPTION reference $option
             }
         }
-    }
-    # We need to squirrel away the reference information to hold
-    # until the relationship is defined. Only then do we have the
-    # "role" information necessary to create the instances of
-    # Referenced Id Attribute and Attribute Reference.
-    dict for {referring referenced} $links {
-        relvar insert ::rosea::Config::ReferenceInClass [list\
-            Domain              $DomainName\
-            ReferringClass      $ClassName\
-            ReferringAttribute  $referring\
-            ReferencedClass     $rclass\
-            ReferencedAttribute $referenced\
-            ReferencedRole      target\
-            ReferencedIdNumber  $refnum\
-            Relationship        $relname\
-        ]
     }
 }
 ----
@@ -2623,7 +2807,7 @@ proc reference {relname rclass args} {
 ----
 <<error code formats>>=
 ARG_FORMAT      {options and values must come in pairs, got "%s"}
-UNKNOWN_OPTION  {unknown option, "%s"}
+UNKNOWN_OPTION  {unknown %s command option, "%s"}
 ----
 
 [source,tcl]
@@ -2932,7 +3116,7 @@ proc association {name source spec target args} {
                 set path $value
             }
             default {
-                tailcall DeclError UNKNOWN_OPTION $option
+                tailcall DeclError UNKNOWN_OPTION association $option
             }
         }
     }
@@ -3095,6 +3279,41 @@ BAD_RELATIONSHIP_SPEC  {bad relationship specifier, "%s"}
 NEED_ASSOCIATOR {relationship of type, "%s", requires associative class}
 NEED_REFLEXIVE_PATH {traversal path must be specified for reflexive\
         association, %s, %s %s %s}
+----
+
+[source,tcl]
+----
+<<bind association references>>=
+variable ReferencedClass
+variable ReferringClass
+variable ReferenceInClass
+
+log::debug [relformat $ReferenceInClass ReferenceInClass]
+log::debug [relformat $ReferencedClass ReferencedClass]
+
+set references [pipe {
+    relation join $ReferencedClass $ReferenceInClass\
+            -using {Domain Domain Class ReferencedClass\
+            Relationship Relationship} |
+    relation project ~ Domain Class Relationship Role\
+            ReferencedAttribute ReferencedIdNumber |
+    relation rename ~ ReferencedAttribute Attribute\
+            ReferencedIdNumber Number
+}]
+relvar union ReferencedIdAttribute $references
+log::debug [relformat [relvar set ReferencedIdAttribute]\
+        ReferencedIdAttribute]
+
+log::debug [relformat $ReferringClass ReferringClass]
+set referrings [pipe {
+    relation join $ReferringClass $ReferenceInClass\
+        -using {Domain Domain Class ReferringClass\
+            Relationship Relationship} |
+    relation rename ~ Class ReferringClass Role ReferringRole
+}]
+relvar union AttributeReference $referrings
+log::debug [relformat [relvar set AttributeReference]\
+        AttributeReference]
 ----
 
 [source,tcl]
