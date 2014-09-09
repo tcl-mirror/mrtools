@@ -610,7 +610,7 @@ blockdiag {
     arch -> archinfo ;
 
     instance [label = "__<class>__INSTANCE", class = "rvstyle"] ;
-    activity [label = "::__ACTIVITY", color = "#ff8b70"] ;
+    activity [label = "::__Activity", color = "#ff8b70"] ;
     classop [label = "::<class op procs>", class = "procstyle"] ;
     instop [label = "::<inst op procs>", class = "procstyle"] ;
 
@@ -898,7 +898,7 @@ proc addClass {domain class heading id} {
         [concat $idheading [list __State string]]\
         $id
     relvar create ${domns}::$class $heading $id
-    namespace eval ${domns}::${class}::__ACTIVITY {}
+    namespace eval ${domns}::${class}::__Activity {}
 }
 
 proc addState {domain args} {
@@ -1713,7 +1713,7 @@ proc DispatchEvent {} {
             }
             try {
                 relvar eval {
-                    ${relvar}::__ACTIVITY::$newState $dstref\
+                    ${relvar}::__Activity::$newState $dstref\
                             {*}[dict get $eventInfo params]
                 }
             } finally {
@@ -1752,7 +1752,7 @@ test DispatchEvent-1.0 {
     addEvent foo Class c1 Event e1
     addInitialState foo Class c1 State s1
     addTransition foo Class c1 State s1 Event e1 NewState s2
-    proc [namespace current]::foo::c1::__ACTIVITY::s2 {self} {
+    proc [namespace current]::foo::c1::__Activity::s2 {self} {
         set ::done $self
     }
 
@@ -1828,7 +1828,7 @@ test DispatchDelayedEvent-1.0 {
     addEvent foo Class c1 Event e1
     addInitialState foo Class c1 State s1
     addTransition foo Class c1 State s1 Event e1 NewState s2
-    proc [namespace current]::foo::c1::__ACTIVITY::s2 {self} {
+    proc [namespace current]::foo::c1::__Activity::s2 {self} {
         set ::done $self
     }
 
@@ -1976,7 +1976,7 @@ namespace export DeclError
 proc DeclError {errcode args} {
     variable errFormats
     set errmsg [format [dict get $errFormats $errcode] {*}$args]
-    tailcall throw [list STSACLASS $errcode {*}$args $errmsg] $errmsg
+    tailcall throw [list ROSEA $errcode {*}$args $errmsg] $errmsg
 }
 ----
 
@@ -2171,10 +2171,8 @@ proc configure {script} {
             Config::ConfigEvaluate ::rosea::Config $script
         }
     } on error {result} {
-        if {$errcount == 0} {
-            log::error $result
-            incr errcount
-        }
+        log::error $result
+        incr errcount
     }
     if {$errcount > 0} {
         tailcall DeclError CONFIG_ERRORS $errcount
@@ -2274,8 +2272,42 @@ proc domain {name body} {
     relvar uinsert ::rosea::Config::Domain [list Name $name] ; # <2>
     try {
         ConfigEvaluate [namespace current]::DomainDef  $body
+
+        # At this point we have the definition of the domain and enough
+        # information to tie together the referential attributes and
+        # the relationship definitions.
+        variable ReferencedClass
+        variable ReferringClass
+        variable ReferenceInClass
+
+        log::debug [relformat $ReferenceInClass ReferenceInClass]
+        log::debug [relformat $ReferencedClass ReferencedClass]
+
+        set references [pipe {
+            relation join $ReferencedClass $ReferenceInClass\
+                    -using {Domain Domain Class ReferencedClass\
+                    Relationship Relationship} |
+            relation project ~ Domain Class Relationship Role\
+                    ReferencedAttribute ReferencedIdNumber |
+            relation rename ~ ReferencedAttribute Attribute\
+                    ReferencedIdNumber Number
+        }]
+        relvar union ReferencedIdAttribute $references
+        log::debug [relformat [relvar set ReferencedIdAttribute]\
+                ReferencedIdAttribute]
+
+        log::debug [relformat $ReferringClass ReferringClass]
+        set referrings [pipe {
+            relation join $ReferringClass $ReferenceInClass\
+                -using {Domain Domain Class ReferringClass\
+                    Relationship Relationship} |
+            relation rename ~ Class ReferringClass Role ReferringRole
+        }]
+        relvar union AttributeReference $referrings
+        log::debug [relformat [relvar set AttributeReference]\
+                AttributeReference]
     } on error {result opts} {
-        puts $result
+        log::error $result
         upvar #0 ::rosea::Config::errcount errcount
         incr errcount
     }
@@ -2342,10 +2374,10 @@ namespace eval DomainDef {
 
 ...............
 class name {
-    attribute name type
-        -default <value>
-        -reference {<RX> <class> ?<name>?} ...
-        -id <num> ...
+    attribute name type ?-default <default value>? ?-id <num>?
+    reference <RX> <class>
+        ?-refid <num>?
+        -link {<name> ?<target name>?}
 }
 ...............
 
@@ -2386,22 +2418,6 @@ relvar correlation R5 IdentifyingAttribute\
     {Domain Class Number} + Identifier {Domain Class Number}\
     {Domain Class Attribute} * Attribute {Domain Class Name}
 
-relvar create BaseAttribute {
-    Domain      string
-    Class       string
-    Name        string
-} {Domain Class Name}
-
-relvar create ReferentialAttribute {
-    Domain      string
-    Class       string
-    Name        string
-} {Domain Class Name}
-
-relvar partition R11 Attribute {Domain Class Name}\
-    BaseAttribute {Domain Class Name}\
-    ReferentialAttribute {Domain Class Name}
-
 relvar create DefaultValue {
     Domain      string
     Class       string
@@ -2417,27 +2433,50 @@ relvar create AttributeReference {
     Domain              string
     ReferringClass      string
     ReferringAttribute  string
+    ReferringRole       string
     ReferencedClass     string
     ReferencedAttribute string
+    ReferencedRole      string
+    ReferencedIdNumber  int
     Relationship        string
-} {Domain ReferringClass ReferringAttribute ReferencedClass\
-    ReferencedAttribute Relationship}
-
-relvar correlation R12 AttributeReference\
-    {Domain ReferringClass ReferringAttribute} +\
-        ReferentialAttribute {Domain Class Name}\
-    {Domain ReferencedClass ReferencedAttribute} *\
-        Attribute {Domain Class Name}\
+} {Domain ReferringClass ReferringAttribute ReferringRole\
+    ReferencedClass ReferencedAttribute ReferencedRole ReferencedIdNumber\
+    Relationship}
 
 relvar association R13\
-    AttributeReference {Domain Relationship} +\
-    Relationship {Domain Name} 1
+    AttributeReference {Domain ReferringClass ReferringAttribute} *\
+    Attribute {Domain Class Name} 1
+
+relvar create ReferencedIdAttribute {
+    Domain          string
+    Class           string
+    Relationship    string
+    Role            string
+    Attribute       string
+    Number          int
+} {Domain Class Relationship Role Attribute Number}
+
+relvar create ReferenceInClass {
+    Domain              string
+    ReferringClass      string
+    ReferringAttribute  string
+    ReferencedClass     string
+    ReferencedAttribute string
+    ReferencedRole      string
+    ReferencedIdNumber  int
+    Relationship        string
+} {Domain ReferringClass ReferringAttribute ReferencedClass\
+    ReferencedAttribute ReferencedIdNumber Relationship}
 ----
 
 [source,tcl]
 ----
 <<domain config commands>>=
 proc class {name body} {
+    if {$name eq {}} {
+        tailcall DeclError EMPTY_CLASS_NAME
+    }
+
     namespace upvar [namespace current] DomainName DomainName
     namespace upvar ClassDef ClassName ClassName
 
@@ -2454,11 +2493,18 @@ proc class {name body} {
     try {
         ConfigEvaluate [namespace current]::ClassDef  $body
     } on error {result opts} {
-        puts $result
+        log::error $result
         upvar #0 ::rosea::Config::errcount errcount
         incr errcount
     }
 }
+----
+
+(((error code,EMPTY_CLASS_NAME)))
+[source,tcl]
+----
+<<error code formats>>=
+EMPTY_CLASS_NAME      {classes may not be named the empty string}
 ----
 
 [source,tcl]
@@ -2494,13 +2540,6 @@ proc attribute {name type args} {
         Type    $type\
     ]
 
-    relvar insert ::rosea::Config::[expr {"-reference" ni $args ?\
-            "BaseAttribute" : "ReferentialAttribute"}] [list\
-        Domain  $DomainName\
-        Class   $ClassName\
-        Name    $name\
-    ]
-
     foreach {option value} $args {
         switch -exact -- $option {
             -default {
@@ -2509,23 +2548,6 @@ proc attribute {name type args} {
                     Class       $ClassName\
                     Attribute   $name\
                     Value       $value\
-                ]
-            }
-            -reference {
-                if {[llength $value] < 2 || [llength $value] > 3} {
-                    tailcall DeclError BAD_REF_SPEC $value
-                }
-                lassign $value relname refclass refattr
-                if {$refattr eq {}} {
-                    set refattr $name
-                }
-                relvar insert ::rosea::Config::AttributeReference [list\
-                    Domain              $DomainName\
-                    ReferringClass      $ClassName\
-                    ReferringAttribute  $name\
-                    ReferencedClass     $refclass\
-                    ReferencedAttribute $refattr\
-                    Relationship        $relname\
                 ]
             }
             -id {
@@ -2547,16 +2569,60 @@ proc attribute {name type args} {
         }
     }
 }
+
+proc reference {relname rclass args} {
+    if {[llength $args] % 2 != 0} {
+        tailcall DeclError ARG_FORMAT $args
+    }
+
+    namespace upvar ::rosea::Config::DomainDef DomainName DomainName
+    namespace upvar ::rosea::Config::DomainDef::ClassDef ClassName ClassName
+
+    set refnum 1
+    set links [dict create]
+
+    foreach {option value} $args {
+        switch -exact -- $option {
+            -refid {
+                set refnum $value
+            }
+            -link {
+                lassign $value referring referenced
+                if {$referenced eq {}} {
+                    set referenced $referring
+                }
+                dict set links $referring $referenced
+            }
+            default {
+                tailcall DeclError UNKNOWN_OPTION $option
+            }
+        }
+    }
+    # We need to squirrel away the reference information to hold
+    # until the relationship is defined. Only then do we have the
+    # "role" information necessary to create the instances of
+    # Referenced Id Attribute and Attribute Reference.
+    dict for {referring referenced} $links {
+        relvar insert ::rosea::Config::ReferenceInClass [list\
+            Domain              $DomainName\
+            ReferringClass      $ClassName\
+            ReferringAttribute  $referring\
+            ReferencedClass     $rclass\
+            ReferencedAttribute $referenced\
+            ReferencedRole      target\
+            ReferencedIdNumber  $refnum\
+            Relationship        $relname\
+        ]
+    }
+}
 ----
 
 (((error code,ARG_FORMAT)))
-(((error code,BAD_REF_SPEC)))
 (((error code,UNKNOWN_OPTION)))
 [source,tcl]
 ----
 <<error code formats>>=
 ARG_FORMAT      {options and values must come in pairs, got "%s"}
-BAD_REF_SPEC    {bad reference specifier format, "%s"}
 UNKNOWN_OPTION  {unknown option, "%s"}
 ----
 
@@ -2597,11 +2663,11 @@ test configure-2.1 {
     rosea configure {
         domain foo {
             class c1 {
-                attribute a1 string -foo 1
+                attribute a1 string -foo 1 -id 1
             }
         }
     }
-} -result {encountered 1 configuration script errors} -returnCodes error
+} -result {encountered 2 configuration script errors} -returnCodes error
 ----
 
 === Defining Relationships
@@ -2846,13 +2912,58 @@ relvar insert AssocInfo {
 }
 
 <<domain config commands>>=
-proc association {name source spec target {associator {}}} {
+proc association {name source spec target args} {
+    if {[llength $args] % 2 != 0} {
+        tailcall DeclError ARG_FORMAT $args
+    }
+
+    namespace upvar ::rosea::Config::DomainDef DomainName DomainName
+    namespace upvar ::rosea::Config::DomainDef::ClassDef ClassName ClassName
+
+    set associator {}
+    set path {}
+
+    foreach {option value} $args {
+        switch -exact -- $option {
+            -associator {
+                set associator $value
+            }
+            -path {
+                set path $value
+            }
+            default {
+                tailcall DeclError UNKNOWN_OPTION $option
+            }
+        }
+    }
+
     set ainfo [relvar restrictone ::rosea::AssocInfo Spec $spec]
     if {[relation isempty $ainfo]} {
         tailcall DeclError BAD_RELATIONSHIP_SPEC $spec
     }
-    if {[relation extract $ainfo NeedsAssociator] && $associator eq {}} {
+    set needsassoc [relation extract $ainfo NeedsAssociator]
+    if {$needsassoc && $associator eq {}} {
         tailcall DeclError NEED_ASSOCIATOR $spec
+    }
+    if {$needsassoc && $source eq $target && $path eq {}} {
+        tailcall DeclError NEED_REFLEXIVE_PATH $name $source $spec $target
+    }
+
+    if {$associator ne {}} {
+        if {$path ne {}} {
+            lassign $path sourceattr targetattr
+            relvar update ::rosea::Config::ReferenceInClass ric {
+                [tuple extract $ric Domain] eq $DomainName &&
+                [tuple extract $ric ReferringClass] eq $associator &&
+                [tuple extract $ric ReferringAttribute] eq $sourceattr
+            } {tuple update $ric ReferencedRole source}
+        } else {
+            relvar update ::rosea::Config::ReferenceInClass ric {
+                [tuple extract $ric Domain] eq $DomainName &&
+                [tuple extract $ric ReferringClass] eq $associator &&
+                [tuple extract $ric ReferencedClass] eq $source
+            } {tuple update $ric ReferencedRole source}
+        }
     }
 
     namespace upvar ::rosea::Config::DomainDef DomainName DomainName
@@ -2976,11 +3087,14 @@ proc association {name source spec target {associator {}}} {
 
 (((error code,BAD_RELATIONSHIP_SPEC)))
 (((error code,NEED_ASSOCIATOR)))
+(((error code, NEED_REFLEXIVE_PATH)))
 [source,tcl]
 ----
 <<error code formats>>=
 BAD_RELATIONSHIP_SPEC  {bad relationship specifier, "%s"}
 NEED_ASSOCIATOR {relationship of type, "%s", requires associative class}
+NEED_REFLEXIVE_PATH {traversal path must be specified for reflexive\
+        association, %s, %s %s %s}
 ----
 
 [source,tcl]
@@ -2999,9 +3113,8 @@ test configure-3.0 {
                 attribute a2 string -default 20
             }
             class y {
-                attribute a1 string\
-                    -id 1\
-                    -reference {R1 x}
+                attribute a1 string -id 1
+                reference R1 x -link a1
             }
             association R1 y 1--1 x
         }
@@ -3014,6 +3127,30 @@ test configure-3.0 {
 ----
 <<config command tests>>=
 test configure-3.1 {
+    Define reflexive simple association
+} -setup {
+} -cleanup {
+    cleanupConfigData
+} -body {
+    rosea configure {
+        domain foo {
+            class x {
+                attribute a1 string -id 1
+                attribute prev string -id 2
+                attribute a2 string -default 20
+                reference R1 x -link {prev a1}
+            }
+            association R1 x 1--1 x
+        }
+    }
+    relation cardinality [relvar set ::rosea::Config::Class]
+} -result {1}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test configure-3.2 {
     Define class based association
 } -setup {
 } -cleanup {
@@ -3022,8 +3159,10 @@ test configure-3.1 {
     rosea configure {
         domain foo {
             class a {
-                attribute x1 string -id 1 -reference {R1 x}
-                attribute y1 string -id 1 -reference {R1 y}
+                attribute x1 string -id 1
+                attribute y1 string -id 1
+                reference R1 x -link x1
+                reference R1 y -link y1
             }
             class x {
                 attribute x1 string -id 1
@@ -3032,7 +3171,7 @@ test configure-3.1 {
             class y {
                 attribute y1 string -id 1
             }
-            association R1 x 1..n--1..n y a
+            association R1 x 1..n--1..n y -associator a
         }
     }
     relation cardinality [relvar set ::rosea::Config::Class]
@@ -3042,7 +3181,7 @@ test configure-3.1 {
 [source,tcl]
 ----
 <<config command tests>>=
-test configure-3.1 {
+test configure-3.3 {
     Define reflexive class based association
 } -setup {
 } -cleanup {
@@ -3051,14 +3190,16 @@ test configure-3.1 {
     rosea configure {
         domain foo {
             class a {
-                attribute x1 string -id 1 -reference {R1 x}
-                attribute next string -id 1 -reference {R1 x x1}
+                attribute x1 string -id 1
+                attribute next string -id 1
+                reference R1 x -link x1
+                reference R1 x -link {next x1}
             }
             class x {
                 attribute x1 string -id 1
                 attribute x2 string -default 20
             }
-            association R1 x 1..n--1..n x a
+            association R1 x 1..n--1..n x -associator a -path {x1 next}
         }
     }
     relation cardinality [relvar set ::rosea::Config::Class]
@@ -3140,14 +3281,12 @@ test configure-4.0 {
                 attribute a2 string -default 20
             }
             class sub1 {
-                attribute a1 string\
-                    -id 1\
-                    -reference {R1 super}
+                attribute a1 string -id 1
+                reference R1 super -link a1
             }
             class sub2 {
-                attribute a1 string\
-                    -id 1\
-                    -reference {R1 super}
+                attribute a1 string -id 1
+                reference R1 super -link a1
             }
             generalization R1 super sub1 sub2
         }
@@ -3230,6 +3369,10 @@ proc generate {{prefix {}}} {
 
         set classes [relation semijoin $domain $DomainElement $Class]
         relation foreach class $classes {
+            set className [relation extract $class Name]
+            namespace eval ${domns}::$className {
+                namespace eval __Activity {}
+            }
             # create class relvars
             set heading [eval $headingQuery]
             set ids [eval $idQuery]
@@ -3239,8 +3382,7 @@ proc generate {{prefix {}}} {
                         [relation extract $id Attributes] Attribute]
             }
             # create the relvar
-            relvar create ${domns}::[relation extract $class Name]\
-                $heading {*}$idset
+            relvar create ${domns}::$className $heading {*}$idset
         }
 
         set rships [relation semijoin $domain $DomainElement $Relationship]
@@ -3261,7 +3403,9 @@ proc generate {{prefix {}}} {
                 -using {Domain Domain Name Relationship}]
             relation foreach sub $subs {
             # HERE
-            # R12 now goes to Identifying Attribute!!
+            #  R12 still not right.
+            #  Need to modify schema to match raloo "mm-3.fig" model
+            #  of referential attributes.
             # create an associate link for sub -> super
             # create a partition link for super -> sub
             }
@@ -3269,6 +3413,24 @@ proc generate {{prefix {}}} {
     }
 }
 ----
+........
+    relvar create ${archns}::__Link {
+        Name            string
+        Class           string
+        Attrs           list
+    } {Name Class}
+    relvar create ${archns}::__AssociationLink {
+        Name            string
+        SrcClass        string
+        DstClass        string
+        PrevSrcClass    string
+    } {Name SrcClass}
+    relvar create ${archns}::__PartitionLink {
+        Name            string
+        DstClass        string
+        SrcClass        string
+    } {Name DstClass}
+........
 
 [source,tcl]
 ----
@@ -3531,21 +3693,21 @@ package require logger
 
 <<required packages>>
 
-source ../src/rosea.tcl
-chan puts "testing rosea version: [package require rosea]"
-
 # Add custom arguments here.
 set optlist {
     {level.arg warn {Log debug level}}
 }
 array set options [::cmdline::getKnownOptions argv $optlist]
 
+logger::setlevel $options(level)
+
+source ../src/rosea.tcl
+chan puts "testing rosea version: [package require rosea]"
+
 package require tcltest
 eval tcltest::configure $argv
 
 namespace eval ::rosea::test {
-    ::logger::initNamespace [namespace current] $::options(level)
-
     namespace import ::tcltest::*
     <<tclral imports>>
 

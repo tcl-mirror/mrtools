@@ -27,6 +27,9 @@ DIAGRAMS =\
 	partition-link.uxf\
 	correl-link.uxf\
 	link-classes.uxf\
+	$(NULL)
+
+LSDIAGRAMS =\
 	config-domain.uxf\
 	config-classes.uxf\
 	config-relation.uxf\
@@ -37,10 +40,7 @@ SEQDIAG	=\
 
 IMAGES =\
 	$(patsubst %.uxf,$(IMAGEDIR)/%.pdf,$(DIAGRAMS))\
-	$(NULL)
-
-SEQIMAGES=\
-	$(patsubst %.diag,$(IMAGEDIR)/%.svg,$(SEQDIAG))\
+	$(patsubst %.uxf,$(IMAGEDIR)/%.pdf,$(LSDIAGRAMS))\
 	$(NULL)
 
 TCLSRC	=\
@@ -146,12 +146,15 @@ $(DOCDIR)/%.pdf : %.aweb
 %.test : %.aweb
 	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $(TESTDIR)/$@ $<
 
+$(IMAGEDIR)/config-%.pdf : config-%.uxf
+	umlet -action=convert -format=pdf\
+		-filename=$< -output=$(basename $@)-cvt
+	pdftk $(basename $@)-cvt.pdf cat 1left output $@
+	$(RM) $(basename $@)-cvt.pdf
+
 $(IMAGEDIR)/%.pdf : %.uxf
 	umlet -action=convert -format=pdf\
 		-filename=$< -output=$(basename $@)
-
-$(IMAGEDIR)/%.svg : %.diag
-	seqdiag --antialias -T svg -o $@ $<
 #
 # vim :set sw=8 ts=8 sts=8 noexpandtab:
 #
