@@ -2385,7 +2385,7 @@ relvar partition R2 DomainElement {Domain Element}\
     Class {Domain Name}\
     Relationship {Domain Name}
 
-relvar create DomainOperations {
+relvar create DomainOperation {
     Domain      string
     Name        string
     Parameters  list
@@ -2393,7 +2393,7 @@ relvar create DomainOperations {
 } {Domain Name}
 
 relvar association R7\
-    DomainOperations Domain *\
+    DomainOperation Domain *\
     Domain Name 1
 ----
 
@@ -2630,6 +2630,62 @@ relvar create ReferencedIdAttribute {
     Attribute       string
     Number          int
 } {Domain Class Relationship Role Attribute Number}
+
+relvar create ClassOperation {
+    Domain  string
+    Class   string
+    Name    string
+} {Domain Class Name}
+
+relvar association R8\
+    ClassOperation {Domain Class} * Class {Domain Name} 1
+
+relvar create UserDefinedClassOp {
+    Domain      string
+    Class       string
+    Name        string
+    Parameters  list
+    Body        string
+} {Domain Class Name}
+
+relvar create SystemClassOp {
+    Domain  string
+    Class   string
+    Name    string
+} {Domain Class Name}
+
+relvar partition R9\
+    ClassOperation {Domain Class Name}\
+        UserDefinedClassOp {Domain Class Name}\
+        SystemClassOp {Domain Class Name}
+
+relvar create InstanceOperation {
+    Domain  string
+    Class   string
+    Name    string
+} {Domain Class Name}
+
+relvar association R10\
+    InstanceOperation {Domain Class} * Class {Domain Name} 1
+
+relvar create UserDefinedInstOp {
+    Domain      string
+    Class       string
+    Name        string
+    Parameters  list
+    Body        string
+} {Domain Class Name}
+
+relvar create SystemInstOp {
+    Domain  string
+    Class   string
+    Name    string
+} {Domain Class Name}
+
+relvar partition R14\
+    InstanceOperation {Domain Class Name}\
+        UserDefinedInstOp {Domain Class Name}\
+        SystemInstOp {Domain Class Name}
 
 relvar create ClassAssoc {
     Domain              string
@@ -3422,8 +3478,8 @@ proc association {name source spec target args} {
             Class           $target\
             Relationship    $name\
             Role            target\
-            Conditionality  [relation extract $ainfo ReferringCond]\
-            Multiplicity    [relation extract $ainfo ReferringMult]\
+            Conditionality  [relation extract $ainfo ReferencedCond]\
+            Multiplicity    [relation extract $ainfo ReferencedMult]\
         ]
         relvar insert ::rosea::Config::ReferencedClass [list\
             Domain          $DomainName\
@@ -3742,7 +3798,7 @@ operation name params body
 proc operation {name params body} {
     namespace upvar ::rosea::Config::DomainDef DomainName DomainName
 
-    relvar insert ::rosea::Config::DomainOperations [list\
+    relvar insert ::rosea::Config::DomainOperation [list\
         Domain      $DomainName\
         Name        $name\
         Parameters  $params\
@@ -3778,16 +3834,20 @@ proc generate {{prefix {}}} {
         Relationship Relationship\
         Association Association\
         SimpleAssociation SimpleAssociation\
+        SimpleReferringClass SimpleReferringClass\
+        SimpleReferencedClass SimpleReferencedClass\
         ClassBasedAssociation ClassBasedAssociation\
+        AssociatorClass AssociatorClass\
+        SourceClass SourceClass\
+        TargetClass TargetClass\
         Generalization Generalization\
         Superclass Superclass\
         Subclass Subclass\
-        SimpleReferringClass SimpleReferringClass\
-        SimpleReferencedClass SimpleReferencedClass\
         AttributeReference AttributeReference\
         ReferencedIdAttribute ReferencedIdAttribute\
         ReferringClass ReferringClass\
-        ReferencedClass ReferencedClass
+        ReferencedClass ReferencedClass\
+        DomainOperation DomainOperation
 
     # Query for the heading
     pipe {
@@ -3807,6 +3867,15 @@ proc generate {{prefix {}}} {
         set domns ${prefix}::[relation extract $domain Name]
         namespace eval $domns {}
         set archns [GenerateArchStructures $domns]
+
+        set domops [relation semijoin $domain $DomainOperation\
+                -using {Name Domain}]
+        relation foreach domop $domops {
+            relation assign $domop\
+                {Name name} {Parameters parameters} {Body body}
+            namespace eval ${domns} [list namespace export $name]
+            proc ${domns}::$name $parameters [list relvar eval [list $body]]
+        }
 
         set classes [relation semijoin $domain $DomainElement $Class]
         relation foreach class $classes {
@@ -3865,25 +3934,18 @@ proc generate {{prefix {}}} {
                 {ReferringAttrs referringAttrs}
             set attrrefs [relation tag $referringAttrs RefOrder]
             #puts [relformat $attrrefs attrrefs]
+            set srcattrs [relation list $attrrefs ReferringAttribute\
+                    -ascending RefOrder]
+            set destattrs [relation list $attrrefs ReferencedAttribute\
+                    -ascending RefOrder]
+            lassign [WeaveLists $srcattrs $destattrs] forwattrs revattrs
 
             relvar association ${domns}::$relationship\
-                 ${domns}::$referringClass\
-                [relation list $attrrefs ReferringAttribute\
-                    -ascending RefOrder]\
-                [mapCondMultToConstraint $referringCond $referringMult]\
-                ${domns}::$referencedClass\
-                [relation list $attrrefs ReferencedAttribute\
-                    -ascending RefOrder]\
-                [mapCondMultToConstraint $referencedCond false]
-            # create link info
-            # associative link forward and back
-            set forwattrs [list]
-            set revattrs [list]
-            relation foreach attref $referringAttrs {
-                relation assign $attref
-                lappend forwattrs $ReferringAttribute $ReferencedAttribute
-                lappend revattrs $ReferencedAttribute $ReferringAttribute
-            }
+                 ${domns}::$referringClass $srcattrs\
+                [MapCondMultToConstraint $referringCond $referringMult]\
+                ${domns}::$referencedClass $destattrs\
+                [MapCondMultToConstraint $referencedCond false]
+
             relvar eval {
                 relvar insert ${archns}::__Link [list\
                     Name    $relationship\
@@ -3909,17 +3971,131 @@ proc generate {{prefix {}}} {
                 ]
             }
 
-            # HERE create the relationship ensemble command
+            # HERE create the association ensemble command
         }
 
         set cassocs [relation semijoin $rships $Association\
                 $ClassBasedAssociation]
         relation foreach cassoc $cassocs {
+            set sourceclass [relation semijoin $cassoc $SourceClass\
+                -using {Domain Domain Name Relationship}]
+            set targetclass [relation semijoin $cassoc $TargetClass\
+                -using {Domain Domain Name Relationship}]
+
+            set assocrefs [pipe {
+                relation semijoin $cassoc $AssociatorClass\
+                        -using {Domain Domain Name Relationship}\
+                    $ReferringClass $AttributeReference\
+                        -using {Domain Domain Class ReferringClass\
+                        Relationship Relationship Role ReferringRole} |
+                relation project ~ Domain ReferringClass ReferringAttribute\
+                    ReferencedClass ReferencedAttribute ReferencedRole\
+                    Relationship |
+                relation join ~ [relation union $sourceclass $targetclass]\
+                        -using {Domain Domain Relationship Relationship\
+                        ReferencedClass Class ReferencedRole Role} |
+                relation group ~ ReferringAttrs\
+                        ReferringAttribute ReferencedAttribute |
+                relation group ~ References ReferencedClass ReferencedRole\
+                        Conditionality Multiplicity ReferringAttrs
+
+            }]
+            #puts [relformat $assocrefs assocrefs]
+
+            relation foreach assocref $assocrefs {
+                relation assign $assocref\
+                    {Domain domain}\
+                    {ReferringClass associator}\
+                    {Relationship relationship}\
+                    {References references}
+                relation foreach reference $references {
+                    relation assign $reference\
+                        {ReferencedClass referencedClass}\
+                        {ReferencedRole referencedRole}\
+                        {Conditionality conditionality}\
+                        {Multiplicity multiplicity}\
+                        {ReferringAttrs referringAttrs}
+
+                    set attrrefs [relation tag $referringAttrs RefOrder]
+                    set assocattrs($referencedRole)\
+                        [relation list $attrrefs ReferringAttribute\
+                            -ascending RefOrder]
+                    set refattrs($referencedRole)\
+                        [relation list $attrrefs ReferencedAttribute\
+                            -ascending RefOrder]
+                    set multcond($referencedRole)\
+                        [MapCondMultToConstraint $conditionality $multiplicity]
+                    set refclass($referencedRole) ${domns}::$referencedClass
+                }
+
+                relvar correlation ${domns}::$relationship\
+                    ${domns}::$associator\
+                    $assocattrs(source) $multcond(target) $refclass(source)\
+                        $refattrs(source)\
+                    $assocattrs(target) $multcond(source) $refclass(target)\
+                        $refattrs(target)
+
+                lassign [WeaveLists $refattrs(source) $assocattrs(source)]\
+                    forwattrs revattrs
+                relvar eval {
+                    relvar insert ${archns}::__Link [list\
+                        Name    $relationship\
+                        Class   $refclass(source)\
+                        Attrs   $forwattrs\
+                    ]
+                    relvar insert ${archns}::__AssociationLink [list\
+                        Name            $relationship\
+                        SrcClass        $refclass(source)\
+                        DstClass        $associator\
+                        PrevSrcClass    {}\
+                    ]
+                    relvar insert ${archns}::__Link [list\
+                        Name    ~$relationship\
+                        Class   $associator\
+                        Attrs   $revattrs\
+                    ]
+                    relvar insert ${archns}::__AssociationLink [list\
+                        Name            ~$relationship\
+                        SrcClass        $associator\
+                        DstClass        $refclass(source)\
+                        PrevSrcClass    $refclass(target)\
+                    ]
+                }
+
+                lassign [WeaveLists $refattrs(target) $assocattrs(target)]\
+                    forwattrs revattrs
+                relvar eval {
+                    relvar insert ${archns}::__Link [list\
+                        Name    $relationship\
+                        Class   $associator\
+                        Attrs   $revattrs\
+                    ]
+                    relvar insert ${archns}::__AssociationLink [list\
+                        Name            $relationship\
+                        SrcClass        $associator\
+                        DstClass        $refclass(target)\
+                        PrevSrcClass    $refclass(source)\
+                    ]
+                    relvar insert ${archns}::__Link [list\
+                        Name    ~$relationship\
+                        Class   $refclass(target)\
+                        Attrs   $forwattrs\
+                    ]
+                    relvar insert ${archns}::__AssociationLink [list\
+                        Name            ~$relationship\
+                        SrcClass        $refclass(target)\
+                        DstClass        $associator\
+                        PrevSrcClass    {}\
+                    ]
+                }
+            }
+
+            # HERE create the class based association ensemble command
         }
 
         set gens [relation semijoin $rships $Generalization]
         relation foreach gen $gens {
-            set reference [pipe {
+            set subrefs [pipe {
                 relation semijoin $gen $Subclass\
                         -using {Domain Domain Name Relationship}\
                     $ReferringClass $AttributeReference\
@@ -3930,34 +4106,61 @@ proc generate {{prefix {}}} {
                 relation group ~ ReferringAttrs\
                         ReferringAttribute ReferencedAttribute
             }]
-            puts [relformat $reference reference]
+            #puts [relformat $subrefs subrefs]
 
-            if 0 {
-            set superattrs [pipe {
-                relation semijoin $gen $Superclass\
-                    -using {Domain Domain Name Relationship}\
-                    $ReferencedClass $ReferencedIdAttribute |
-                relation project ~ Domain Class Relationship Attribute |
-                relation group ~ ReferencedAttributes Attribute
-            }]
-            puts [relformat $superattrs superattrs]
+            set subparts [list]
+            relation foreach subref $subrefs {
+                relation assign $subref\
+                    {Domain domain}\
+                    {ReferringClass subclass}\
+                    {ReferencedClass superclass}\
+                    {Relationship relationship}\
+                    {ReferringAttrs referringAttrs}
 
-            relation assign $superattrs\
-                {Domain domain}\
-                {Relationship relationship}\
-                {Class superclass}\
-                {ReferencedAttributes referencedAttributes}
+                set attrrefs [relation tag $referringAttrs RefOrder]
+                set subattrs [relation list $attrrefs ReferringAttribute\
+                        -ascending RefOrder]
+                set superattrs [relation list $attrrefs ReferencedAttribute\
+                        -ascending RefOrder]
+                lassign [WeaveLists $subattrs $superattrs] forwattrs revattrs
 
-            set ralcmd [list relvar partition ${domns}::$relationship\
-                ${domns}::$superclass\
-                [relation list $referencedAttributes]\
-            ]
+                lappend subparts ${domns}::$subclass $subattrs
+
+                relvar eval {
+                    relvar insert ${archns}::__Link [list\
+                        Name    $relationship\
+                        Class   $subclass\
+                        Attrs   $forwattrs\
+                    ]
+                    relvar insert ${archns}::__AssociationLink [list\
+                        Name            $relationship\
+                        SrcClass        $subclass\
+                        DstClass        $superclass\
+                        PrevSrcClass    {}\
+                    ]
+                    relvar insert ${archns}::__Link [list\
+                        Name    ~$relationship\
+                        Class   $subclass\
+                        Attrs   $revattrs\
+                    ]
+                    relvar insert ${archns}::__PartitionLink [list\
+                        Name        ~$relationship\
+                        DstClass    $subclass\
+                        SrcClass    $superclass\
+                    ]
+                }
             }
+
+            relvar partition ${domns}::$relationship ${domns}::$superclass\
+                    $superattrs {*}$subparts
         }
     }
+    #puts [relformat [relvar set ${archns}::__Link] Link]
+    #puts [relformat [relvar set ${archns}::__AssociationLink] AssociationLink]
+    #puts [relformat [relvar set ${archns}::__PartitionLink] PartitionLink]
 }
 
-proc mapCondMultToConstraint {cond mult} {
+proc MapCondMultToConstraint {cond mult} {
     if {$cond && $mult} {
         return *
     } elseif {$cond && !$mult} {
@@ -3968,25 +4171,17 @@ proc mapCondMultToConstraint {cond mult} {
         return 1
     }
 }
+
+proc WeaveLists {l1 l2} {
+    set w1 [list]
+    set w2 [list]
+    foreach a $l1 b $l2 {
+        lappend w1 $a $b
+        lappend w2 $b $a
+    }
+    return [list $w1 $w2]
+}
 ----
-........
-    relvar create ${archns}::__Link {
-        Name            string
-        Class           string
-        Attrs           list
-    } {Name Class}
-    relvar create ${archns}::__AssociationLink {
-        Name            string
-        SrcClass        string
-        DstClass        string
-        PrevSrcClass    string
-    } {Name SrcClass}
-    relvar create ${archns}::__PartitionLink {
-        Name            string
-        DstClass        string
-        SrcClass        string
-    } {Name DstClass}
-........
 
 [source,tcl]
 ----
@@ -4081,6 +4276,45 @@ test generate-2.0 {
 [source,tcl]
 ----
 <<config command tests>>=
+test generate-3.0 {
+    generate constraints for class based associative relationshp
+} -setup {
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::foo
+} -body {
+    rosea configure {
+        domain foo {
+            class a {
+                attribute ax1 string -id 1
+                attribute ax2 string -id 1
+                attribute ay1 string -id 1
+                attribute ay2 string -id 1
+                reference R1 x -link {ax1 x1}
+                reference R1 x -link {ax2 x2}
+                reference R1 y -link {ay1 y1}
+                reference R1 y -link {ay2 y2}
+            }
+            class x {
+                attribute x1 string -id 1
+                attribute x2 string -id 1
+                attribute x3 string -default 20
+            }
+            class y {
+                attribute y1 string -id 1
+                attribute y2 string -id 1
+            }
+            association R1 x 0..n--1..n y -associator a
+        }
+    }
+    rosea generate
+    relvar constraint info ::foo::R1
+} -result {correlation ::foo::R1 ::foo::a {ax1 ax2} + ::foo::x {x1 x2} {ay1 ay2} * ::foo::y {y1 y2}}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
 test generate-4.0 {
     generate constraints for generalization relationship
 } -setup {
@@ -4112,7 +4346,7 @@ test generate-4.0 {
     }
     rosea generate
     relvar constraint info ::foo::R1
-} -result {}
+} -result {partition ::foo::R1 ::foo::super {s1 s2} ::foo::sub2 {sb3 sb4} ::foo::sub1 {sb1 sb2}}
 ----
 
 === Structuring Architectural Data
