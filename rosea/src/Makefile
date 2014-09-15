@@ -74,7 +74,7 @@ DBLATEX_PARAMS =\
 	doc.publisher.show=0\
 	doc.lot.show=figure,table\
 	toc.section.depth=3\
-	doc.section.depth=1\
+	doc.section.depth=0\
 	$(NULL)
 
 DOCINFO	=\
@@ -135,7 +135,7 @@ wmctrl.tcl : $(DOCSRC)
 	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
 
 $(DOCDIR)/%.pdf : %.aweb
-	a2x $(A2XOPTS) --doctype=article  --format=pdf\
+	a2x $(A2XOPTS) --doctype=book  --format=pdf\
 	    --destination-dir=$(DOCDIR)\
 	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) $<
 	$(RM) $(DOCDIR)/*__[0-9].pdf
