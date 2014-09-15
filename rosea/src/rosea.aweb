@@ -1116,7 +1116,15 @@ proc delete {relvar instref} {
     set deleted 0
     relation foreach inst $refinsts {
         incr deleted [relvar deleteone $relvar\
-            [tuple get [relation tuple $inst]]]
+            {*}[tuple get [relation tuple $inst]]]
+    }
+
+    lassign [SplitRelvarName $relvar] domain class
+    set instrelvar ${domain}::__${class}__INSTANCE
+    if {[relvar exists $instrelvar]} {
+        relation foreach inst $refinsts {
+            relvar deleteone $instrelvar {*}[tuple get [relation tuple $inst]]]
+        }
     }
     return $deleted
 }
@@ -1161,7 +1169,75 @@ Linking Instances Across Relationships
 [source,tcl]
 ----
 <<relationship commands>>=
-proc link {rname inst1 inst2} {
+proc linkSimple {rname instref1 instref2} {
+    lassign $instref1 relvar1 inst1
+    set domain1 [namespace qualifiers $relvar1]
+
+    lassign $instref2 relvar2 inst2
+    set domain2 [namespace qualifiers $relvar2]
+
+    if {$domain1 ne $domain2} {
+        error "cannot link across domains"
+    }
+
+    set archns ${domain1}::__Arch
+
+    set reflink [relvar restrictone ${archns}::__RefLink Relationship $rname]
+    if {[relation isempty $reflink]} {
+        error "unknown relationship $rname"
+    }
+    relation assign $reflink\
+        {ReferringClass referringClass}\
+        {ReferencedClass referencedClass}\
+        {ReferringAttrs referringAttrs}
+
+    if {$relvar1 eq $referringClass && $relvar2 eq $referencedClass} {
+        set rgrelvar $relvar1
+        set rginst $inst1
+        set rtrelvar $relvar2
+        set rtinst $inst2
+    } elseif {$relvar2 eq $referringClass && $relvar1 eq $referencedClass} {
+        set rgrelvar $relvar2
+        set rginst $inst2
+        set rtrelvar $relvar1
+        set rtinst $inst1
+    } else {
+        error "$relvar1 and $relvar2 don't participate in $rname,\
+                expected $referringClass and $referencedClass"
+    }
+
+    if {[relation cardinality $rtinst] != 1} {
+        error "referred to reference must be singular"
+    }
+
+    set rtrelvalue [pipe {
+        relvar set $rtrelvar |
+        relation semijoin $rtinst ~ 
+    }]
+
+    set rtattrvalue [pipe {
+        relation extend $referringAttrs rfa RefValue string {
+            [relation extract $rtrelvalue\
+                [tuple extract $rfa ReferencedAttribute]]
+        } |
+        relation dict ~ ReferringAttribute RefValue
+    }]
+
+    relation foreach linkinst $rginst {
+        relvar updateone $rgrelvar rgtup\
+                [tuple get [relation tuple $linkinst]] {
+            tuple update $rgtup {*}$rtattrvalue
+        }
+    }
+
+    return
+}
+----
+
+[source,tcl]
+----
+<<relationship commands>>=
+proc linkAssoc {rname inst1 inst2 args} {
 }
 ----
 
@@ -1172,60 +1248,126 @@ Unlinking Instances Across Relationships
 [source,tcl]
 ----
 <<relationship commands>>=
-proc unlink {rname inst1 inst2} {
+proc unlinkSimple {rname instref} {
+    lassign $instref relvar inst
+
+    set archns [namespace qualifiers $relvar]::__Arch
+
+    set reflink [relvar restrictone ${archns}::__RefLink Relationship $rname]
+    if {[relation isempty $reflink]} {
+        error "unknown relationship $rname"
+    }
+    relation assign $reflink\
+        {ReferringClass referringClass}\
+        {ReferencedClass referencedClass}\
+        {ReferringAttrs referringAttrs}
+
+    if {$relvar eq $referringClass} {
+        set rgrelvar $relvar
+        set rginst $inst
+    } elseif {$relvar eq $referencedClass} {
+        lassign [::rosea::InstCmds::findRelated $instref ~$rname]\
+            rgrelvar rginst
+    } else {
+        error "$relvar doesn't participate in $rname,\
+                expected $referringClass or $referencedClass"
+    }
+
+    set rtattrvalue [pipe {
+        relation extend $referringAttrs rfa RefValue string {{}} |
+        relation dict ~ ReferringAttribute RefValue
+    }]
+
+    relation foreach linkinst $rginst {
+        relvar updateone $rgrelvar rgtup\
+                [tuple get [relation tuple $linkinst]] {
+            tuple update $rgtup {*}$rtattrvalue
+        }
+    }
+
+    return
+}
+----
+
+[source,tcl]
+----
+<<relationship commands>>=
+proc unlinkAssoc {rname inst1 inst2} {
 }
 ----
 
 ==== Migrating Subclasss Across Generalizations
 
-Migrating Subclasss Across Generalizations
+For the case of generalization relationships,
+the notion of linking and unlinking across the relationship
+doesn't make much sense.
+To understand why,
+consider that each subclass instance is unconditionally related
+to exactly one superclass instance.
+If you were to unlink a subclass from its superclass the only operation
+that would not violate referential integrity is to delete the
+unlinked subclass.
+That would leave the super class without a corresponding subclass and
+so a new subclass instance would need to be created and linked.
+So the only operation that does not violate referential integrity
+is to _migrate_ a subclass instance.
+Conceptually, migration consists of:
+
+* Unlink the superclass and subclass.
+* Delete the subclass instance.
+* Create a new instance of a subclass of the generalization.
+* Link the new instance to the superclass.
+
+One additional complication is that the newly created subclass instance
+may have attributes that need to be set.
 
 [source,tcl]
 ----
 <<relationship commands>>=
 proc migrate {rname instref subclass args} {
-    lassign $insref relvar inst
-    set domain [namespace qualifiers $relvar]
-    set archns ${domain}::__Arch
+    lassign $instref relvar inst
+    set domns [namespace qualifiers $relvar]
+    set archns ${domns}::__Arch
 
-    set link [relvar restrictone ${archns}::__Link Name $rname Class $relvar]
+    namespace upvar ${archns}\
+            __AssociationLink AssociationLink
+
+    set link [pipe {
+        relvar restrictone ${archns}::__Link Name $rname Class $relvar |
+        relation join ~ $AssociationLink -using {Name Name Class SrcClass}
+    }]
     if {[relation isempty $link]} {
         error "no relationship $rname to superclass $relvar"
     }
+    #puts [relformat $link link]
     set superinst [pipe {
-        relvar set $relvar |
+        relvar set [relation extract $link DstClass] |
         relation semijoin $inst ~ -using [relation extract $link Attrs]
     }]
 
     set sublink [relvar restrictone ${archns}::__SubLink Relationship $rname\
-            SubClass $subclass]
-    if {[relation isempty $sublink} {
+            SubClass ${domns}::$subclass]
+    if {[relation isempty $sublink]} {
         error "no subclass, $subclass"
     }
-    set attrrefs [relation extract $AttrRef]
+    #puts [relformat $sublink sublink]
     set refedvalues [pipe {
-        relation extract $sublink AttrRef |
+        relation extract $sublink AttrRefs |
         relation extend ~ rval Value string {
             [relation extract $superinst\
                 [tuple extract $rval ReferencedAttribute]]
         } |
         relation dict ~ ReferringAttribute Value
     }]
-    return [::rosea::ClassCmds create ${domain}::$subclass {*}[dict merge\
-        $args $refedvalues]]
+
+    relvar eval {
+        ::rosea::ClassCmds::delete $relvar $instref
+        set ref [::rosea::ClassCmds::create ${domns}::$subclass\
+                {*}[dict merge $args $refedvalues]]
+    }
+    return $ref
 }
 ----
-    relvar create ${archns}::__Link {
-        Name            string
-        Class           string
-        Attrs           list
-    } {Name Class}
-    relvar create ${archns}::__AssociationLink {
-        Name            string
-        SrcClass        string
-        DstClass        string
-        PrevSrcClass    string
-    } {Name SrcClass}
 
 === Instance Commands
 
@@ -4266,9 +4408,20 @@ proc generate {{prefix {}}} {
                     DstClass        ${domns}::$referringClass\
                     PrevSrcClass    {}\
                 ]
+                relvar insert ${archns}::__RefLink [list\
+                    Relationship    $relationship\
+                    ReferringClass  ${domns}::$referringClass\
+                    ReferencedClass ${domns}::$referencedClass\
+                    ReferringAttrs  $referringAttrs\
+                ]
             }
 
-            # HERE create the association ensemble command
+            namespace ensemble create\
+                -command ${domns}::$relationship\
+                -map [dict create\
+                    link [list ::rosea::RelCmds::linkSimple $relationship]\
+                    unlink [list ::rosea::RelCmds::unlinkSimple $relationship]\
+                ]
         }
 
         set cassocs [relation semijoin $rships $Association\
@@ -4448,11 +4601,11 @@ proc generate {{prefix {}}} {
                     ]
                     relvar uinsert ${archns}::__SuperLink [list\
                         Relationship    $relationship\
-                        SuperClass      $superclass\
+                        SuperClass      ${domns}::$superclass\
                     ]
                     relvar insert ${archns}::__SubLink [list\
                         Relationship    $relationship\
-                        SubClass        $subclass\
+                        SubClass        ${domns}::$subclass\
                         AttrRefs        $referringAttrs\
                     ]
                 }
@@ -4460,11 +4613,18 @@ proc generate {{prefix {}}} {
 
             relvar partition ${domns}::$relationship ${domns}::$superclass\
                     $superattrs {*}$subparts
+            namespace ensemble create\
+                -command ${domns}::$relationship\
+                -map [dict create migrate [list ::rosea::RelCmds::migrate\
+                        $relationship]]
         }
     }
     #puts [relformat [relvar set ${archns}::__Link] Link]
     #puts [relformat [relvar set ${archns}::__AssociationLink] AssociationLink]
     #puts [relformat [relvar set ${archns}::__PartitionLink] PartitionLink]
+    #puts [relformat [relvar set ${archns}::__RefLink] RefLink]
+    #puts [relformat [relvar set ${archns}::__SuperLink] SuperLink]
+    #puts [relformat [relvar set ${archns}::__SubLink] SubLink]
 }
 
 proc MapCondMultToConstraint {cond mult} {
@@ -4655,6 +4815,46 @@ test generate-4.0 {
 [source,tcl]
 ----
 <<config command tests>>=
+test generate-4.1 {
+    generate linkage information for generalization
+} -setup {
+    rosea configure {
+        domain foo {
+            class S {
+                attribute s1 string -id 1
+                attribute s2 string -id 1
+                attribute a2 int -default 20
+            }
+            class X {
+                attribute x1 string -id 1
+                attribute x2 string -id 1
+                reference R1 S -link {x1 s1} -link {x2 s2}
+            }
+            class Y {
+                attribute y1 string -id 1
+                attribute y2 string -id 1
+                reference R1 S -link {y1 s1} -link {y2 s2}
+            }
+            generalization R1 S X Y
+        }
+    }
+    rosea generate
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::foo
+} -body {
+    relvar eval {
+        foo::S create s1 a s2 b a2 42
+        foo::X create x1 a x2 b
+    }
+    set ref [foo::X findWhere {$x1 eq "a"}]
+    foo::R1 migrate $ref Y
+} -result {::foo::Y {{y1 string y2 string} {{y1 a y2 b}}}} -match ref
+----
+
+[source,tcl]
+----
+<<config command tests>>=
 test generate-5.0 {
     generate class based operations
 } -setup {
@@ -4725,6 +4925,120 @@ test generate-6.0 {
     -match relation
 ----
 
+[source,tcl]
+----
+<<config command tests>>=
+test generate-6.1 {
+    generate multiple classes and a relationship, link instances together
+} -setup {
+    rosea configure {
+        domain meta {
+            class C1 {
+                attribute Id string -id 1
+                attribute A1 int
+            }
+
+            class C2 {
+                attribute Id string -id 1
+                attribute C1Id string
+                reference R1 C1 -link {C1Id Id}
+            }
+            association R1 C2 1..n--1 C1
+        }
+    }
+    rosea generate
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::meta
+} -body {
+    relvar eval {
+        set c1 [meta::C1 create Id foo A1 20]
+        meta::C2 create Id bar C1Id {}
+        meta::C2 create Id baz C1Id {}
+        set c2 [meta::C2 create Id fub C1Id {}]
+        meta::R1 link $c1 [meta::C2 findAll]
+    }
+    #puts [relformat [relvar set ::meta::C2] C2]
+    rosea::InstCmds::readAttribute $c2 C1Id
+} -result {foo}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test generate-6.2 {
+    generate multiple classes and a relationship, unlink instances
+} -setup {
+    rosea configure {
+        domain meta {
+            class C1 {
+                attribute Id string -id 1
+                attribute A1 int
+            }
+
+            class C2 {
+                attribute Id string -id 1
+                attribute C1Id string
+                reference R1 C1 -link {C1Id Id}
+            }
+            association R1 C2 0..n--0..1 C1
+        }
+    }
+    rosea generate
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::meta
+} -body {
+    relvar eval {
+        set c1 [meta::C1 create Id foo A1 20]
+        meta::C2 create Id bar C1Id foo
+        meta::C2 create Id baz C1Id foo
+        set c2 [meta::C2 create Id fub C1Id foo]
+    }
+    meta::R1 unlink [meta::C2 findWhere {[string match b* $Id]}]
+    puts [relformat [relvar set ::meta::C2] C2]
+    rosea::InstCmds::readAttribute $c2 C1Id
+} -result {foo}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test generate-6.3 {
+    generate multiple classes and a relationship, unlink by referred to instance
+} -setup {
+    rosea configure {
+        domain meta {
+            class C1 {
+                attribute Id string -id 1
+                attribute A1 int
+            }
+
+            class C2 {
+                attribute Id string -id 1
+                attribute C1Id string
+                reference R1 C1 -link {C1Id Id}
+            }
+            association R1 C2 0..n--0..1 C1
+        }
+    }
+    rosea generate
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::meta
+} -body {
+    relvar eval {
+        set c1 [meta::C1 create Id foo A1 20]
+        meta::C2 create Id bar C1Id foo
+        meta::C2 create Id baz C1Id foo
+        set c2 [meta::C2 create Id fub C1Id foo]
+    }
+    meta::R1 unlink $c1
+    puts [relformat [relvar set ::meta::C2] C2]
+    rosea::InstCmds::readAttribute $c2 C1Id
+} -result {}
+----
+
 === Structuring Architectural Data
 
 [source,tcl]
@@ -4789,6 +5103,16 @@ proc GenerateArchStructures {domns} {
         AttrRefs        {Relation {ReferringAttribute string\
                         ReferencedAttribute string}}
     } {Relationship SubClass}
+    relvar association ${archns}::R4\
+        ${archns}::__SubLink Relationship +\
+        ${archns}::__SuperLink Relationship 1
+    relvar create ${archns}::__RefLink {
+        Relationship    string
+        ReferringClass  string
+        ReferencedClass string
+        ReferringAttrs  {Relation {ReferringAttribute string\
+                            ReferencedAttribute string}}
+    } Relationship
 
     return $archns
 }
@@ -4955,6 +5279,7 @@ namespace eval ::rosea::test {
     <<test utility procs>>
     <<helper command tests>>
     <<class command tests>>
+    <<relationship command tests>>
     <<instance command tests>>
     <<dispatch command tests>>
     <<config command tests>>
