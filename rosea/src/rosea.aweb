@@ -1237,7 +1237,76 @@ proc linkSimple {rname instref1 instref2} {
 [source,tcl]
 ----
 <<relationship commands>>=
-proc linkAssoc {rname inst1 inst2 args} {
+proc linkAssoc {rname instref1 instref2 args} {
+    lassign $instref1 relvar1 inst1
+    set domain1 [namespace qualifiers $relvar1]
+
+    lassign $instref2 relvar2 inst2
+    set domain2 [namespace qualifiers $relvar2]
+
+    if {$domain1 ne $domain2} {
+        error "cannot link across domains"
+    }
+
+    set archns ${domain1}::__Arch
+
+    set assocref [relvar restrictone ${archns}::__AssocRef Relationship $rname]
+    if {[relation isempty $assocref]} {
+        error "unknown relationship $rname"
+    }
+
+    relation assign $assocref\
+        {AssocClass assocClass}\
+        {References references}
+
+    set ref1 [relation restrictwith $references {$Participant eq $relvar1}]
+    if {[relation isempty $ref1]} {
+        error "$relvar1 not a participant in $rname"
+    }
+    if {[relation cardinality $ref1] > 1} {
+        set ref2 [relation restrictwith $ref1 {$Role eq "target"}]
+        set ref1 [relation minus $ref1 $ref2]
+    } else {
+        set ref2 [relation restrictwith $references {$Participant eq $relvar2}]
+        if {[relation isempty $ref2]} {
+            error "$relvar2 not a participant in $rname"
+        }
+    }
+
+    set values1 [pipe {
+        relvar set $relvar1 |
+        relation semijoin $inst1 ~
+    }]
+    set values2 [pipe {
+        relvar set $relvar2 |
+        relation semijoin $inst2 ~
+    }]
+
+    set rattr1 [relation extract $ref1 ReferringAttrs]
+    set rattr2 [relation extract $ref2 ReferringAttrs]
+
+    set assoctuples [list]
+    relation foreach v1 $values1 {
+        set refto1 [pipe {
+            relation extend $rattr1 rfa RefValue string {
+                [relation extract $v1 [tuple extract $rfa ReferencedAttribute]]
+            } |
+            relation dict ~ ReferringAttribute RefValue
+        }]
+        relation foreach v2 $values2 {
+            set refto2 [pipe {
+                relation extend $rattr2 rfa RefValue string {
+                    [relation extract $v2\
+                        [tuple extract $rfa ReferencedAttribute]]
+                } |
+                relation dict ~ ReferringAttribute RefValue
+            }]
+
+            lappend assoctuples [dict merge $args $refto1 $refto2]
+        }
+    }
+
+    return [ToRef $assocClass [relvar insert $assocClass {*}$assoctuples]]
 }
 ----
 
@@ -1292,7 +1361,7 @@ proc unlinkSimple {rname instref} {
 [source,tcl]
 ----
 <<relationship commands>>=
-proc unlinkAssoc {rname inst1 inst2} {
+proc unlinkAssoc {rname instref} {
 }
 ----
 
@@ -4218,6 +4287,7 @@ proc generate {{prefix {}}} {
         DomainElement DomainElement\
         Class Class\
         Attribute Attribute\
+        DefaultValue DefaultValue\
         Identifier Identifier\
         IdentifyingAttribute IdentifyingAttribute\
         Relationship Relationship\
@@ -4254,7 +4324,6 @@ proc generate {{prefix {}}} {
                 $IdentifyingAttribute |
         relation group ~ Attributes Attribute
     } idQuery
-
 
     relation foreach domain $Domain {
         set domns ${prefix}::[relation extract $domain Name]
@@ -4294,6 +4363,21 @@ proc generate {{prefix {}}} {
             }
             # create the relvar
             relvar create $className $heading {*}$idset
+
+            set defaultvalues [pipe {
+                relation semijoin $class $Attribute\
+                    -using {Domain Domain Name Class} |
+                relation join ~ $DefaultValue\
+                    -using {Domain Domain Class Class Name Attribute}
+            }]
+            #puts [relformat $defaultvalues defaultvalues]
+
+            if {[relation isnotempty $defaultvalues]} {
+                set defheading [relation dict $defaultvalues Name Type]
+                set defvalues [relation dict $defaultvalues Name Value]
+                relvar trace add variable $className insert [list\
+                    ::rosea::Helpers::InsertTrace $defheading $defvalues]
+            }
 
             set opmap [dict create]
             set classops [relation semijoin $class $ClassOperation\
@@ -4451,7 +4535,7 @@ proc generate {{prefix {}}} {
                         Conditionality Multiplicity ReferringAttrs
 
             }]
-            puts [relformat $assocrefs assocrefs]
+            #puts [relformat $assocrefs assocrefs]
 
             relation foreach assocref $assocrefs {
                 relation assign $assocref\
@@ -4459,6 +4543,9 @@ proc generate {{prefix {}}} {
                     {ReferringClass associator}\
                     {Relationship relationship}\
                     {References references}
+                set assoclinks [relation create {Participant string Role string\
+                    ReferringAttrs {Relation {ReferringAttribute string\
+                        ReferencedAttribute string}}}]
                 relation foreach reference $references {
                     relation assign $reference\
                         {ReferencedClass referencedClass}\
@@ -4477,6 +4564,12 @@ proc generate {{prefix {}}} {
                     set multcond($referencedRole)\
                         [MapCondMultToConstraint $conditionality $multiplicity]
                     set refclass($referencedRole) ${domns}::$referencedClass
+
+                    set assoclinks [relation insert $assoclinks [list\
+                        Participant $refclass($referencedRole)\
+                        Role $referencedRole\
+                        ReferringAttrs $referringAttrs\
+                    ]]
                 }
 
                 relvar correlation ${domns}::$relationship\
@@ -4497,19 +4590,24 @@ proc generate {{prefix {}}} {
                     relvar insert ${archns}::__AssociationLink [list\
                         Name            $relationship\
                         SrcClass        $refclass(source)\
-                        DstClass        $associator\
+                        DstClass        ${domns}::$associator\
                         PrevSrcClass    {}\
                     ]
                     relvar insert ${archns}::__Link [list\
                         Name    ~$relationship\
-                        Class   $associator\
+                        Class   ${domns}::$associator\
                         Attrs   $revattrs\
                     ]
                     relvar insert ${archns}::__AssociationLink [list\
                         Name            ~$relationship\
-                        SrcClass        $associator\
+                        SrcClass        ${domns}::$associator\
                         DstClass        $refclass(source)\
                         PrevSrcClass    $refclass(target)\
+                    ]
+                    relvar insert ${archns}::__AssocRef [list\
+                        Relationship    $relationship\
+                        AssocClass      ${domns}::$associator\
+                        References      $assoclinks\
                     ]
                 }
 
@@ -4518,12 +4616,12 @@ proc generate {{prefix {}}} {
                 relvar eval {
                     relvar insert ${archns}::__Link [list\
                         Name    $relationship\
-                        Class   $associator\
+                        Class   ${domns}::$associator\
                         Attrs   $revattrs\
                     ]
                     relvar insert ${archns}::__AssociationLink [list\
                         Name            $relationship\
-                        SrcClass        $associator\
+                        SrcClass        ${domns}::$associator\
                         DstClass        $refclass(target)\
                         PrevSrcClass    $refclass(source)\
                     ]
@@ -4535,7 +4633,7 @@ proc generate {{prefix {}}} {
                     relvar insert ${archns}::__AssociationLink [list\
                         Name            ~$relationship\
                         SrcClass        $refclass(target)\
-                        DstClass        $associator\
+                        DstClass        ${domns}::$associator\
                         PrevSrcClass    {}\
                     ]
                 }
@@ -4629,6 +4727,7 @@ proc generate {{prefix {}}} {
     #puts [relformat [relvar set ${archns}::__AssociationLink] AssociationLink]
     #puts [relformat [relvar set ${archns}::__PartitionLink] PartitionLink]
     #puts [relformat [relvar set ${archns}::__RefLink] RefLink]
+    #puts [relformat [relvar set ${archns}::__AssocRef] AssocRef]
     #puts [relformat [relvar set ${archns}::__SuperLink] SuperLink]
     #puts [relformat [relvar set ${archns}::__SubLink] SubLink]
 }
@@ -4653,6 +4752,16 @@ proc WeaveLists {l1 l2} {
         lappend w2 $b $a
     }
     return [list $w1 $w2]
+}
+----
+
+[source,tcl]
+----
+<<helper commands>>=
+proc InsertTrace {defheading defvalues op relvar tuple} {
+    tuple create\
+        [dict merge $defheading [tuple heading $tuple]]\
+        [dict merge $defvalues [tuple get $tuple]]
 }
 ----
 
@@ -4850,7 +4959,7 @@ test generate-4.1 {
     removeDomain ::foo
 } -body {
     relvar eval {
-        foo::S create s1 a s2 b a2 42
+        foo::S create s1 a s2 b
         foo::X create x1 a x2 b
     }
     set ref [foo::X findWhere {$x1 eq "a"}]
@@ -5002,7 +5111,7 @@ test generate-6.2 {
         set c2 [meta::C2 create Id fub C1Id foo]
     }
     meta::R1 unlink [meta::C2 findWhere {[string match b* $Id]}]
-    puts [relformat [relvar set ::meta::C2] C2]
+    #puts [relformat [relvar set ::meta::C2] C2]
     rosea::InstCmds::readAttribute $c2 C1Id
 } -result {foo}
 ----
@@ -5040,9 +5149,56 @@ test generate-6.3 {
         set c2 [meta::C2 create Id fub C1Id foo]
     }
     meta::R1 unlink $c1
-    puts [relformat [relvar set ::meta::C2] C2]
+    #puts [relformat [relvar set ::meta::C2] C2]
     rosea::InstCmds::readAttribute $c2 C1Id
 } -result {}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test generate-6.4 {
+    generate class-based association and link instances
+} -setup {
+    rosea configure {
+        domain foo {
+            class A {
+                attribute ax1 string -id 1
+                attribute ax2 string -id 1
+                attribute ay1 string -id 1
+                attribute ay2 string -id 1
+                reference R1 X -link {ax1 x1} -link {ax2 x2}
+                reference R1 Y -link {ay1 y1} -link {ay2 y2}
+            }
+            class X {
+                attribute x1 string -id 1
+                attribute x2 string -id 1
+                attribute x3 int
+            }
+            class Y {
+                attribute y1 string -id 1
+                attribute y2 string -id 1
+                attribute y3 int
+            }
+            association R1 X 1..n--1..n Y -associator A
+        }
+    }
+    rosea generate
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::foo
+} -body {
+    relvar eval {
+        ::foo::X create x1 x1-1 x2 x2-1 x3 27
+        ::foo::X create x1 x1-2 x2 x2-2 x3 47
+        ::foo::Y create y1 y1-1 y2 y2-1 y3 57
+        ::foo::Y create y1 y1-2 y2 y2-2 y3 67
+
+        set assoc [::foo::R1 link [::foo::X findAll] [::foo::Y findAll]]
+    }
+    #puts [relformat [relvar set ::foo::A] A]
+    ::rosea::Helpers::refMultiplicity $assoc
+} -result {4}
 ----
 
 === Structuring Architectural Data
@@ -5119,13 +5275,13 @@ proc GenerateArchStructures {domns} {
         ReferringAttrs  {Relation {ReferringAttribute string\
                             ReferencedAttribute string}}
     } Relationship
-    relvar create ${archns}::__AssocLink {
+    relvar create ${archns}::__AssocRef {
         Relationship    string
         AssocClass      string
         References      {Relation {Participant string Role string\
                     ReferringAttrs {Relation\
                     {ReferringAttribute string ReferencedAttribute string}}}}
-    }
+    } Relationship
 
     return $archns
 }
