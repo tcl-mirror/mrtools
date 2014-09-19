@@ -661,8 +661,10 @@ blockdiag {
     link [label = "__Link", class = "rvstyle"]
     assoclink [label = "__AssociationLink", class = "rvstyle"]
     partlink [label = "__PartitionLink", class = "rvstyle"]
+    partdst [label = "__PartitionDst", class = "rvstyle"]
 
-    archinfo -> trans, istate, deftrans, term, link, assoclink, partlink ;
+    archinfo -> trans, istate, deftrans, term, link, assoclink, partlink,
+        partdst ;
 }
 ------
 
@@ -929,8 +931,8 @@ proc addInitialState {domain args} {
 }
 
 proc addAssocLink {domain linkattrs assocattrs} {
-    dict set linkattrs Class\
-        [namespace current]::${domain}::[dict get $linkattrs Class]
+    dict set linkattrs SrcClass\
+        [namespace current]::${domain}::[dict get $linkattrs SrcClass]
     dict set assocattrs SrcClass\
         [namespace current]::${domain}::[dict get $assocattrs SrcClass]
     dict set assocattrs DstClass\
@@ -947,18 +949,21 @@ proc addAssocLink {domain linkattrs assocattrs} {
     }
 }
 
-proc addParitionLink {domain linkattrs partattrs} {
-    dict set linkattrs Class\
-        [namespace current]::${domain}::[dict get $linkattrs Class]
-    dict set partattrs DstClass\
-        [namespace current]::${domain}::[dict get $partattrs DstClass]
-    dict set partattrs SrcClass\
-        [namespace current]::${domain}::[dict get $partattrs SrcClass]
-    relvar eval {
-        relvar insert [namespace current]::${domain}::__Arch::__Link $linkattrs
-        relvar insert [namespace current]::${domain}::__Arch::__PartitionLink\
-                $partattrs
-    }
+proc addParitionLink {domain linkattrs} {
+    dict set linkattrs SrcClass\
+        [namespace current]::${domain}::[dict get $linkattrs SrcClass]
+    relvar insert [namespace current]::${domain}::__Arch::__Link $linkattrs
+    relvar insert [namespace current]::${domain}::__Arch::__PartitionLink\
+            $linkattrs
+}
+
+proc addPartitionDst {domain dstattrs} {
+    dict set dstattrs SrcClass\
+        [namespace current]::${domain}::[dict get $dstattrs SrcClass]
+    dict set dstattrs DstClass\
+        [namespace current]::${domain}::[dict get $dstattrs DstClass]
+    relvar insert [namespace current]::${domain}::__Arch::__PartitionDst\
+        $dstattrs
 }
 ----
 
@@ -1362,6 +1367,38 @@ proc unlinkSimple {rname instref} {
 ----
 <<relationship commands>>=
 proc unlinkAssoc {rname instref} {
+    lassign $instref relvar insts
+
+    set archns [namespace qualifiers $relvar]::__Arch
+
+    set assocref [relvar restrictone ${archns}::__AssocRef Relationship $rname]
+    if {[relation isempty $assocref]} {
+        error "unknown relationship $rname"
+    }
+    relation assign $assocref\
+        {Relationship relationship}\
+        {AssocClass associator}\
+        {References references}
+
+    if {$relvar eq $associator} {
+        set associnsts [deRef $instref]
+    } else {
+        set part [relation restrictwith $references {$Participant eq $relvar}]
+        set partcard [relation cardinality $part]
+        if {$partcard == 0} {
+            error "$relvar is not a participant in $rname"
+        } elseif {$partcard > 1} {
+            error "ambiguous unlink in reflexive relationship"
+        } else {
+            # find associative class instances
+            set navdir [expr {[relation extract $part Role] eq "source" ?\
+                $relationship : ~$relationship}]
+            set associnsts [deRef [::rosea::InstCmds::findRelated $instref\
+                [list $navdir [namespace tail $associator]]]]
+        }
+    }
+    relvar minus $associator $associnsts
+    return
 }
 ----
 
@@ -1399,15 +1436,10 @@ proc migrate {rname instref subclass args} {
     set domns [namespace qualifiers $relvar]
     set archns ${domns}::__Arch
 
-    namespace upvar ${archns}\
-            __AssociationLink AssociationLink
-
-    set link [pipe {
-        relvar restrictone ${archns}::__Link Name $rname Class $relvar |
-        relation join ~ $AssociationLink -using {Name Name Class SrcClass}
-    }]
+    set link [relvar restrictone ${archns}::__AssociationLink Name $rname\
+            SrcClass $relvar]
     if {[relation isempty $link]} {
-        error "no relationship $rname to superclass $relvar"
+        error "no relationship $rname with subclass $relvar"
     }
     #puts [relformat $link link]
     set superinst [pipe {
@@ -1462,57 +1494,58 @@ pipe {
     relation $op $related ~ -using $Attrs
 } relatedQuery
 
-pipe {
-    relation semijoin $assoc $AssociationLink\
-            -using {Name Name SrcClass PrevSrcClass} |
-    relation join ~ $Link -using {Name Name SrcClass Class}
-} nextlinkQuery
-
 <<instance commands>>=
 proc FindRelatedInsts {instref op args} {
     set srcrelvar [lindex $instref 0]
-    lassign [SplitRelvarName $srcrelvar] domain
+    lassign [SplitRelvarName $srcrelvar] domain class
 
     namespace upvar ${domain}::__Arch\
             __Link Link\
             __AssociationLink AssociationLink\
-            __PartitionLink PartitionLink
+            __PartitionLink PartitionLink\
+            __PartitionDst PartitionDst
+    #puts [relformat $Link Link]
+    #puts [relformat $AssociationLink AssociationLink]
+    #puts [relformat $PartitionLink PartitionLink]
+    #puts [relformat $PartitionDst PartitionDst]
     variable relatedQuery
-    variable nextlinkQuery
 
     set related [deRef $instref]
     foreach linkage $args {
         lassign $linkage lname dst
 
-        set linkclass [expr {$dst eq {} ? $srcrelvar : "${domain}::$dst"}]
         set link [relvar restrictone ${domain}::__Arch::__Link\
-                Name $lname Class $linkclass]
+                Name $lname SrcClass $srcrelvar]
         if {[ral relation isempty $link]} {
-            tailcall DeclError UNKNOWN_LINKAGE $lname $linkclass
+            tailcall DeclError UNKNOWN_LINKAGE $lname $srcrelvar
         }
-        set assoc [relation join $AssociationLink $link\
-                -using {Name Name SrcClass Class}]
+        set assoc [relation join $link $AssociationLink]
         if {[relation isnotempty $assoc]} {
-            relation assign $assoc SrcClass DstClass Attrs
-            if {$SrcClass ne $srcrelvar} {
-                tailcall DeclError PATH_ERROR $lname $SrcClass $DstClass\
-                    $srcrelvar
-            }
-
-            set related [eval $relatedQuery]
-            set assoc [eval $nextlinkQuery]
-            if {[relation isnotempty $assoc]} {
-                relation assign $assoc DstClass Attrs
+            relation assign $assoc DstClass Attrs
+            if {$dst eq {}} {
+                set related [eval $relatedQuery]
+                set assoc [relation semijoin $assoc $AssociationLink\
+                    -using {Name Name SrcClass PrevSrcClass}]
+                if {[relation isnotempty $assoc]} {
+                    relation assign $assoc DstClass Attrs
+                    set related [eval $relatedQuery]
+                }
+                set srcrelvar $DstClass
+            } else {
+                set dst ${domain}::$dst
+                if {$dst ne $DstClass} {
+                    tailcall DeclError PATH_ERROR $lname $srcrelvar $DstClass\
+                        $dst
+                }
                 set related [eval $relatedQuery]
             }
         } else {
-            set partition [relation join $PartitionLink $link\
-                -using {Name Name DstClass Class}]
-            relation assign $partition SrcClass DstClass Attrs
-            if {$SrcClass ne $srcrelvar} {
-                tailcall DeclError PATH_ERROR $linkage $srcrelvar
+            set partdst [relvar restrictone ${domain}::__Arch::__PartitionDst\
+                Name $lname SrcClass $srcrelvar DstClass ${domain}::$dst]
+            if {[relation isempty $partdst]} {
+                tailcall DeclError PATH_ERROR $lname $srcrelvar $DstClass $dst
             }
-
+            relation assign $partdst DstClass Attrs
             set related [eval $relatedQuery]
         }
         set srcrelvar $DstClass
@@ -1528,7 +1561,7 @@ proc FindRelatedInsts {instref op args} {
 ----
 <<error code formats>>=
 UNKNOWN_LINKAGE {unknown relationship, "%s", for class, "%s"}
-PATH_ERROR      {relationship, "%s", from "%s" to "%s", does not start at "%s"}
+PATH_ERROR      {relationship, "%s", from "%s" to "%s", does not end at "%s"}
 ----
 
 [source,tcl]
@@ -1566,8 +1599,8 @@ test findRelated-1.0 {
     setupDomain foo
     addClass foo c1 {A1 int A2 string} A1
     addClass foo c2 {B1 int B2 string} B1
-    addAssocLink foo {Name R1 Class c1 Attrs {A1 B1}}\
-        {Name R1 SrcClass c1 DstClass c2 PrevSrcClass {}}
+    addAssocLink foo {Name R1 SrcClass c1}\
+        {Name R1 SrcClass c1 DstClass c2 Attrs {A1 B1} PrevSrcClass {}}
     set ref [rosea::ClassCmds::create [namespace current]::foo::c1 A1 5 A2 baz]
     rosea::ClassCmds::create [namespace current]::foo::c2 B1 5 B2 bar
 } -cleanup {
@@ -1588,10 +1621,10 @@ test findRelated-1.1 {
     addClass foo c2 {B1 int B2 string} B1
     addClass foo c3 {C1 int C2 string} C1
 
-    addAssocLink foo {Name R1 Class c1 Attrs {A1 B1}}\
-        {Name R1 SrcClass c1 DstClass c2 PrevSrcClass {}}
-    addAssocLink foo {Name R2 Class c2 Attrs {B1 C1}}\
-        {Name R2 SrcClass c2 DstClass c3 PrevSrcClass {}}
+    addAssocLink foo {Name R1 SrcClass c1}\
+        {Name R1 SrcClass c1 DstClass c2 Attrs {A1 B1} PrevSrcClass {}}
+    addAssocLink foo {Name R2 SrcClass c2}\
+        {Name R2 SrcClass c2 DstClass c3 Attrs {B1 C1} PrevSrcClass {}}
 
     set ref [rosea::ClassCmds::create [namespace current]::foo::c1 A1 5 A2 baz]
     rosea::ClassCmds::create [namespace current]::foo::c2 B1 5 B2 bar
@@ -1634,22 +1667,21 @@ test findRelated-1.3 {
     addClass foo c1 {A1 int A2 string} A1
 
     # Forward direction is from X -> Y via A
-    addAssocLink foo {Name R1 Class X Attrs {A1 A1}}\
-        {Name R1 SrcClass X DstClass A PrevSrcClass {}}
-    addAssocLink foo {Name R1 Class A Attrs {B1 B1}}\
-        {Name R1 SrcClass A DstClass Y PrevSrcClass X}
-    addAssocLink foo {Name ~R1 Class Y Attrs {B1 B1}}\
-        {Name ~R1 SrcClass Y DstClass A PrevSrcClass {}}
-    addAssocLink foo {Name ~R1 Class A Attrs {A1 A1}}\
-        {Name ~R1 SrcClass A DstClass X PrevSrcClass Y}
+    addAssocLink foo {Name R1 SrcClass X}\
+        {Name R1 SrcClass X DstClass A Attrs {A1 A1} PrevSrcClass {}}
+    addAssocLink foo {Name R1 SrcClass A}\
+        {Name R1 SrcClass A DstClass Y Attrs {B1 B1} PrevSrcClass X}
+    addAssocLink foo {Name ~R1 SrcClass Y}\
+        {Name ~R1 SrcClass Y DstClass A Attrs {B1 B1} PrevSrcClass {}}
+    addAssocLink foo {Name ~R1 SrcClass A}\
+        {Name ~R1 SrcClass A DstClass X Attrs {A1 A1} PrevSrcClass Y}
     set ref [rosea::ClassCmds::create [namespace current]::foo::c1 A1 5 A2 baz]
 } -cleanup {
     cleanupDomain foo
 } -body {
     ::rosea::InstCmds::findRelated $ref {R1 A}
-} -result {relationship, "R1", from "::rosea::test::foo::A" to\
-    "::rosea::test::foo::Y", does not start at "::rosea::test::foo::c1"}\
--returnCodes error
+} -result {unknown relationship, "R1", for class, "::rosea::test::foo::c1"}\
+    -returnCodes error
 ----
 
 [source,tcl]
@@ -1663,14 +1695,14 @@ test findRelated-2.0 {
     addClass foo Y {B1 int B2 string} B1
     addClass foo A {A1 int B1 int} {A1 B1}
     # Forward direction is from X -> Y via A
-    addAssocLink foo {Name R1 Class X Attrs {A1 A1}}\
-        {Name R1 SrcClass X DstClass A PrevSrcClass {}}
-    addAssocLink foo {Name R1 Class A Attrs {B1 B1}}\
-        {Name R1 SrcClass A DstClass Y PrevSrcClass X}
-    addAssocLink foo {Name ~R1 Class Y Attrs {B1 B1}}\
-        {Name ~R1 SrcClass Y DstClass A PrevSrcClass {}}
-    addAssocLink foo {Name ~R1 Class A Attrs {A1 A1}}\
-        {Name ~R1 SrcClass A DstClass X PrevSrcClass Y}
+    addAssocLink foo {Name R1 SrcClass X}\
+        {Name R1 SrcClass X DstClass A Attrs {A1 A1} PrevSrcClass {}}
+    addAssocLink foo {Name R1 SrcClass A}\
+        {Name R1 SrcClass A DstClass Y Attrs {B1 B1} PrevSrcClass X}
+    addAssocLink foo {Name ~R1 SrcClass Y}\
+        {Name ~R1 SrcClass Y DstClass A Attrs {B1 B1} PrevSrcClass {}}
+    addAssocLink foo {Name ~R1 SrcClass A}\
+        {Name ~R1 SrcClass A DstClass X Attrs {A1 A1} PrevSrcClass Y}
 
     set ref [rosea::ClassCmds::create [namespace current]::foo::X A1 5 A2 baz]
     rosea::ClassCmds::create [namespace current]::foo::Y B1 10 B2 bar
@@ -1685,6 +1717,36 @@ test findRelated-2.0 {
 [source,tcl]
 ----
 <<instance command tests>>=
+test findRelated-2.1 {
+    Navigate a relationship -- path to associative class
+} -setup {
+    setupDomain foo
+    addClass foo X {A1 int A2 string} A1
+    addClass foo Y {B1 int B2 string} B1
+    addClass foo A {A1 int B1 int} {A1 B1}
+    # Forward direction is from X -> Y via A
+    addAssocLink foo {Name R1 SrcClass X}\
+        {Name R1 SrcClass X DstClass A Attrs {A1 A1} PrevSrcClass {}}
+    addAssocLink foo {Name R1 SrcClass A}\
+        {Name R1 SrcClass A DstClass Y Attrs {B1 B1} PrevSrcClass X}
+    addAssocLink foo {Name ~R1 SrcClass Y}\
+        {Name ~R1 SrcClass Y DstClass A Attrs {B1 B1} PrevSrcClass {}}
+    addAssocLink foo {Name ~R1 SrcClass A}\
+        {Name ~R1 SrcClass A DstClass X Attrs {A1 A1} PrevSrcClass Y}
+
+    set ref [rosea::ClassCmds::create [namespace current]::foo::X A1 5 A2 baz]
+    rosea::ClassCmds::create [namespace current]::foo::Y B1 10 B2 bar
+    rosea::ClassCmds::create [namespace current]::foo::A A1 5 B1 10
+} -cleanup {
+    cleanupDomain foo
+} -body {
+    ::rosea::InstCmds::findRelated $ref {R1 A}
+} -result {::rosea::test::foo::A {{A1 int B1 int} {{A1 5 B1 10}}}} -match ref
+----
+
+[source,tcl]
+----
+<<instance command tests>>=
 test findRelated-3.0 {
     Navigate a generalization
 } -setup {
@@ -1693,14 +1755,15 @@ test findRelated-3.0 {
     addClass foo X {X1 int X2 string} X1
     addClass foo Y {Y1 int Y2 string} Y1
 
-    addAssocLink foo {Name R1 Class X Attrs {X1 S1}}\
-        {Name R1 SrcClass X DstClass S PrevSrcClass {}}
-    addParitionLink foo {Name ~R1 Class X Attrs {S1 X1}}\
-        {Name ~R1 DstClass X SrcClass S}
-    addAssocLink foo {Name R1 Class Y Attrs {Y1 S1}}\
-        {Name R1 SrcClass Y DstClass S PrevSrcClass {}}
-    addParitionLink foo {Name ~R1 Class Y Attrs {S1 Y1}}\
-        {Name ~R1 DstClass Y SrcClass S}
+    addAssocLink foo {Name R1 SrcClass X}\
+        {Name R1 SrcClass X DstClass S Attrs {X1 S1} PrevSrcClass {}}
+    addAssocLink foo {Name R1 SrcClass Y}\
+        {Name R1 SrcClass Y DstClass S Attrs {Y1 S1} PrevSrcClass {}}
+    relvar eval {
+        addParitionLink foo {Name ~R1 SrcClass S}
+        addPartitionDst foo {Name ~R1 SrcClass S DstClass X Attrs {S1 X1}}
+        addPartitionDst foo {Name ~R1 SrcClass S DstClass Y Attrs {S1 Y1}}
+    }
 
     set ref [rosea::ClassCmds::create [namespace current]::foo::S S1 5 S2 baz]
     rosea::ClassCmds::create [namespace current]::foo::X X1 5 X2 bar
@@ -1997,10 +2060,8 @@ hierarchies originating at the source relvar.
 ----
 <<dispatch data>>=
 pipe {
-    relvar set ${archns}::__PartitionLink |
+    relvar set ${archns}::__PartitionDst |
     relation restrictwith ~ {$SrcClass eq $dstrelvar} |
-    relation join ~ [relvar set ${archns}::__Link]\
-        -using {Name Name DstClass Class} |
     relation group ~ DstLinks DstClass Attrs
 } polymapQuery
 ----
@@ -2053,14 +2114,15 @@ test MapPolymorphicEvent-1.0 {
     addClass bar X {X1 int X2 string} X1
     addClass bar Y {Y1 int Y2 string} Y1
 
-    addAssocLink bar {Name R1 Class X Attrs {X1 S1}}\
-        {Name R1 SrcClass X DstClass S PrevSrcClass {}}
-    addParitionLink bar {Name ~R1 Class X Attrs {S1 X1}}\
-        {Name ~R1 DstClass X SrcClass S}
-    addAssocLink bar {Name R1 Class Y Attrs {Y1 S1}}\
-        {Name R1 SrcClass Y DstClass S PrevSrcClass {}}
-    addParitionLink bar {Name ~R1 Class Y Attrs {S1 Y1}}\
-        {Name ~R1 DstClass Y SrcClass S}
+    addAssocLink bar {Name R1 SrcClass X}\
+        {Name R1 SrcClass X DstClass S Attrs {X1 S1} PrevSrcClass {}}
+    addAssocLink bar {Name R1 SrcClass Y}\
+        {Name R1 SrcClass Y DstClass S Attrs {Y1 S1} PrevSrcClass {}}
+    relvar eval {
+        addParitionLink bar {Name ~R1 SrcClass S}
+        addPartitionDst bar {Name ~R1 SrcClass S DstClass X Attrs {S1 X1}}
+        addPartitionDst bar {Name ~R1 SrcClass S DstClass Y Attrs {S1 Y1}}
+    }
 
     addPolymorphic bar Class S Event e1
     set ref [rosea::ClassCmds::create [namespace current]::bar::S S1 5 S2 baz]
@@ -4473,24 +4535,24 @@ proc generate {{prefix {}}} {
             relvar eval {
                 relvar insert ${archns}::__Link [list\
                     Name    $relationship\
-                    Class   ${domns}::$referringClass\
-                    Attrs   $forwattrs\
+                    SrcClass   ${domns}::$referringClass\
                 ]
                 relvar insert ${archns}::__AssociationLink [list\
                     Name            $relationship\
                     SrcClass        ${domns}::$referringClass\
                     DstClass        ${domns}::$referencedClass\
+                    Attrs   $forwattrs\
                     PrevSrcClass    {}\
                 ]
                 relvar insert ${archns}::__Link [list\
                     Name    ~$relationship\
-                    Class   ${domns}::$referencedClass\
-                    Attrs   $revattrs\
+                    SrcClass   ${domns}::$referencedClass\
                 ]
                 relvar insert ${archns}::__AssociationLink [list\
                     Name            ~$relationship\
                     SrcClass        ${domns}::$referencedClass\
                     DstClass        ${domns}::$referringClass\
+                    Attrs   $revattrs\
                     PrevSrcClass    {}\
                 ]
                 relvar insert ${archns}::__RefLink [list\
@@ -4584,24 +4646,24 @@ proc generate {{prefix {}}} {
                 relvar eval {
                     relvar insert ${archns}::__Link [list\
                         Name    $relationship\
-                        Class   $refclass(source)\
-                        Attrs   $forwattrs\
+                        SrcClass   $refclass(source)\
                     ]
                     relvar insert ${archns}::__AssociationLink [list\
                         Name            $relationship\
                         SrcClass        $refclass(source)\
                         DstClass        ${domns}::$associator\
+                        Attrs   $forwattrs\
                         PrevSrcClass    {}\
                     ]
                     relvar insert ${archns}::__Link [list\
                         Name    ~$relationship\
-                        Class   ${domns}::$associator\
-                        Attrs   $revattrs\
+                        SrcClass   ${domns}::$associator\
                     ]
                     relvar insert ${archns}::__AssociationLink [list\
                         Name            ~$relationship\
                         SrcClass        ${domns}::$associator\
                         DstClass        $refclass(source)\
+                        Attrs   $revattrs\
                         PrevSrcClass    $refclass(target)\
                     ]
                     relvar insert ${archns}::__AssocRef [list\
@@ -4616,24 +4678,24 @@ proc generate {{prefix {}}} {
                 relvar eval {
                     relvar insert ${archns}::__Link [list\
                         Name    $relationship\
-                        Class   ${domns}::$associator\
-                        Attrs   $revattrs\
+                        SrcClass   ${domns}::$associator\
                     ]
                     relvar insert ${archns}::__AssociationLink [list\
                         Name            $relationship\
                         SrcClass        ${domns}::$associator\
                         DstClass        $refclass(target)\
+                        Attrs   $revattrs\
                         PrevSrcClass    $refclass(source)\
                     ]
                     relvar insert ${archns}::__Link [list\
                         Name    ~$relationship\
-                        Class   $refclass(target)\
-                        Attrs   $forwattrs\
+                        SrcClass   $refclass(target)\
                     ]
                     relvar insert ${archns}::__AssociationLink [list\
                         Name            ~$relationship\
                         SrcClass        $refclass(target)\
                         DstClass        ${domns}::$associator\
+                        Attrs   $forwattrs\
                         PrevSrcClass    {}\
                     ]
                 }
@@ -4683,25 +4745,30 @@ proc generate {{prefix {}}} {
 
                 relvar eval {
                     relvar insert ${archns}::__Link [list\
-                        Name    $relationship\
-                        Class   ${domns}::$subclass\
-                        Attrs   $forwattrs\
+                        Name        $relationship\
+                        SrcClass    ${domns}::$subclass\
                     ]
                     relvar insert ${archns}::__AssociationLink [list\
                         Name            $relationship\
                         SrcClass        ${domns}::$subclass\
                         DstClass        ${domns}::$superclass\
+                        Attrs           $forwattrs\
                         PrevSrcClass    {}\
                     ]
-                    relvar insert ${archns}::__Link [list\
-                        Name    ~$relationship\
-                        Class   ${domns}::$subclass\
-                        Attrs   $revattrs\
-                    ]
-                    relvar insert ${archns}::__PartitionLink [list\
+                    # Here!! need to figure out how to get rid of the uinserts
+                    relvar uinsert ${archns}::__Link [list\
                         Name        ~$relationship\
-                        DstClass    ${domns}::$subclass\
                         SrcClass    ${domns}::$superclass\
+                    ]
+                    relvar uinsert ${archns}::__PartitionLink [list\
+                        Name        ~$relationship\
+                        SrcClass    ${domns}::$superclass\
+                    ]
+                    relvar insert ${archns}::__PartitionDst [list\
+                        Name        ~$relationship\
+                        SrcClass    ${domns}::$superclass\
+                        DstClass    ${domns}::$subclass\
+                        Attrs   $revattrs\
                     ]
                     relvar uinsert ${archns}::__SuperLink [list\
                         Relationship    $relationship\
@@ -4723,9 +4790,10 @@ proc generate {{prefix {}}} {
                         $relationship]]
         }
     }
-    #puts [relformat [relvar set ${archns}::__Link] Link]
-    #puts [relformat [relvar set ${archns}::__AssociationLink] AssociationLink]
-    #puts [relformat [relvar set ${archns}::__PartitionLink] PartitionLink]
+    puts [relformat [relvar set ${archns}::__Link] Link]
+    puts [relformat [relvar set ${archns}::__AssociationLink] AssociationLink]
+    puts [relformat [relvar set ${archns}::__PartitionLink] PartitionLink]
+    puts [relformat [relvar set ${archns}::__PartitionDst] PartitionDst]
     #puts [relformat [relvar set ${archns}::__RefLink] RefLink]
     #puts [relformat [relvar set ${archns}::__AssocRef] AssocRef]
     #puts [relformat [relvar set ${archns}::__SuperLink] SuperLink]
@@ -5201,6 +5269,52 @@ test generate-6.4 {
 } -result {4}
 ----
 
+[source,tcl]
+----
+<<config command tests>>=
+test generate-6.5 {
+    generate class-based association and unlink instances
+} -setup {
+    rosea configure {
+        domain foo {
+            class A {
+                attribute ax1 string -id 1
+                attribute ax2 string -id 1
+                attribute ay1 string -id 1
+                attribute ay2 string -id 1
+                reference R1 X -link {ax1 x1} -link {ax2 x2}
+                reference R1 Y -link {ay1 y1} -link {ay2 y2}
+            }
+            class X {
+                attribute x1 string -id 1
+                attribute x2 string -id 1
+                attribute x3 int
+            }
+            class Y {
+                attribute y1 string -id 1
+                attribute y2 string -id 1
+                attribute y3 int
+            }
+            association R1 X 0..n--0..n Y -associator A
+        }
+    }
+    rosea generate
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::foo
+} -body {
+    relvar eval {
+        ::foo::X create x1 x1-1 x2 x2-1 x3 27
+        ::foo::X create x1 x1-2 x2 x2-2 x3 47
+        ::foo::Y create y1 y1-1 y2 y2-1 y3 57
+        ::foo::Y create y1 y1-2 y2 y2-2 y3 67
+    }
+    set assoc [::foo::R1 link [::foo::X findAll] [::foo::Y findAll]]
+    ::foo::R1 unlink [::foo::X findAll]
+    relation cardinality [relvar set ::foo::A]
+} -result {0}
+----
+
 === Structuring Architectural Data
 
 [source,tcl]
@@ -5237,24 +5351,32 @@ proc GenerateArchStructures {domns} {
     } {Class Event}
     relvar create ${archns}::__Link {
         Name            string
-        Class           string
-        Attrs           list
-    } {Name Class}
+        SrcClass        string
+    } {Name SrcClass}
     relvar create ${archns}::__AssociationLink {
         Name            string
         SrcClass        string
         DstClass        string
+        Attrs           list
         PrevSrcClass    string
     } {Name SrcClass}
     relvar create ${archns}::__PartitionLink {
         Name            string
-        DstClass        string
         SrcClass        string
-    } {Name DstClass}
+    } {Name SrcClass}
     relvar partition ${archns}::R3\
-        ${archns}::__Link {Name Class}\
+        ${archns}::__Link {Name SrcClass}\
             ${archns}::__AssociationLink {Name SrcClass}\
-            ${archns}::__PartitionLink {Name DstClass}
+            ${archns}::__PartitionLink {Name SrcClass}
+    relvar create ${archns}::__PartitionDst {
+        Name            string
+        SrcClass        string
+        DstClass        string
+        Attrs           list
+    } {Name SrcClass DstClass}
+    relvar association ${archns}::R4\
+        ${archns}::__PartitionDst {Name SrcClass} +\
+        ${archns}::__PartitionLink {Name SrcClass} 1
     relvar create ${archns}::__SuperLink {
         Relationship    string
         SuperClass      string
@@ -5265,7 +5387,7 @@ proc GenerateArchStructures {domns} {
         AttrRefs        {Relation {ReferringAttribute string\
                         ReferencedAttribute string}}
     } {Relationship SubClass}
-    relvar association ${archns}::R4\
+    relvar association ${archns}::R5\
         ${archns}::__SubLink Relationship +\
         ${archns}::__SuperLink Relationship 1
     relvar create ${archns}::__RefLink {
