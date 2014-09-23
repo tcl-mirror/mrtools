@@ -900,6 +900,7 @@ The namespace is organized as shown <<package-organization,above>>.
 <<relationship commands namespace>>
 <<dispatch commands namespace>>
 <<configuration commands namespace>>
+<<population commands namespace>>
 <<trace commands namespace>>
 ----
 
@@ -3126,6 +3127,19 @@ components have been defined.
 CONFIG_ERRORS     {encountered %d configuration script errors}
 ----
 
+[source,tcl]
+----
+<<rosea commands>>=
+proc configureFromFile {filename} {
+    set f [::open $filename r]
+    try {
+        configure [read $f]
+    } finally {
+        ::chan close $f
+    }
+}
+----
+
 === Defining a Domain
 
 The _script_ handed to the +configure+ command should contain
@@ -3167,7 +3181,8 @@ command.
 ----
 <<config data>>=
 relvar create Domain {
-    Name    string
+    Name        string
+    Location    string
 } Name
 
 relvar create DomainElement {
@@ -3219,7 +3234,7 @@ proc domain {name body} {
     namespace upvar DomainDef DomainName DomainName ; # <1>
     set DomainName $name
 
-    relvar uinsert ::rosea::Config::Domain [list Name $name] ; # <2>
+    relvar uinsert ::rosea::Config::Domain [list Name $name Location {}] ; # <2>
     try {
         if {$name eq {}} {
             tailcall DeclError EMPTY_NAME domain
@@ -4831,7 +4846,11 @@ proc generate {{prefix {}}} {
 
     # Iterate over all domains.
     relation foreach domain $Domain {
-        set domns ${prefix}::[relation extract $domain Name]
+        set domainName [relation extract $domain Name]
+        relvar updateone Config::Domain dtup [list Name $domainName] {
+            tuple update $dtup Location $prefix
+        }
+        set domns ${prefix}::$domainName
         # We start by creating a namespace to house the domain.
         namespace eval $domns {
             <<tclral imports>>
@@ -5370,8 +5389,44 @@ test generate-2.0 {
 [source,tcl]
 ----
 <<config command tests>>=
+test generate-2.1 {
+    Simple association -- bad class
+} -setup {
+} -cleanup {
+    cleanupConfigData
+} -body {
+    rosea configure {
+        domain foo {
+            association R1 y 1--1 x
+        }
+    }
+    rosea generate
+} -result {encountered 1 configuration script errors} -returnCodes error
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test generate-2.2 {
+    Simple association -- need associator
+} -setup {
+} -cleanup {
+    cleanupConfigData
+} -body {
+    rosea configure {
+        domain foo {
+            association R1 y 1..n--1..n x
+        }
+    }
+    rosea generate
+} -result {encountered 1 configuration script errors} -returnCodes error
+----
+
+[source,tcl]
+----
+<<config command tests>>=
 test generate-3.0 {
-    generate constraints for class based associative relationshp
+    generate constraints for class based associative relationship
 } -setup {
 } -cleanup {
     cleanupConfigData
@@ -5402,6 +5457,69 @@ test generate-3.0 {
     rosea generate
     relvar constraint info ::foo::R1
 } -result {correlation ::foo::R1 ::foo::a {ax1 ax2} + ::foo::x {x1 x2} {ay1 ay2} * ::foo::y {y1 y2}}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test generate-3.1 {
+    class based association when simple would do
+} -setup {
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::foo
+} -body {
+    rosea configure {
+        domain foo {
+            class a {
+                attribute x1 string -id 1
+                attribute y1 string
+                reference R2 x -link x1
+                reference R2 y -link y1
+            }
+            class x {
+                attribute x1 string -id 1
+                attribute x2 int -default 20
+            }
+            class y {
+                attribute y1 string -id 1
+                attribute y2 string -default bar
+            }
+            association R2 x 0..n--1 y -associator a
+        }
+    }
+    rosea generate
+    relvar constraint info ::foo::R2
+} -result {correlation ::foo::R2 ::foo::a x1 1 ::foo::x x1 y1 * ::foo::y y1}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test generate-3.2 {
+    generate constraints for reflexive class based associative relationshp
+} -setup {
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::foo
+} -body {
+    rosea configure {
+        domain foo {
+            class A {
+                attribute xid string -id 1
+                attribute next_xid string -id 1
+                reference R1 X -link xid -link {next_xid xid}
+            }
+            class X {
+                attribute xid string -id 1
+                attribute value string -default 20
+            }
+            association R1 X 0..n--0..n X -associator A -path {xid next_xid}
+        }
+    }
+    rosea generate
+    relvar constraint info ::foo::R1
+} -result {correlation ::foo::R1 ::foo::A xid * ::foo::X xid next_xid * ::foo::X xid}
 ----
 
 [source,tcl]
@@ -5443,7 +5561,7 @@ test generate-4.0 {
 ----
 <<config command tests>>=
 test generate-4.1 {
-    generate linkage information for generalization
+    migrate subclass
 } -setup {
     rosea configure {
         domain foo {
@@ -5477,6 +5595,56 @@ test generate-4.1 {
     set ref [foo::X findWhere {$x1 eq "a"}]
     foo::R1 migrate $ref Y
 } -result {::foo::Y {{y1 string y2 string} {{y1 a y2 b}}}} -match ref
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test generate-4.2 {
+    compound generalization
+} -setup {
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::grocer
+} -body {
+    rosea configure {
+        domain grocer {
+            class Fruit {
+                attribute Name string -id 1
+                attribute Color string
+            }
+            class SeededFruit {
+                attribute Name string -id 1
+                reference R1 Fruit -link Name
+            }
+            class UnseededFruit {
+                attribute Name string -id 1
+                reference R1 Fruit -link Name
+            }
+            generalization R1 Fruit SeededFruit UnseededFruit
+
+            class StoneFruit {
+                attribute Name string -id 1
+                reference R2 SeededFruit -link Name
+            }
+            class PitFruit {
+                attribute Name string -id 1
+                attribute PitSize int -default 10
+                reference R2 SeededFruit -link Name
+            }
+            generalization R2 SeededFruit StoneFruit PitFruit
+        }
+    }
+    rosea generate
+    relvar eval {
+        set ref [::grocer::Fruit create Name apple Color red]
+        ::grocer::SeededFruit create Name apple
+        ::grocer::PitFruit create Name apple PitSize 30
+    }
+    set pit [::rosea::InstCmds::findRelated $ref\
+            {~R1 SeededFruit} {~R2 PitFruit}]
+    ::rosea::InstCmds::readAttribute $pit PitSize
+} -result {30}
 ----
 
 [source,tcl]
@@ -5757,6 +5925,130 @@ test generate-6.5 {
     ::foo::R1 unlink [::foo::X findAll]
     relation cardinality [relvar set ::foo::A]
 } -result {0}
+----
+
+== Populating Domains
+
+[source,tcl]
+----
+<<rosea exports>>=
+namespace export populate
+
+<<rosea commands>>=
+proc populate {domain script} {
+    namespace upvar Config errcount errcount configlineno configlineno
+    set errcount 0
+    set configlineno 1
+
+    set dom [relvar restrictone Config::Domain Name $domain]
+    if {[relation isempty $dom]} {
+        tailcall DeclError UNKNOWN_DOMAIN $domain
+    }
+
+    namespace upvar Populate DomainName DomainName DomainLoc DomainLoc
+    relation assign $dom {Name DomainName} {Location DomainLoc}
+
+    try {
+        relvar eval {
+            Config::ConfigEvaluate ::rosea::Populate $script
+        }
+    } on error {result} {
+        log::error $result
+        incr errcount
+    }
+    if {$errcount > 0} {
+        tailcall DeclError CONFIG_ERRORS $errcount
+    }
+    return $errcount
+}
+
+<<error code formats>>=
+UNKNOWN_DOMAIN  {unknown domain, "%s"}
+
+<<population commands namespace>>=
+namespace eval Populate {
+    logger::initNamespace [namespace current]
+
+    <<tclral imports>>
+    namespace path [namespace parent]::Helpers
+    <<populate data>>
+    <<populate commands>>
+}
+
+<<populate commands>>=
+proc class {class heading args} {
+    set population [expr {[llength $args] == 1 ? [lindex $args 0] : $args}]
+    set headlen [llength $heading]
+    if {[llength $population] % $headlen != 0} {
+        tailcall DeclError ARG_MISMATCH $headlen [llength $population]
+    }
+
+    set body [list]
+    for {set vindex 0} {$vindex < [llength $args]} {incr vindex $headlen} {
+        set values [lrange $population $vindex [expr {$vindex + $headlen - 1}]]
+        set tuple [list]
+        foreach attr $heading value $values {
+            lappend tuple $attr $value
+        }
+        lappend body $tuple
+    }
+
+    namespace upvar [namespace current]\
+        DomainName DomainName\
+        DomainLoc DomainLoc
+    relvar insert ${DomainLoc}::${DomainName}::$class {*}$body
+    puts [relformat [relvar set ${DomainLoc}::$DomainName}::$class]]
+
+    return
+}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test populate-1.0 {
+    Populate a domain
+} -setup {
+    rosea configure {
+        domain meta {
+            class C1 {
+                attribute Id string -id 1
+                attribute A1 int
+            }
+
+            class C2 {
+                attribute Id string -id 1
+                attribute C1Id string
+                reference R1 C1 -link {C1Id Id}
+            }
+            association R1 C2 0..n--0..1 C1
+        }
+    }
+    rosea generate
+} -cleanup {
+    cleanupConfigData
+} -body {
+    rosea populate meta {
+        class C1\
+            {Id     A1} {
+            foo     24
+            bar     42
+        }
+        class C2\
+            {Id     C1Id} {
+            f1      24
+            f2      24
+        }
+    }
+    relation cardinality $::meta::C1
+} -result {2}
+----
+
+(((error code,ARG_MISMATCH)))
+[source,tcl]
+----
+<<error code formats>>=
+ARG_MISMATCH      {number of population values must be a multiple of %d, got %d}
 ----
 
 === Structuring Architectural Data
