@@ -851,10 +851,11 @@ blockdiag {
     relcmd [label="::RelCmds",class=ns2nd]
     dispatchcmd [label="::Dispatch",class=ns2nd]
     configcmd [label="::Config",class=ns2nd]
+    populatecmd [label="::Populate",class=ns2nd]
     tracecmd [label="::Trace",class=ns2nd]
 
     rosea -> helpcmd, classcmd, instcmd, relcmd, dispatchcmd, configcmd,
-        tracecmd
+        populatecmd, tracecmd
 }
 ------
 
@@ -1235,7 +1236,7 @@ the state of the instance into a procedure.
 
 [source,tcl]
 ----
-<<class commands>>=
+<<helper commands>>=
 proc CreateInstanceState {domain class state value} {
     set tuple [concat\
         [tuple get [relation tuple $value]]\
@@ -3094,9 +3095,6 @@ a script.
 <<rosea exports>>=
 namespace export configure
 
-<<rosea imports>>=
-namespace import ::rosea::Helpers::DeclError
-
 <<rosea commands>>=
 proc configure {script} {
     namespace upvar Config errcount errcount configlineno configlineno
@@ -3566,6 +3564,9 @@ proc attribute {name type args} {
     if {$name eq {}} {
         tailcall DeclError EMPTY_NAME attribute
     }
+    if {[string range $name 0 1] eq "__"} {
+        tailcall DeclError RESERVED_NAME $name
+    }
     if {[llength $args] % 2 != 0} {
         tailcall DeclError ARG_FORMAT $args
     }
@@ -3609,6 +3610,15 @@ proc attribute {name type args} {
         }
     }
 }
+----
+
+(((error code,RESERVED_NAME)))
+[source,tcl]
+----
+<<error code formats>>=
+RESERVED_NAME {names beginning with two underscore characters are reserved,\
+        "%s"}
+    
 ----
 
 ==== Defining References
@@ -5275,14 +5285,17 @@ proc MapCondMultToConstraint {cond mult} {
     }
 }
 
-proc WeaveLists {l1 l2} {
-    set w1 [list]
-    set w2 [list]
+<<helper commands>>=
+proc Interleave {l1 l2} {
+    set result [list]
     foreach a $l1 b $l2 {
-        lappend w1 $a $b
-        lappend w2 $b $a
+        lappend result $a $b
     }
-    return [list $w1 $w2]
+    return $result
+}
+
+proc WeaveLists {l1 l2} {
+    tailcall list [Interleave $l1 $l2] [Interleave $l2 $l1]
 }
 ----
 
@@ -5927,130 +5940,6 @@ test generate-6.5 {
 } -result {0}
 ----
 
-== Populating Domains
-
-[source,tcl]
-----
-<<rosea exports>>=
-namespace export populate
-
-<<rosea commands>>=
-proc populate {domain script} {
-    namespace upvar Config errcount errcount configlineno configlineno
-    set errcount 0
-    set configlineno 1
-
-    set dom [relvar restrictone Config::Domain Name $domain]
-    if {[relation isempty $dom]} {
-        tailcall DeclError UNKNOWN_DOMAIN $domain
-    }
-
-    namespace upvar Populate DomainName DomainName DomainLoc DomainLoc
-    relation assign $dom {Name DomainName} {Location DomainLoc}
-
-    try {
-        relvar eval {
-            Config::ConfigEvaluate ::rosea::Populate $script
-        }
-    } on error {result} {
-        log::error $result
-        incr errcount
-    }
-    if {$errcount > 0} {
-        tailcall DeclError CONFIG_ERRORS $errcount
-    }
-    return $errcount
-}
-
-<<error code formats>>=
-UNKNOWN_DOMAIN  {unknown domain, "%s"}
-
-<<population commands namespace>>=
-namespace eval Populate {
-    logger::initNamespace [namespace current]
-
-    <<tclral imports>>
-    namespace path [namespace parent]::Helpers
-    <<populate data>>
-    <<populate commands>>
-}
-
-<<populate commands>>=
-proc class {class heading args} {
-    set population [expr {[llength $args] == 1 ? [lindex $args 0] : $args}]
-    set headlen [llength $heading]
-    if {[llength $population] % $headlen != 0} {
-        tailcall DeclError ARG_MISMATCH $headlen [llength $population]
-    }
-
-    set body [list]
-    for {set vindex 0} {$vindex < [llength $args]} {incr vindex $headlen} {
-        set values [lrange $population $vindex [expr {$vindex + $headlen - 1}]]
-        set tuple [list]
-        foreach attr $heading value $values {
-            lappend tuple $attr $value
-        }
-        lappend body $tuple
-    }
-
-    namespace upvar [namespace current]\
-        DomainName DomainName\
-        DomainLoc DomainLoc
-    relvar insert ${DomainLoc}::${DomainName}::$class {*}$body
-    puts [relformat [relvar set ${DomainLoc}::$DomainName}::$class]]
-
-    return
-}
-----
-
-[source,tcl]
-----
-<<config command tests>>=
-test populate-1.0 {
-    Populate a domain
-} -setup {
-    rosea configure {
-        domain meta {
-            class C1 {
-                attribute Id string -id 1
-                attribute A1 int
-            }
-
-            class C2 {
-                attribute Id string -id 1
-                attribute C1Id string
-                reference R1 C1 -link {C1Id Id}
-            }
-            association R1 C2 0..n--0..1 C1
-        }
-    }
-    rosea generate
-} -cleanup {
-    cleanupConfigData
-} -body {
-    rosea populate meta {
-        class C1\
-            {Id     A1} {
-            foo     24
-            bar     42
-        }
-        class C2\
-            {Id     C1Id} {
-            f1      24
-            f2      24
-        }
-    }
-    relation cardinality $::meta::C1
-} -result {2}
-----
-
-(((error code,ARG_MISMATCH)))
-[source,tcl]
-----
-<<error code formats>>=
-ARG_MISMATCH      {number of population values must be a multiple of %d, got %d}
-----
-
 === Structuring Architectural Data
 
 [source,tcl]
@@ -6096,6 +5985,9 @@ proc GenerateArchStructures {domns} {
         Attrs           list
         PrevSrcClass    string
     } {Name SrcClass}
+    relvar association ${archns}::R4\
+        ${archns}::__AssociationLink {Name PrevSrcClass} ?\
+        ${archns}::__AssociationLink {Name SrcClass} ?
     relvar create ${archns}::__PartitionLink {
         Name            string
         SrcClass        string
@@ -6110,7 +6002,7 @@ proc GenerateArchStructures {domns} {
         DstClass        string
         Attrs           list
     } {Name SrcClass DstClass}
-    relvar association ${archns}::R4\
+    relvar association ${archns}::R2\
         ${archns}::__PartitionDst {Name SrcClass} +\
         ${archns}::__PartitionLink {Name SrcClass} 1
     relvar create ${archns}::__SuperLink {
@@ -6143,6 +6035,327 @@ proc GenerateArchStructures {domns} {
 
     return $archns
 }
+----
+
+== Populating Domains
+
+The third important step in translating an XUML domain is to establish
+an initial instance population.
+If you consider the evolution of the domain over time,
+the initial instance population sets the values of attributes
+at time zero.
+This is analogous to specifying the initial state of a state machine.
+Then at each transaction in the processing,
+the domain data moves from one valid state to another as enforced by
+the integrity constraints of the underlying relvars.
+
+One of the great benefits of using TclRAL relvars as the basis of the
+data architecture is the instance population of the domain can be
+established by specifying attribute values alone.
+Attributes values and relationship linkage is established by setting
+values in a declarative way.
+Now it is possible to execute a series of +create+ and +link+ commands
+to establish the initial instance population in much the same way as
+class instances are dealt with at run-time.
+However, this implies writing potentially long sequences of code.
+The +populate+ command will allow you to specify attribute values and
+the implied relationship linkages as data organized as tables.
+
+[source,tcl]
+----
+<<rosea exports>>=
+namespace export populate
+
+<<rosea commands>>=
+proc populate {domain script} {
+    namespace upvar Config errcount errcount configlineno configlineno
+    set errcount 0
+    set configlineno 1
+
+    set dom [relvar restrictone Config::Domain Name $domain]
+    if {[relation isempty $dom]} {
+        tailcall DeclError UNKNOWN_DOMAIN $domain
+    }
+
+    namespace upvar Populate DomainName DomainName DomainLoc DomainLoc
+    relation assign $dom {Name DomainName} {Location DomainLoc}
+
+    try {
+        relvar eval {
+            Config::ConfigEvaluate ::rosea::Populate $script
+        }
+    } on error {result} {
+        log::error $result
+        incr errcount
+    }
+    if {$errcount > 0} {
+        tailcall DeclError CONFIG_ERRORS $errcount
+    }
+    return $errcount
+}
+----
+
+(((error code,UNKNOWN_DOMAIN)))
+[source,tcl]
+----
+<<error code formats>>=
+UNKNOWN_DOMAIN  {unknown domain, "%s"}
+----
+
+[source,tcl]
+----
+<<population commands namespace>>=
+namespace eval Populate {
+    logger::initNamespace [namespace current]
+
+    <<tclral imports>>
+    namespace path [namespace parent]::Helpers
+    <<populate data>>
+    <<populate commands>>
+}
+----
+
+[source,tcl]
+----
+<<populate commands>>=
+proc class {class heading args} {
+    # Determine if we have one big list or a bunch of values.
+    set popvalues [expr {[llength $args] == 1 ? [lindex $args 0] : $args}]
+    set headlen [llength $heading]
+    if {[llength $popvalues] % $headlen != 0} {
+        tailcall DeclError ARG_MISMATCH $headlen [llength $popvalues]
+    }
+
+    # Iterate over the attribute values taking them in chunks that are the same
+    # size as the heading.
+    set body [list]
+    for {set vindex 0} {$vindex < [llength $popvalues]} {incr vindex $headlen} {
+        set values [lrange $popvalues $vindex [expr {$vindex + $headlen - 1}]]
+        # Create a tuple as a list of attribute name / value pairs.
+        set tuple [list]
+        foreach attr $heading value $values {
+            # Check if we are skipping a value to use a default.  We must also
+            # allow some way to specify the value as "-".
+            if {$value eq "-"} {
+                continue
+            } elseif {$value eq "\\-"} {
+                set value -
+            }
+            lappend tuple $attr $value
+        }
+        # Accumulate the tuples as a list to form the body that will be
+        # inserted into the relvar.
+        lappend body $tuple
+    }
+
+    # Insert the body into the relvar.
+    namespace upvar [namespace current]\
+        DomainName DomainName\
+        DomainLoc DomainLoc
+    set domns ${DomainLoc}::${DomainName}
+    set relvar ${domns}::$class
+    set insts [relvar insert $relvar {*}$body]
+    #puts [relformat $insts $relvar]
+
+    # Now we have to deal with any state model that might be present.  We have
+    # to set up the initial state properly if such a thing exists for this
+    # class.
+    set initstate [relvar restrictone ${domns}::__Arch::__InitialState\
+        Class $relvar]
+    if {[relation isnotempty $initstate]} {
+        relation assign $initstate {State state}
+        set idattrs [lindex [relvar identifiers $relvar] 0]
+        relation foreach inst $insts {
+            CreateInstanceState $domns $class $state\
+                [relation project $inst {*}$idattrs]
+        }
+    }
+
+    return
+}
+----
+
+(((error code,ARG_MISMATCH)))
+[source,tcl]
+----
+<<error code formats>>=
+ARG_MISMATCH      {number of population values must be a multiple of %d, got %d}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test populate-1.0 {
+    Populate a domain
+} -setup {
+    rosea configure {
+        domain meta {
+            class C1 {
+                attribute Id string -id 1
+                attribute A1 int
+            }
+
+            class C2 {
+                attribute Id string -id 1
+                attribute C1Id string
+                reference R1 C1 -link {C1Id Id}
+            }
+            association R1 C2 0..n--0..1 C1
+        }
+    }
+    rosea generate
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::meta
+} -body {
+    rosea populate meta {
+        class C1\
+            {Id     A1} {
+            foo     24
+            bar     42
+        }
+        class C2\
+            {Id     C1Id} {
+            f1      24
+            f2      24
+        }
+    }
+    relation cardinality $::meta::C1
+} -result {2}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test populate-1.1 {
+    Populate a domain -- alternate syntax
+} -setup {
+    rosea configure {
+        domain meta {
+            class C1 {
+                attribute Id string -id 1
+                attribute A1 int
+            }
+
+            class C2 {
+                attribute Id string -id 1
+                attribute C1Id string
+                reference R1 C1 -link {C1Id Id}
+            }
+            association R1 C2 0..n--0..1 C1
+        }
+    }
+    rosea generate
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::meta
+} -body {
+    rosea populate meta {
+        class C1\
+            {Id     A1}\
+            foo     24\
+            bar     42\
+    }
+    rosea populate meta {
+        class C2\
+            {Id     C1Id}\
+            f1      24\
+            f2      24\
+    }
+    relation cardinality $::meta::C2
+} -result {2}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test populate-1.2 {
+    Populate a domain using default value syntax
+} -setup {
+    rosea configure {
+        domain meta {
+            class C1 {
+                attribute Id string -id 1
+                attribute A1 int -default 20
+            }
+
+            class C2 {
+                attribute Id string -id 1
+                attribute C1Id string
+                reference R1 C1 -link {C1Id Id}
+            }
+            association R1 C2 0..n--0..1 C1
+        }
+    }
+    rosea generate
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::meta
+} -body {
+    rosea populate meta {
+        class C1\
+            {Id     A1} {
+            foo     24
+            bar     -
+        }
+        class C2\
+            {Id     C1Id} {
+            f1      24
+            f2      24
+        }
+    }
+    set ref [::meta::C1 findWhere {$A1 == 20}]
+    ::rosea::InstCmds::readAttribute $ref Id
+} -result {bar}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test populate-1.3 {
+    Populate a domain with initial states
+} -setup {
+    rosea configure {
+        domain meta {
+            class C1 {
+                attribute Id string -id 1
+                attribute A1 int
+            }
+
+            class C2 {
+                attribute Id string -id 1
+                attribute C1Id string
+                reference R1 C1 -link {C1Id Id}
+            }
+            association R1 C2 0..n--0..1 C1
+        }
+    }
+    rosea generate [namespace current]
+    addInitialState meta Class C2 State s1
+    # We need this for the test since we have not declared any
+    # state model for C2. Just faking the underlying data structures.
+    relvar create [namespace current]::meta::__C2__INSTANCE {
+        Id string
+        __State string
+    } Id
+} -cleanup {
+    cleanupConfigData
+    removeDomain [namespace current]::meta
+} -body {
+    rosea populate meta {
+        class C1\
+            {Id     A1} {
+            foo     24
+            bar     42
+        }
+        class C2\
+            {Id     C1Id} {
+            f1      24
+            f2      24
+        }
+    }
+    relation cardinality [relvar set [namespace current]::meta::__C2__INSTANCE]
+} -result {2}
 ----
 
 == Code Organization
@@ -6216,7 +6429,7 @@ namespace eval ::rosea {
     <<rosea commands>>
     <<rosea namespace layout>>
 
-    <<rosea imports>>
+    namespace path ::rosea::Helpers
 }
 
 package provide rosea $::rosea::version
