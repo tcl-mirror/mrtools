@@ -33,6 +33,9 @@ LSDIAGRAMS =\
 	config-domain.uxf\
 	config-classes.uxf\
 	config-relation.uxf\
+	config-statemodel.uxf\
+	config-transition.uxf\
+	config-event.uxf\
 	$(NULL)
 
 SEQDIAG	=\
