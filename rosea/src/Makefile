@@ -104,9 +104,9 @@ ASCIIDOC_OPTS =\
 	$(patsubst %,--attribute=%,$(ASCIIDOC_ATTRS))\
 	$(NULL)
 
-.PHONY : all doc code tests runtests clean
+.PHONY : all doc code tests runtests example clean
 
-all : doc
+all : doc code tests example
 
 doc : $(PDF)
 

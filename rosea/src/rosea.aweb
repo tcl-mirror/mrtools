@@ -355,6 +355,7 @@ to anything.
 [source,tcl]
 ----
 <<helper commands>>=
+namespace export isNilRef
 proc isNilRef {instref} {
     tailcall relation isempty [lindex $instref 1]
 }
@@ -373,6 +374,7 @@ address and dereferencing the +nil+ pointer is not allowed.
 [source,tcl]
 ----
 <<helper commands>>=
+namespace export isNotNilRef
 proc isNotNilRef {instref} {
     tailcall relation isnotempty [lindex $instref 1]
 }
@@ -382,6 +384,7 @@ proc isNotNilRef {instref} {
 [source,tcl]
 ----
 <<helper commands>>=
+namespace export refMultiplicity
 proc refMultiplicity {instref} {
     tailcall relation cardinality [lindex $instref 1]
 }
@@ -391,6 +394,7 @@ proc refMultiplicity {instref} {
 [source,tcl]
 ----
 <<helper commands>>=
+namespace export isRefSingular
 proc isRefSingular {instref} {
     expr {[refMultiplicity $instref] == 1}
 }
@@ -402,6 +406,7 @@ proc isRefSingular {instref} {
 [source,tcl]
 ----
 <<helper commands>>=
+namespace export isRefEqual
 proc isRefEqual {ref1 ref2} {
     lassign $ref1 relvar1 inst1
     lassign $ref2 relvar2 inst2
@@ -1235,10 +1240,10 @@ proc CreateInstanceState {domain class state value} {
 <<class commands>>=
 proc createasync {relvar event eventparams args} {
     lassign [SplitRelvarName $relvar] domain class
-    set event [relvar restrictone ${domain}::__Arch::__Event\
-        Class $relvar Event $event]
-    if {[relation isempty $event]} {
-        tailcall DeclError UNKNOWN_EVENT $event $relvar
+    set knownevent [relvar restrictone ${domain}::__Arch::__Event\
+        Class $class Event $event]
+    if {[relation isempty $knownevent]} {
+        tailcall DeclError UNKNOWN_EVENT $event $class
     }
     set instref [createin $relvar @ {*}$args]
     ::rosea::Trace::TraceCreation [SelfInstRef 1] $event $instref
@@ -4988,11 +4993,11 @@ relvar partition R71\
         NonStateTransition {Domain Model State Event}
 
 relvar association R72\
-        StateTransition {Domain Model State} ?\
+        StateTransition {Domain Model NewState} *\
         State {Domain Model Name} 1
 
 relvar association R73\
-    NonStateTransition TransRule ?\
+    NonStateTransition TransRule *\
     TransitionRule Name 1
 ----
 
@@ -5701,6 +5706,7 @@ proc generate {{prefix {}}} {
         # We start by creating a namespace to house the domain.
         namespace eval $domns {
             <<tclral imports>>
+            namespace import ::rosea::Helpers::*
         }
         namespace eval $domns [list\
             namespace import {*}[relation list $SystemInstOp Prefix]
@@ -5886,7 +5892,8 @@ proc generate {{prefix {}}} {
                     {Parameters params}\
                     {Body opbody}
 
-                proc ${className}::__Activity::$opname $params $opbody
+                proc ${className}::__Activity::$opname\
+                    [linsert $params 0 self] $opbody
             }
         }
 
@@ -7517,8 +7524,8 @@ We log to a service that is the same name as the package.
 
 [source,tcl]
 ----
-<<trace packages>>=
-variable traceLogCmd [::logger::init stsatcl]
+<<trace data>>=
+variable traceLogCmd [::logger::init rosea]
 ----
 
 === Trace Control
@@ -7565,7 +7572,7 @@ proc traceControl {op args} {
             set traceLogState off
         }
         loglevel {
-            namespace upvar Trace traceLogState traceLogState
+            namespace upvar Trace traceLogLevel traceLogLevel
             if {[llength $args] != 0} {
                 set traceLogLevel [lindex $args 0]
             }
@@ -7675,7 +7682,7 @@ proc NewTrace {src event target} {
         Source      $src\
         Event       $event\
         Target      $target\
-        Class       [info object class $target]\
+        Class       [lindex $target 0]\
     ]]
 }
 ----
@@ -7704,109 +7711,167 @@ list contains only one element, we extract that element to format.
 
 [source,tcl]
 ----
-<<exported tests>>=
+<<trace command tests>>=
 test LogTrace-1.0 {
     log trace data
 } -setup {
-    ::stsatcl STSAClass create tr1 {
-        attribute {Count 0} {Max 2}
-        statemodel {
-            state s1 {} {
-                my variable Count Max
-                incr Count
-                if {$Count >= $Max} {
-                    ::stsatcl::test::syncToTest $Count
+    rosea configure {
+        domain foo {
+            class c1 {
+                attribute Id int -id 1
+                attribute Count int -default 0
+                attribute Max int -default 2
+                statemodel {
+                    state s1 {} {
+                        updateAttribute $self Count\
+                            [expr {[readAttribute $self Count] + 1}]
+                        #puts [relformat [deRef $self] self]
+                        lassign [readAttribute $self Count Max] count max
+                        if {$count >= $max} {
+                            ::rosea::test::syncToTest $count
+                        }
+                    }
+                    transition s1 - e1 -> s2
+
+                    state s2 {} {
+                        updateAttribute $self Count\
+                            [expr {[readAttribute $self Count] + 1}]
+                        signal $self e2
+                    }
+                    transition s2 - e2 -> s1
                 }
             }
-            transition s1 - e1 -> s2
-
-            state s2 {} {
-                my variable Count
-                incr Count
-                my signal e2
-            }
-            transition s2 - e2 -> s1
         }
     }
-
+    rosea generate
     turnOnTraceLog
 } -cleanup {
+    cleanupConfigData
+    removeDomain ::foo
     turnOffTraceLog
-
-    tr1 destroy
 } -body {
-    tr1 create inst1
-    inst1 signal e1
+    set ref [::foo::c1 create Id 1]
+    ::rosea::InstCmds::signal $ref e1
     waitForSync
 } -result {2}
 ----
 
 [source,tcl]
 ----
-<<exported tests>>=
+<<test utility procs>>=
+proc syncToTest {{value {}}} {
+    set [namespace current]::testDone $value
+}
+
+proc waitForSync {{timeout 1000}} {
+    set varname [namespace current]::testDone
+    set tid [::after $timeout set $varname TIMEOUT]
+    vwait $varname
+    after cancel $tid
+    set $varname
+}
+----
+
+[source,tcl]
+----
+<<trace command tests>>=
 test LogTrace-2.0 {
     log trace data for a polymorphic event
 } -setup {
-    ::stsatcl STSAClass create lt2 {
-        partition R1 lt2-sub1 foo
-        polymorphic *e1 *e2
-    }
+    rosea configure {
+        domain foo {
+            class lt2 {
+                attribute Id int -id 1
 
-    ::stsatcl STSAClass create lt2-sub1 {
-        reference R1 -> lt2
-        statemodel {
-            state sub1-s1 {} {
-                ::stsatcl::test::syncToTest true
+                polymorphic *e1 *e2
             }
-            transition sub1-s1 - *e1 -> sub1-s2
+            generalization R1 lt2 lt2-sub1 lt2-sub2
 
-            state sub1-s2 {} {
-                [my -> R1] delayedSignal 50 *e2
+            class lt2-sub1 {
+                attribute Id int -id 1
+                reference R1 lt2 -link Id
+
+                statemodel {
+                    state sub1-s1 {} {
+                        ::rosea::test::syncToTest true
+                    }
+                    transition sub1-s1 - *e1 -> sub1-s2
+
+                    state sub1-s2 {} {
+                        delaysignal 50 $self *e2
+                    }
+                    transition sub1-s2 - *e2 -> sub1-s1
+                }
             }
-            transition sub1-s2 - *e2 -> sub1-s1
+
+            class lt2-sub2 {
+                attribute Id int -id 1
+                reference R1 lt2 -link Id
+
+                statemodel {
+                    state sub1-s1 {} {
+                        ::rosea::test::syncToTest true
+                    }
+                    transition sub1-s1 - *e1 -> sub1-s2
+
+                    state sub1-s2 {} {
+                        delaysignal 50 $self *e2
+                    }
+                    transition sub1-s2 - *e2 -> sub1-s1
+                }
+            }
         }
     }
 
-    lt2 create super
-    lt2-sub1 create sub1
-    super link R1 sub1
-    sub1 link R1 super
+    rosea generate
+
+    rosea populate foo {
+        class lt2 Id 1
+        class lt2-sub1 Id 1
+    }
 
     turnOnTraceLog
 } -cleanup {
+    cleanupConfigData
+    removeDomain ::foo
     turnOffTraceLog
-
-    lt2 destroy
-    lt2-sub1 destroy
 } -body {
-    super signal *e1
+    set superref [::foo::lt2 findWhere {$Id == 1}]
+    ::rosea::InstCmds::signal $superref *e1
     waitForSync
 } -result {true}
 ----
 
 [source,tcl]
 ----
-<<exported tests>>=
+<<trace command tests>>=
 test LogTrace-3.0 {
     log trace data for a creation event
 } -setup {
-    ::stsatcl STSAClass create lt3 {
-        statemodel {
-            transition @ - e1 -> s1
+    rosea configure {
+        domain foo {
+            class lt3 {
+                attribute Id int -id 1
+                statemodel {
+                    transition @ - e1 -> s1
 
-            state s1 {value} {
-                ::stsatcl::test::syncToTest $value
+                    state s1 {value} {
+                        ::rosea::test::syncToTest $value
+                    }
+                }
             }
         }
     }
 
+    rosea generate
+
     turnOnTraceLog
 } -cleanup {
+    cleanupConfigData
+    removeDomain ::foo
     turnOffTraceLog
-
-    lt3 destroy
 } -body {
-    set inst [lt3 signal e1 10]
+    ::foo::lt3 createasync e1 10 Id 1
     waitForSync
 } -result {10}
 ----
@@ -7817,22 +7882,22 @@ test LogTrace-3.0 {
 proc turnOnTraceLog {} {
     variable prevloglevel
 
-    ::stsatcl traceControl clear
-    ::stsatcl traceControl on
-    set logcmd [::logger::servicecmd stsatcl]
+    ::rosea traceControl clear
+    ::rosea traceControl on
+    set logcmd [::logger::servicecmd rosea]
     set prevloglevel [${logcmd}::currentloglevel]
-    ${logcmd}::setlevel [::stsatcl traceControl loglevel]
-    ::stsatcl traceControl logon
+    ${logcmd}::setlevel [::rosea traceControl loglevel]
+    ::rosea traceControl logon
 }
 
 proc turnOffTraceLog {} {
     variable prevloglevel
 
-    set logcmd [::logger::servicecmd stsatcl]
+    set logcmd [::logger::servicecmd rosea]
     ${logcmd}::setlevel $prevloglevel
-    ::stsatcl traceControl logoff
-    ::stsatcl traceControl off
-    ::stsatcl traceControl clear
+    ::rosea traceControl logoff
+    ::rosea traceControl off
+    ::rosea traceControl clear
 }
 ----
 
@@ -7885,15 +7950,15 @@ The common keys are:
 +time+::
     The time since the epoch, in microseconds, that the trace was captured.
 +source+::
-    The object command name of the instance that signaled the event.
+    The instance reference of the instance that signaled the event.
     If the source of the event is outside of an object,
-    then this will be the empty string.
+    then this will be the nil reference.
 +event+::
     The name of the event.
 +target+::
-    The object command name of the target of the event.
+    The instance reference of the target of the event.
 +class+::
-    The command name of the class that corresponds to +target+.
+    The fully qualified relvar name for the class that corresponds to +target+.
 +type+::
     The type of the dispatched event: one of +creation+, +polymorphic+,
     or +transition+.
@@ -7906,11 +7971,11 @@ the instance creator (which is, necessarily, also the class of the +target+).
 For +polymorphic+ type events, the following additional keys are available:
 
 +super+::
-    The object command name of the superclass instance mapping the event.
+    The class name of the superclass instance mapping the event.
 +link+::
     The name of the partition linkage across which the event is mapped.
 
-For polymorphic type events, the +target+ value is the command name of
+For polymorphic type events, the +target+ value is the class name of
 the subclass instance onto which the polymorphic event is mapped.
 
 For +transition+ type events, the following additional keys are available:
@@ -7946,7 +8011,7 @@ constraint, only one of the new attributes will contain any tuples.
 <<trace commands>>=
 proc TracesToRecords {traces} {
     foreach rvname {Creation Polymorphic Transition} { # <1>
-        set traces [rvajoin $traces [relvar set $rvname] $rvname]
+        set traces [::ralutil::rvajoin $traces [relvar set $rvname] $rvname]
     }
 
     set result [list]
@@ -8011,7 +8076,7 @@ namespace export decodeAllTraces
 
 <<rosea commands>>=
 proc decodeAllTraces {} {
-    tailcall TracesToRecords [relvar set Trace]
+    tailcall Trace::TracesToRecords [relvar set Trace::Trace]
 }
 ----
 
@@ -8020,40 +8085,49 @@ proc decodeAllTraces {} {
 
 [source,tcl]
 ----
-<<exported tests>>=
+<<trace command tests>>=
 test decodeAllTraces-1.0 {
     display trace data
 } -setup {
-    ::stsatcl STSAClass create tr1 {
-        attribute {Count 0} {Max 2}
-        statemodel {
-            state s1 {} {
-                my variable Count Max
-                incr Count
-                if {$Count >= $Max} {
-                    ::stsatcl::test::syncToTest $Count
+    rosea configure {
+        domain foo {
+            class c1 {
+                attribute Id int -id 1
+                attribute Count int -default 0
+                attribute Max int -default 2
+                statemodel {
+                    state s1 {} {
+                        updateAttribute $self Count\
+                            [expr {[readAttribute $self Count] + 1}]
+                        lassign [readAttribute $self Count Max] count max
+                        if {$count >= $max} {
+                            ::rosea::test::syncToTest $count
+                        }
+                    }
+                    transition s1 - e1 -> s2
+
+                    state s2 {} {
+                        updateAttribute $self Count\
+                            [expr {[readAttribute $self Count] + 1}]
+                    }
+                    transition s2 - e2 -> s1
                 }
             }
-            transition s1 - e1 -> s2
-
-            state s2 {} {
-                my variable Count
-                incr Count
-            }
-            transition s2 - e2 -> s1
         }
     }
+    rosea generate
 } -cleanup {
-    ::stsatcl traceControl off
-    ::stsatcl traceControl clear
-    tr1 destroy
+    cleanupConfigData
+    removeDomain ::foo
+    ::rosea traceControl off
+    ::rosea traceControl clear
 } -body {
-    ::stsatcl traceControl on
-    tr1 create inst1
-    inst1 signal e1
-    inst1 signal e2
+    ::rosea traceControl on
+    set ref [::foo::c1 create Id 1]
+    ::rosea::InstCmds::signal $ref e1
+    ::rosea::InstCmds::signal $ref e2
     waitForSync
-    set traces [::stsatcl decodeAllTraces]
+    set traces [::rosea decodeAllTraces]
     dict get [lindex $traces 0] event
 } -result {e1}
 ----
@@ -8069,8 +8143,8 @@ namespace export decodeClassTraces
 
 <<rosea commands>>=
 proc decodeClassTraces {args} {
-    tailcall TracesToRecords [pipe {
-        relvar set Trace |
+    tailcall Trace::TracesToRecords [pipe {
+        relvar set Trace::Trace |
         relation restrictwith ~ {$Class in $args}
     }]
 }
@@ -8081,59 +8155,69 @@ proc decodeClassTraces {args} {
 
 [source,tcl]
 ----
-<<exported tests>>=
+<<trace command tests>>=
 test decodeClassTraces-1.0 {
     display trace data for specific class
 } -setup {
-    ::stsatcl STSAClass create dct1 {
-        reference R1 -> dct2
-        attribute {Power 20}
-        statemodel {
-            state Off {} {
-                [my -> R1] signal Lower
-            }
-            transition Off - TurnOn -> On
+    rosea configure {
+        domain foo {
+            class dct1 {
+                attribute Id string -id 1
+                attribute Power int -default 20
+                reference R1 dct2 -link Id
+                statemodel {
+                    state Off {} {
+                        signal [findRelated $self R1] Lower
+                    }
+                    transition Off - TurnOn -> On
 
-            state On {power} {
-                my variable Power
-                set Power $power
-                [my -> R1] signal Raise
+                    state On {power} {
+                        updateAttribute $self Power $power
+                        signal [findRelated $self R1] Raise
+                    }
+                    transition On - TurnOff -> Off
+                }
             }
-            transition On - TurnOff -> Off
+
+            association R1 dct1 1--1 dct2
+
+            class dct2 {
+                attribute Id string -id 1
+                statemodel {
+                    state Down {} {
+                        ::rosea::test::syncToTest\
+                            [readAttribute [findRelated $self ~R1] Power]
+                    }
+                    transition Down - Raise -> Up
+
+                    state Up {} {
+                        delaysignal 50 [findRelated $self ~R1] TurnOff
+                    }
+                    transition Up - Lower -> Down
+                }
+            }
         }
     }
 
-    ::stsatcl STSAClass create dct2 {
-        reference R1 -> dct1
-        statemodel {
-            state Down {} {
-                ::stsatcl::test::syncToTest [[my -> R1] readAttributes Power]
-            }
-            transition Down - Raise -> Up
+    rosea generate
 
-            state Up {} {
-                [my -> R1] delayedSignal 50 TurnOff
-            }
-            transition Up - Lower -> Down
-        }
+    rosea populate foo {
+        class dct1 Id first
+        class dct2 Id first
     }
 
-    ::stsatcl traceControl clear
-    ::stsatcl traceControl on
+    rosea traceControl clear
+    rosea traceControl on
 } -cleanup {
-    ::stsatcl traceControl off
-    ::stsatcl traceControl clear
-    dct1 destroy
-    dct2 destroy
+    cleanupConfigData
+    removeDomain ::foo
+    rosea traceControl off
+    rosea traceControl clear
 } -body {
-    dct1 create inst1
-    dct2 create inst2
-    inst1 link R1 inst2
-    inst2 link R1 inst1
-    inst1 signal TurnOn 30
+    ::rosea::InstCmds::signal [::foo::dct1 findWhere {$Id eq "first"}] TurnOn 30
     waitForSync
-    # puts [::stsatcl formatTraces [::stsatcl decodeAllTraces]]
-    set traces [::stsatcl decodeClassTraces [namespace current]::dct2]
+    # puts [::rosea formatTraces [::rosea decodeAllTraces]]
+    set traces [::rosea decodeClassTraces ::foo::dct2]
     expr {[llength $traces] == 2 &&\
             [dict get [lindex $traces 1] event] eq "Lower"}
 } -result {1}
@@ -8183,10 +8267,11 @@ proc formatTraces {tracerecs} {
     set prevtime [dict get [lindex $tracerecs 0] time]
     foreach rec $tracerecs {
         dict with rec {
-            append result "[FormatTimestamp $time]: "
-            append result "[FormatTimeAsSec [expr {$time - $prevtime}]]: "
+            append result "[Trace::FormatTimestamp $time]: "
+            append result "[Trace::FormatTimeAsSec\
+                    [expr {$time - $prevtime}]]: "
             set prevtime $time
-            append result [FormatTraceRec $rec] \n
+            append result [Trace::FormatTraceRec $rec] \n
         }
     }
     return [string trimright $result]
@@ -8198,40 +8283,48 @@ proc formatTraces {tracerecs} {
 
 [source,tcl]
 ----
-<<exported tests>>=
+<<trace command tests>>=
 test formatTraces-1.0 {
     display human readable trace data
 } -setup {
-    ::stsatcl STSAClass create tr1 {
-        attribute {Count 0} {Max 2}
-        statemodel {
-            state s1 {} {
-                my variable Count Max
-                incr Count
-                if {$Count >= $Max} {
-                    ::stsatcl::test::syncToTest $Count
+    rosea configure {
+        domain foo {
+            class c1 {
+                attribute Id int -id 1
+                attribute Count int -default 0
+                attribute Max int -default 2
+                statemodel {
+                    state s1 {} {
+                        updateAttribute $self Count\
+                            [expr {[readAttribute $self Count] + 1}]
+                        lassign [readAttribute $self Count Max] count max
+                        if {$count >= $max} {
+                            ::rosea::test::syncToTest $count
+                        }
+                    }
+                    transition s1 - e1 -> s2
+
+                    state s2 {} {
+                        updateAttribute $self Count\
+                            [expr {[readAttribute $self Count] + 1}]
+                    }
+                    transition s2 - e2 -> s1
                 }
             }
-            transition s1 - e1 -> s2
-
-            state s2 {} {
-                my variable Count
-                incr Count
-            }
-            transition s2 - e2 -> s1
         }
     }
+    rosea generate
 } -cleanup {
-    ::stsatcl traceControl off
-    ::stsatcl traceControl clear
-    tr1 destroy
+    rosea traceControl off
+    rosea traceControl clear
 } -body {
-    ::stsatcl traceControl on
-    tr1 create inst1
-    inst1 signal e1
-    inst1 signal e2
+    rosea traceControl on
+    set one [::foo::c1 create Id 1]
+    ::rosea::InstCmds::signal $one e1
+    ::rosea::InstCmds::signal $one e2
     waitForSync
-    set traces [::stsatcl formatTraces [::stsatcl::decodeAllTraces]]
+    set traces [rosea formatTraces [rosea decodeAllTraces]]
+    # puts $traces
     llength [split $traces \n]
 } -result {2}
 ----
@@ -8252,19 +8345,21 @@ proc FormatTraceRec {rec} {
             transition {
                 append result\
                     "Transition: "\
-                    "[list $source] - $event \{$params\} -> $target ==> "\
+                    "[FormatInstRef $source] - $event\($params\) ->\
+                        [FormatInstRef $target] ==> "\
                     "$current -> $new"
             }
             polymorphic {
                 append result\
                     "Polymorphic : "\
-                    "[list $source] - $event -> $super ==> "\
-                    "$link -> $target"
+                    "[FormatInstRef $source] - $event -> $super ==> "\
+                    "$link -> [FormatInstRef $target]"
             }
             creation {
                 append result\
                     "Creation: "\
-                    "[list $source] - $event -> $class ==> $target"
+                    "[FormatInstRef $source] - $event -> $class ==>\
+                        [FormatInstRef $target]"
             }
             default {
                 DeclError BAD_TRACETYPE $type
@@ -8272,6 +8367,19 @@ proc FormatTraceRec {rec} {
         }
     }
     return $result
+}
+----
+
+[source,tcl]
+----
+<<trace commands>>=
+proc FormatInstRef {instref} {
+    lassign $instref relvar inst
+    if {$relvar eq {}} {
+        return {{}}
+    } else {
+        return "$relvar\([tuple get [relation tuple $inst]]\)"
+    }
 }
 ----
 
@@ -8395,7 +8503,7 @@ proc diagClassTraces {filename classes args} {
     set chan [open $filename w]
     try {
         set traces [pipe {
-            relvar set Trace >
+            relvar set Config::Trace >
             relation restrictwith ~\
                 {$Class in $classes || [namespace tail $Class] in $classes}
         }] {} >~
@@ -8406,6 +8514,1085 @@ proc diagClassTraces {filename classes args} {
     return
 }
 ----
+
+== An Example
+
+=== Example Overview
+
+In this section we start the discussion of the example that is used
+to illustrate the usage of +rosea+.
+Unfortunately,
+there is rather a lot of background material that we will not cover here.
+We do not explain how to create an XUML model
+nor will we spend much time explaining why the example model was designed
+the way it was.
+There are many good books that explain XUML in detail and will teach
+you the basics of modelingfootnote:[
+<<mb-xuml,Mellor and Balcer>>,
+<<rs-xuml,Chris Raistrick _et.al_>> and
+<<ls-build,Leon Starr>> all are worthy of a close reading.].
+We suggest you read at least one of them.
+It is also the case that this package represents one particular piece
+of a larger workflow and this means that readers who may not be
+completely familiar with model-driven translation oriented development
+may have many questions that remain.
+
+["blockdiag",title="Simplified Translation Workflow"]
+----
+blockdiag {
+    class process [shape=ellipse]
+    class known [shape=ellipse,color="#ff7690"]
+    requirements [label="Requirements", class="process"]
+    models [label="Models", class="process"]
+    code [label="Code", class="known"]
+
+    pop [label="Population", class="known"]
+    arch [label="stsatcl", class="known"]
+    program [label="Program", class="known"]
+
+    requirements -> models [label="Analysis",fontsize=8]
+    models -> code [label="Translate",fontsize=8]
+    code -> program [label="Build",fontsize=8]
+    arch -> program
+    pop -> program
+}
+----
+
+In the above figure,
+we will cover those portions that are colored.
+Specifically,
+we will not deal with how one creates models from Requirements.
+We will start with the Model and show how that becomes Code via translation.
+By combining the code with a population and the +stsatcl+ package,
+we will produce a running example program.
+
+The subject matter of our example is an automatic clothes washer.
+This is a very simple washing machine,
+especially compared to modern commercially available washers.
+The intent is to select a subject that most people would be familiar
+with from ordinary experience so that we don't have to devote too much
+time explaining the problem.
+One word of caution.
+This model is an example for pedagogical purposes
+and probably has little correspondence with the way _real_ washing
+machines operate or are designed to operate.
+You will also notice a lack of any attention paid to _what can go wrong_.
+For industrial strength programs,
+handling probable failure cases is very important but we have dispensed
+with those considerations here to focus on how the model is
+translated into the implementation code using +stsatcl+.
+
+=== Class Diagram
+
+The figure below shows a class diagram for the washing machine control
+domain in UML graphical notation.
+
+[[class-diagram,class diagram]]
+
+image::wmc-class-diagram.pdf[title="Washing Machine Class Diagram"]
+
+In our world,
+a Washing Machine operates according to some Washing Cycle.
+The Washing Cycle is a set of parameters that specifies aspects of
+the washing that will turn dirty clothes into clean ones.
+The Washing Machine itself has a Clothes Tub into which the dirty
+laundry is placed.
+There are also Water Valves to control the flow of water into and out of
+the Clothes Tub and Motors to run a water pump, agitate the
+Clothes Tub and rotate the Clothes Tub to spin excess water out of the
+clean laundry.
+Rounding out the machinery,
+there is a Water Level Sensor that will tell us when the Clothes Tub
+is filled with water or empty of water.
+
+For a well engineered model,
+the class diagram must also have a set of descriptions of what
+the attributes and relationship actually mean,
+what the value domains of the attributes are and many other
+aspects that describe how the problem is represented in the model.
+These descriptions are vital to understanding a class diagram.
+Here again, in the interests of space,
+we will have to suffice ourselves with more casual descriptions
+included along with the example as it translated into the implementation
+and an admonition that writing the model descriptions is an essential
+aspect of a well engineered solution.
+
+The class diagram shows the static aspects of our domain
+and is always the first aspect of the model that must be considered
+when deriving the implementation.
+The classes hold the parameters of the domain and the relationships
+state how the components are associated with respect to each other.
+The class diagram facet of the model is static in the sense that
+at any point in time,
+the statements you can infer from the diagram will be true.
+Later, we visit the dynamic and algorithmic facets of the domain
+but, for now, we will endeavor to represent the classes and relationships
+in terms of the +rosea+ package constructs.
+
+=== Washing Machine Class
+
+[source,tcl]
+----
+<<WM class>>=
+class WashingMachine {
+    attribute MachineID string -id 1
+    attribute CycleType string
+    reference R4 WashingCycle -link CycleType
+
+    statemodel {
+        initialstate Stopped
+        defaulttrans CH
+
+        state Stopped {} {
+            <<WM stopped activity>>
+        }
+        transition Stopped - Start -> FillingToWash
+
+        state FillingToWash {} {
+            <<WM filling to wash activity>>
+        }
+        transition FillingToWash - Full -> Washing
+
+        state Washing {} {
+            <<WM washing activity>>
+        }
+        transition Washing - Done -> DrainingWash
+
+        state DrainingWash {} {
+            <<WM draining wash activity>>
+        }
+        transition DrainingWash - Empty -> FillingToRinse
+
+        state FillingToRinse {} {
+            <<WM filling to rinse activity>>
+        }
+        transition FillingToRinse - Full -> Rinsing
+
+        state Rinsing {} {
+            <<WM rinsing activity>>
+        }
+        transition Rinsing - Done -> DrainingRinse
+
+        state DrainingRinse {} {
+            <<WM draining rinse activity>>
+        }
+        transition DrainingRinse - Empty -> Spinning
+
+        state Spinning {} {
+            <<WM spinning activity>>
+        }
+        transition Spinning - Done -> Stopped
+    }
+}
+
+association R4 WashingMachine 0..n--1 WashingCycle
+----
+
+==== Washing Machine State Activities
+
+We start with the Washing Machine class.
+
+'''
+
+// %States images/wm-states.uxf WashingMachine
+
+// %Action WashingMachine Stopped
+.Stopped Activity
+----
+# Stop spinning -- wash complete
+select one ct related by self->R1[CT]
+signal Stop to ct
+----
+
+.Stopped Implementation
+[source,tcl]
+----
+<<WM stopped activity>>=
+set ct [findRelated $self ~R1]
+signal $ct Stop
+----
+
+'''
+
+// %Action WashingMachine "Filling To Wash"
+.Filling To Wash Activity
+----
+# Fill the tub with wash water.
+select one wc related by self->R4[WC]
+select one ct related by self->R1[CT]
+signal Fill(wc.WashWaterTemp) to ct
+----
+
+.Filling To Wash Implementation
+[source,tcl]
+----
+<<WM filling to wash activity>>=
+set wc [findRelated $self R4]
+set ct [findRelated $self ~R1]
+signal $ct Fill [readAttribute $wc WashWaterTemp]
+----
+
+'''
+
+// %Action WashingMachine Washing
+.Washing Activity
+----
+# Agitate the tub to wash.
+select one ct related by self->R1[CT]
+signal Agitate to ct
+select one wc related by self->R4[WC]
+signal Done to self at wc.WashDuration
+----
+
+.Washing Implementation
+[source,tcl]
+----
+<<WM washing activity>>=
+set ct [findRelated $self ~R1]
+signal $ct Agitate
+set wc [findRelated $self R4]
+delaysignal [expr {[readAttribute $wc WashDuration] * 1000}] $self Done ; # <1>
+----
+<1> We are implicitly assuming the units of WashDuration are seconds.
+In truth, the units are minutes, but we are not patient enough
+to wait that long for a run of the example to finish.
+
+'''
+
+// %Action WashingMachine "Draining Wash"
+.Draining Wash Activity
+----
+# Stop washing and drain
+# the dirty wash water.
+select one ct related by self->R1[CT]
+signal Drain to ct
+----
+
+.Draining Wash Implementation
+[source,tcl]
+----
+<<WM draining wash activity>>=
+set ct [findRelated $self ~R1]
+signal $ct Drain
+----
+
+'''
+
+// %Action WashingMachine "Filling To Rinse"
+.Filling To Rinse Activity
+----
+# Fill the tub with rinse water.
+select one wc related by self->R4[WC]
+select one ct related by self->R1[CT]
+signal Fill(wc.RinseWaterTemp) to ct
+----
+
+.Filling To Rinse Implementation
+[source,tcl]
+----
+<<WM filling to rinse activity>>=
+set wc [findRelated $self R4]
+set ct [findRelated $self ~R1]
+signal $ct Fill [readAttribute $wc RinseWaterTemp]
+----
+
+'''
+
+// %Action WashingMachine Rinsing
+.Rinsing Activity
+----
+# Agitate the tub to rinse.
+select one ct related by self->R1[CT]
+signal Agitate to ct
+select one wc related by self->R4[WC]
+signal Done to self at wc.RinseDuration
+----
+
+.Rinsing Implementation
+[source,tcl]
+----
+<<WM rinsing activity>>=
+set ct [findRelated $self ~R1]
+signal $ct Agitate
+set wc [findRelated $self R4]
+delaysignal [expr {[readAttributes $wc RinseDuration] * 1000}] $self Done
+----
+
+'''
+
+// %Action WashingMachine "Draining Rinse"
+.Draining Rinse Activity
+----
+# Stop rinsing and drain
+# the rinse water.
+select one ct related by self->R1[CT]
+signal Drain to ct
+----
+
+.Draining Rinse Implementation
+[source,tcl]
+----
+<<WM draining rinse activity>>=
+set ct [findRelated $self ~R1]
+signal $ct Drain
+----
+
+'''
+
+// %Action WashingMachine Spinning
+.Spinning Activity
+----
+# Spin out excess water.
+select one ct related by self->R1[CT]
+signal Spin to ct
+select one wc related by self->R4[WC]
+signal Done to self at wc.SpinDuration
+----
+
+.Spinning Implementation
+[source,tcl]
+----
+<<WM spinning activity>>=
+set ct [findRelated $self ~R1]
+signal $ct Spin
+set wc [findRelated $self R4]
+delaysignal [expr {[readAttributes $wc SpinDuration] * 1000}] $self Done
+----
+
+=== Washing Cycle Class
+
+[source,tcl]
+----
+<<WC class>>=
+class WashingCycle {
+    attribute CycleType string -id 1
+    attribute WashWaterTemp string
+    attribute RinseWaterTemp string
+    attribute WashDuration int
+    attribute RinseDuration int
+    attribute SpinDuration int
+    attribute AgitationSpeed string
+    attribute SpinSpeed string
+}
+----
+
+=== Clothes Tub Class
+
+[source,tcl]
+----
+<<CT class>>=
+class ClothesTub {
+    attribute MachineID string -id 1
+    reference R1 WashingMachine -link MachineID
+
+    statemodel {
+        initialstate Empty
+        defaulttrans CH
+
+        state Empty {} {
+            <<CT empty activity>>
+        }
+        transition Empty - Fill -> Filling
+        transition Empty - Spin -> Spinning
+
+        state Filling {temp} {
+            <<CT filling activity>>
+        }
+        transition Filling - TubFull -> Full
+        transition Filling - TubEmpty -> IG     ; # <1>
+
+        state Full {} {
+            <<CT full activity>>
+        }
+        transition Full - Agitate -> Agitating
+
+        state Agitating {} {
+            <<CT agitating activity>>
+        }
+        transition Agitating - Drain -> Emptying
+
+        state Emptying {} {
+            <<CT emptying activity>>
+        }
+        transition Emptying - TubEmpty -> Empty
+        transition Emptying - TubFull -> IG
+
+        state Spinning {} {
+            <<CT spinning activity>>
+        }
+        transition Spinning - Stop -> StoppingSpin
+
+        state StoppingSpin {} {
+            <<CT stopping spin activity>>
+        }
+        transition StoppingSpin - Fill -> Filling
+    }
+}
+
+association R1 ClothesTub 1--1 WashingMachine
+----
+<1> We allow for the fact that when the water level sensor is
+enabled it may send events that reflect its current state.
+So we simply ignore those sensor events in which we are not currently
+interested.
+See also the *Emptying* state transition for the *TubFull* event.
+
+=== Clothes Tub State Activities
+
+The other state model in our example is for the Clothes Tub class
+
+'''
+
+// %States images/ct-states.uxf ClothesTub
+
+// %Action ClothesTub Empty
+.Empty Activity
+----
+# Stop the pump
+select one mtr related by self->R2[MTR]
+    where (MotorID = 'Pump')
+mtr.Stop()
+# Close the drain valve
+select one wv related by self->R3[WV]
+     where (ValveID = 'Drain')
+wv.Close()
+# Disable the sensor
+select one wls related by self->R5[WLS]
+wls.Disable()
+# Inform the washing machine
+select one wm related by self->R1[WM]
+signal Empty to wm
+----
+
+.Empty Implementation
+[source,tcl]
+----
+<<CT empty activity>>=
+set mtr [findRelatedWhere $self ~R2 {$MotorID eq "Pump"}]
+Motor Stop $mtr
+
+set wv [findRelatedWhere $self ~R3 {$ValveID eq "Drain"}]
+Valve Close $wv
+
+set wls [findRelated $self ~R5]
+WaterLevelSensor Disable $wls
+
+set wm [findRelated $self R1]
+signal $wm Empty
+----
+
+'''
+
+// %Action ClothesTub Filling
+.Filling Activity
+----
+# Enable the sensor
+select one wls related by self->R5[WLS]
+wls.Enable()
+# Open inlet valve(s)
+if (temp = 'Hot')
+    select one wv related by self->R3[WV]
+        where (ValveID = 'Hot')
+    wv.Open()
+else if (temp = 'Cold')
+    select one wv related by self->R3[WV]
+        where (ValveID = 'Cold')
+    wv.Open()
+else if (temp = 'Warm')
+    select many wvs related by self->R3[WV]
+        where (ValveID = 'Hot' OR ValveID = 'Cold')
+    foreach wv in wvs
+        wv.Open()
+    endfor
+end if
+----
+
+.Filling Implementation
+[source,tcl]
+----
+<<CT filling activity>>=
+set wls [findRelated $self ~R5]
+WaterLevelSensor Enable $wls
+if {$temp eq "Hot"} {
+    set wv [findRelatedWhere $self ~R3 {$ValveID eq "Hot"}]
+    WaterValue Open $wv
+} elseif {$temp eq "Cold"} {
+    set wv [findRelatedWhere $self ~R3 {$ValveID eq "Cold"}]
+    WaterValue Open $wv
+} elseif {$temp eq "Warm"} {
+    set wvs [findRelatedWhere $self ~R3 {$ValveID eq "Hot" ||\
+            $ValveID eq "Cold"}]
+    forAllRefs wv $wvs {
+        WaterValue Open $wv
+    }
+}
+----
+
+'''
+
+// %Action ClothesTub Full
+.Full Activity
+----
+# Disable the sensor
+select one wls related by self->R5[WLS]
+wls.Disable()
+# Close all water valves
+select many wvs related by self->R3[WV]
+    where (ValveID = 'Hot' OR ValveID = 'Cold')
+foreach wv in wvs
+    wv.Close()
+endfor
+# Inform the washing machine
+select one wm related by self->R1[WM]
+signal Full to wm
+----
+
+.Full Implementation
+[source,tcl]
+----
+<<CT full activity>>=
+set wls [findRelated $self ~R5]
+WaterLevelSensor Disable $wls
+set wvs [findRelatedWhere $self ~R3 {$ValveID eq "Hot" || $ValveID eq "Cold"}]
+forAllRefs wv $wvs {
+    WaterValue Open $wv
+}
+set wm [findRelated $self R1]
+signal $wm Full
+----
+
+'''
+
+// %Action ClothesTub Agitating
+.Agitating Activity
+----
+# Start the agitator motor
+select one mtr related by self->R2[MTR]
+    where (MotorID = 'Agitator')
+mtr.Start()
+----
+
+.Agitating Implementation
+[source,tcl]
+----
+<<CT agitating activity>>=
+set mtr [findRelatedWhere $self ~R2 {$MotorID eq "Agitator"}]
+Motor Stop $mtr
+----
+
+'''
+
+// %Action ClothesTub Emptying
+.Emptying Activity
+----
+# Stop the motor
+select one mtr related by self->R2[MTR]
+    where (MotorID = 'Agitator')
+mtr.Stop()
+# Open the drain valve
+select one wv related by self->R3[WV]
+     where (ValveID = 'Drain')
+wv.Open()
+# Start the pump
+select one mtr related by self->R2[MTR]
+    where (MotorID = 'Pump')
+mtr.Start()
+# Enable the sensor
+select one wls related by self->R5[WLS]
+wls.Enable()
+----
+
+.Emptying Implementation
+[source,tcl]
+----
+<<CT emptying activity>>=
+set mtr [findRelatedWhere $self ~R2 {$MotorID eq "Agitator"}]
+Motor Stop $mtr
+
+set wv [findRelatedWhere $self ~R3 {$ValveID eq "Drain"}]
+WaterValue Open $wv
+
+set mtr [findRelatedWhere $self ~R2 {$MotorID eq "Pump"}]
+Motor Start $mtr
+
+set wls [findRelated $self ~R5]
+WaterLevelSensor Enable $wls
+----
+
+'''
+
+// %Action ClothesTub Spinning
+.Spinning Activity
+----
+# Open the drain valve
+select one wv related by self->R2[WV]
+     where (ValveID = 'Drain')
+wv.Open()
+# Start the pump
+select one mtr related by self->R2[MTR]
+    where (MotorID = 'Pump')
+mtr.Start()
+# Start the spin motor
+select one mtr related by self->R2[MTR]
+    where (MotorID = 'Spin')
+mtr.Start()
+----
+
+.Spinning Implementation
+[source,tcl]
+----
+<<CT spinning activity>>=
+set wv [findRelatedWhere $self ~R3 {$ValveID eq "Drain"}]
+WaterValue Open $wv
+
+set mtr [findRelatedWhere $self ~R2 {$MotorID eq "Pump"}]
+Motor Start $mtr
+
+set mtr [findRelatedWhere $self ~R2 {$MotorID eq "Spin"}]
+Motor Start $mtr
+----
+
+'''
+
+// %Action ClothesTub "Stopping Spin"
+.Stopping Spin Activity
+----
+# Stop the motor
+select one mtr related by self->R2[MTR]
+    where (MotorID = 'Spin')
+mtr.Stop()
+# Stop the pump
+select one mtr related by self->R2[MTR]
+    where (MotorID = 'Pump')
+mtr.Stop()
+# Close the drain valve
+select one wv related by self->R3[WV]
+     where (ValveID = 'Drain')
+wv.Close()
+----
+
+.Stopping Spin Implementation
+[source,tcl]
+----
+<<CT stopping spin activity>>=
+set mtr [findRelatedWhere $self ~R2 {$MotorID eq "Spin"}]
+Motor Stop $mtr
+
+set mtr [findRelatedWhere $self ~R2 {$MotorID eq "Pump"}]
+Motor Stop $mtr
+
+set wv [findRelatedWhere $self ~R3 {$ValveID eq "Drain"}]
+WaterValue Close $wv
+----
+
+=== Water Valve Class
+
+[source,tcl]
+----
+<<WV class>>=
+class WaterValve {
+    attribute ValveID string -id 1
+    attribute MachineID string
+    reference R3 ClothesTub -link MachineID
+
+    instop Open {} {
+        <<WV open operation>>
+    }
+    instop Close {} {
+        <<WV close operation>>
+    }
+}
+
+association R3 WaterValve 1..n--1 ClothesTub
+----
+
+=== Motor Class
+
+[source,tcl]
+----
+<<MTR class>>=
+class Motor {
+    attribute MotorID string -id 1
+    attribute MachineID string
+    reference R2 ClothesTub -link MachineID
+
+    instop Start {} {
+        <<MTR start operation>>
+    }
+    instop Stop {} {
+        <<MTR stop operation>>
+    }
+}
+
+association R2 Motor 1..n--1 ClothesTub
+----
+
+=== Water Level Sensor
+
+[source,tcl]
+----
+<<WLS class>>=
+class WaterLevelSensor {
+    attribute MachineID string -id 1
+    reference R5 ClothesTub -link MachineID
+
+    instop Enable {} {
+        <<WLS enable operation>>
+    }
+    instop Disable {} {
+        <<WLS disable operation>>
+    }
+}
+
+association R5 WaterLevelSensor 1--1 ClothesTub
+----
+
+=== Domain Operations
+
+In this section we show the code for our two domain operations.
+We assume that there is some entity in our overall system that
+will invoke these operations.
+To make our example run,
+we will contrive to make that happen
+even though we do not intend to supply a user interface, _per se_.
+
+==== Start Washer
+
+To start a washing machine we must supply the identifier of the
+washer so we can know which one is to be started.
+Although our instance population only included a single WashingMachine
+instance,
+as we stated before, the models will run with an arbitrary number
+of washing machine instances.
+
+The implementation of the operation first searches all the instances
+of WashingMachine to find the correct one to start.
+It is possible to request an unknown washer to start.
+After finding the correct instance,
+the *Start* event will kick things off.
+
+(((proc,domain operation,startWasher)))
+
+[source,tcl]
+----
+<<domain operations>>=
+operation startWasher {washer} {
+    set wm [WashingMachine findWhere {$MachineID eq $washer}]
+    if {[isNilRef $wm]} {
+        error "unknown washer, \"$washer\""
+    }
+
+    signal $wm Start
+
+    return
+}
+----
+
+==== Select Cycle
+
+On the class diagram,
+relationship +R1+ determines which Washing Cycle will be used to
+control the operations.
+Selecting a wash cycle mean we must reform the +R1+ relationship,
+_i.e._ unlink the existing cycle and link in a different one.
+The implementation of the +selectCycle+ domain operation does just that.
+
+(((proc,domain operation,selectCycle)))
+
+[source,tcl]
+----
+<<domain operations>>=
+operation selectCycle {washer cycle} {
+    set wm [WashingMachine findWhere {$MachineID eq $washer}]
+    if {[isNilRef $wm]} {
+        error "unknown washer, \"$washer\""
+    }
+
+    set wc [WashingCycle findWhere {$CycleType eq $cycle}]
+    if {[isNilRef $wc]} {
+        error "unknown cycle, \"$cycle\""
+    }
+
+    R4 link $wm $wc
+
+    return
+}
+----
+
+=== External Operations
+
+For external operations,
+we don't code the operation itself,
+it is after all _external_.
+But we must define its interface and invoke the operation at the
+appropriate time in our own processing.
+
+For our example,
+there are six external operations that are assumed,
+two each for the motor, valve and water level sensor.
+Each of these operations passes an identifying value to the operation.
+This allows the external operations to determine exactly what is
+is to operate upon.
+We fill in the external operation invocations below.
+
+[source,tcl]
+----
+<<MTR start operation>>=
+MOTOR::start [readAttribute $self MotorID]
+
+<<MTR stop operation>>=
+MOTOR::stop [readAttribute $self MotorID]
+
+<<WV open operation>>=
+VALVE::open [readAttribute $self ValveID]
+
+<<WV close operation>>=
+VALVE::close [readAttribute $self ValveID]
+
+<<WLS enable operation>>=
+SENSOR::enable [readAttribute $self MachineID]
+
+<<WLS disable operation>>=
+SENSOR::disable [readAttribute $self MachineID]
+----
+
+=== Initial Instance Population
+
+[source,tcl]
+----
+<<initial instance population>>=
+class WashingCycle\
+    {CycleType WashWaterTemp RinseWaterTemp WashDuration RinseDuration\
+             SpinDuration AgitationSpeed SpinSpeed} {
+
+    Normal Cold Cold 20 10 10 Medium Medium
+    Whites Hot Cold 20 10 20 High High
+    PermPress Warm Cold 15 10 15 Medium Medium
+    Delicate Cold Cold 15 10 10 Low Low
+}
+----
+
+We intend to have only a single WashingMachine instance but
+note that the model will run correctly regardless of how many washing
+machines we are trying to control.
+We can also link up our washer with its initial washingCycle.
+
+[source,tcl]
+----
+<<initial instance population>>=
+class WashingMachine {MachineID CycleType} {WasherOne Normal}
+----
+
+The class model dictates that each washer have exactly one ClothesTub.
+
+[source,tcl]
+----
+<<initial instance population>>=
+class ClothesTub MachineID WasherOne
+----
+
+[source,tcl]
+----
+<<initial instance population>>=
+class Motor\
+    {MotorID    MachineID} {
+    Pump        WasherOne
+    Agitator    WasherOne
+    Spin        WasherOne
+}
+----
+
+Each washing machine, also by design,
+has three valves to control hot and cold water and draining.
+
+[source,tcl]
+----
+<<initial instance population>>=
+class WaterValve\
+    {ValveID    MachineID} {
+    Hot         WasherOne
+    Cold        WasherOne
+    Drain       WasherOne
+}
+----
+
+Finally, each washing machine has a sensor that can determine
+whether the tub is full or empty.
+
+[source,tcl]
+----
+<<initial instance population>>=
+class WaterLevelSensor MachineID WasherOne
+----
+
+=== Stubbing the External Operations
+
+For the MOTOR and VALVE operations we will content ourselves to simply
+log the fact that they were invoked.
+The control that is implied by the operation is ``open loop'' and no
+feed back is assumed.
+So when we say ``Open a Valve'' we will assume that the value does what
+it is told.
+This leads us to the following implementation.
+
+[source,tcl]
+----
+<<external operation stubs>>=
+namespace eval ::wmctrl::Motor::MOTOR {
+    ::logger::initNamespace [namespace current] info
+    proc start {motor} {
+        log::info "starting motor, \"$motor\""
+    }
+    proc stop {motor} {
+        log::info "stopping motor, \"$motor\""
+    }
+}
+
+namespace eval ::wmctrl::WaterValve::VALVE {
+    ::logger::initNamespace [namespace current] info
+    proc open {valve} {
+        log::info "opening valve, \"$valve\""
+    }
+    proc close {valve} {
+        log::info "closing valve, \"$valve\""
+    }
+}
+----
+
+The SENSOR operations present a bit more difficulty to stub.
+In this case,
+there _is_ feedback from the interaction.
+We must signal back the state of water level as being full or empty.
+So in some sense we must _simulate_ the action of the sensor.
+If you carefully examine the example,
+you find that we can assume the tub starts empty and each time the
+sensor is enabled we are trying to detect the opposite state of the tub.
+So enabling the sensor on an empty tub means we are looking for when
+the tub goes full and _vice versa_.
+So it sufficient to simulate the sensor to simply toggle the tub state and then
+announce the new state at some time when we think the new state will have been
+reached.
+We will delay the announcement of the new state for some time
+to simulate the water filling or draining.
+To make the example run in reasonable times,
+we assume the tub will fill or empty in 3 seconds.
+That's quick!
+
+[source,tcl]
+----
+<<external operation stubs>>=
+namespace eval ::wmctrl::WaterLevelSensor::SENSOR {
+    ::logger::initNamespace [namespace current] info
+    variable sensorState TubEmpty
+    variable sensorEvent
+
+    proc enable {machine} {
+        log::info "enable sensor on machine, \"$machine\""
+
+        variable sensorState
+        variable sensorEvent
+
+        set newState\
+            [expr {$sensorState eq "TubEmpty" ? "TubFull" : "TubEmpty"}] ; # <1>
+        set sensorEvent [after 3000 [namespace code\
+            [list trigger $machine $newState]]] ; # <2>
+    }
+
+    proc disable {machine} {
+        log::info "disable sensor on machine, \"$machine\""
+        variable sensorEvent
+        after cancel $sensorEvent
+    }
+----
+<1> Toggle the tub state.
+<2> Use the +after+ _ms_ form of the command to delay announcing the new
+state.
+
+Delivering the indication that the Water Level Sensor has detected
+a change in the water level really means we want to send the
+appropriate ClothesTub instance either the *TubFull* or *TubEmpty*
+event.
+Conveniently, we have been keeping track of the sensor state using
+string named the same as the event we intend to deliver.
+So all we have to do is search for the correct Washing Machine that
+matches the sensor, navigate +R1+ to the ClothesTub and signal an event.
+
+[source,tcl]
+----
+<<external operation stubs>>=
+    proc trigger {machine value} {
+        variable sensorState
+        set sensorState $value
+
+        set wm [::wmctrl::WashingMachine selectOneWhere selected {
+            [$selected readAttributes MachineID] eq $machine
+        }]
+        set ct [$wm -> R1]
+        $ct signal $sensorState
+    }
+}
+----
+
+Before we can start the example running,
+we have to figure out how we are going to stop it.
+Recall that to dispatch state machine events we must enter the
+Tcl event loop.
+We will use the +vwait+ command to do that.
+But we need some way to break out of the event loop
+so that we can look at the results of the run.
+To do that we will add setting a global variable to the
+state activity of the Stopping Spin state in the ClothesTub class.
+This state is entered when the cycle is done
+and it is our intent to regain control of the execution flow after
+each washing cycle.
+Note that we are adding this synchronization solely to be able to
+run one washing cycle in our example.
+An actual application would most likely run forever.
+
+[source,tcl]
+----
+<<CT stopping spin activity>>=
+set ::done 1
+----
+
+An finally, yes truly finally,
+we are in a position to drive the domain operations to select a cycle and
+run the washer through the cycle.
+We will turn on tracing so we can see what happened.
+
+[source,tcl]
+----
+<<running the example>>=
+puts "commands = \"[lsort [info commands ::wmctrl::WaterLevelSensor::__Activity::*]]\""
+rosea traceControl on
+
+wmctrl::selectCycle WasherOne PermPress
+puts "**** Start Run"
+wmctrl::startWasher WasherOne
+
+vwait ::done ; # <1>
+
+puts "**** Finish Run"
+rosea traceControl off
+
+puts "**** Trace Begin"
+puts [rosea formatTraces [rosea decodeAllTraces]]
+puts "**** Trace End"
+
+if 0 {
+::wmctrl::WashingMachine draw\
+    {-Gcenter=1 -Gratio=auto -Gsize=7.5,10 -Tsvg -oimages/WashingMachine.svg} ; # <2>
+
+::stsatcl diagAllTraces images/wmctrl-seqdiag.diag span_height 7 ; # <3>
+}
+----
+<1> Enter the Tcl event loop.
+State machine events will then be dispatched and the washer will operate.
+<2> While we are at it, we need an example to show how *dot* will draw
+a state model.
+<3> Draw a sequence diagram of the example run.
+This will allow us to compare the textual log with a graphic containing
+the same information.
 
 == Code Organization
 
@@ -8564,6 +9751,8 @@ eval tcltest::configure $argv
 
 namespace eval ::rosea::test {
     namespace import ::tcltest::*
+    ::logger::initNamespace [namespace current]
+
     <<tclral imports>>
 
     <<test utility procs>>
@@ -8573,6 +9762,7 @@ namespace eval ::rosea::test {
     <<instance command tests>>
     <<dispatch command tests>>
     <<config command tests>>
+    <<trace command tests>>
 
     cleanupTests
 }
@@ -8588,6 +9778,80 @@ test X-1.0 {
 } -result {}
 ----
 ////
+
+=== Example Code
+
+[source,tcl]
+----
+<<wmctrl.tcl>>=
+# DO NOT EDIT THIS FILE!
+# THIS FILE IS AUTOMATICALLY GENERATED FROM A LITERATE PROGRAM SOURCE FILE.
+#
+# This software is copyrighted 2014 by G. Andrew Mangogna.
+# The following terms apply to all files associated with the software unless
+# explicitly disclaimed in individual files.
+# 
+# The authors hereby grant permission to use, copy, modify, distribute,
+# and license this software and its documentation for any purpose, provided
+# that existing copyright notices are retained in all copies and that this
+# notice is included verbatim in any distributions. No written agreement,
+# license, or royalty fee is required for any of the authorized uses.
+# Modifications to this software may be copyrighted by their authors and
+# need not follow the licensing terms described here, provided that the
+# new terms are clearly indicated on the first page of each file where
+# they apply.
+# 
+# IN NO EVENT SHALL THE AUTHORS OR DISTRIBUTORS BE LIABLE TO ANY PARTY FOR
+# DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES ARISING
+# OUT OF THE USE OF THIS SOFTWARE, ITS DOCUMENTATION, OR ANY DERIVATIVES
+# THEREOF, EVEN IF THE AUTHORS HAVE BEEN ADVISED OF THE POSSIBILITY OF
+# SUCH DAMAGE.
+# 
+# THE AUTHORS AND DISTRIBUTORS SPECIFICALLY DISCLAIM ANY WARRANTIES,
+# INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.  THIS SOFTWARE
+# IS PROVIDED ON AN "AS IS" BASIS, AND THE AUTHORS AND DISTRIBUTORS HAVE
+# NO OBLIGATION TO PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS,
+# OR MODIFICATIONS.
+# 
+# GOVERNMENT USE: If you are acquiring this software on behalf of the
+# U.S. government, the Government shall have only "Restricted Rights"
+# in the software and related documentation as defined in the Federal
+# Acquisition Regulations (FARs) in Clause 52.227.19 (c) (2).  If you
+# are acquiring the software on behalf of the Department of Defense,
+# the software shall be classified as "Commercial Computer Software"
+# and the Government shall have only "Restricted Rights" as defined in
+# Clause 252.227-7013 (c) (1) of DFARs.  Notwithstanding the foregoing,
+# the authors grant the U.S. Government and others acting in its behalf
+# permission to use and distribute the software in accordance with the
+# terms specified in this license.
+
+package require Tcl 8.6
+package require logger
+
+source rosea.tcl
+
+rosea configure {
+    domain wmctrl {
+        <<domain operations>>
+        <<WM class>>
+        <<WC class>>
+        <<CT class>>
+        <<WV class>>
+        <<MTR class>>
+        <<WLS class>>
+    }
+}
+
+rosea generate
+
+rosea populate wmctrl {
+    <<initial instance population>>
+}
+
+<<external operation stubs>>
+<<running the example>>
+----
 
 [appendix]
 == Literate Programming [[literate-programming,Literate Programming]]
@@ -8651,5 +9915,7 @@ you will have to trust that the
 author managed to arrange the chunk definitions and references in
 a manner so that the tangled output is acceptable to the Tcl interpreter.
 
+include::bibliography.txt[]
+
 [index]
-== Index
+.Index
