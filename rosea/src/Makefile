@@ -27,6 +27,7 @@ DIAGRAMS =\
 	partition-link.uxf\
 	correl-link.uxf\
 	link-classes.uxf\
+	trace-schema.uxf\
 	$(NULL)
 
 LSDIAGRAMS =\

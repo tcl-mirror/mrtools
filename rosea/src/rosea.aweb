@@ -1234,14 +1234,15 @@ proc CreateInstanceState {domain class state value} {
 ----
 <<class commands>>=
 proc createasync {relvar event eventparams args} {
-    set event [relvar restrictone\
-        [namespace qualifiers $relvar]::__Arch::__TransitionEVENT\
+    lassign [SplitRelvarName $relvar] domain class
+    set event [relvar restrictone ${domain}::__Arch::__Event\
         Class $relvar Event $event]
     if {[relation isempty $event]} {
         tailcall DeclError UNKNOWN_EVENT $event $relvar
     }
     set instref [createin $relvar @ {*}$args]
-    ::rosea::InstCmds signal $instref $event {*}$eventparams
+    ::rosea::Trace::TraceCreation [SelfInstRef 1] $event $instref
+    ::rosea::InstCmds::signal $instref $event {*}$eventparams
     return $instref
 }
 ----
@@ -2418,8 +2419,10 @@ proc MapPolymorphicEvent {frwdcmd srcref dstrefs event arglist} {
                 set related [relation semijoin $inst\
                     [relvar set ${domain}::$DstClass] -using $Attrs] ; # <4>
                 if {[relation isnotempty $related]} {
-                    {*}$frwdcmd $srcref [ToRef ${domain}::$DstClass $related]\
-                            $event $arglist
+                    set dstreference [ToRef ${domain}::$DstClass $related]
+                    ::rosea::Trace::TracePolymorphic $srcref\
+                        $event $dstreference ${domain}::SrcClass $Name
+                    {*}$frwdcmd $srcref $dstreference $event $arglist
                     break
                 }
             }
@@ -2618,6 +2621,8 @@ proc DispatchEvent {} {
                 Class $class State $currstate Event $event |
             relation extract ~ NewState
         }]
+        ::rosea::Trace::TraceTransition [dict get $eventInfo src]\
+            $event $dstref $currstate $newState [dict get $eventInfo params]
 
         if {$newState eq "CH"} {
             tailcall DeclError CANT_HAPPEN_EVENT [dict get $eventInfo src]\
@@ -5592,8 +5597,7 @@ the configuration process.
 Generating the domains should happen after all the configuration is
 complete.
 It is allowable to invoke the +configure+ command multiple times
-and domain configuration are cumulative in the sense that a configuration
-
+and domain configurations are cumulative in the sense that a configuration
 script may refer to the same domain many times and the additional
 configuration is simply added to any previous one.
 
@@ -5612,9 +5616,9 @@ Given the relational schema used to accumulate the configuration script
 information,
 you can anticipate that generating the domain involves a set of
 queries on that information.
-In more conventional situations, _e.g._ +pycca+, the results of
-those queries are used to generate programming language text files
-which are then handed over to a language compiler.
+In more conventional situations, _e.g._ when +pycca+ generates ``C'' source,
+the results of those queries are used to generate programming language text
+files which are then handed over to a language compiler.
 But, since this is Tcl, we will avoid all the unnecessary intermediate
 files and just execute Tcl commands directly.
 This is much more in keeping with the dynamic style of Tcl.
@@ -7350,6 +7354,1057 @@ test populate-1.3 {
     }
     relation cardinality [relvar set [namespace current]::meta::__C2__INSTANCE]
 } -result {2}
+----
+
+== State Machine Trace
+
+In this section we discuss the capabilities and design of tracing
+state machine event dispatch.
+Again,
+we are confronted with a heavily overloaded term, _trace_.
+There are many kinds of traces in the Tcl world and
+we do not wish to confuse Tcl variable and command tracing with
++rosea+ package state machine tracing.
+Here we are discussing the ability of the package to produce a chronologically
+ordered sequence of the results of dispatching state machine events.
+
+It's hard to overemphasize the importance of the event dispatch trace
+for a set of state machines.
+Since the majority of the processing in state machine based application is in
+the form of callbacks for dispatched events,
+it is difficult to simply read the code base sequentially and
+have a good sense of what will happen during execution.
+Of course,
+a different sequence of events will order the code execution differently.
+That is, after all, what we are trying to achieve with a state model.
+
+The fact that the path of code execution does not easily correspond to the
+sequence of the code statements is objectionable enough to some that they avoid
+a state model based approach.
+Others try to cast state behavior into more sequential appearing
+code by using other techniques such as coroutines.
+All of these considerations lead to the conclusion that
+capturing a chronological trace of the event dispatch of
+a state machine based applications is indispensable to understanding and
+testing.
+
+In this section we discuss the design and implementation of the
+state machine tracing implemented by this package.
+First we lay out some basic rules.
+
+* Tracing can be controlled.
+It is necessary to be able to start and stop the trace capture
+and to clear out any accumulated traces.
+* Tracing must capture all the semantics of event dispatch,
+including polymorphic and creation events.
+* It is only necessary to trace event dispatch.
+Signaling, _i.e._ when events are generated,
+is not captured.
+* Common operations on the collected trace data must be supported
+including the ability to save the trace data into some persistent form,
+(_e.g._ a file).
+
+To meet these requirements,
+trace data is captured by the event dispatch methods and stored
+in appropriate data structures.
+The following sections discuss the manner in which this is done.
+We divide the discussion into the these parts:
+
+* The structure of the trace data.
+* Procedures to gather the trace data.
+* Procedures to query and format the trace data.
+
+=== Trace Data
+
+The figure below shows a class diagram in UML notation of the
+state machine trace data.
+
+image::trace-schema.pdf[title="Trace Data Class Model"]
+
+A trace is identified by an arbitrary identifier.
+We will use a sequential integer.
+Each trace has a +Timestamp+.
+This needs to be of relatively high resolution so we will use the
+return from the +clock microseconds+ command.
+The +Target+ of a trace is the object command name of the instance
+to which the event is directed.
+We also store the +Class+ command name that corresponds to the +Target+
+so we can perform queries on a class rather than instance basis
+(_e.g._ it is interesting to determine how all instances of some set of classes
+pass events without any reference to particular instances).
+
+The three types of event dispatch types are captured as by the +R1+
+generalization.
+*Creation* events result in an instance being created followed by
+an ordinary *Transition* event.
+So any creation event will have two trace entries.
+*Polymorphic* events map, at run time, an event directed at a superclass
+instance to a corresponding event in the related subclass instance.
+So each polymorphic event will have at least one ordinary transition associated
+with it as the polymorphic event is finally mapped down to a leaf subclass
+and consumed there.
+Ordinary *Transition* events are most common and we record the object that is
+the source of the event,
+parameters associated with the event and
+the outcome of the transition.
+
+Following our established patter,
+the most direct implementation of this data schema is to use the +TclRAL+
+package.
+
+[source,tcl]
+----
+<<trace commands namespace>>=
+namespace eval Trace {
+    logger::initNamespace [namespace current]
+
+    <<tclral imports>>
+    namespace path [namespace parent]::Helpers
+    <<trace data>>
+    <<trace commands>>
+}
+----
+
+[source,tcl]
+----
+<<trace data>>=
+relvar create Trace {
+    Trace_Id    int
+    Timestamp   bignum
+    Source      string
+    Event       string
+    Target      string
+    Class       string
+} Trace_Id
+
+relvar create Creation {
+    Trace_Id    int
+} Trace_Id
+
+relvar create Polymorphic {
+    Trace_Id    int
+    SuperClass  string
+    Linkage     string
+} Trace_Id
+
+relvar create Transition {
+    Trace_Id    int
+    CurrState   string
+    NewState    string
+    Params      list
+} Trace_Id
+
+relvar partition R1 Trace Trace_Id\
+    Creation Trace_Id\
+    Polymorphic Trace_Id\
+    Transition Trace_Id
+----
+
+We need some ordinary variables to keep track of the
+state of trace capture, a counter for generating
+the +Trace_Id+ attribute values and details of trace logging.
+
+[source,tcl]
+----
+<<trace data>>=
+variable traceState off
+variable traceNumber 0
+variable traceLogState off
+variable traceLogLevel info
+----
+
+We log to a service that is the same name as the package.
+
+[source,tcl]
+----
+<<trace packages>>=
+variable traceLogCmd [::logger::init stsatcl]
+----
+
+=== Trace Control
+
+The +traceControl+ procedure provides the interface necessary to control the
+aspects of state machine tracing.
+
+[source,tcl]
+----
+<<rosea exports>>=
+namespace export traceControl
+
+<<rosea commands>>=
+proc traceControl {op args} {
+    switch -exact -- $op {
+        on {
+            namespace upvar Trace traceState traceState
+            set traceState on
+        }
+        off {
+            namespace upvar Trace traceState traceState
+            set traceState off
+        }
+        status {
+            namespace upvar Trace traceState traceState
+            return $traceState
+        }
+        clear {
+            relvar eval {
+                foreach rvar {Trace Creation Polymorphic Transition} {
+                    relvar set Trace::$rvar\
+                            [relation emptyof [relvar set Trace::$rvar]]
+                }
+            }
+            namespace upvar Trace traceNumber traceNumber
+            set traceNumber 0
+        }
+        logon {
+            namespace upvar Trace traceLogState traceLogState
+            set traceLogState on
+        }
+        logoff {
+            namespace upvar Trace traceLogState traceLogState
+            set traceLogState off
+        }
+        loglevel {
+            namespace upvar Trace traceLogState traceLogState
+            if {[llength $args] != 0} {
+                set traceLogLevel [lindex $args 0]
+            }
+            return $traceLogLevel
+        }
+        save {
+            if {[llength $args] == 0} {
+                DeclError NO_SAVEFILE
+            }
+            storeToSQLite [lindex $args 0] [relvar names ::rosea::Trace::*]
+        }
+        default {
+            DeclError BAD_TRACEOP $op
+        }
+    }
+}
+----
+
+(((error code,BAD_TRACEOP)))
+(((error code,NO_SAVEFILE)))
+[source,tcl]
+----
+<<error code formats>>=
+BAD_TRACEOP     {unknown trace operation, "%s"}
+NO_SAVEFILE     {no save file name provided}
+----
+
+=== Trace Population
+
+Each of the XUML class methods that is involved with dispatching
+events into a state machine invokes a procedure to capture the dispatch
+data.
+There are three such procedures corresponding to the three types
+of event dispatch.
+Each as the same basic structure, namely determining if tracing is
+enabled,
+inserting the trace data to the appropriate relvars
+and logging the trace instance.
+
+[source,tcl]
+----
+<<trace commands>>=
+proc TraceCreation {source event target} {
+    variable traceState
+    if {$traceState} {
+        relvar eval {
+            set trace [NewTrace $source $event $target]
+            relvar insert Creation [list\
+                Trace_Id    [relation extract $trace Trace_Id]\
+            ]
+        }
+        LogTrace $trace
+    }
+}
+----
+
+[source,tcl]
+----
+<<trace commands>>=
+proc TracePolymorphic {source event target super link} {
+    variable traceState
+    if {$traceState} {
+        relvar eval {
+            set trace [NewTrace $source $event $target]
+            relvar insert Polymorphic [list\
+                Trace_Id    [relation extract $trace Trace_Id]\
+                SuperClass  $super\
+                Linkage     $link\
+            ]
+        }
+        LogTrace $trace
+    }
+}
+----
+
+[source,tcl]
+----
+<<trace commands>>=
+proc TraceTransition {source event target curr new params} {
+    variable traceState
+    if {$traceState} {
+        relvar eval {
+            set trace [NewTrace $source $event $target]
+            relvar insert Transition [list\
+                Trace_Id    [relation extract $trace Trace_Id]\
+                CurrState   $curr\
+                NewState    $new\
+                Params      $params\
+            ]
+        }
+        LogTrace $trace
+    }
+}
+----
+
+Code to number the trace and insert it into the +Trace+ relvar is
+factored to a separate procedure.
+
+[source,tcl]
+----
+<<trace commands>>=
+proc NewTrace {src event target} {
+    variable traceNumber
+    return [relvar insert Trace [list\
+        Trace_Id    [incr traceNumber]\
+        Timestamp   [clock microseconds]\
+        Source      $src\
+        Event       $event\
+        Target      $target\
+        Class       [info object class $target]\
+    ]]
+}
+----
+
+Each of the above three procedures that inserts a particular type
+of trace data into the data store also logs the trace.
+Trace logging first checks the state of the logging and then
+formats an appropriate string for the log.
+
+[source,tcl]
+----
+<<trace commands>>=
+proc LogTrace {trace} {
+    variable traceLogState
+    if {$traceLogState} {
+        set rec [FormatTraceRec [lindex [TracesToRecords $trace] 0]] ; # <1>
+
+        variable traceLogCmd
+        variable traceLogLevel
+        ${traceLogCmd}::${traceLogLevel} $rec
+    }
+}
+----
+<1> The +TracesToRecords+ procedure returns a list and knowing that the
+list contains only one element, we extract that element to format.
+
+[source,tcl]
+----
+<<exported tests>>=
+test LogTrace-1.0 {
+    log trace data
+} -setup {
+    ::stsatcl STSAClass create tr1 {
+        attribute {Count 0} {Max 2}
+        statemodel {
+            state s1 {} {
+                my variable Count Max
+                incr Count
+                if {$Count >= $Max} {
+                    ::stsatcl::test::syncToTest $Count
+                }
+            }
+            transition s1 - e1 -> s2
+
+            state s2 {} {
+                my variable Count
+                incr Count
+                my signal e2
+            }
+            transition s2 - e2 -> s1
+        }
+    }
+
+    turnOnTraceLog
+} -cleanup {
+    turnOffTraceLog
+
+    tr1 destroy
+} -body {
+    tr1 create inst1
+    inst1 signal e1
+    waitForSync
+} -result {2}
+----
+
+[source,tcl]
+----
+<<exported tests>>=
+test LogTrace-2.0 {
+    log trace data for a polymorphic event
+} -setup {
+    ::stsatcl STSAClass create lt2 {
+        partition R1 lt2-sub1 foo
+        polymorphic *e1 *e2
+    }
+
+    ::stsatcl STSAClass create lt2-sub1 {
+        reference R1 -> lt2
+        statemodel {
+            state sub1-s1 {} {
+                ::stsatcl::test::syncToTest true
+            }
+            transition sub1-s1 - *e1 -> sub1-s2
+
+            state sub1-s2 {} {
+                [my -> R1] delayedSignal 50 *e2
+            }
+            transition sub1-s2 - *e2 -> sub1-s1
+        }
+    }
+
+    lt2 create super
+    lt2-sub1 create sub1
+    super link R1 sub1
+    sub1 link R1 super
+
+    turnOnTraceLog
+} -cleanup {
+    turnOffTraceLog
+
+    lt2 destroy
+    lt2-sub1 destroy
+} -body {
+    super signal *e1
+    waitForSync
+} -result {true}
+----
+
+[source,tcl]
+----
+<<exported tests>>=
+test LogTrace-3.0 {
+    log trace data for a creation event
+} -setup {
+    ::stsatcl STSAClass create lt3 {
+        statemodel {
+            transition @ - e1 -> s1
+
+            state s1 {value} {
+                ::stsatcl::test::syncToTest $value
+            }
+        }
+    }
+
+    turnOnTraceLog
+} -cleanup {
+    turnOffTraceLog
+
+    lt3 destroy
+} -body {
+    set inst [lt3 signal e1 10]
+    waitForSync
+} -result {10}
+----
+
+[source,tcl]
+----
+<<test utility procs>>=
+proc turnOnTraceLog {} {
+    variable prevloglevel
+
+    ::stsatcl traceControl clear
+    ::stsatcl traceControl on
+    set logcmd [::logger::servicecmd stsatcl]
+    set prevloglevel [${logcmd}::currentloglevel]
+    ${logcmd}::setlevel [::stsatcl traceControl loglevel]
+    ::stsatcl traceControl logon
+}
+
+proc turnOffTraceLog {} {
+    variable prevloglevel
+
+    set logcmd [::logger::servicecmd stsatcl]
+    ${logcmd}::setlevel $prevloglevel
+    ::stsatcl traceControl logoff
+    ::stsatcl traceControl off
+    ::stsatcl traceControl clear
+}
+----
+
+=== Trace Operations
+
+It is difficult to provide all the conceivable operations that one
+may wish to perform on the captured state machine trace data.
+In this package we will provide some common operations,
+but special cases can be handled by constructing appropriate
+queries on the +relvar+ data of the package and passing the result
+to be formatted.
+The required primitive operations are here to support a wider range
+of custom trace queries.
+
+We divide the decoding of the trace data into two parts:
+
+* Casting the +relvar+ data into an ordered list of dictionaries.
+* Formatting trace dictionary data into human readable form.
+
+This separation makes handling data programmatically via the dictionaries
+much easier yet still allows the production of human readable output.
+There are many ways that a program can use the state machine trace data.
+For example, the trace data can be used to compute the coverage of
+states and transitions for testing purposes.
+This is much easier to accomplish if the data is _not_ in string form but
+rather with known named fields.
+
+In this section we will cover the layout of the trace record dictionaries
+and then a set of query functions to produce sets of records.
+Afterward, we will discuss procedures to format trace dictionaries into
+human readable strings.
+
+==== Trace Dictionary Structure
+
+Although the ++relvar++s defined above contain all the trace data
+in a form that is easy to write queries on,
+transforming relational data into a dictionary provides a convenient
+interface for handling sets of trace data.
+Here we discuss the keys that the trace data dictionary have
+and the procedures which produce them.
+
+The trace data dictionary has to account for the three different
+types of dispatched events.
+We will have common keys that apply to all types of events and a +type+
+key that can be used to determine the event type specific keys.
+The common keys are:
+
++id+::
+    An integer number that identifies the sequence of the trace entry.
++time+::
+    The time since the epoch, in microseconds, that the trace was captured.
++source+::
+    The object command name of the instance that signaled the event.
+    If the source of the event is outside of an object,
+    then this will be the empty string.
++event+::
+    The name of the event.
++target+::
+    The object command name of the target of the event.
++class+::
+    The command name of the class that corresponds to +target+.
++type+::
+    The type of the dispatched event: one of +creation+, +polymorphic+,
+    or +transition+.
+
+For +creation+ type events, there are no additional keys.
+The +target+ value is interpreted as the object command name of the
+newly created instance and the +class+ value is the command name of
+the instance creator (which is, necessarily, also the class of the +target+).
+
+For +polymorphic+ type events, the following additional keys are available:
+
++super+::
+    The object command name of the superclass instance mapping the event.
++link+::
+    The name of the partition linkage across which the event is mapped.
+
+For polymorphic type events, the +target+ value is the command name of
+the subclass instance onto which the polymorphic event is mapped.
+
+For +transition+ type events, the following additional keys are available:
+
++current+::
+    The name of the state of +target+ when the event was received.
++new+::
+    The name of the state of +target+ after the transition happened.
++params+::
+    A list of values giving the parametric data passed with the event to
+    the state activity.
+
+The procedure, +TracesToRecords+, takes a relation value that is
+a subset (proper or improper) of the value contained in the +Trace+ relvar
+and converts it into a list of trace records.
+Each trace record is a dictionary of the form described above.
+
+As we will see below,
+this procedure is used by all the query oriented procedures to
+convert the trace data into lists of dictionaries.
+One difficulty of this transformation is to account for the
+three different types of event traces.
+This is done by joining the +Trace+ relation values against each of the
+three ++relvar++s that participate in +R1+.
+This join is done in such a way that three new relation valued attributes
+are created and, given the disjoint union implied by the partition
+constraint, only one of the new attributes will contain any tuples.
+
+(((proc,TracesToRecords)))
+
+[source,tcl]
+----
+<<trace commands>>=
+proc TracesToRecords {traces} {
+    foreach rvname {Creation Polymorphic Transition} { # <1>
+        set traces [rvajoin $traces [relvar set $rvname] $rvname]
+    }
+
+    set result [list]
+    relation foreach trace $traces -ascending Trace_Id { # <2>
+        relation assign $trace
+        set labeled [dict create\
+            id      $Trace_Id\
+            time    $Timestamp\
+            source  $Source\
+            event   $Event\
+            target  $Target\
+            class   $Class\
+        ] ; # <3>
+        if {[relation isnotempty $Transition]} { # <4>
+            relation assign $Transition
+            dict set labeled type transition
+            dict set labeled current $CurrState
+            dict set labeled new $NewState
+            dict set labeled params $Params
+        } elseif {[relation isnotempty $Polymorphic]} {
+            relation assign $Polymorphic
+            dict set labeled type polymorphic
+            dict set labeled super $SuperClass
+            dict set labeled link $Linkage
+        } elseif {[relation isnotempty $Creation]} {
+            dict set labeled type creation
+        }
+
+        lappend result $labeled
+    }
+    return $result
+}
+----
+<1> Perform a *relation valued join* of the traces against the three
+different types of trace data.
+Each +rvajoin+ produces a new attribute whose name we choose to be the same
+as the +relvar+ from which it came and whose value is a relation value
+containing those tuples whose value of +Trace_Id+ match.
+Because the +R1+ partition represents a disjoint union and +Trace_Id+
+is an identifier,
+only one of the three new attributes will have any tuples and the non-empty
+one will contain exactly one tuple.
+<2> We can now iterate across the joined trace data in the order that it was
+generated (_i.e._ by +-ascending Trace_Id+)
+so that the resulting list of dictionaries is in the same order.
+This was the primary reason for performing all the +rvajoin+ operations,
+_i.e._ to make it more convenient to preserve the event dispatch order
+into the resulting list.
+<3> Add all the common keys, except +type+.
+<4> Add the keys that are specific to the event type.
+
+==== Decode All Traces
+
+The first of the query functions simple decodes all available trace data.
+
+(((proc,decodeAllTraces)))
+
+[source,tcl]
+----
+<<rosea exports>>=
+namespace export decodeAllTraces
+
+<<rosea commands>>=
+proc decodeAllTraces {} {
+    tailcall TracesToRecords [relvar set Trace]
+}
+----
+
+[float]
+===== Decode All Traces Tests
+
+[source,tcl]
+----
+<<exported tests>>=
+test decodeAllTraces-1.0 {
+    display trace data
+} -setup {
+    ::stsatcl STSAClass create tr1 {
+        attribute {Count 0} {Max 2}
+        statemodel {
+            state s1 {} {
+                my variable Count Max
+                incr Count
+                if {$Count >= $Max} {
+                    ::stsatcl::test::syncToTest $Count
+                }
+            }
+            transition s1 - e1 -> s2
+
+            state s2 {} {
+                my variable Count
+                incr Count
+            }
+            transition s2 - e2 -> s1
+        }
+    }
+} -cleanup {
+    ::stsatcl traceControl off
+    ::stsatcl traceControl clear
+    tr1 destroy
+} -body {
+    ::stsatcl traceControl on
+    tr1 create inst1
+    inst1 signal e1
+    inst1 signal e2
+    waitForSync
+    set traces [::stsatcl decodeAllTraces]
+    dict get [lindex $traces 0] event
+} -result {e1}
+----
+
+==== Decode Class Traces
+
+(((proc,decodeClassTraces)))
+
+[source,tcl]
+----
+<<rosea exports>>=
+namespace export decodeClassTraces
+
+<<rosea commands>>=
+proc decodeClassTraces {args} {
+    tailcall TracesToRecords [pipe {
+        relvar set Trace |
+        relation restrictwith ~ {$Class in $args}
+    }]
+}
+----
+
+[float]
+===== Decode Class Traces Tests
+
+[source,tcl]
+----
+<<exported tests>>=
+test decodeClassTraces-1.0 {
+    display trace data for specific class
+} -setup {
+    ::stsatcl STSAClass create dct1 {
+        reference R1 -> dct2
+        attribute {Power 20}
+        statemodel {
+            state Off {} {
+                [my -> R1] signal Lower
+            }
+            transition Off - TurnOn -> On
+
+            state On {power} {
+                my variable Power
+                set Power $power
+                [my -> R1] signal Raise
+            }
+            transition On - TurnOff -> Off
+        }
+    }
+
+    ::stsatcl STSAClass create dct2 {
+        reference R1 -> dct1
+        statemodel {
+            state Down {} {
+                ::stsatcl::test::syncToTest [[my -> R1] readAttributes Power]
+            }
+            transition Down - Raise -> Up
+
+            state Up {} {
+                [my -> R1] delayedSignal 50 TurnOff
+            }
+            transition Up - Lower -> Down
+        }
+    }
+
+    ::stsatcl traceControl clear
+    ::stsatcl traceControl on
+} -cleanup {
+    ::stsatcl traceControl off
+    ::stsatcl traceControl clear
+    dct1 destroy
+    dct2 destroy
+} -body {
+    dct1 create inst1
+    dct2 create inst2
+    inst1 link R1 inst2
+    inst2 link R1 inst1
+    inst1 signal TurnOn 30
+    waitForSync
+    # puts [::stsatcl formatTraces [::stsatcl decodeAllTraces]]
+    set traces [::stsatcl decodeClassTraces [namespace current]::dct2]
+    expr {[llength $traces] == 2 &&\
+            [dict get [lindex $traces 1] event] eq "Lower"}
+} -result {1}
+----
+
+==== Decode Target Traces
+
+(((proc,decodeTargetTraces)))
+
+[source,tcl]
+----
+<<rosea exports>>=
+namespace export decodeTargetTraces
+
+<<rosea commands>>=
+proc decodeTargetTraces {args} {
+    tailcall TracesToRecords [pipe {
+        relvar set Trace |
+        relation restrictwith ~ {$Target in $args}
+    }]
+}
+----
+
+==== Format Traces
+
+Human readable output for state machine traces can be obtain via the
++formatTraces+ procedure.
+This procedure takes a list of trace records,
+as defined above and as returned from the various trace decode procedures,
+and returns a string that has a human readable representation of the
+trace records.
+Each trace record is separated by a line terminator character.
+The returned string may be written on any channel the caller wishes.
+
+(((proc,formatTraces)))
+
+[source,tcl]
+----
+<<rosea exports>>=
+namespace export formatTraces
+
+<<rosea commands>>=
+proc formatTraces {tracerecs} {
+    if {[llength $tracerecs] == 0} {
+        return {}
+    }
+    set prevtime [dict get [lindex $tracerecs 0] time]
+    foreach rec $tracerecs {
+        dict with rec {
+            append result "[FormatTimestamp $time]: "
+            append result "[FormatTimeAsSec [expr {$time - $prevtime}]]: "
+            set prevtime $time
+            append result [FormatTraceRec $rec] \n
+        }
+    }
+    return [string trimright $result]
+}
+----
+
+[float]
+===== Format Traces Tests
+
+[source,tcl]
+----
+<<exported tests>>=
+test formatTraces-1.0 {
+    display human readable trace data
+} -setup {
+    ::stsatcl STSAClass create tr1 {
+        attribute {Count 0} {Max 2}
+        statemodel {
+            state s1 {} {
+                my variable Count Max
+                incr Count
+                if {$Count >= $Max} {
+                    ::stsatcl::test::syncToTest $Count
+                }
+            }
+            transition s1 - e1 -> s2
+
+            state s2 {} {
+                my variable Count
+                incr Count
+            }
+            transition s2 - e2 -> s1
+        }
+    }
+} -cleanup {
+    ::stsatcl traceControl off
+    ::stsatcl traceControl clear
+    tr1 destroy
+} -body {
+    ::stsatcl traceControl on
+    tr1 create inst1
+    inst1 signal e1
+    inst1 signal e2
+    waitForSync
+    set traces [::stsatcl formatTraces [::stsatcl::decodeAllTraces]]
+    llength [split $traces \n]
+} -result {2}
+----
+
+==== Format Trace Record
+
+An individual trace record may be formatted with the +FormatTraceRec+
+procedure.
+
+(((proc,FormatTraceRec)))
+
+[source,tcl]
+----
+<<trace commands>>=
+proc FormatTraceRec {rec} {
+    dict with rec {
+        switch -exact -- $type {
+            transition {
+                append result\
+                    "Transition: "\
+                    "[list $source] - $event \{$params\} -> $target ==> "\
+                    "$current -> $new"
+            }
+            polymorphic {
+                append result\
+                    "Polymorphic : "\
+                    "[list $source] - $event -> $super ==> "\
+                    "$link -> $target"
+            }
+            creation {
+                append result\
+                    "Creation: "\
+                    "[list $source] - $event -> $class ==> $target"
+            }
+            default {
+                DeclError BAD_TRACETYPE $type
+            }
+        }
+    }
+    return $result
+}
+----
+
+(((error code,BAD_TRACETYPE)))
+[source,tcl]
+----
+<<error code formats>>=
+BAD_TRACETYPE   {unknown trace type, "%s"}
+----
+
+==== Format Time Stamp
+
+(((proc,FormatTimeStamp)))
+
+[source,tcl]
+----
+<<trace commands>>=
+proc FormatTimestamp {time} {
+    set sec [clock format [expr {$time / 1000000}] -format %T] ; # <1>
+    set time [expr {$time % 1000000}]
+    set msec [expr {$time / 1000}]
+    set usec [expr {$time % 1000}]
+
+    return [format %s.%03ld.%03ld $sec $msec $usec]
+}
+----
+<1> We assume time in units of microseconds.
+
+==== Format Time As Seconds
+
+(((proc,FormatTimeAsSec)))
+
+[source,tcl]
+----
+<<trace commands>>=
+proc FormatTimeAsSec {time} {
+    set sec [expr {$time / 1000000}]
+    set time [expr {$time % 1000000}]
+    set msec [expr {$time / 1000}]
+    set usec [expr {$time % 1000}]
+
+    return [format %3ld.%03ld.%03ld $sec $msec $usec]
+}
+----
+
+=== Sequence Diagrams
+
+Another way to view trace information is in the form of a sequence diagram.
+The http://blockdiag.com/en/seqdiag/index.html[+seqdiag+]
+program can layout and render UML sequence diagrams
+from a simple textual specification of the diagram's components.
+The syntax of the sequence diagram is similar to that of *dot*.
+Using the captured state machine trace information,
+we can view the interactions of state models.
+We present several procedures in this group.
+
+==== Diagram Traces
+
+(((proc,DiagTraces)))
+
+[source,tcl]
+----
+<<trace commands>>=
+proc DiagTraces {traces args} {
+    set result {}
+    append result "seqdiag \{\n"
+    append result "    activation = none;\n"
+    foreach {option value} $args {
+        append result "    $option = $value;\n"
+    }
+
+    relation foreach trace $traces -ascending Trace_Id {
+        relation assign $trace
+        if {$Source eq {}} {
+            set Source EXTERNAL
+        } else {
+            set Source [namespace tail $Source]
+        }
+        set Target [namespace tail $Target]
+        append result "    $Source ->> $Target \[label=\"$Event\"\];\n"
+    }
+
+    append result "\}\n"
+
+    return $result
+}
+----
+
+==== Diagram All Traces
+
+(((proc,diagAllTraces)))
+
+[source,tcl]
+----
+<<rosea exports>>=
+namespace export diagAllTraces
+
+<<rosea commands>>=
+proc diagAllTraces {filename args} {
+    set chan [open $filename w]
+    try {
+        chan puts $chan [Trace::DiagTraces [relvar set Trace] {*}$args]
+    } finally {
+        chan close $chan
+    }
+    return
+}
+----
+
+==== Diagram Class Traces
+
+(((proc,diagClassTraces)))
+
+[source,tcl]
+----
+<<rosea exports>>=
+namespace export diagClassTraces
+
+<<rosea commands>>=
+proc diagClassTraces {filename classes args} {
+    set chan [open $filename w]
+    try {
+        set traces [pipe {
+            relvar set Trace >
+            relation restrictwith ~\
+                {$Class in $classes || [namespace tail $Class] in $classes}
+        }] {} >~
+        chan puts $chan [Trace::DiagTraces $traces {*}$args]
+    } finally {
+        chan close $chan
+    }
+    return
+}
 ----
 
 == Code Organization
