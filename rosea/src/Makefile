@@ -28,6 +28,7 @@ DIAGRAMS =\
 	correl-link.uxf\
 	link-classes.uxf\
 	trace-schema.uxf\
+	wmc-class-diagram.uxf\
 	$(NULL)
 
 LSDIAGRAMS =\
