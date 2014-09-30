@@ -29,6 +29,7 @@ DIAGRAMS =\
 	link-classes.uxf\
 	trace-schema.uxf\
 	wmc-class-diagram.uxf\
+	wm-states.uxf\
 	$(NULL)
 
 LSDIAGRAMS =\
@@ -38,14 +39,20 @@ LSDIAGRAMS =\
 	config-statemodel.uxf\
 	config-transition.uxf\
 	config-event.uxf\
+	ct-states.uxf\
 	$(NULL)
 
 SEQDIAG	=\
+	wmctrl-seqdiag.diag\
 	$(NULL)
 
 IMAGES =\
 	$(patsubst %.uxf,$(IMAGEDIR)/%.pdf,$(DIAGRAMS))\
 	$(patsubst %.uxf,$(IMAGEDIR)/%.pdf,$(LSDIAGRAMS))\
+	$(NULL)
+
+SEQIMAGES=\
+	$(patsubst %.diag,$(IMAGEDIR)/%.svg,$(SEQDIAG))\
 	$(NULL)
 
 TCLSRC	=\
@@ -65,6 +72,7 @@ CLEANFILES =\
 	$(IMAGES)\
 	$(PDF)\
 	$(TESTDIR)/$(TESTS)\
+	wmctrl-trace.txt\
 	$(NULL)
 
 A2XOPTS =\
@@ -123,13 +131,13 @@ runtests : tests
 runexample : example
 	tclsh wmctrl.tcl | tee wmctrl-trace.txt
 
-wmctrl-trace.txt : wmctrl.tcl $(TCLSRC)
+wmctrl-trace.txt wmctrl-seqdiag.diag : wmctrl.tcl $(TCLSRC)
 	tclsh wmctrl.tcl | tee wmctrl-trace.txt
 
 clean :
 	$(RM) $(CLEANFILES)
 
-$(PDF) : $(DOCSRC) $(EXTRAS) $(IMAGES)
+$(PDF) : $(DOCSRC) $(EXTRAS) $(IMAGES) wmctrl-trace.txt $(SEQIMAGES)
 
 $(TCLSRC) : $(DOCSRC)
 
@@ -157,9 +165,18 @@ $(IMAGEDIR)/config-%.pdf : config-%.uxf
 	pdftk $(basename $@)-cvt.pdf cat 1left output $@
 	$(RM) $(basename $@)-cvt.pdf
 
+$(IMAGEDIR)/ct-states.pdf : ct-states.uxf
+	umlet -action=convert -format=pdf\
+		-filename=$< -output=$(basename $@)-cvt
+	pdftk $(basename $@)-cvt.pdf cat 1left output $@
+	$(RM) $(basename $@)-cvt.pdf
+
 $(IMAGEDIR)/%.pdf : %.uxf
 	umlet -action=convert -format=pdf\
 		-filename=$< -output=$(basename $@)
+
+$(IMAGEDIR)/%.svg : $(IMAGEDIR)/%.diag
+	seqdiag --antialias -T svg -o $@ $<
 #
 # vim :set sw=8 ts=8 sts=8 noexpandtab:
 #
