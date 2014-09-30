@@ -3154,6 +3154,9 @@ CONFIG_ERRORS     {encountered %d configuration script errors}
 
 [source,tcl]
 ----
+<<rosea exports>>=
+namespace export configureFromFile
+
 <<rosea commands>>=
 proc configureFromFile {filename} {
     set f [::open $filename r]
@@ -7262,19 +7265,10 @@ the implied relationship linkages as data organized as tables.
 namespace export populate
 
 <<rosea commands>>=
-proc populate {domain script} {
+proc populate {script} {
     namespace upvar Config errcount errcount configlineno configlineno
     set errcount 0
     set configlineno 1
-
-    set dom [relvar restrictone Config::Domain Name $domain]
-    if {[relation isempty $dom]} {
-        tailcall DeclError UNKNOWN_DOMAIN $domain
-    }
-
-    namespace upvar Populate DomainName DomainName DomainLoc DomainLoc
-    relation assign $dom {Name DomainName} {Location DomainLoc}
-
     try {
         relvar eval {
             ConfigEvaluate ::rosea::Populate $script
@@ -7290,11 +7284,20 @@ proc populate {domain script} {
 }
 ----
 
-(((error code,UNKNOWN_DOMAIN)))
 [source,tcl]
 ----
-<<error code formats>>=
-UNKNOWN_DOMAIN  {unknown domain, "%s"}
+<<rosea exports>>=
+namespace export populateFromFile
+
+<<rosea commands>>=
+proc populateFromFile {filename} {
+    set f [::open $filename r]
+    try {
+        populate [read $f]
+    } finally {
+        ::chan close $f
+    }
+}
 ----
 
 [source,tcl]
@@ -7304,14 +7307,50 @@ namespace eval Populate {
     logger::initNamespace [namespace current]
 
     <<tclral imports>>
-    namespace path [namespace parent]::Helpers
+    namespace import ::rosea::Config::ConfigEvaluate
+    namespace import ::rosea::Helpers::DeclError
     <<populate commands>>
+    <<domain population namespace layout>>
 }
 ----
 
 [source,tcl]
 ----
 <<populate commands>>=
+proc domain {name body} {
+    set domain [relvar restrictone ::rosea::Config::Domain Name $name]
+    if {[relation isempty $domain]} {
+        tailcall DeclError UNKNOWN_DOMAIN $domain
+    }
+
+    namespace upvar DomainPop DomainName DomainName DomainLoc DomainLoc
+    relation assign $domain {Name DomainName} {Location DomainLoc}
+
+    try {
+        ConfigEvaluate [namespace current]::DomainPop $body
+    } on error {result opts} {
+        log::error $result
+        upvar #0 ::rosea::Config::errcount errcount
+        incr errcount
+    }
+}
+----
+
+[source,tcl]
+----
+<<domain population namespace layout>>=
+namespace eval DomainPop {
+    logger::initNamespace [namespace current]
+
+    <<tclral imports>>
+    namespace path ::rosea::Helpers
+    <<domain populate commands>>
+}
+----
+
+[source,tcl]
+----
+<<domain populate commands>>=
 proc class {class heading args} {
     # Determine if we have one big list or a bunch of values.
     set popvalues [expr {[llength $args] == 1 ? [lindex $args 0] : $args}]
@@ -7402,16 +7441,18 @@ test populate-1.0 {
     cleanupConfigData
     removeDomain ::meta
 } -body {
-    rosea populate meta {
-        class C1\
-            {Id     A1} {
-            foo     24
-            bar     42
-        }
-        class C2\
-            {Id     C1Id} {
-            f1      24
-            f2      24
+    rosea populate {
+        domain meta {
+            class C1\
+                {Id     A1} {
+                foo     24
+                bar     42
+            }
+            class C2\
+                {Id     C1Id} {
+                f1      24
+                f2      24
+            }
         }
     }
     relation cardinality $::meta::C1
@@ -7444,17 +7485,17 @@ test populate-1.1 {
     cleanupConfigData
     removeDomain ::meta
 } -body {
-    rosea populate meta {
-        class C1\
-            {Id     A1}\
-            foo     24\
-            bar     42\
-    }
-    rosea populate meta {
-        class C2\
-            {Id     C1Id}\
-            f1      24\
-            f2      24\
+    rosea populate {
+        domain meta {
+            class C1\
+                {Id     A1}\
+                foo     24\
+                bar     42
+            class C2\
+                {Id     C1Id}\
+                f1      24\
+                f2      24
+        }
     }
     relation cardinality $::meta::C2
 } -result {2}
@@ -7486,16 +7527,18 @@ test populate-1.2 {
     cleanupConfigData
     removeDomain ::meta
 } -body {
-    rosea populate meta {
-        class C1\
-            {Id     A1} {
-            foo     24
-            bar     -
-        }
-        class C2\
-            {Id     C1Id} {
-            f1      24
-            f2      24
+    rosea populate {
+        domain meta {
+            class C1\
+                {Id     A1} {
+                foo     24
+                bar     -
+            }
+            class C2\
+                {Id     C1Id} {
+                f1      24
+                f2      24
+            }
         }
     }
     set ref [::meta::C1 findWhere {$A1 == 20}]
@@ -7536,16 +7579,18 @@ test populate-1.3 {
     cleanupConfigData
     removeDomain [namespace current]::meta
 } -body {
-    rosea populate meta {
-        class C1\
-            {Id     A1} {
-            foo     24
-            bar     42
-        }
-        class C2\
-            {Id     C1Id} {
-            f1      24
-            f2      24
+    rosea populate {
+        domain meta {
+            class C1\
+                {Id     A1} {
+                foo     24
+                bar     42
+            }
+            class C2\
+                {Id     C1Id} {
+                f1      24
+                f2      24
+            }
         }
     }
     relation cardinality [relvar set [namespace current]::meta::__C2__INSTANCE]
@@ -7655,7 +7700,10 @@ namespace eval Trace {
     logger::initNamespace [namespace current]
 
     <<tclral imports>>
-    namespace path [namespace parent]::Helpers
+    namespace path [list\
+        [namespace parent]::Helpers\
+        [namespace parent]::InstCmds\
+    ]
     <<trace data>>
     <<trace commands>>
 }
@@ -8014,9 +8062,11 @@ test LogTrace-2.0 {
 
     rosea generate
 
-    rosea populate foo {
-        class lt2 Id 1
-        class lt2-sub1 Id 1
+    rosea populate {
+        domain foo {
+            class lt2 Id 1
+            class lt2-sub1 Id 1
+        }
     }
 
     turnOnTraceLog
@@ -8390,9 +8440,11 @@ test decodeClassTraces-1.0 {
 
     rosea generate
 
-    rosea populate foo {
-        class dct1 Id first
-        class dct2 Id first
+    rosea populate {
+        domain foo {
+            class dct1 Id first
+            class dct2 Id first
+        }
     }
 
     rosea traceControl clear
@@ -8642,15 +8694,29 @@ proc DiagTraces {traces args} {
         append result "    $option = $value;\n"
     }
 
+    foreach rvname {Creation Polymorphic Transition} { # <1>
+        set traces [::ralutil::rvajoin $traces [relvar set $rvname] $rvname]
+    }
+
     relation foreach trace $traces -ascending Trace_Id {
         relation assign $trace
-        if {$Source eq {}} {
+        if {[isNilRef $Source]} {
             set Source EXTERNAL
         } else {
-            set Source [namespace tail $Source]
+            set Source [namespace tail [lindex $Source 0]]
         }
-        set Target [namespace tail $Target]
-        append result "    $Source ->> $Target \[label=\"$Event\"\];\n"
+        set Target [namespace tail [lindex $Target 0]]
+        if {[relation isnotempty $Transition]} {
+            relation assign $Transition Params
+            set evtlabel $Event[expr {[llength $Params] != 0 ?\
+                "\([join $Params {, }]\)" : {}}]
+        } elseif {[relation isnotempty $Polymorphic]} {
+            relation assign $Transition Linkage
+            set evtlabel "$Event <<Polymorphic $Linkage>>"
+        } elseif {[relation isnotempty $Creation]} {
+            set evtlabel "$Event <<Creation>>"
+        }
+        append result "    $Source ->> $Target \[label=\"$evtlabel\"\];\n"
     }
 
     append result "\}\n"
@@ -10082,8 +10148,10 @@ rosea configure {
 
 rosea generate
 
-rosea populate wmctrl {
-    <<initial instance population>>
+rosea populate {
+    domain wmctrl {
+        <<initial instance population>>
+    }
 }
 
 <<external operation stubs>>
