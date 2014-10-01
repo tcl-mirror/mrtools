@@ -30,6 +30,7 @@ DIAGRAMS =\
 	trace-schema.uxf\
 	wmc-class-diagram.uxf\
 	wm-states.uxf\
+	arch-class-diagram.uxf\
 	$(NULL)
 
 LSDIAGRAMS =\
