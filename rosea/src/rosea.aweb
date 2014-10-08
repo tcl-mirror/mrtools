@@ -868,7 +868,6 @@ blockdiag {
     class ns2nd [color= "#ffe870"]
 
     rosea [label="::rosea",class=ns1st]
-    helpcmd [label="::Helpers",class=ns2nd]
     classcmd [label="::ClassCmds",class=ns2nd]
     instcmd [label="::InstCmds",class=ns2nd]
     relcmd [label="::RelCmds",class=ns2nd]
@@ -876,6 +875,7 @@ blockdiag {
     configcmd [label="::Config",class=ns2nd]
     populatecmd [label="::Populate",class=ns2nd]
     tracecmd [label="::Trace",class=ns2nd]
+    helpcmd [label="::Helpers",class=ns2nd]
 
     rosea -> classcmd, instcmd, relcmd, configcmd,
         populatecmd, tracecmd, dispatchcmd, helpcmd
@@ -1942,7 +1942,7 @@ NO_SUBCLASS         {relationship "%s" does not have a "%s"}
 proc signalAssigner {rname event args} {
     lassign [SplitRelvarName $rname] domain relationship
     set assignrelvar ${domain}::__${relationship}__STATEINST
-    if {![relvar exists $assignrelvar} {
+    if {![relvar exists $assignrelvar]} {
         tailcall DeclError NO_ASSIGNER $rname
     }
 
@@ -1952,7 +1952,7 @@ proc signalAssigner {rname event args} {
         list $rname ~
     }]
     set srcref [SelfInstRef]
-    ::rosea::Dispatch::SignalEvent $srcref $dstset $event $args
+    ::rosea::Dispatch::SignalEvent $srcref $dstref $event $args
 
     return
 }
@@ -1973,31 +1973,34 @@ NO_ASSIGNER         {relationship, "%s", does not have an assigner}
 proc signalMultiAssigner {rname idvalues event args} {
     lassign [SplitRelvarName $rname] domain relationship
     set assignrelvar ${domain}::__${relationship}__STATEINST
-    if {![relvar exists $assignrelvar} {
+    if {![relvar exists $assignrelvar]} {
         tailcall DeclError NO_ASSIGNER $rname
     }
+    set idattrs [lindex [relvar identifiers $assignrelvar] 0]
+    # We will insist that the idvalues contain the necessary identifying
+    # attributes.
+    if {![struct::set equal [dict keys $idvalues] $idattrs]} {
+        tailcall DeclError NO_IDENTIFIER [dict keys $idvalues] $idattrs
+    }
     set assigninsts [relvar set $assignrelvar]
-    set assignrefs [relation project $assigninsts\
-            {*}[lindex [relvar identifiers $assignrelvar] 0]]
+    set assignrefs [relation project $assigninsts {*}$idattrs]
+
     # We need to find the tuple in "assignrefs" that matches the attributes and
     # values in "idvalues". We will do this by creating a relation value from
     # the idvalues list and semijoining that to "assignrefs". If we come up
-    # non-empty, then we have found our multi-assigner instance.  We will
-    # insist that the idvalues contain the necessary identifying attributes.
-    # HERE, make sure idvalues contains the attributes as heading.
+    # non-empty, then we have found our multi-assigner instance.
     set heading [relation heading $assignrefs]
     set dstinst [pipe {
         tuple create $heading $idvalues |
-        tuple relation ~
+        tuple relation ~ |
         relation semijoin ~ $assignrefs
     }]
     if {[relation isempty $dstinst]} {
         tailcall DeclError UNKNOWN_ASSIGNER $idvalues $rname
     }
-    set dstref [list $rname $dstinst]
 
-    set srcref [SelfInstRef]
-    ::rosea::Dispatch::SignalEvent $srcref $dstset $event $args
+    set dstref [list $rname $dstinst]
+    ::rosea::Dispatch::SignalEvent [SelfInstRef] $dstref $event $args
 
     return
 }
@@ -2007,8 +2010,35 @@ proc signalMultiAssigner {rname idvalues event args} {
 [source,tcl]
 ----
 <<error code formats>>=
-UNKNOWN_ASSIGNER         {unknown assigner instance, "%s", for relationship,\
-        "%s"}
+NO_IDENTIFIER       {bad identifying attributes, expected "%s", got "%s"}
+UNKNOWN_ASSIGNER    {unknown assigner instance, "%s", for relationship, "%s"}
+----
+
+==== Creating a Multi-Assigner
+
+[source,tcl]
+----
+<<relationship commands>>=
+proc createMultiAssigner {rname args} {
+    if {[llength $args] % 2 != 0} {
+        tailcall DeclError ARG_FORMAT $args
+    }
+    lassign [SplitRelvarName $rname] domain relationship
+    set assignrelvar ${domain}::__${relationship}__STATEINST
+    if {![relvar exists $assignrelvar]} {
+        tailcall DeclError NO_ASSIGNER $rname
+    }
+    set idattrs [lindex [relvar identifiers $assignrelvar] 0]
+    if {![struct::set equal [dict keys $args] $idattrs]} {
+        tailcall DeclError NO_IDENTIFIER [dict keys $args] $idattrs
+    }
+    # Find the initial state
+    set initstate [pipe {
+        relvar restrictone ${domain}::__Arch::InitialState Class $relationship |
+        relation extract ~ State
+    }]
+    relvar insert $assignrelvar [concat $args [list __State $initstate]]
+}
 ----
 
 === Instance Commands
@@ -3697,6 +3727,7 @@ namespace eval DomainDef {
     <<domain config commands>>
 
     <<class config namespace layout>>
+    <<assigner config namespace layout>>
 }
 ----
 
@@ -5259,6 +5290,278 @@ test configure-4.0 {
 } -result {3}
 ----
 
+==== Defining Assigners
+
+...............
+assigner name script
+...............
+
+[source,tcl]
+----
+<<assigner config namespace layout>>=
+namespace eval AssignerDef {
+    logger::initNamespace [namespace current]
+
+    <<tclral imports>>
+    namespace import ::ral::relvar
+    namespace import ::rosea::Config::ConfigEvaluate
+    namespace import ::rosea::Helpers::DeclError
+
+    <<assigner config commands>>
+}
+----
+
+[source,tcl]
+----
+<<domain config commands>>=
+proc assigner {rname body} {
+    namespace upvar ::rosea::Config::DomainDef DomainName DomainName
+    namespace upvar AssignerDef\
+        RelationshipName RelationshipName\
+        multiClass multiClass\
+        multiIdNum multiIdNum\
+        InitialState InitialState\
+        DefaultTrans DefaultTrans
+
+    set RelationshipName $rname
+    set multiClass {}
+    set multiIdNum 1
+    set InitialState {}
+    set DefaultTrans {}
+
+    try {
+        ConfigEvaluate [namespace current]::AssignerDef $body
+
+        if {$DefaultTrans eq {}} {
+            set DefaultTrans CH
+        }
+        relvar insert ::rosea::Config::StateModel [list\
+            Domain          $DomainName\
+            Model           $rname\
+            InitialState    $InitialState\
+            DefaultTrans    $DefaultTrans\
+        ]
+        set assigntuple [list\
+            Domain          $DomainName\
+            Relationship    $rname\
+        ]
+        relvar insert ::rosea::Config::AssignerStateModel $assigntuple
+        if {$multiClass eq {}} {
+            relvar insert ::rosea::Config::SingleAssigner $assigntuple
+        } else {
+            lappend assigntuple Class $multiClass Number $multiIdNum
+            relvar insert ::rosea::Config::MultipleAssigner $assigntuple
+        }
+    } on error {result opts} {
+        log::error $result
+        upvar #0 ::rosea::Config::errcount errcount
+        incr errcount
+    }
+}
+----
+
+[source,tcl]
+----
+<<assigner config commands>>=
+proc state {name params body} {
+    if {$name eq {}} {
+        tailcall DeclError EMPTY_NAME state
+    }
+
+    namespace upvar ::rosea::Config::DomainDef DomainName DomainName
+    namespace upvar ::rosea::Config::DomainDef::AssignerDef\
+        RelationshipName RelationshipName
+
+    variable InitialState
+
+    if {$InitialState eq {}} {
+        set InitialState $name
+    }
+
+    relvar insert ::rosea::Config::State [list\
+        Domain          $DomainName\
+        Model           $RelationshipName\
+        Name            $name\
+        Parameters      $params\
+        Action          $body\
+        IsFinal         false\
+    ]
+    relvar insert ::rosea::Config::StatePlace [list\
+        Domain          $DomainName\
+        Model           $RelationshipName\
+        Name            $name\
+    ]
+    return
+}
+----
+
+[source,tcl]
+----
+<<assigner config commands>>=
+proc transition {source - event -> target} {
+    if {$event eq {}} {
+        tailcall DeclError EMPTY_NAME event
+    }
+
+    namespace upvar ::rosea::Config::DomainDef DomainName DomainName
+    namespace upvar ::rosea::Config::DomainDef::AssignerDef\
+        RelationshipName RelationshipName
+
+    set eventtuple [list\
+        Domain  $DomainName\
+        Model   $RelationshipName\
+        Event   $event\
+    ]
+    relvar uinsert ::rosea::Config::Event $eventtuple
+    relvar uinsert ::rosea::Config::EffectiveEvent $eventtuple
+    relvar uinsert ::rosea::Config::LocalEvent $eventtuple
+
+    set tranrule [relvar restrictone ::rosea::Config::TransitionRule\
+        Name $target]
+    set transtuple [list\
+        Domain  $DomainName\
+        Model   $RelationshipName\
+        State   $source\
+        Event   $event\
+    ]
+    relvar insert ::rosea::Config::TransitionPlace $transtuple
+
+    if {[relation isnotempty $tranrule]} {
+        lappend transtuple TransRule $target
+        set tpsubtype NonStateTransition
+    } else {
+        lappend transtuple NewState $target
+        set tpsubtype StateTransition
+    }
+    relvar insert ::rosea::Config::$tpsubtype $transtuple
+    return
+}
+----
+
+[source,tcl]
+----
+<<assigner config commands>>=
+proc initialstate {name} {
+    variable InitialState $name
+    return
+}
+----
+
+[source,tcl]
+----
+<<assigner config commands>>=
+proc defaulttrans {name} {
+    variable DefaultTrans $name
+    return
+}
+----
+
+[source,tcl]
+----
+<<assigner config commands>>=
+proc identifyby {name args} {
+    if {[llength $args] % 2 != 0} {
+        tailcall DeclError ARG_FORMAT $args
+    }
+
+    variable multiClass $name
+
+    foreach {option value} $args {
+        switch -exact -- $option {
+            -id {
+                variable multiIdNum $value
+            }
+            default {
+                tailcall DeclError UNKNOWN_OPTION  identifyby $option
+            }
+        }
+    }
+
+    return
+}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test configure-7.0 {
+    Define assigner
+} -setup {
+} -cleanup {
+    cleanupConfigData
+} -body {
+    rosea configure {
+        domain foo {
+            class Customer {
+                attribute Name string -id 1
+            }
+            class Clerk {
+                attribute Name string -id 1
+                attribute Customer string
+                reference R1 Customer -link {Customer Name}
+            }
+            association R1 Clerk 0..1--0..1 Customer
+            assigner R1 {
+                state s1 {a b} {
+                    puts $a $b
+                }
+                transition s1 - e1 -> s2
+
+                state s2 {} {
+                    puts "in s2"
+                }
+                transition s2 - e1 -> s1
+            }
+        }
+    }
+    relation cardinality [relvar set ::rosea::Config::SingleAssigner]
+} -result {1}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test configure-7.1 {
+    Define mulit assigner
+} -setup {
+} -cleanup {
+    cleanupConfigData
+} -body {
+    rosea configure {
+        domain foo {
+            class Customer {
+                attribute Name string -id 1
+            }
+            class Clerk {
+                attribute Name string -id 1
+                attribute Customer string
+                attribute Department string
+                reference R1 Customer -link {Customer Name}
+                reference R2 Department -link {Department Name}
+            }
+            class Department {
+                attribute Name string -id 1
+            }
+            association R1 Clerk 0..1--0..1 Customer
+            association R2 Clerk 1..n--1 Department
+            assigner R1 {
+                identifyby Department
+                state s1 {a b} {
+                    puts $a $b
+                }
+                transition s1 - e1 -> s2
+
+                state s2 {} {
+                    puts "in s2"
+                }
+                transition s2 - e1 -> s1
+            }
+        }
+    }
+    relation cardinality [relvar set ::rosea::Config::MultipleAssigner]
+} -result {1}
+----
+
 === Defining Domain Operations
 
 ...............
@@ -5555,7 +5858,7 @@ proc statemodel {body} {
     set Terminals [list]
 
     try {
-        ConfigEvaluate [namespace current]::StateModelDef  $body
+        ConfigEvaluate [namespace current]::StateModelDef $body
 
         if {$DefaultTrans eq {}} {
             set DefaultTrans CH
@@ -5577,7 +5880,6 @@ proc statemodel {body} {
                 tuple update $stup IsFinal true
             }
         }
-
     } on error {result opts} {
         log::error $result
         upvar #0 ::rosea::Config::errcount errcount
@@ -6205,7 +6507,10 @@ proc generate {{prefix {}}} {
         DeferredEvent DeferredEvent\
         TransitionPlace TransitionPlace\
         StateTransition StateTransition\
-        NonStateTransition NonStateTransition
+        NonStateTransition NonStateTransition\
+        AssignerStateModel AssignerStateModel\
+        SingleAssigner SingleAssigner\
+        MultipleAssigner MultipleAssigner
 
     # Query for the heading
     pipe {
@@ -6247,12 +6552,8 @@ proc generate {{prefix {}}} {
             ]
             namespace eval $domns namespace ensemble create
 
-            set classes [relation semijoin $domain $DomainElement $Class]
-            set statemodels [pipe {
-                relation semijoin $classes $InstanceStateModel\
-                        -using {Domain Domain Name Class}\
-                    $StateModel -using {Domain Domain Class Model}
-            }]
+            set statemodels [relation semijoin $domain $StateModel\
+                -using {Name Domain}]
 
             # Much of the architectural data can be built in large queries
             # across the entire domain capturing the data for all the classes
@@ -6263,22 +6564,21 @@ proc generate {{prefix {}}} {
             }]
 
 
-            set states [relation semijoin $classes $StatePlace\
-                    -using {Domain Domain Name Model}]
+            set states [relation semijoin $domain $StatePlace\
+                -using {Name Domain}]
             relvar union ${archns}::State [pipe {
                 relation project $states Model Name |
                 relation rename ~ Model Class Name State
             }]
             relvar union ${archns}::Terminal [pipe {
-                relation semijoin $classes $State\
-                        -using {Domain Domain Name Model}|
+                relation semijoin $domain $State -using {Name Domain} |
                 relation restrict ~ termtuple\
                         {[tuple extract $termtuple IsFinal]} |
                 relation project ~ Model Name |
                 relation rename ~ Model Class Name State
             }]
-            set events [relation semijoin $classes $EffectiveEvent\
-                    -using {Domain Domain Name Model}]
+            set events [relation semijoin $domain $EffectiveEvent\
+                -using {Name Domain}]
             relvar union ${archns}::Event [pipe {
                 relation project $events Model Event |
                 relation rename ~ Model Class
@@ -6288,11 +6588,11 @@ proc generate {{prefix {}}} {
                 relation join $states $events |
                 relation rename ~ Name State
             }]
-            set statetrans [relation semijoin $classes $StateTransition\
-                        -using {Domain Domain Name Model}]
+            set statetrans [relation semijoin $domain $StateTransition\
+                -using {Name Domain}]
             set nontrans [pipe {
-                relation semijoin $classes $NonStateTransition\
-                        -using {Domain Domain Name Model} |
+                relation semijoin $domain $NonStateTransition\
+                    -using {Name Domain} |
                 relation rename ~ TransRule NewState
             }]
             set deftrans [pipe {
@@ -6311,13 +6611,14 @@ proc generate {{prefix {}}} {
             #puts [relformat [relvar set ${archns}::Transition] Transition]
 
             relvar union ${archns}::PolymorphicEvent [pipe {
-                relation semijoin $classes $DeferredEvent\
-                        -using {Domain Domain Name Model} |
+                relation semijoin $domain $DeferredEvent\
+                    -using {Name Domain} |
                 relation project ~ Model Event |
                 relation rename ~ Model Class
             }]
         }
 
+        set classes [relation semijoin $domain $DomainElement $Class]
         relation foreach class $classes {
             set className ${domns}::[relation extract $class Name]
             namespace eval $className {
@@ -6499,7 +6800,6 @@ proc generate {{prefix {}}} {
             #puts [relformat $reference reference]
 
             relation assign $reference\
-                {Domain domain}\
                 {Relationship relationship}\
                 {ReferringClass referringClass}\
                 {ReferencedClass referencedClass}\
@@ -6552,13 +6852,28 @@ proc generate {{prefix {}}} {
                 ]
             }
 
-            namespace ensemble create\
-                -command ${domns}::$relationship\
-                -map [dict create\
-                    link [list ::rosea::RelCmds::linkSimple $relationship]\
-                    unlink [list ::rosea::RelCmds::unlinkSimple\
-                            $relationship]\
-                ]
+            set rpath ${domns}::$relationship
+            set ensemblemap [dict create\
+                link [list ::rosea::RelCmds::linkSimple $relationship]\
+                unlink [list ::rosea::RelCmds::unlinkSimple $relationship]\
+            ]
+            # Determine if we have any assigners
+            set assigner [relation semijoin $sassoc $SingleAssigner\
+                -using {Domain Domain Name Relationship}]
+            if {[relation isnotempty $assigner]} {
+                dict set ensemblemap signal\
+                    [list ::rosea::RelCmds::signalAssigner $rpath]
+            } else {
+                set assigner [relation semijoin $sassoc $MultipleAssigner\
+                    -using {Domain Domain Name Relationship}]
+                if {[relation isnotempty $assigner]} {
+                    dict set ensemblemap signal [list\
+                        ::rosea::RelCmds::signalMultiAssigner $rpath]
+                    dict set ensemblemap create [list\
+                        ::rosea::RelCmds::createMultiAssigner $rpath]
+                }
+            }
+            namespace ensemble create -command $rpath -map $ensemblemap
         }
 
         set cassocs [relation semijoin $rships $Association\
@@ -6591,7 +6906,6 @@ proc generate {{prefix {}}} {
 
             relation foreach assocref $assocrefs {
                 relation assign $assocref\
-                    {Domain domain}\
                     {ReferringClass associator}\
                     {Relationship relationship}\
                     {References references}
@@ -6691,13 +7005,28 @@ proc generate {{prefix {}}} {
                 }
             }
 
-            namespace ensemble create\
-                -command ${domns}::$relationship\
-                -map [dict create\
-                    link [list ::rosea::RelCmds::linkAssoc $relationship]\
-                    unlink [list ::rosea::RelCmds::unlinkAssoc\
-                            $relationship]\
-                ]
+            set rpath ${domns}::$relationship
+            set ensemblemap [dict create\
+                link [list ::rosea::RelCmds::linkAssoc $relationship]\
+                unlink [list ::rosea::RelCmds::unlinkAssoc $relationship]\
+            ]
+            # Determine if we have any assigners
+            set assigner [relation semijoin $cassoc $SingleAssigner\
+                -using {Domain Domain Name Relationship}]
+            if {[relation isnotempty $assigner]} {
+                dict set ensemblemap signal\
+                    [list ::rosea::RelCmds::signalAssigner $rpath]
+            } else {
+                set assigner [relation semijoin $cassoc $MultipleAssigner\
+                    -using {Domain Domain Name Relationship}]
+                if {[relation isnotempty $assigner]} {
+                    dict set ensemblemap signal [list\
+                        ::rosea::RelCmds::signalMultiAssigner $rpath]
+                    dict set ensemblemap create [list\
+                        ::rosea::RelCmds::createMultiAssigner $rpath]
+                }
+            }
+            namespace ensemble create -command $rpath -map $ensemblemap
         }
 
         set gens [relation semijoin $rships $Generalization]
@@ -6718,7 +7047,6 @@ proc generate {{prefix {}}} {
             set subparts [list]
             relation foreach subref $subrefs {
                 relation assign $subref\
-                    {Domain domain}\
                     {ReferringClass subclass}\
                     {ReferencedClass superclass}\
                     {Relationship relationship}\
@@ -6779,6 +7107,71 @@ proc generate {{prefix {}}} {
                 -command ${domns}::$relationship\
                 -map [dict create migrate [list ::rosea::RelCmds::migrate\
                         $relationship]]
+        }
+
+        set assigners [relation semijoin $domain $AssignerStateModel\
+                -using {Name Domain}]
+        relation foreach assigner $assigners {
+            set asgnns\
+                ${domns}::[relation extract $assigner Relationship]::__Activity
+            namespace eval $asgnns {
+                <<tclral imports>>
+            }
+            namespace eval $asgnns [list\
+                namespace path [list\
+                    ::rosea::InstCmds\
+                    $domns\
+                ]\
+            ]
+            set states [pipe {
+                relation semijoin $assigner $State\
+                    -using {Domain Domain Relationship Model} |
+                relation project ~ Name Parameters Action
+            }]
+            relation foreach state $states {
+                relation assign $state\
+                    {Name stateName}\
+                    {Parameters params}\
+                    {Action stateAction}
+                set params [linsert $params 0 self]
+                proc ${asgnns}::$stateName $params $stateAction
+            }
+        }
+
+        relation foreach sassigner\
+                [relation semijoin $domain $SingleAssigner\
+                -using {Name Domain}] {
+            relation assign $sassigner {Relationship relationship}
+            set assignvar ${domns}::__${relationship}__STATEINST
+            relvar create $assignvar {
+                Id      int
+                __State string
+            } Id
+
+            set initialstate [pipe {
+                relation semijoin $sassigner $AssignerStateModel\
+                    $StateModel -using {Domain Domain Relationship Model} |
+                relation extract ~ InitialState
+            }]
+            relvar insert $assignvar [list Id 0 __State $initialstate]
+        }
+
+        relation foreach massigner\
+                [relation semijoin $domain $MultipleAssigner\
+                -using {Name Domain}] {
+            relation assign $massigner {Relationship relationship}
+            set assignvar ${domns}::__${relationship}__STATEINST
+
+            set idattrs [pipe {
+                relation semijoin $massigner $Identifier\
+                    $IdentifyingAttribute\
+                    $Attribute -using {Domain Domain Class Class\
+                        Attribute Name} |
+                relation dict ~ Name Type
+            }]
+            relvar create $assignvar\
+                [concat $idattrs [list __State string]]\
+                [dict keys $idattrs]
         }
     }
     #puts [relformat [relvar set ${archns}::Link] Link]
@@ -7523,6 +7916,102 @@ test generate-7.0 {
 } -result {1}
 ----
 
+[source,tcl]
+----
+<<config command tests>>=
+test generate-8.0 {
+    signal an assigner
+} -setup {
+    rosea configure {
+        domain foo {
+            class Customer {
+                attribute Name string -id 1
+            }
+            class Clerk {
+                attribute Name string -id 1
+                attribute Customer string
+                reference R1 Customer -link {Customer Name}
+            }
+            association R1 Clerk 0..1--0..1 Customer
+            assigner R1 {
+                state s1 {a b} {
+                    puts $a $b
+                }
+                transition s1 - e1 -> s2
+
+                state s2 {} {
+                    puts "in s2"
+                        set ::done 1
+                }
+                transition s2 - e1 -> s1
+            }
+        }
+    }
+    rosea generate
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::foo
+} -body {
+    ::foo::R1 signal e1
+    set timer [after 1000 set ::done TIMEOUT]
+    vwait ::done
+    after cancel $timer
+    set ::done
+} -result {1}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test generate-8.1 {
+    signal a multi assigner
+} -setup {
+    rosea configure {
+        domain foo {
+            class Customer {
+                attribute Name string -id 1
+            }
+            class Clerk {
+                attribute Name string -id 1
+                attribute Customer string
+                attribute Department string
+                reference R1 Customer -link {Customer Name}
+                reference R2 Department -link {Department Name}
+            }
+            class Department {
+                attribute Name string -id 1
+            }
+            association R1 Clerk 0..1--0..1 Customer
+            association R2 Clerk 1..n--1 Department
+            assigner R1 {
+                identifyby Department
+                state s1 {a b} {
+                    puts $a $b
+                }
+                transition s1 - e1 -> s2
+
+                state s2 {} {
+                    puts "in s2"
+                        set ::done 1
+                }
+                transition s2 - e1 -> s1
+            }
+        }
+    }
+    rosea generate
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::foo
+} -body {
+    ::foo::R1 create Name Shoes
+    ::foo::R1 signal {Name Shoes} e1
+    set timer [after 1000 set ::done TIMEOUT]
+    vwait ::done
+    after cancel $timer
+    set ::done
+} -result {1}
+----
+
 === Structuring Architectural Data
 
 image::arch-class-diagram.pdf[title="Class State Model Architecture Date"]
@@ -7998,6 +8487,49 @@ test populate-1.3 {
     }
     relation cardinality [relvar set [namespace current]::meta::__C2__STATEINST]
 } -result {2}
+----
+
+[source,tcl]
+----
+<<domain populate commands>>=
+proc assigner {rname heading args} {
+    # Determine if we have one big list or a bunch of values.
+    set popvalues [expr {[llength $args] == 1 ? [lindex $args 0] : $args}]
+    set headlen [llength $heading]
+    if {[llength $popvalues] % $headlen != 0} {
+        tailcall DeclError ARG_MISMATCH $headlen [llength $popvalues]
+    }
+
+    namespace upvar [namespace current]\
+        DomainName DomainName\
+        DomainLoc DomainLoc
+    set domns ${DomainLoc}::${DomainName}
+    set relvar ${domns}::__${rname}__STATEINST
+    set idattrs [lindex [relvar identifiers $relvar] 0]
+    if {![struct::set equal $heading $idattrs]} {
+        tailcall DeclError NO_IDENTIFIER $heading $idattrs
+    }
+
+    # Iterate over the attribute values taking them in chunks that are the same
+    # size as the heading.
+    set body [list]
+    for {set vindex 0} {$vindex < [llength $popvalues]} {incr vindex $headlen} {
+        set values [lrange $popvalues $vindex [expr {$vindex + $headlen - 1}]]
+        # Create a tuple as a list of attribute name / value pairs.  We assume
+        # the values are in the same order as the heading -- that is the point.
+        set tuple [list]
+        foreach attr $heading value $values {
+            lappend tuple $attr $value
+        }
+        # Accumulate the tuples as a list to form the body that will be
+        # inserted into the relvar.
+        lappend body $tuple
+    }
+    # HERE -- need to add the initial state!!
+    relvar insert $relvar {*}$body
+
+    return
+}
 ----
 
 == State Machine Trace
@@ -10264,10 +10796,10 @@ After running the example we obtain the following output.
 include::wmctrl-trace.txt[]
 --
 
-The first section is the set of log message that show the interaction
+The first section is the set of log messages that show the interaction
 with the motors, values and sensors.
 This amounts to a trace of the external side effects that the domain
-asserts on the washing machine hardware.
+produces on the washing machine hardware.
 The second portion show the chronological trace of the state machine
 event dispatch.
 The first column of the trace is the time of day and the second column is
@@ -10275,12 +10807,15 @@ the time difference between the last trace entry (in the form of _s.ms.us_).
 The remainder of the trace show the details of the event dispatch.
 The first portion of the _Transition_ trace shows the event being
 dispatched from a source instance to a target instance.
-The state machine transition, from current state to new state,
-is then shown after the ``==>'' symbol.
+The state machine transition of the target instance,
+from current state to new state,
+is shown after the ``==>'' symbol.
+Instances are shown with the set of attribute name / value pairs that
+form the identifier contained in the instance reference.
 
 The figure below shows the trace information in sequence diagram form.
 This diagram was produced using +rosea diagAllTraces+ to generate
-a file suitable for the +seqdiag+ program to then render a graphic.
+a file suitable for the +seqdiag+ program to render a graphic.
 
 image::wmctrl-seqdiag.svg[title="Example Sequence Diagram"]
 
