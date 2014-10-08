@@ -1228,14 +1228,12 @@ The command returns an instance reference to the newly created instance.
 ----
 <<class commands>>=
 proc create {relvar args} {
+    if {[llength $args] % 2 != 0} {
+        tailcall DeclError ARG_FORMAT $args
+    }
     set ref [ToRef $relvar [relvar insert $relvar $args]] ; # <1>
     lassign [SplitRelvarName $relvar] domain class
-    set initstate [relvar restrictone ${domain}::__Arch::InitialState\
-        Class [namespace tail $relvar]] ; # <2>
-    if {[relation isnotempty $initstate]} {
-        CreateInstanceState $domain $class [relation extract $initstate State]\
-                [lindex $ref 1]
-    }
+    CreateInInitialStateFromRef $domain $class $ref
     return $ref
 }
 ----
@@ -1296,6 +1294,9 @@ The command returns an instance reference to the newly created instance.
 ----
 <<class commands>>=
 proc createin {relvar state args} {
+    if {[llength $args] % 2 != 0} {
+        tailcall DeclError ARG_FORMAT $args
+    }
     lassign [SplitRelvarName $relvar] domain class
     set initstate [relvar restrictone ${domain}::__Arch::State\
         Class $class State $state]
@@ -1303,7 +1304,7 @@ proc createin {relvar state args} {
         tailcall DeclError UNKNOWN_STATE $state $relvar
     }
     set ref [ToRef $relvar [relvar insert $relvar $args]]
-    CreateInstanceState $domain $class $state [lindex $ref 1]
+    CreateStateInstanceFromRef $domain $class $state $ref
     return $ref
 }
 ----
@@ -1350,24 +1351,45 @@ test createin-1.0 {
 We factor out the code to create the instance tuple that tracks
 the state of the instance.
 
-(((rosea,Helper,CreateInstanceState)))
+(((rosea,Helper,CreateStateInstance)))
 [source,tcl]
 ----
 <<helper commands>>=
-proc CreateInstanceState {domain class state value} {
-    set tuple [concat\
-        [tuple get [relation tuple $value]]\
-        [list __State $state]\
-    ] ; # <1>
-    relvar insert ${domain}::__${class}__STATEINST $tuple
+proc CreateStateInstance {domns class state value} {
+    tailcall relvar insert ${domns}::__${class}__STATEINST\
+            [concat $value [list __State $state]]
+}
+
+proc CreateStateInstanceFromRef {domns class state ref} {
+    tailcall CreateStateInstance $domns $class $state\
+        [tuple get [relation tuple [lindex $ref 1]]]
+}
+----
+
+(((rosea,Helper,CreateInInitialState)))
+[source,tcl]
+----
+<<helper commands>>=
+proc CreateInInitialState {domns class value} {
+    set initstate [relvar restrictone ${domns}::__Arch::InitialState\
+        Class $class]
+    if {[relation isnotempty $initstate]} {
+        CreateStateInstance $domns $class [relation extract $initstate State]\
+            $value
+    }
+    return
+}
+
+proc CreateInInitialStateFromRef {domns class ref} {
+    set initstate [relvar restrictone ${domns}::__Arch::InitialState\
+        Class $class]
+    if {[relation isnotempty $initstate]} {
+        CreateStateInstanceFromRef $domns $class\
+            [relation extract $initstate State] $ref
+    }
     return
 }
 ----
-<1> The heading of the ``INSTANCE'' relvar is just that of the
-identifier of the relvar plus an attribute to hold the current
-state value.
-Note the use of leading underscores in ``__State'' to prevent
-any name conflict with the identifying attributes.
 
 ==== Asynchronous Instance Creation
 
@@ -2032,12 +2054,7 @@ proc createMultiAssigner {rname args} {
     if {![struct::set equal [dict keys $args] $idattrs]} {
         tailcall DeclError NO_IDENTIFIER [dict keys $args] $idattrs
     }
-    # Find the initial state
-    set initstate [pipe {
-        relvar restrictone ${domain}::__Arch::InitialState Class $relationship |
-        relation extract ~ State
-    }]
-    relvar insert $assignrelvar [concat $args [list __State $initstate]]
+    CreateInInitialState $domain $relationship $args
 }
 ----
 
@@ -7142,18 +7159,11 @@ proc generate {{prefix {}}} {
                 [relation semijoin $domain $SingleAssigner\
                 -using {Name Domain}] {
             relation assign $sassigner {Relationship relationship}
-            set assignvar ${domns}::__${relationship}__STATEINST
-            relvar create $assignvar {
+            relvar create ${domns}::__${relationship}__STATEINST {
                 Id      int
                 __State string
             } Id
-
-            set initialstate [pipe {
-                relation semijoin $sassigner $AssignerStateModel\
-                    $StateModel -using {Domain Domain Relationship Model} |
-                relation extract ~ InitialState
-            }]
-            relvar insert $assignvar [list Id 0 __State $initialstate]
+            CreateInInitialState $domns $relationship {Id 0}
         }
 
         relation foreach massigner\
@@ -8285,15 +8295,13 @@ proc class {class heading args} {
     # Now we have to deal with any state model that might be present.  We have
     # to set up the initial state properly if such a thing exists for this
     # class.
-    set initstate [relvar restrictone ${domns}::__Arch::InitialState\
-        Class $class]
-    if {[relation isnotempty $initstate]} {
-        relation assign $initstate {State state}
-        set idattrs [lindex [relvar identifiers $relvar] 0]
-        relation foreach inst $insts {
-            CreateInstanceState $domns $class $state\
-                [relation project $inst {*}$idattrs]
-        }
+    set idattrs [lindex [relvar identifiers $relvar] 0]
+    relation foreach inst $insts {
+        CreateInInitialState $domns $class [pipe {
+            relation project $inst {*}$idattrs |
+            relation tuple ~ |
+            tuple get ~
+        }]
     }
 
     return
@@ -8491,6 +8499,62 @@ test populate-1.3 {
 
 [source,tcl]
 ----
+<<config command tests>>=
+test populate-1.4 {
+    populate a multi assigner
+} -setup {
+    rosea configure {
+        domain foo {
+            class Customer {
+                attribute Name string -id 1
+            }
+            class Clerk {
+                attribute Name string -id 1
+                attribute Customer string
+                attribute Department string
+                reference R1 Customer -link {Customer Name}
+                reference R2 Department -link {Department Name}
+            }
+            class Department {
+                attribute Name string -id 1
+            }
+            association R1 Clerk 0..1--0..1 Customer
+            association R2 Clerk 1..n--1 Department
+            assigner R1 {
+                identifyby Department
+                state s1 {a b} {
+                    puts $a $b
+                }
+                transition s1 - e1 -> s2
+
+                state s2 {} {
+                    puts "in s2"
+                        set ::done 1
+                }
+                transition s2 - e1 -> s1
+            }
+        }
+    }
+    rosea generate
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::foo
+} -body {
+    rosea populate {
+        domain foo {
+            assigner R1 Name Shoes
+        }
+    }
+    ::foo::R1 signal {Name Shoes} e1
+    set timer [after 1000 set ::done TIMEOUT]
+    vwait ::done
+    after cancel $timer
+    set ::done
+} -result {1}
+----
+
+[source,tcl]
+----
 <<domain populate commands>>=
 proc assigner {rname heading args} {
     # Determine if we have one big list or a bunch of values.
@@ -8512,7 +8576,6 @@ proc assigner {rname heading args} {
 
     # Iterate over the attribute values taking them in chunks that are the same
     # size as the heading.
-    set body [list]
     for {set vindex 0} {$vindex < [llength $popvalues]} {incr vindex $headlen} {
         set values [lrange $popvalues $vindex [expr {$vindex + $headlen - 1}]]
         # Create a tuple as a list of attribute name / value pairs.  We assume
@@ -8521,12 +8584,8 @@ proc assigner {rname heading args} {
         foreach attr $heading value $values {
             lappend tuple $attr $value
         }
-        # Accumulate the tuples as a list to form the body that will be
-        # inserted into the relvar.
-        lappend body $tuple
+        CreateInInitialState $domns $rname $tuple
     }
-    # HERE -- need to add the initial state!!
-    relvar insert $relvar {*}$body
 
     return
 }
