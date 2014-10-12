@@ -64,6 +64,14 @@ PDF 	=\
      	$(DOCDIR)/$(patsubst %.aweb,%.pdf,$(DOCSRC))\
      	$(NULL)
 
+MANSRC	=\
+     	$(DOCDIR)/$(patsubst %.aweb,%.man,$(DOCSRC))\
+     	$(NULL)
+
+MANDOC	=\
+     	$(DOCDIR)/$(patsubst %.aweb,%.html,$(DOCSRC))\
+     	$(NULL)
+
 TESTS	=\
      	$(patsubst %.aweb,%.test,$(DOCSRC))\
 	$(NULL)
@@ -116,7 +124,7 @@ ASCIIDOC_OPTS =\
 
 .PHONY : all doc code tests runtests example clean
 
-all : doc code tests example
+all : doc code tests example manual
 
 doc : $(PDF)
 
@@ -125,6 +133,8 @@ code : $(TCLSRC) pkgIndex.tcl
 tests : code $(TESTS)
 
 example : $(TCLSRC) wmctrl.tcl
+
+manual : $(MANDOC)
 
 runtests : tests
 	cd $(TESTDIR) ; tclsh $(TESTS) -verbose bet -level info
@@ -178,6 +188,12 @@ $(IMAGEDIR)/%.pdf : %.uxf
 
 $(IMAGEDIR)/%.svg : $(IMAGEDIR)/%.diag
 	seqdiag --antialias -T svg -o $@ $<
+
+$(MANSRC) : $(DOCSRC)
+	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $@ $<
+
+$(MANDOC) : $(MANSRC)
+	dtplite -o $@ html $<
 #
 # vim :set sw=8 ts=8 sts=8 noexpandtab:
 #
