@@ -3356,6 +3356,13 @@ proc delaysignal {time dstset event args} {
 INVALID_TIME    {invalid time value, "%s"}
 ----
 
+///////
+----
+<<manual architecture instance commands>>=
+[call [cmd canceldelayed] [arg srcref] [arg dstref] [arg event]]
+----
+///////
+
 [source,tcl]
 ----
 <<instance commands>>=
@@ -3378,6 +3385,13 @@ proc canceldelayed {srcref dstset event} {
 SINGLE_OR_EMPTY_REF_REQUIRED {single valued or nil reference required, %d found}
 ----
 
+///////
+----
+<<manual architecture instance commands>>=
+[call [cmd delayremaining] [arg srcref] [arg dstref] [arg event]]
+----
+///////
+
 [source,tcl]
 ----
 <<instance commands>>=
@@ -3399,6 +3413,13 @@ proc delayremaining {srcref dstref event} {
 <<error code formats>>=
 SINGLE_REF_REQUIRED     {single valued reference required, %d found}
 ----
+
+///////
+----
+<<manual architecture instance commands>>=
+[call [cmd instop] [arg instref] [arg operation] [opt [arg "arg1 arg2 ..."]]]
+----
+///////
 
 [source,tcl]
 ----
@@ -4144,6 +4165,17 @@ set our location counter to where that command starts.
 So one of our top level +rosea+ commands is to configure a domain from
 a script.
 
+[float]
+===== Synopsis
+====
++configure+ _script_
+====
+
++script+::
+    A Tcl script that is executed in an environment that will resolve
+    _domain configuration_ commands that may be used to define
+    the characteristics of a domain.
+
 ///////
 ----
 <<manual package commands>>=
@@ -4162,6 +4194,8 @@ containing the definition of a single domain.
 ----
 ///////
 
+[float]
+===== Implementation
 [source,tcl]
 ----
 <<rosea exports>>=
@@ -4202,10 +4236,13 @@ CONFIG_ERRORS     {encountered %d configuration script errors}
 <<manual package commands>>=
 [call [cmd "::rosea configureFromFile"] [arg filename]]
 The [cmd configureFromFile] command executes the [cmd configure]
-command on the data that is contained in the file named, [arg filename].
+command on the script that is contained in the file named, [arg filename].
 ----
 ///////
 
+
+[float]
+===== Implementation
 [source,tcl]
 ----
 <<rosea exports>>=
@@ -4260,20 +4297,63 @@ After we have finished all the configuration scripts,
 then the +generate+ command is used to layout the data structures
 and namespace as needed.
 
-In this section we start this process by showing some of the data
-structures we will use to store the configuration data as it is
-being collected.
-Below is a UML class diagram for the data that the DSL will populate
-for a domain definition.
+The structure of the data that is populated by the configuration
+scripts is rather complicated itself.
+There are many rules as to what is allowed or not allowed
+when configuring the characteristics of a domain.
+It is important that these rules be enforced to insure that the
+generated domain is correct.
+To accomplish that we will formulate a model of the domain rules.
+Such models-of-models are usually called _meta-models_.
+An unfortunate consequence of using a meta-model is that they tend
+to be rather abstract and it is easy to confuse the rules associated
+with building models with the rules associated with some particular
+application domain.
+We will strive to make the distinction clear.
+To further confound the situation,
+we will implement the meta-models as a set of TclRAL relvars and
+relvar constraints.
+This means we are putting TclRAL commands to two distinct uses:
+first as a basis for the data architecture of the generated domains
+and second as the basis for accumulating the domain definition
+during configuration.
+Again, we will strive to make the distinction clear.
+
+In this section we start the process of configuring a domain by showing some of
+the data structures we will use to store the configuration data as it is being
+collected.
+We will present these meta-model diagrams in small groups that are
+associated with the configuration commands being discussed.
+We will establish a pattern of presenting the meta-model class diagram
+followed by a dicussion of the rules it enforces and finally show
+the configuration code and how it populates the meta-model relvars.
+
+Below is a UML class diagram for a domain and some of its component parts.
 
 image::config-domain.pdf[title="Domain Configuration Class Diagram"]
 
-Since we are deep into TclRAL in this package,
-the class diagram above will be implemented as a set of TclRAL relvars
-and constraints.
-We will establish a pattern of showing a class diagram followed by
-the TclRAL relvar definitions and finally the code for the configuration
-command.
+A *Domain* is characterized by a Name and Location
+and consists of a set of *Domain Elements* (*R1*).
+*Domain Elements* are of three types (*R2*),
+*Domain Operation*, *Relationship* and *Class*.
+*R2* insures that no two elements have the same name and this makes sure that
+there are no naming conflicts in the namespace ensemble into which the domain
+is placed when it is generated.
+A *Class* may also have a set of operations (*R8*).
+These operations are of two types (*R7*), *Instance Operation* and
+*Class Operation*.
+The difference between the two is that *Instance Operation* will have
+a generated +self+ argument that refers to the instance on which the
+operation is performed.
+In turn,
+operations may be either user defined or system defined (*R9* and *R10*).
+System operations are one of the *Supplied Operation* (*R16* and *R15*)
+A *Supplied Operation* is mapped to a Tcl *Command* and may be supplied
+to all classes and instances or to those where *RequiresStateModel* is true.
+
+As we will see repeated many times below,
+the above UML class diagram has a direct textual correspondance to
+TclRAL +relvar+ commands.
 
 [source,tcl]
 ----
@@ -4341,6 +4421,9 @@ proc domain {name body} {
         # information to tie together the referential attributes and
         # the association definitions.
         <<bind association references>>
+
+        # We must also compute how polymorphic events are inherited
+        # down generalization hierarchies.
         <<propagate polymorphic events>>
     } on error {result opts} {
         log::error $result
@@ -4355,14 +4438,6 @@ implies that all the components defined are to be part of this domain.
 Domains are open ended definitions and the +uinsert+ command will not
 throw an error upon a duplicate.
 
-We will defer the discussion about binding the associations and their
-attribute referenced until later when we have covered those commands.
-For now,
-we will say that there are semantics evaluations and checks that can only
-be done after the entire domain configuration script has been processed.
-The reason for this lies mainly with the way the DSL script commands
-were defined to make them convenient when translating from an XUML model.
-
 (((error code,EMPTY_NAME)))
 [source,tcl]
 ----
@@ -4370,6 +4445,28 @@ were defined to make them convenient when translating from an XUML model.
 EMPTY_NAME      {the empty string is not a value name for a %s}
 ----
 
+After evaluating the domain configuration script,
+it is necessary to patch up the association data.
+We will defer the discussion about binding the associations and their
+attribute referenced until later when we have covered those commands.
+For now,
+we will say that there are semantics evaluations and checks that can only
+be done after the entire domain configuration script has been processed.
+The reason for this lies mainly with the way the DSL script commands
+were defined to make them convenient when translating from an XUML model.
+Polymorphic events also must be dealt with after the domain configuration
+is in place.
+Again we will discuss this further below.
+
+Although we have said that domain configurations are cumulative,
+clearly the need to resolve association bindings and polymorphic event
+inheritance means that domain configurations cannot be split arbitrarily.
+You will need to be aware that certain divisions of domain configuration
+will end up separating information that is needed at the end of the
+configuration process.
+
+[float]
+===== Tests
 [source,tcl]
 ----
 <<config command tests>>=
@@ -4381,6 +4478,7 @@ test configure-1.0 {
 } -body {
     rosea configure {
         domain foo {
+            # A domain may be empty of components.
         }
     }
     relation extract [relvar set ::rosea::Config::Domain] Name
@@ -4816,7 +4914,7 @@ association requires more specification to resolve an inherent ambiguity.
         then the name of the referenced attribute is assumed to be
         the same as the referencing attribute.
         Multiple +-link+ options may be given for a given _relationships_.
-        The link options define a one-to-one correspondance between the
+        The link options must define a one-to-one correspondance between
         referring attributes and an identifier in _class_.
     +-refid+ _number_:::
         The +refid+ option gives the _number_ of the identifier to which
@@ -4828,6 +4926,14 @@ association requires more specification to resolve an inherent ambiguity.
         option is necessary.
         All the attributes given by the +-link+ options, as a group,
         must reference a specific identifier in _class_.
+
+///////
+----
+<<manual class configuration commands>>=
+[call [cmd reference] [arg relationship] [arg class]\
+        [opt [arg "option value ..."]]]
+----
+///////
 
 [source,tcl]
 ----
@@ -5075,6 +5181,13 @@ relvar eval {
 }
 ----
 
+///////
+----
+<<manual class configuration commands>>=
+[call [cmd classop] [arg name] [arg params] [arg body]]
+----
+///////
+
 [source,tcl]
 ----
 <<class config commands>>=
@@ -5227,6 +5340,13 @@ relvar eval {
     }
 }
 ----
+
+///////
+----
+<<manual class configuration commands>>=
+[call [cmd instop] [arg name] [arg params] [arg body]]
+----
+///////
 
 [source,tcl]
 ----
@@ -6121,17 +6241,6 @@ test configure-4.0 {
 
 ==== Defining Assigners
 
-...............
-assigner name script
-...............
-
-///////
-----
-<<manual domain configuration commands>>=
-[call [cmd assigner] [arg relationship] [arg body]]
-----
-///////
-
 [source,tcl]
 ----
 <<assigner config namespace layout>>=
@@ -6146,6 +6255,20 @@ namespace eval AssignerDef {
     <<assigner config commands>>
 }
 ----
+
+
+[float]
+===== Synopsis
+====
++assigner+ _association_ _script_
+====
+
+///////
+----
+<<manual domain configuration commands>>=
+[call [cmd assigner] [arg association] [arg script]]
+----
+///////
 
 [source,tcl]
 ----
@@ -6210,6 +6333,9 @@ proc state {name params body} {
     if {$name eq {}} {
         tailcall DeclError EMPTY_NAME state
     }
+    if {$name in {CH IG}} {
+        tailcall DeclError PSEUDO_STATE $name state
+    }
 
     namespace upvar ::rosea::Config::DomainDef DomainName DomainName
     namespace upvar ::rosea::Config::DomainDef::AssignerDef\
@@ -6251,6 +6377,9 @@ proc state {name params body} {
 proc transition {source - event -> target} {
     if {$event eq {}} {
         tailcall DeclError EMPTY_NAME event
+    }
+    if {$source in {CH IG}} {
+        tailcall DeclError PSEUDO_STATE $name "transition source state"
     }
 
     namespace upvar ::rosea::Config::DomainDef DomainName DomainName
@@ -6299,9 +6428,22 @@ proc transition {source - event -> target} {
 ----
 <<assigner config commands>>=
 proc initialstate {name} {
+    if {$name eq {}} {
+        tailcall DeclError EMPTY_NAME initialstate
+    }
+    if {$name in {CH IG}} {
+        tailcall DeclError PSEUDO_STATE $name initialstate
+    }
     variable InitialState $name
     return
 }
+----
+
+(((error code,PSEUDO_STATE)))
+[source,tcl]
+----
+<<error code formats>>=
+PSEUDO_STATE    {the transition action, "%s", is not valid as %s}
 ----
 
 ///////
@@ -6315,9 +6457,19 @@ proc initialstate {name} {
 ----
 <<assigner config commands>>=
 proc defaulttrans {name} {
+    if {$name ni {CH IG}} {
+        tailcall DeclError EXPECTED_PSEUDO_STATE $name
+    }
     variable DefaultTrans $name
     return
 }
+----
+
+(((error code,EXPECTED_PSEUDO_STATE)))
+[source,tcl]
+----
+<<error code formats>>=
+EXPECTED_PSEUDO_STATE    {expected CH or IG, got "%s"}
 ----
 
 ///////
@@ -6787,6 +6939,9 @@ proc state {name params body} {
     if {$name eq {}} {
         tailcall DeclError EMPTY_NAME state
     }
+    if {$name in {CH IG}} {
+        tailcall DeclError PSEUDO_STATE $name state
+    }
 
     namespace upvar ::rosea::Config::DomainDef DomainName DomainName
     namespace upvar ::rosea::Config::DomainDef::ClassDef ClassName ClassName
@@ -6827,6 +6982,9 @@ proc state {name params body} {
 proc transition {source - event -> target} {
     if {$event eq {}} {
         tailcall DeclError EMPTY_NAME event
+    }
+    if {$source in {CH IG}} {
+        tailcall DeclError PSEUDO_STATE $name "transition source state"
     }
     namespace upvar ::rosea::Config::DomainDef DomainName DomainName
     namespace upvar ::rosea::Config::DomainDef::ClassDef ClassName ClassName
@@ -6894,6 +7052,12 @@ BAD_CREATION_TARGET {the target of a creation event must be a state,\
 ----
 <<state model config commands>>=
 proc initialstate {name} {
+    if {$name eq {}} {
+        tailcall DeclError EMPTY_NAME initialstate
+    }
+    if {$name in {CH IG}} {
+        tailcall DeclError PSEUDO_STATE $name initialstate
+    }
     variable InitialState $name
     return
 }
@@ -6910,6 +7074,9 @@ proc initialstate {name} {
 ----
 <<state model config commands>>=
 proc defaulttrans {name} {
+    if {$name ni {CH IG}} {
+        tailcall DeclError EXPECTED_PSEUDO_STATE $name
+    }
     variable DefaultTrans $name
     return
 }
@@ -9167,6 +9334,13 @@ namespace eval Populate {
     <<domain population namespace layout>>
 }
 ----
+
+///////
+----
+<<manual populate commands>>=
+[call [cmd domain] [arg name] [arg script]]
+----
+///////
 
 [source,tcl]
 ----
@@ -11983,7 +12157,7 @@ namespace eval ::rosea {
     <<rosea exports>>
     namespace ensemble create
 
-    variable version 1.0a1
+    variable version 1.0a2
 
     logger::initNamespace [namespace current]
 
@@ -12006,7 +12180,7 @@ We also provide a root chunk to extract a package index file.
 [source,tcl]
 ----
 <<pkgIndex.tcl>>=
-package ifneeded rosea 1.0a1 [list source [file join $dir rosea.tcl]]
+package ifneeded rosea 1.0a2 [list source [file join $dir rosea.tcl]]
 ----
 
 === Unit Tests
@@ -12108,7 +12282,7 @@ rosea populate {
 [source,tcl]
 ----
 <<rosea.man>>=
-[manpage_begin rosea n 1.0a1]
+[manpage_begin rosea n 1.0a2]
 [comment {
 <<copyright info>>
 }]
