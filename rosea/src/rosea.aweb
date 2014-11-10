@@ -4024,7 +4024,7 @@ But such an undertaking is too error prone for productive uses and
 some type of configuration scheme is needed.
 Configuring the run-time mechanisms via a DSL has the added benefit of creating
 a well defined interface that will insulate the package user from minor changes
-in the mechanisms.
+in the underlying data structures and procedural mechanisms.
 
 The configuration language itself will be a Tcl script.
 Commands in that script will define the aspects of a domain such
@@ -4037,7 +4037,7 @@ There are two basic approaches to the DSL that were considered.
 * As each DSL command is executed, create the corresponding run-time
 structure.
 One can view that as a type of on-the-fly interpretation.
-* Consume all the DSL commands, storing away any data that is required
+* Consume all the DSL commands, storing away any data that the commands contain
 and then generate the run-time structure at the end.
 
 The first approach is certainly simpler to code
@@ -4060,6 +4060,32 @@ considerable flexibility.
 It has the added benefit of allowing much easier and extensive
 introspection of the domain than could be possible if we were just
 examining the run-time structures themselves.
+As we shall see below,
+the data structures required to accumulate the domain definition
+are quite large and we will spend considerable time discussing them.
+There turn out to be a relatively large number of rules about how
+an XUML domain is specified and we will need data structures to hold
+the specification data and enforce the rules.
+
+///////
+----
+<<manual configuration description>>==
+The commands in this section are used to configure domains.
+Configuration is the process whereby the properties of a domain
+are specified and there is only one command in this section,
+namely [cmd domain].
+The [arg script] argument to the [cmd "::rosea configure"]
+(or the contents of the file given to [cmd "rosea configureFromFile"])
+should contain one or more invocations of the [cmd domain] command.
+[example {
+rosea configure {
+    domain wmctrl {
+        # Invoke domain configuration commands here
+    }
+}
+}]
+----
+///////
 
 
 === Config Namespace Layout
@@ -4134,11 +4160,11 @@ We hold the evaluation lambda as a piece of data.
 variable evalLambda {{body} {
     upvar #0 ::rosea::Config::errcount errcount ; # <1>
     upvar #0 ::rosea::Config::configlineno configlineno
-    set cmdline $configlineno
+    set lineno $configlineno
     set command {}
     foreach line [split $body \n] { # <2>
         append command $line \n
-        incr cmdline ; # <3>
+        incr lineno ; # <3>
         if {[info complete $command]} {
             try {
                 eval $command
@@ -4147,7 +4173,7 @@ variable evalLambda {{body} {
                 incr errcount
             }
             set command {} ; # <4>
-            set configlineno $cmdline
+            set configlineno $lineno
         }
     }
     return $errcount
@@ -4162,8 +4188,11 @@ we have something that has some chance of being a real command.
 <4> After evaluating a command we begin to assemble another one and
 set our location counter to where that command starts.
 
-So one of our top level +rosea+ commands is to configure a domain from
+=== Configure Command
+
+One of our top level +rosea+ commands is to configure a domain from
 a script.
+
 
 [float]
 ===== Synopsis
@@ -4196,6 +4225,8 @@ containing the definition of a single domain.
 
 [float]
 ===== Implementation
+
+(((proc,rosea,configure)))
 [source,tcl]
 ----
 <<rosea exports>>=
@@ -4231,6 +4262,10 @@ components have been defined.
 CONFIG_ERRORS     {encountered %d configuration script errors}
 ----
 
+It is often convenient to hold the +configure+ script in a file.
+The +rosea configureFromFile+ command supports reading the configure
+script directly from a file.
+
 ///////
 ----
 <<manual package commands>>=
@@ -4243,6 +4278,8 @@ command on the script that is contained in the file named, [arg filename].
 
 [float]
 ===== Implementation
+
+(((proc,rosea,configureFromFile)))
 [source,tcl]
 ----
 <<rosea exports>>=
@@ -4322,6 +4359,8 @@ Again, we will strive to make the distinction clear.
 In this section we start the process of configuring a domain by showing some of
 the data structures we will use to store the configuration data as it is being
 collected.
+The design of this meta-model was first defined in the +raloo+ package.
+// HERE need reference to raloo
 We will present these meta-model diagrams in small groups that are
 associated with the configuration commands being discussed.
 We will establish a pattern of presenting the meta-model class diagram
@@ -4332,19 +4371,20 @@ Below is a UML class diagram for a domain and some of its component parts.
 
 image::config-domain.pdf[title="Domain Configuration Class Diagram"]
 
-A *Domain* is characterized by a Name and Location
+A *Domain* is characterized by a *Name* and *Location*
 and consists of a set of *Domain Elements* (*R1*).
 *Domain Elements* are of three types (*R2*),
 *Domain Operation*, *Relationship* and *Class*.
 *R2* insures that no two elements have the same name and this makes sure that
-there are no naming conflicts in the namespace ensemble into which the domain
-is placed when it is generated.
+there are no naming conflicts with the namespace ensemble commands
+that are generated for the domain.
 A *Class* may also have a set of operations (*R8*).
 These operations are of two types (*R7*), *Instance Operation* and
 *Class Operation*.
 The difference between the two is that *Instance Operation* will have
 a generated +self+ argument that refers to the instance on which the
 operation is performed.
+A *Class Operation* has no such argument.
 In turn,
 operations may be either user defined or system defined (*R9* and *R10*).
 System operations are one of the *Supplied Operation* (*R16* and *R15*)
@@ -4400,8 +4440,9 @@ we will evaluate the configuration script in the +DomainDef+ child namespace.
 That namespace will define commands for all the components of the
 domain.
 We will use a similar arrangement for other nested aspects of
-defining parts of the domain.
+domain definitions.
 
+(((proc,configure,domain)))
 [source,tcl]
 ----
 <<config commands>>=
@@ -4450,7 +4491,7 @@ it is necessary to patch up the association data.
 We will defer the discussion about binding the associations and their
 attribute referenced until later when we have covered those commands.
 For now,
-we will say that there are semantics evaluations and checks that can only
+we will say that there are semantic evaluations and checks that can only
 be done after the entire domain configuration script has been processed.
 The reason for this lies mainly with the way the DSL script commands
 were defined to make them convenient when translating from an XUML model.
@@ -4556,22 +4597,26 @@ namespace eval DomainDef {
 
 === Defining Classes
 
+An XUML class represents a real world entity.
+It is defined by giving it a name and providing a script to
+further define its characteristics.
+
 ====
-+class+ _name_ _body_
++class+ _name_ _script_
 ====
 
 +name+::
     The name of the class. A class name must be a non-empty string.
-+body+::
++script+::
     A Tcl script containing invocation of the class definition commands
     to specify the details of the class configuration.
 
 ///////
 ----
 <<manual domain configuration commands>>=
-[call [cmd class] [arg name] [arg body]]
+[call [cmd class] [arg name] [arg script]]
 
-The [cmd class] command executes [arg body] as a Tcl script in an environment
+The [cmd class] command executes [arg script] as a Tcl script in an environment
 where the characteristcs of the class may be defined.
 The class is given [arg name] as a name which may not be the empty string.
 ----
@@ -4579,18 +4624,24 @@ The class is given [arg name] as a name which may not be the empty string.
 
 Below is a UML class diagram of the configuration data for defining
 classes.
-There are a substantial number of rules about what constitutes a
-proper XUML class.
-This diagram is intended to enforce those rules.
-For example,
-every class must have at least one identifier.
-That rule is enforced by relationship, +R4+.
-Every class must have at least one attribute and that rule is
-enforced by relationship, +R3+.
-The use of a schema such as this insures that evaluating a class
-definition script results in a consistent class definition.
 
 image::config-classes.pdf[title="Classes Configuration Class Diagram"]
+
+There are a substantial number of rules about what constitutes a
+proper XUML class.
+A *Class* has one or more **Attribute**s (*R3*).
+It also has one or more **Identfier**s (*R4*)
+An *Attribute* that serves as part of an *Identifier* is known as
+an *Identifying Attribute* (*R5*).
+An *Attribute* may have a *Default Value* (*R6*).
+An *Identifiying Attribute* is sometimes referenced as part of
+realizing a relationship and in that role is treated as
+a *Referenced Id Attribute* (*R11*).
+Also, classes may contain attributes that are referential and in
+that role the attribute is treated as an *Attribute Reference* (*R12*).
+Of course, any *Attribute Reference* must ultimately refer to some
+*Attribute* that is in a class (*R13*).
+
 
 As before,
 the TclRAL relvar defintions corresponding to the class model are
@@ -12293,11 +12344,16 @@ rosea populate {
 [description]
 <<manual description>>
 [section "Package Commands"]
+The commands in this section are part of the ensemble command [cmd ::rosea].
+Their primary use is to configure, generate and populate domains.
+There are also commands to control state machine tracing and to
+format state machine trace records.
 [list_begin definitions]
 [usage "Package Commands"]
 <<manual package commands>>
 [list_end]
 [section "Configuration Commands"]
+<<manual configuration description>>
 [list_begin definitions]
 [usage "Configuration Commands"]
 <<manual configuration commands>>
