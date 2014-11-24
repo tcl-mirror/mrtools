@@ -53,7 +53,7 @@ IMAGES =\
 	$(NULL)
 
 SEQIMAGES=\
-	$(patsubst %.diag,$(IMAGEDIR)/%.svg,$(SEQDIAG))\
+	$(patsubst %.diag,$(IMAGEDIR)/%.pdf,$(SEQDIAG))\
 	$(NULL)
 
 TCLSRC	=\
@@ -186,8 +186,8 @@ $(IMAGEDIR)/%.pdf : %.uxf
 	umlet -action=convert -format=pdf\
 		-filename=$< -output=$(basename $@)
 
-$(IMAGEDIR)/%.svg : $(IMAGEDIR)/%.diag
-	seqdiag --antialias -T svg -o $@ $<
+$(IMAGEDIR)/%.pdf : $(IMAGEDIR)/%.diag
+	seqdiag --antialias -T pdf -o $@ $<
 
 $(MANSRC) : $(DOCSRC)
 	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $@ $<
