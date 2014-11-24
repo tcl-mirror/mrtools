@@ -31,6 +31,9 @@ DIAGRAMS =\
 	wmc-class-diagram.uxf\
 	wm-states.uxf\
 	arch-class-diagram.uxf\
+	ref-links.uxf\
+	assoc-ref-links.uxf\
+	gen-links.uxf\
 	$(NULL)
 
 LSDIAGRAMS =\

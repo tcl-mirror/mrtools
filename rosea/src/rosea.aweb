@@ -325,7 +325,7 @@ identifying attributes.
 
 [float]
 ===== Implementation
-(((rosea,Helper,DeRef)))
+(((rosea,Helper,deRef)))
 [source,tcl]
 ----
 <<instance commands>>=
@@ -399,6 +399,19 @@ test deRef-1.1 {
     set ref [list [namespace current]::A {{Attr1 int} {{Attr1 40}}}]
     rosea::InstCmds::deRef $ref Attr3
 } -result {{Attr1 int Attr3 string} {{Attr1 40 Attr3 zub}}} -match relation
+----
+
+==== Empty Reference
+
+[float]
+===== Implementation
+(((rosea,Helper,emptyRef)))
+[source,tcl]
+----
+<<instance commands>>=
+proc emptyRef {} {
+    return {{} {{} {}}}
+}
 ----
 
 ==== Counting References
@@ -2028,6 +2041,28 @@ Later we discuss linking for class based associations.
 They are very similar, but class bases associations may require
 additional arguments.
 
+The figure below shows the architectural relvars required to
+link instances.
+
+image::ref-links.pdf[title="Data Required for Linking Simple Associations"]
+
+The +RefLink+ relvar contains the information require to support
+linking instances at run time.
+The +ReferringAttrs+ attribute is a relation valued attribute
+and we use the UML composition notation to show the nested attributes
+of the +ReferringAttrs+ attribute.
+For the case of simple association,
+we have one class that plays the role of the +ReferringClass+ that
+contains attribute references to the +ReferencedClass+.
+Since referential attribute refer to an identifier and since
+identifiers may consist of multiple attributes,
+the +ReferringAttrs+ attribute gives the mapping and the
++ReferringAttribute+ / +ReferencedAttribute+ pairs give the
+attribute correspondence in the mapping.
+This relvar is populated by the domain generation process.
+The relationship command that links instances in a simple association
+uses this data.
+
 [float]
 ===== Synopsis
 ====
@@ -2037,12 +2072,13 @@ _relationship_ +link+ _instref1_ _instref2_
 +instref1+::
     An instance reference to a class that participates in
     _relationship_.
-+instref1+::
++instref2+::
     An instance reference to the other class that participates in
     _relationship_.
 
-The +link+ command create an relationship linkage for the simple
-association, _relationship_.
+The +link+ command create an relationship linkage between the class instances
+referenced by _instref1_ and _instref2_ for the simple association,
+_relationship_.
 
 ///////
 ----
@@ -2091,82 +2127,136 @@ query the referenced attributes to get their values.
 ----
 <<relationship commands>>=
 proc linkSimple {rname instref1 instref2} {
-    lassign $instref1 relvar1 inst1
-    lassign [SplitRelvarName $relvar1] domain1 class1
-
-    lassign $instref2 relvar2 inst2
-    lassign [SplitRelvarName $relvar2] domain2 class2
-
-    if {$domain1 ne $domain2} {
-        tailcall DeclError NO_CROSS_DOMAIN $domain1 $domain2
-    }
-
-    set archns ${domain1}::__Arch
-
-    set reflink [relvar restrictone ${archns}::RefLink Relationship $rname]
-    if {[relation isempty $reflink]} {
-        tailcall DeclError UNKNOWN_RELATIONSHIP $rname
-    }
-    relation assign $reflink\
-        {ReferringClass referringClass}\
-        {ReferencedClass referencedClass}\
-        {ReferringAttrs referringAttrs}
-
-    # First we determine which of the argument instance references are from the
-    # referring class and which from the referenced class.
-    if {$class1 eq $referringClass && $class2 eq $referencedClass} {
-        set fromrelvar $relvar1
-        set frominsts $inst1
-        set torelvar $relvar2
-        set toinst $inst2
-    } elseif {$class2 eq $referringClass && $class1 eq $referencedClass} {
-        set fromrelvar $relvar2
-        set frominsts $inst2
-        set torelvar $relvar1
-        set toinst $inst1
-    } else {
-        tailcall DeclError NON_PARTICIPANTS $relvar1 $relvar2 $rname\
-            $referringClass $referencedClass
-    }
-
-    # You may link many referring instances to the same referenced instance,
-    # but there can only be one referenced instance
-    if {[relation cardinality $toinst] != 1} {
-        tailcall MUST_BE_SINGULAR $torelvar [relation cardinality $toinst]
-    }
-
-    # The update we want to perform is to modify the values of the referential
-    # attributes to match the values of the referenced attributes. First we
-    # deference the referenced instance.  We perform the implied semijoin in
-    # place since we have already split apart the instance reference into its
-    # components.
-    set refedvalue [relation semijoin $toinst [relvar set $torelvar]]
-
-    # Our stategy for updating the referential attributes is to create a
-    # dictionary whose keys are the referential attribute names the values are
-    # those of the referenced attributes.  It is important to maintain the
-    # correspondence between the referential and referenced attributes. The
-    # architectural data structures do this by have the ReferringAttrs
-    # attribute as a relation valued attribute.  So it is a matter of extending
-    # that relation to include the values and extracting the dictionary.
-    set tovalues [pipe {
-        relation extend $referringAttrs rfa RefValue string {
-            [relation extract $refedvalue\
-                [tuple extract $rfa ReferencedAttribute]]
-        } |
-        relation dict ~ ReferringAttribute RefValue
-    }]
-
-    # Now we iterate across the referring instances updating the referential
-    # attributes to be the values of the dictionary we just computed.
-    relation foreach frominst $frominsts {
-        relvar updateone $fromrelvar fromtup\
-                [tuple get [relation tuple $frominst]] { # <1>
-            tuple update $fromtup {*}$tovalues ; # <2>
-        }
-    }
+    <<linkSimple: validate arguments>>
+    <<linkSimple: look up link info>>
+    <<linkSimple: determine reference direction>>
+    <<linkSimple: obtain referenced values>>
+    <<linkSimple: update referring values>>
 
     return
+}
+----
+
+We need to break apart the components of the arguments and insure
+that we aren't attempting something absurd such as linking across domains.
+
+[source,tcl]
+----
+<<linkSimple: validate arguments>>=
+lassign $instref1 relvar1 inst1
+lassign [SplitRelvarName $relvar1] domain1 class1
+
+lassign $instref2 relvar2 inst2
+lassign [SplitRelvarName $relvar2] domain2 class2
+
+if {$domain1 ne $domain2} {
+    tailcall DeclError NO_CROSS_DOMAIN $domain1 $domain2
+}
+----
+
+We find the instance of +RefLink+ that matches the relation name.
+This will allow us to detect any unknown relationships.
+For convenience, we can then assign the attribute values into
+ordinary Tcl variables.
+
+[source,tcl]
+----
+<<linkSimple: look up link info>>=
+set archns ${domain1}::__Arch
+
+set reflink [relvar restrictone ${archns}::RefLink Relationship $rname]
+if {[relation isempty $reflink]} {
+    tailcall DeclError UNKNOWN_RELATIONSHIP $rname
+}
+relation assign $reflink\
+    {ReferringClass referringClass}\
+    {ReferencedClass referencedClass}\
+    {ReferringAttrs referringAttrs}
+----
+
+As we stated,
+we didn't want to impose an order on the instance references.
+So here we can compare the class names to determine the roles
+the classes play in the association.
+This also allows us to check that the classes actually participate
+in the given relationship.
+
+[source,tcl]
+----
+<<linkSimple: determine reference direction>>=
+if {$class1 eq $referringClass && $class2 eq $referencedClass} {
+    set fromrelvar $relvar1
+    set frominsts $inst1
+    set torelvar $relvar2
+    set toinst $inst2
+} elseif {$class2 eq $referringClass && $class1 eq $referencedClass} {
+    set fromrelvar $relvar2
+    set frominsts $inst2
+    set torelvar $relvar1
+    set toinst $inst1
+} else {
+    tailcall DeclError NON_PARTICIPANTS $relvar1 $relvar2 $rname\
+        $referringClass $referencedClass
+}
+----
+
+You may link many referring instances to the same referenced instance,
+but there can only be one referenced instance.
+
+[source,tcl]
+----
+<<linkSimple: determine reference direction>>=
+if {[relation cardinality $toinst] != 1} {
+    tailcall MUST_BE_SINGULAR $torelvar [relation cardinality $toinst]
+}
+----
+
+The update we want to perform is to modify the values of the referential
+attributes to match the values of the referenced attributes.
+First, we deference the referenced instance.
+We perform the +semijoin+ in place since we have already split apart the
+instance reference into its components.
+
+[source,tcl]
+----
+<<linkSimple: obtain referenced values>>=
+set refedvalue [relation semijoin $toinst [relvar set $torelvar]]
+----
+
+Our stategy for updating the referential attributes is to create a
+dictionary whose keys are the referential attribute names the values are
+those of the referenced attributes.
+It is important to maintain the correspondence between the referential and
+referenced attributes.
+The +RefLink+ relvar does this by have the +ReferringAttrs+
+attribute as a relation valued attribute.
+So it is a matter of extending that relation to include the
+referenced value and then extracting the referenced value along with the
+referring attribute name.
+
+[source,tcl]
+----
+<<linkSimple: update referring values>>=
+set tovalues [pipe {
+    relation extend $referringAttrs rfa RefValue string {
+        [relation extract $refedvalue\
+            [tuple extract $rfa ReferencedAttribute]]
+    } |
+    relation dict ~ ReferringAttribute RefValue
+}]
+----
+
+Now we iterate across the referring instances updating the referential
+attributes to be the values of the dictionary we just computed.
+
+[source,tcl]
+----
+<<linkSimple: update referring values>>=
+relation foreach frominst $frominsts {
+    relvar updateone $fromrelvar fromtup\
+            [tuple get [relation tuple $frominst]] { # <1>
+        tuple update $fromtup {*}$tovalues ; # <2>
+    }
 }
 ----
 <1> The +relvar updateone+ command needs a list of attribute name/value
@@ -3097,7 +3187,7 @@ a set of instances for the class that is the ultimate destination of
 the relationship chain.
 
 [example {
-set inst [findRelated $self R1 {R2 Sub} ~R3]
+set inst [findRelated $self R1 {~R2 Sub} ~R3]
 }]
 ----
 ///////
@@ -3730,14 +3820,14 @@ This is the preferred way to perform _set-at-a-time_ computations.
 [float]
 ===== Synopsis
 ====
-+readAttribute+ _instref_ _?attr1 attr2?_
++readAttribute+ _instref_ _?attr1 attr2 ...?_
 ====
 
 +instref+::
     An instance reference to those instances that are to be updated.
     This instance reference must be a singular reference.
 +attrN+::
-    The [arg attrN] arguments are a set of attribute names.
+    The +attrN+ arguments are a set of attribute names.
     The values of the attributes will be returned.
     If no +attrN+ arguements are given,
     the return value is the empty string.
@@ -3768,6 +3858,8 @@ set duration [readAttribute $wc SpinDuration]
 ----
 ///////
 
+[float]
+===== Implementation
 [source,tcl]
 ----
 <<instance commands>>=
@@ -3844,6 +3936,8 @@ The [cmd delete] command deletes all the class instances referenced by
 ----
 ///////
 
+[float]
+===== Implementation
 (((rosea,InstCmds,delete)))
 [source,tcl]
 ----
@@ -3888,16 +3982,24 @@ proc SelfInstRef {{level 2}} {
 }
 ----
 
-One complication with signaling events is dealing with polymorphic
-events.
-Polymorphic events are sent to a superclass instance and, at run time,
-are mapped to an event in the subclass instance to which the superclass
-instance is currently related.
-In general the rules of mapping polymorphic events can be complex,
-so we factor that into a procedure.
-Otherwise, the +signal+ procedure is simplified means of invoking
-a dispatch procedure that queues an event and hooks that action
-into the Tcl event loop.
+[float]
+===== Synopsis
+====
++signal+ _instref_ _event_ _?param1 param2 ...?_
+====
+
++instref+::
+    An instance reference whose instances that are to be signaled.
++event+::
+    The name of the event to signal.
++paramN+::
+    The +paramN+ arguments are a set of optional event parameter values.
+    These values are delivered to the state activity when it is run.
+    It is a corollary of the rules of Moore type state machines that
+    any event that causes a transition into a state must supply any
+    parametric event data defined by the signature of the state activity.
+    Failing to do so will result in a runtime error when the event is
+    dispatched.
 
 ///////
 ----
@@ -3920,6 +4022,19 @@ signal $wm Start
 ----
 ///////
 
+One complication with signaling events is dealing with polymorphic
+events.
+Polymorphic events are sent to a superclass instance and, at run time,
+are mapped to an event in the subclass instance to which the superclass
+instance is currently related.
+In general the rules of mapping polymorphic events can be complex,
+so we factor that into a procedure.
+Otherwise, the +signal+ procedure is simply a means of invoking
+a dispatch procedure that queues an event and hooks that action
+into the Tcl event loop.
+
+[float]
+===== Implementation
 [source,tcl]
 ----
 <<instance commands>>=
@@ -3935,16 +4050,59 @@ proc signal {dstset event args} {
 
 ==== Signaling Delayed Events
 
-Similar logic applies to signaling a delayed event
+The XUML modeling semantics supply the concept of a delayed event
+as a means of dealing with time.
+Delayed events are requests to deliver an event at some time in the
+future.
+Time is specified in units of milliseconds.
+
+There is a rule in the XUML semantics that there may be no more than
+one outstanding delayed event between any sending / receiving pair
+of instances.
+We will see below what happens when duplicate delayed events are
+signaled.
+For now we will simply state the rule and state that it is enforced.
+
+[float]
+===== Synopsis
+====
++delaysignal+ _time_ _instref_ _event_ _?param1 param2 ...?_
+====
+
++time+::
+    The number of milliseconds to delay in delivering the event.
+    The time value must be a non-negative integer.
+    Delay times of zero are acceptable and result in the event
+    being signalled immediately.
++instref+::
+    An instance reference whose instances that are to be signaled.
++event+::
+    The name of the event to signal.
++paramN+::
+    The +paramN+ arguments are a set of optional event parameter values.
+    These values are delivered to the state activity when it is run.
 
 ///////
 ----
 <<manual architecture instance commands>>=
 [call [cmd delaysignal] [arg time] [arg instref] [arg event]\
     [opt [arg "param1 param2 ..."]]]
+
+The [cmd delaysignal] command sends the event named, [arg event],
+to all the class instances referenced by [arg instref]
+at least [arg time] milliseconds in the future..
+If any optional [arg paramN] parameters are supplied they are send as
+parameters of the event.
+
+[example {
+set wm [WashingMachine findById MachineId 27]
+delaysignal 100 $wm Start
+}]
 ----
 ///////
 
+[float]
+===== Implementation
 [source,tcl]
 ----
 <<instance commands>>=
@@ -3969,13 +4127,41 @@ proc delaysignal {time dstset event args} {
 INVALID_TIME    {invalid time value, "%s"}
 ----
 
+==== Canceling Delayed Events
+
+You may cancel a delayed event that is outstanding.
+
+[float]
+===== Synopsis
+====
++canceldelayed+ _srcref_ _dstref_ _event_
+====
+
++srcref+::
+    The instance reference of the sender of the delayed event.
+    The +srcref+ reference may not be multiple.
++dstref+::
+    The instance reference of the receiver of the delayed event.
+    The +dstref+ reference may be multiple.
++event+::
+    The name of the event to cancel.
+
 ///////
 ----
 <<manual architecture instance commands>>=
 [call [cmd canceldelayed] [arg srcref] [arg dstref] [arg event]]
+
+The [cmd canceldelayed] command cancels the oustanding [arg event]
+between the instance referred to by [arg srcref] and all the instances
+referred to by [arg dstref].
+If there are not outstanding [arg event] events between the referenced
+instanced,
+then no action is taken and no error is generated.
 ----
 ///////
 
+[float]
+===== Implementation
 [source,tcl]
 ----
 <<instance commands>>=
@@ -3998,10 +4184,38 @@ proc canceldelayed {srcref dstset event} {
 SINGLE_OR_EMPTY_REF_REQUIRED {single valued or nil reference required, %d found}
 ----
 
+==== Remaining Time for a Delayed Event
+
+The other operation for delayed is events is to inquire as to the
+amount of time remaining before the event is signaled.
+
+[float]
+===== Synopsis
+====
++delayremaining+ _srcref_ _dstref_ _event_
+====
+
++srcref+::
+    The instance reference of the sender of the delayed event.
+    The +srcref+ reference may not be multiple.
++dstref+::
+    The instance reference of the receiver of the delayed event.
+    The +dstref+ reference must be singular.
++event+::
+    The name of the event to inquire of the remaining time.
+
+The return value of the command is the number of milliseconds remaining
+before +event+ is signaled.
+
 ///////
 ----
 <<manual architecture instance commands>>=
 [call [cmd delayremaining] [arg srcref] [arg dstref] [arg event]]
+
+The [cmd delayremaining] command returns the number of milliseconds
+until [arg event] is signaled from [arg srcref] to [arg dstref].
+The returned value will be zero if the [arg event] does not exist
+or has already been signalled.
 ----
 ///////
 
@@ -4264,6 +4478,7 @@ test SignalEvent-1.0 {
 } -cleanup {
     after cancel [namespace eval ::rosea::Dispatch namespace code DispatchEvent]
     cleanupDomain foo
+    set ::rosea::Dispatch::event_queue [list]
 } -body {
     set event [lindex $::rosea::Dispatch::event_queue 0]
     dict get $event dst
@@ -4277,8 +4492,7 @@ proc DispatchEvent {} {
     variable event_queue
     variable inTransaction
 
-    set eqlen [llength $event_queue]
-    if {$eqlen != 0} {
+    if {[llength $event_queue] != 0} {
         # Pull the event from the front of the queue.
         set eventInfo [lindex $event_queue 0]
         set event_queue [lrange $event_queue 1 end]
@@ -4305,7 +4519,13 @@ proc DispatchEvent {} {
         ::rosea::Trace::TraceTransition [dict get $eventInfo src]\
             $event $dstref $currstate $newState [dict get $eventInfo params]
 
+        if {!$inTransaction} {
+            relvar transaction begin
+            set inTransaction true
+        }
         if {$newState eq "CH"} {
+            relvar transaction rollback
+            set inTransaction false
             tailcall DeclError CANT_HAPPEN_EVENT [dict get $eventInfo src]\
                 $event $dstref $currstate
         } elseif {$newState ne "IG"} {
@@ -4314,10 +4534,6 @@ proc DispatchEvent {} {
                 tuple update $is __State $newState
             }
             try {
-                if {$eqlen == 1 && !$inTransaction} {
-                    relvar transaction begin
-                    set inTransaction true
-                }
                 ${relvar}::__Activity::$newState $dstref\
                         {*}[dict get $eventInfo params]
             } finally {
