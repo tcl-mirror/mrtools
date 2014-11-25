@@ -2123,6 +2123,7 @@ referenced attributes into the referential attributes and so we need
 to know the correspondence between the two sets of attributes and
 query the referenced attributes to get their values.
 
+(((rosea,RelCmds,linkSimple)))
 [source,tcl]
 ----
 <<relationship commands>>=
@@ -2291,6 +2292,13 @@ MUST_BE_SINGULAR        {number of refered to instances for "%s" must be one,\
 
 ==== Linking Class Based Associations
 
+The run time data required to create class based associations
+is different that for simple associations.
+The diagram below shows the structure of the architectural relvars
+that support linking class based associations.
+
+image::assoc-ref-links.pdf[title="Data Required for Linking Class Based Associations"]
+
 When a class based association is linked,
 we must create an instance of the associator class.
 In general,
@@ -2345,108 +2353,165 @@ new created associator class instances.
 
 [float]
 ===== Implementation
+
+As expected,
+the implementation of +linkAssoc+ follows the same general pattern
+as that for +linkSimple+.
+
+(((rosea,RelCmds,linkAssoc)))
 [source,tcl]
 ----
 <<relationship commands>>=
 proc linkAssoc {rname instref1 instref2 args} {
-    lassign $instref1 relvar1 inst1
-    lassign [SplitRelvarName $relvar1] domain1 class1
+    <<linkAssoc: validate arguments>>
+    <<linkAssoc: look up link info>>
+    <<linkAssoc: determine reference direction>>
+    <<linkAssoc: obtain referenced values>>
+    <<linkAssoc: update referring values>>
+    <<linkAssoc: return assoc class instref>>
+}
+----
 
-    lassign $instref2 relvar2 inst2
-    lassign [SplitRelvarName $relvar2] domain2 class2
+We need to access the components of the instance references and
+insure that there is not cross domain link attempt.
 
-    if {$domain1 ne $domain2} {
-        tailcall DeclError NO_CROSS_DOMAIN $domain1 $domain2
+[source,tcl]
+----
+<<linkAssoc: validate arguments>>=
+lassign $instref1 relvar1 inst1
+lassign [SplitRelvarName $relvar1] domain1 class1
+
+lassign $instref2 relvar2 inst2
+lassign [SplitRelvarName $relvar2] domain2 class2
+
+if {$domain1 ne $domain2} {
+    tailcall DeclError NO_CROSS_DOMAIN $domain1 $domain2
+}
+----
+
+Now we look up the instance of +AssocRef+ that corresponds
+to the relationship.
+
+[source,tcl]
+----
+<<linkAssoc: look up link info>>=
+set archns ${domain1}::__Arch
+
+set assocref [relvar restrictone ${archns}::AssocRef Relationship $rname]
+if {[relation isempty $assocref]} {
+    tailcall DeclError UNKNOWN_RELATIONSHIP $rname
+}
+
+relation assign $assocref\
+    {AssocClass assocClass}\
+    {References references}
+----
+
+For class based associations, we need to identify the participants
+and check that the instance references refer to relvar that
+indeed participate in the relationship.
+
+[source,tcl]
+----
+<<linkAssoc: determine reference direction>>=
+set ref1 [relation restrictwith $references {$Participant eq $class1}]
+if {[relation isempty $ref1]} {
+    tailcall DeclError NOT_IN_ASSOCIATION $class1 $rname
+}
+----
+
+Reflexive associations have to be considered.
+If the association is reflexive then the above query will yield two tuples
+since the Participants are the same name.
+In this case, we query for the "target"
+as a means of disambiguating the reflexive relationship.
+
+For the non-reflexive case, we can just find the other participant,
+checking that it is indeed there.
+[source,tcl]
+----
+<<linkAssoc: determine reference direction>>=
+if {[relation cardinality $ref1] > 1} {
+    set ref2 [relation restrictwith $ref1 {$Role eq "target"}]
+    set ref1 [relation minus $ref1 $ref2]
+} else {
+    set ref2 [relation restrictwith $references {$Participant eq $class2}]
+    if {[relation isempty $ref2]} {
+        tailcall DeclError NOT_IN_ASSOCIATION $class2 $rname
     }
+}
+----
 
-    set archns ${domain1}::__Arch
+At this point, +ref1+ and +ref2+ are the instances of the reference
+information corresponding to +instref1+ and +instref2+.
 
-    set assocref [relvar restrictone ${archns}::AssocRef Relationship $rname]
-    if {[relation isempty $assocref]} {
-        tailcall DeclError UNKNOWN_RELATIONSHIP $rname
-    }
+We use a similar strategy here as with +linkSimple+.
+First we de-reference the instance references against the relvar.
+Then we want to create dictionaries with the referring attributes as keys and
+the referenced values as the dictionary values.
 
-    relation assign $assocref\
-        {AssocClass assocClass}\
-        {References references}
+[source,tcl]
+----
+<<linkAssoc: obtain referenced values>>=
+set values1 [pipe {
+    relvar set $relvar1 |
+    relation semijoin $inst1 ~
+}]
+set values2 [pipe {
+    relvar set $relvar2 |
+    relation semijoin $inst2 ~
+}]
 
-    # For class based associations, we need to identify the participants
-    # and check that the instance references refer to relvar that
-    # indeed participate in the relationship.
-    set ref1 [relation restrictwith $references {$Participant eq $class1}]
-    if {[relation isempty $ref1]} {
-        tailcall DeclError NOT_IN_ASSOCIATION $class1 $rname
-    }
-    # Reflexive associations have to be considered. If the association is
-    # reflexive then the above query will yield two tuples since the
-    # Participants are the same name. In this case, we query for the "target"
-    # as a means of disambiguating the reflexive relationship.
-    if {[relation cardinality $ref1] > 1} {
-        set ref2 [relation restrictwith $ref1 {$Role eq "target"}]
-        set ref1 [relation minus $ref1 $ref2]
-    } else {
-        # For the non-reflexive case, we can just find the other participant,
-        # checking that it is indeed there.
-        set ref2 [relation restrictwith $references {$Participant eq $class2}]
-        if {[relation isempty $ref2]} {
-            tailcall DeclError NOT_IN_ASSOCIATION $class2 $rname
-        }
-    }
+set rattr1 [relation extract $ref1 ReferringAttrs]
+set rattr2 [relation extract $ref2 ReferringAttrs]
+----
 
-    # Dereference the referenced values via the instance reference.
-    set values1 [pipe {
-        relvar set $relvar1 |
-        relation semijoin $inst1 ~
+Since linking a class based associations amounts to inserting tuples in
+the associator relvar,
+we will accumulate the set of tuples and perform a single +relvar insert+.
+
+[source,tcl]
+----
+<<linkAssoc: update referring values>>=
+set assoctuples [list]
+relation foreach v1 $values1 { # <1>
+    set refto1 [pipe {
+        relation extend $rattr1 rfa RefValue string {
+            [relation extract $v1 [tuple extract $rfa ReferencedAttribute]]
+        } |
+        relation dict ~ ReferringAttribute RefValue
     }]
-    set values2 [pipe {
-        relvar set $relvar2 |
-        relation semijoin $inst2 ~
-    }]
-
-    # We use a similar strategy here as with "linkSimple". We want to create
-    # dictionaries with the referring attributes as keys and the referenced
-    # values as the dictionary values.
-    set rattr1 [relation extract $ref1 ReferringAttrs]
-    set rattr2 [relation extract $ref2 ReferringAttrs]
-
-    # Since linking a class based associations amounts to inserting tuples in
-    # the associator relvar, we will accumulate the set of tuples and perform a
-    # single "relvar insert".
-    # HERE!!! should be able to remove the iteration by extending and
-    # then taking the cartesian product.
-    set assoctuples [list]
-    relation foreach v1 $values1 { # <1>
-        set refto1 [pipe {
-            relation extend $rattr1 rfa RefValue string {
-                [relation extract $v1 [tuple extract $rfa ReferencedAttribute]]
+    relation foreach v2 $values2 {
+        set refto2 [pipe {
+            relation extend $rattr2 rfa RefValue string {
+                [relation extract $v2\
+                    [tuple extract $rfa ReferencedAttribute]]
             } |
             relation dict ~ ReferringAttribute RefValue
         }]
-        relation foreach v2 $values2 {
-            set refto2 [pipe {
-                relation extend $rattr2 rfa RefValue string {
-                    [relation extract $v2\
-                        [tuple extract $rfa ReferencedAttribute]]
-                } |
-                relation dict ~ ReferringAttribute RefValue
-            }]
 
-            # It may be the case that the associator class has other
-            # attributes. Those are passed as attribute/value pairs in the
-            # "args". The merge order is important here just in case the caller
-            # tried to set one of the referential attributes in the invocation.
-            lappend assoctuples [dict merge $args $refto1 $refto2]
-        }
+        lappend assoctuples [dict merge $args $refto1 $refto2] ; # <2>
     }
-
-    return [ToRef ${domain1}::$assocClass\
-            [relvar insert ${domain1}::$assocClass {*}$assoctuples]]
 }
 ----
 <1> The instance references may refer to multiple instances so we need to
 compute the Cartesian product of the instance references.
 The nested iteration will insure that we end up with an associator
 instance for each reference in each of the instance references.
+<2> It may be the case that the associator class has other
+attributes.
+Those are passed as attribute/value pairs in the +args+.
+The merge order is important here just in case the caller
+tried to set one of the referential attributes in the invocation.
+By merging the referential attributes last,
+they will take precedence over any caller arguments.
+
+[source,tcl]
+----
+<<linkAssoc: return assoc class instref>>=
+return [ToRef ${domain1}::$assocClass\
+        [relvar insert ${domain1}::$assocClass {*}$assoctuples]]
+----
 
 (((error code,NOT_IN_ASSOCIATION)))
 [source,tcl]
@@ -2499,7 +2564,10 @@ since we have all the information required to make the necessary
 determination of role.
 For simple associations,
 we will set the referring attributes to the empty string.
+This code follows the same pattern as for +linkSimple+ and so
+we present it without any additional commentary.
 
+(((rosea,RelCmds,unlinkSimple)))
 [source,tcl]
 ----
 <<relationship commands>>=
@@ -2554,6 +2622,11 @@ instances of the associator class.
 
 [float]
 ===== Implementation
+
+The +unlinkAssoc+ follows the same pattern as +linkAssoc+.
+The goal here is to delete instances of the associative class.
+
+(((rosea,RelCmds,unlinkAssoc)))
 [source,tcl]
 ----
 <<relationship commands>>=
@@ -2687,6 +2760,7 @@ set floorlamp [R7 migrate $tablelamp FloorLamp Material brass Weight 15]
 
 [float]
 ===== Implementation
+(((rosea,RelCmds,migrate)))
 [source,tcl]
 ----
 <<relationship commands>>=
@@ -2788,6 +2862,7 @@ Any optional event parameters are given by the [arg paramN] arguments.
 
 [float]
 ===== Implementation
+(((rosea,RelCmds,signalAssigner)))
 [source,tcl]
 ----
 <<relationship commands>>=
@@ -2873,6 +2948,7 @@ name sets.
 package require struct::set
 ----
 
+(((rosea,RelCmds,signalMultiAssigner)))
 [source,tcl]
 ----
 <<relationship commands>>=
@@ -2951,6 +3027,7 @@ that is identified by the [arg attrN] / [arg valueN] names and values.
 
 [float]
 ===== Implementation
+(((rosea,RelCmds,createMultiAssigner)))
 [source,tcl]
 ----
 <<relationship commands>>=
@@ -3015,6 +3092,7 @@ the +semiminus+ command.
 We factor all the common processing into a procedure below and then provide
 specific procedures intended for the state activities.
 
+(((rosea,InstCmds,FindRelatedInst)))
 [source,tcl]
 ----
 <<instance commands>>=
@@ -3194,6 +3272,7 @@ set inst [findRelated $self R1 {~R2 Sub} ~R3]
 
 [float]
 ===== Implementation
+(((rosea,InstCmds,findRelated)))
 [source,tcl]
 ----
 <<instance commands>>=
@@ -3255,6 +3334,7 @@ instances referenced by [arg instref] along the relationship navigation chain.
 
 [float]
 ===== Implementation
+(((rosea,InstCmds,findUnrelated)))
 [source,tcl]
 ----
 <<instance commands>>=
@@ -3324,6 +3404,7 @@ set wv [findRelatedWhere $self ~R3 {$ValveID eq "Drain"}]
 
 [float]
 ===== Implementation
+(((rosea,InstCmds,findRelatedWhere)))
 [source,tcl]
 ----
 <<instance commands>>=
@@ -3380,6 +3461,7 @@ referenced by [arg instref].
 
 [float]
 ===== Implementation
+(((rosea,InstCmds,findUnrelatedWhere)))
 [source,tcl]
 ----
 <<instance commands>>=
@@ -3618,6 +3700,7 @@ updateAttribute $wc SpinDuration 20 SpinSpeed high
 [float]
 ===== Implementation
 
+(((rosea,InstCmds,updateAttribute)))
 [source,tcl]
 ----
 <<instance commands>>=
@@ -3860,6 +3943,7 @@ set duration [readAttribute $wc SpinDuration]
 
 [float]
 ===== Implementation
+(((rosea,InstCmds,readAttribute)))
 [source,tcl]
 ----
 <<instance commands>>=
@@ -3973,6 +4057,7 @@ The following procedure determines if +self+ exists in the caller.
 During translation, some caution must be used to insure that domain
 operations do not declare a +self+ variable.
 
+(((rosea,HelperCmds,SelfInstRef)))
 [source,tcl]
 ----
 <<helper commands>>=
@@ -4035,6 +4120,7 @@ into the Tcl event loop.
 
 [float]
 ===== Implementation
+(((rosea,InstCmds,signal)))
 [source,tcl]
 ----
 <<instance commands>>=
@@ -4103,6 +4189,7 @@ delaysignal 100 $wm Start
 
 [float]
 ===== Implementation
+(((rosea,InstCmds,delaysignal)))
 [source,tcl]
 ----
 <<instance commands>>=
@@ -4162,6 +4249,7 @@ then no action is taken and no error is generated.
 
 [float]
 ===== Implementation
+(((rosea,InstCmds,canceldelayed)))
 [source,tcl]
 ----
 <<instance commands>>=
@@ -4219,6 +4307,7 @@ or has already been signalled.
 ----
 ///////
 
+(((rosea,InstCmds,delayremaining)))
 [source,tcl]
 ----
 <<instance commands>>=
@@ -4241,13 +4330,20 @@ proc delayremaining {srcref dstref event} {
 SINGLE_REF_REQUIRED     {single valued reference required, %d found}
 ----
 
+==== Invoking Instance Operations
+
 ///////
 ----
 <<manual architecture instance commands>>=
 [call [cmd instop] [arg instref] [arg operation] [opt [arg "arg1 arg2 ..."]]]
+
+The [cmd instop] command invokes an instance based operation,
+[arg operation], on the class instance referenced by [arg instref].
+The options [arg argN] arguments are passed to the operation.
 ----
 ///////
 
+(((rosea,InstCmds,instop)))
 [source,tcl]
 ----
 <<instance commands>>=
@@ -4283,6 +4379,7 @@ namespace eval Dispatch {
 }
 ----
 
+(((rosea,Dispatch,MapPolymorphicEvent)))
 [source,tcl]
 ----
 <<dispatch commands>>=
@@ -4426,6 +4523,7 @@ variable event_queue [list]
 variable inTransaction false
 ----
 
+(((rosea,Dispatch,SignalEvent)))
 [source,tcl]
 ----
 <<dispatch commands>>=
