@@ -34,10 +34,10 @@ DIAGRAMS =\
 	ref-links.uxf\
 	assoc-ref-links.uxf\
 	gen-links.uxf\
+	config-domain.uxf\
 	$(NULL)
 
 LSDIAGRAMS =\
-	config-domain.uxf\
 	config-classes.uxf\
 	config-relation.uxf\
 	config-statemodel.uxf\
@@ -172,6 +172,10 @@ $(DOCDIR)/%.pdf : %.aweb
 
 %.test : %.aweb
 	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $(TESTDIR)/$@ $<
+
+$(IMAGEDIR)/config-domain.pdf : $(IMAGEDIR)/config-domain.uxf
+	umlet -action=convert -format=pdf\
+		-filename=$< -output=$(basename $@)
 
 $(IMAGEDIR)/config-%.pdf : config-%.uxf
 	umlet -action=convert -format=pdf\
