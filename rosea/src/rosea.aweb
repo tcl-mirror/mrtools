@@ -1045,20 +1045,6 @@ _i.e._ we go forward along +R1+ but stop at +A+.
 Conversely,
 we can navigate from +Y+ to +A+ along +~R1 A+.
 
-==== Architecture Link Information
-
-Given these syntax conventions,
-we can design the data structures necessary to
-support the run-time navigation of relationships as a series
-of relational algebra +semijoin+ operations.
-The diagram below shows a class diagram of the required data.
-
-image::link-classes.pdf[title="Link Information Class Diagram"]
-
-This is the first of several architectural data structures that
-will be used to directly support the +rosea+ run-time.
-We shall see others, for example, for state transitions.
-
 === Domain Organization [[domain-organization,Domain Organization]]
 
 Domain Organization
@@ -1842,9 +1828,9 @@ and places the newly created instance into a pseudo-initial state.
 Then [arg event] along with the event parameters given by
 [arg eventparams] is signaled to the newly created instance.
 [arg Eventparams] is intepreted as a list of parameter values that
-must match the parameters of the state into which [arg event]
+must match the parameter signature of the state into which [arg event]
 causes a transition.
-It is an error to invoke [cmd createin] if [arg class] does not have
+It is an error to invoke [cmd createasync] if [arg class] does not have
 an associated state machine or if [arg class] does not have a
 transition specified to originate from the pseudo-initial state
 of "@".
@@ -1858,10 +1844,11 @@ the attribute need not be included in the arguments and its default
 value will be used instead.
 
 The command returns a reference to the newly created instance.
-Note however, that the event transition will [emph not] have occurred.
+Note however, that the event transition will [emph not] have occurred
+on the newly created instance.
 
 [example {
-set r [Reactor createin Process {temp 300} VesselId A270]
+set r [Reactor createasync Process {300 20} VesselId A270]
 }]
 ----
 ///////
@@ -3180,6 +3167,64 @@ namespace eval InstCmds {
 
 Navigating the class diagram to find related instances is a fundamental
 operation in most state activities.
+Relationship navigation is mapped to a series of relational +semijoin+
+operations.
+To support the run-time processing,
+we require a set of data structures that facilitate invoking a series
+of relational +semijoin+ operations.
+The class diagram for these data structures is shown below.
+
+image::link-classes.pdf[title="Link Information Class Diagram"]
+
+A *Link* can be of two types (*R3*).
+An *AssociationLink* corresponds to the linkage of an association type
+relationship
+and a *Partition* link corresponds to a generalization relationship.
+For class based associations,
+it is necessary to traverse to both the associator class and then
+to the other participating class (*R4*)
+To traverse from a superclass to a subclass
+we must know what are the possible destination subclasses and
+the attributes needed to locate a subclass instance (*R2*).
+
+The transliteration of the graphic into TclRAL relvars and constraints
+follows the usual pattern.
+
+[source,tcl]
+----
+<<arch relvar definitions>>=
+ral relvar create Link {
+    Name            string
+    SrcClass        string
+} {Name SrcClass}
+ral relvar create AssociationLink {
+    Name            string
+    SrcClass        string
+    DstClass        string
+    Attrs           list
+    PrevSrcClass    string
+} {Name SrcClass}
+ral relvar association R4\
+    AssociationLink {Name PrevSrcClass} ?\
+    AssociationLink {Name SrcClass} ?
+ral relvar create PartitionLink {
+    Name            string
+    SrcClass        string
+} {Name SrcClass}
+ral relvar partition R3 Link {Name SrcClass}\
+    AssociationLink {Name SrcClass}\
+    PartitionLink {Name SrcClass}
+ral relvar create PartitionDst {
+    Name            string
+    SrcClass        string
+    DstClass        string
+    Attrs           list
+} {Name SrcClass DstClass}
+ral relvar association R2\
+    PartitionDst {Name SrcClass} +\
+    PartitionLink {Name SrcClass} 1
+----
+
 There are two features of navigating that we provide to make
 tranlation easier.
 
@@ -3194,88 +3239,25 @@ We provide that functionality since obtaining the unrelated instance set
 is otherwise tedious and TclRAL provides the necessary mechanism in
 the +semiminus+ command.
 
-We factor all the common processing into a procedure below and then provide
-specific procedures intended for the state activities.
+We factor all the common processing for relationship navigation
+into a procedure below and then provide
+specific procedures intended to be invoked by the model processing code.
+
+The strategy for navigating relationships is to iterate across the
+relationship navigation chain querying the linkage relvars to determine
+the type of linkage and formulating TclRAL +relation semijoin+ (or
++relation semiminus+ if we are seeking unrelated instances).
 
 (((rosea,InstCmds,FindRelatedInst)))
 [source,tcl]
 ----
 <<instance commands>>=
 proc FindRelatedInsts {instref op args} {
-    set srcrelvar [lindex $instref 0]
-    lassign [SplitRelvarName $srcrelvar] domain class
-
-    # This procedure queries the architectural data about relationship linkage,
-    # so we bring the relvar variables into scope.
-    namespace upvar ${domain}::__Arch\
-            Link Link\
-            AssociationLink AssociationLink\
-            PartitionLink PartitionLink\
-            PartitionDst PartitionDst
-    #puts [relformat $Link Link]
-    #puts [relformat $AssociationLink AssociationLink]
-    #puts [relformat $PartitionLink PartitionLink]
-    #puts [relformat $PartitionDst PartitionDst]
-    variable relatedQuery ; # <1>
-
-    # The strategy here is to iterage over the relationship chain to build
-    # semijoin (or semiminus) commands from the architectural data values.
+    <<FindRelatedInst: set up data access>>
+    # We start by dereferencing the instance reference.
     set related [deRef $instref]
     foreach linkage $args {
-        # Recall that the linkage specification may contain a destination class
-        # for those types of linkages where there may be multiple paths along
-        # the relationship (i.e. to associative classes or subclasses).
-        lassign $linkage lname dst
-
-        set link [relvar restrictone ${domain}::__Arch::Link\
-                Name $lname SrcClass $class]
-        if {[ral relation isempty $link]} {
-            tailcall DeclError UNKNOWN_LINKAGE $lname $class
-        }
-        # First we determine if we are dealing with an associative link or a
-        # partition link.
-        set assoc [relation join $link $AssociationLink]
-        if {[relation isnotempty $assoc]} {
-            relation assign $assoc DstClass Attrs
-            # Check if additional path information was provided.
-            if {$dst eq {}} {
-                # Find the set of instances related to the current set.
-                set related [eval $relatedQuery]
-                # We must see if this is a class-based association.  If so,
-                # then the first traversal was to the associator and we must
-                # traverse again to the other class.
-                set assoc [relation semijoin $assoc $AssociationLink\
-                    -using {Name Name SrcClass PrevSrcClass}]
-                if {[relation isnotempty $assoc]} {
-                    relation assign $assoc DstClass Attrs
-                    set related [eval $relatedQuery]
-                }
-            } else {
-                # If a destination was specified in the linkage, then we need
-                # to verify that it is actually part of the relationship.
-                if {$dst ne $DstClass} {
-                    tailcall DeclError PATH_ERROR $lname $class $DstClass\
-                        $dst
-                }
-                set related [eval $relatedQuery]
-            }
-        } else {
-            # If the linkage is not associative, then it must be a superclass
-            # to subclass traversal. Recall that subclass to superclass
-            # traversal is just an ordinary associative linkage. In this case
-            # we simply find the partition linkage information.
-            set partdst [relvar restrictone ${domain}::__Arch::PartitionDst\
-                Name $lname SrcClass $class DstClass $dst]
-            if {[relation isempty $partdst]} {
-                tailcall DeclError PATH_ERROR $lname $class $DstClass $dst
-            }
-            relation assign $partdst DstClass Attrs
-            set related [eval $relatedQuery]
-        }
-        # Continue the iteration by setting the next source to the current
-        # destination class.
-        set class $DstClass
-        set srcrelvar ${domain}::$class
+        <<FindRelatedInst: traverse linkage>>
     }
     # N.B. that we are not returning an instance reference but rather the
     # complete relation value of the related instances. This allows us
@@ -3283,20 +3265,34 @@ proc FindRelatedInsts {instref op args} {
     return [list $srcrelvar $related]
 }
 ----
-<1> This query fetches to related instances across a single linkage.
-See the query below.
 
-(((error code,UNKNOWN_LINKAGE)))
-(((error code,PATH_ERROR)))
 [source,tcl]
 ----
-<<error code formats>>=
-UNKNOWN_LINKAGE {unknown relationship, "%s", for class, "%s"}
-PATH_ERROR      {relationship, "%s", from "%s" to "%s", does not end at "%s"}
-----
+<<FindRelatedInst: set up data access>>=
+set srcrelvar [lindex $instref 0]
+lassign [SplitRelvarName $srcrelvar] domain class
 
-The query to obtain the related instances is used many places and so
+# This procedure queries the architectural data about relationship linkage,
+# so we bring the relvar variables into scope.
+namespace upvar ${domain}::__Arch\
+        Link Link\
+        AssociationLink AssociationLink\
+        PartitionLink PartitionLink\
+        PartitionDst PartitionDst
+variable relatedQuery ; # <1>
+----
+<1> The query to obtain the related instances is used many places and so
 worth factoring out.
+
+The query below shows the relational algebraic equivalent to
+traversing a relationship.
+The key here is that we want to specify the attributes across which
+the +semijoin+ (or +semiminus+) operation occurs.
+In TclRAL, you may specify the attribute names for the join directly
+rather than having to go through an additional renaming operation.
+Since the referential attributes and the corresponding identifying attributes
+may not be named the same,
+the run-time linkage information stores them in a directly usable form.
 
 [source,tcl]
 ----
@@ -3312,9 +3308,109 @@ By placing the result of the +pipe+ command into a namespace variable
 we save the work of rewriting the pipe syntax into a Tcl nested command
 each time it is invoked.
 We will use this technique in many places.
-Also note that it is in this query where the [var op] argument is
+Also note that it is in this query where the +op+ argument is
 substituted and this allows us to select +semijoin+ to query for the
 related instances or +semiminus+ to query for the unrelated ones.
+
+The linkage specification may contain a destination class
+for those types of linkages where there may be multiple paths along
+the relationship (i.e. navigating to associative classes or subclasses
+in a generalization).
+
+[source,tcl]
+----
+<<FindRelatedInst: traverse linkage>>=
+lassign $linkage lname dst ; # split out the linkage spec
+
+set link [relvar restrictone ${domain}::__Arch::Link\
+        Name $lname SrcClass $class]
+if {[ral relation isempty $link]} {
+    tailcall DeclError UNKNOWN_LINKAGE $lname $class
+}
+# First we determine if we are dealing with an associative link or a
+# partition link.
+set assoc [relation join $link $AssociationLink]
+if {[relation isnotempty $assoc]} {
+    <<FindRelatedInst: traverse association>>
+} else {
+    <<FindRelatedInst: traverse to subclass>>
+}
+# Continue the iteration by setting the next source to the current
+# destination class.
+set class $DstClass
+set srcrelvar ${domain}::$class
+----
+
+If this is a navigation across an associative relationship,
+then the following cases arise.
+
+* A simple association where we need only join across one set of referential
+attributes.
+* A class based association where we will need to perform two joins, first to
+the associator class and then to the other participant.
+* A class based assocation where we want to stop the traversal at the
+associator class.
+
+The first two cases are distinguished by whether the instances of
+*AssociationLink* are related across *R4* .
+The third case is determined if the linkages spec included a path to
+a destination class.
+
+[source,tcl]
+----
+<<FindRelatedInst: traverse association>>=
+relation assign $assoc DstClass Attrs
+# Check if additional path information was provided.
+if {$dst eq {}} {
+    # Find the set of instances related to the current set.
+    set related [eval $relatedQuery]
+    # We must see if this is a class-based association.  If so, then the first
+    # traversal was to the associator and we must traverse again to the other
+    # class.
+    set assoc [relation semijoin $assoc $AssociationLink\
+        -using {Name Name SrcClass PrevSrcClass}]
+    if {[relation isnotempty $assoc]} {
+        relation assign $assoc DstClass Attrs
+        set related [eval $relatedQuery]
+    }
+} else {
+    # If a destination was specified in the linkage, then we need to verify
+    # that it is actually part of the relationship.
+    if {$dst ne $DstClass} {
+        tailcall DeclError PATH_ERROR $lname $class $DstClass\
+            $dst
+    }
+    set related [eval $relatedQuery]
+}
+----
+
+If the linkage is not associative, then it must be a superclass to subclass
+traversal.
+In this case,
+we simply find the partition linkage information.
+A subclass to superclass traversal is treated as just an ordinary
+associative linkage and would be handled by the associative traversal code.
+
+[source,tcl]
+----
+<<FindRelatedInst: traverse to subclass>>=
+set partdst [relvar restrictone ${domain}::__Arch::PartitionDst\
+    Name $lname SrcClass $class DstClass $dst]
+if {[relation isempty $partdst]} {
+    tailcall DeclError PATH_ERROR $lname $class $DstClass $dst
+}
+relation assign $partdst DstClass Attrs
+set related [eval $relatedQuery]
+----
+
+(((error code,UNKNOWN_LINKAGE)))
+(((error code,PATH_ERROR)))
+[source,tcl]
+----
+<<error code formats>>=
+UNKNOWN_LINKAGE {unknown relationship, "%s", for class, "%s"}
+PATH_ERROR      {relationship, "%s", from "%s" to "%s", does not end at "%s"}
+----
 
 The set of commands intended for state activities are just
 variations on the invocation of +FindRelatedInsts+.
@@ -3329,15 +3425,15 @@ variations on the invocation of +FindRelatedInsts+.
     An instance reference that is the start of the relationship chain
     navigation.
 +relationshipN+::
-    A relationship specifier for the navigation chain.
+    A specifier indicating the relationship path to traverse.
     Each relationship specifier is a one or two element list.
     If a single element, then it is the name of a relationship (_e.g._ R27)
     that is to be traversed in the forward direction or the
-    name of a relationship prefixed by a tilde (_e.g._ \~R27) giving the
+    name of a relationship prefixed by a tilde (_e.g._ ~R27) giving the
     name of a relationship to be traversed in its reverse direction.
-    If a two element list, then the traversal may have alternate paths
-    and the second element names the class that is to be the destination
-    of the traversal.
+    If the relationship specifier is a two element list,
+    then the traversal has alternate paths and the second element names the
+    class that is to be the destination of the traversal.
     For class based associations this would be the name of the associator class
     and for generalizations this would be the name of one of the subclasses.
 
@@ -3402,15 +3498,15 @@ The procedure for finding the unrelated instances has the same interface.
     An instance reference that is the start of the relationship chain
     navigation.
 +relationshipN+::
-    A relationship specifier for the navigation chain.
+    A specifier indicating the relationship path to traverse.
     Each relationship specifier is a one or two element list.
     If a single element, then it is the name of a relationship (_e.g._ R27)
     that is to be traversed in the forward direction or the
-    name of a relationship prefixed by a tilde (_e.g._ \~R27) giving the
+    name of a relationship prefixed by a tilde (_e.g._ ~R27) giving the
     name of a relationship to be traversed in its reverse direction.
-    If a two element list, then the traversal may have alternate paths
-    and the second element names the class that is to be the destination
-    of the traversal.
+    If the relationship specifier is a two element list,
+    then the traversal has alternate paths and the second element names the
+    class that is to be the destination of the traversal.
     For class based associations this would be the name of the associator class
     and for generalizations this would be the name of one of the subclasses.
 
@@ -3465,8 +3561,7 @@ These variations are described below.
     navigation.
 +rchain+::
     A list of relationship specifiers that form a navigation chain.
-    Each element of the list is specified as given by the
-    +findRelated+ command.
+    Each element of the list is specified as for the +findRelated+ command.
 +expression+::
     A expression suitable for the +::expr+ command.
     Each instance found at the end of the navigation chain is evaluated
@@ -3535,8 +3630,7 @@ of the caller to insure proper resolution of any variables in +expr+.
     navigation.
 +rchain+::
     A list of relationship specifiers that form a navigation chain.
-    Each element of the list is specified as given by the
-    +findRelated+ command.
+    Each element of the list is specified as for the +findRelated+ command.
 +expression+::
     A expression suitable for the +::expr+ command.
     Each instance found at the end of the navigation chain is evaluated
@@ -3848,7 +3942,6 @@ from the elements of a list.
 [source,tcl]
 ----
 <<updateAttribute: check for identifiers>>=
-
 set identifiers [relvar identifiers $relvar]
 if {[llength $identifiers] > 1} {
     set idrelations [list]
@@ -4350,6 +4443,20 @@ INVALID_TIME    {invalid time value, "%s"}
 ==== Canceling Delayed Events
 
 You may cancel a delayed event that is outstanding.
+There are three situations that might arise when a delayed event
+is to be canceled.
+
+* The delay time has not expired and the signal is still pending.
+* The delay time has expired but the event has not yet been delivered.
+* The event has already been delivered.
+
+In the third case,
+canceling has no effect as it is not possible to reach backward in time.
+It is not an error to cancel a delayed event that is not in flight.
+For the first two cases,
+canceling the delayed event will insure that it is _not_ delivered.
+That is to say, that even if the event is queued for delivery,
+it will be found and discarded.
 
 [float]
 ===== Synopsis
@@ -4503,6 +4610,15 @@ proc instop {instref op args} {
 
 === Dispatch Commands
 
+Let's recap where we are with respect to the +rosea+ package commands.
+So far we have seen commands associated with classes, relationships
+and instances.
+These commands were intended to be invoked by the domain processing
+to translate XUML semantics onto the underlying Tcl implementation.
+These commands primarily deal with access to data or requesting
+events to be signaled.
+In this section we will see how execution is sequenced.
+
 Dispatch commands are those commands in the +rosea+ execution architecure
 that queue and dispatch state machine events and provide the mapping
 between the XUML semantics of state machine execution and the Tcl event
@@ -4512,6 +4628,33 @@ and in this section we show how those facilities are used to implement
 the Moore type state machines that are part of the XUML execution model.
 In our case we will use the +::after+ command to provide access
 to the event loop.
+
+The dispatch commands are not intended to be directly invoked by state
+activities or other domain processing code.
+These command are invoked as either part of requesting an event be signaled
+or as the means of delivering an event to a class instance.
+
+Like the other aspects that support XUML semantics,
+there are a set of architectural relvars that contain the data
+needed to support the run-time dispatch of events.
+The structure of this data is shown below.
+
+image::arch-class-diagram.pdf[title="Class State Model Architecture Date"]
+
+There are two distinct concerns regarding event dispatch.
+
+* Ordinary events are dispatched via a *Transition* table.
+* Polymorphic events must be mapped at run-time to ordinary events
+in the currently related subclass.
+
+The *Transition* table here is the Cartesian product of
+the *State* and *Event* instances (*R1*).
+Every class has a well defined *InitialState* (*R6*).
+To map a *polymorphicEvent*,
+we need only know its event name.
+
+We place the dispatch command in their own namespace to avoid any
+accidental invocation of these commands from state activity code.
 
 [source,tcl]
 ----
@@ -4527,6 +4670,8 @@ namespace eval Dispatch {
     <<dispatch commands>>
 }
 ----
+
+==== Dispatching Polymorphic Events
 
 (((rosea,Dispatch,MapPolymorphicEvent)))
 [source,tcl]
@@ -6926,7 +7071,8 @@ association R1 ClothesTub 1--1 WashingMachine
 association R47 Member 1..n--1..n Organization -associator Membership
 }]
 In the example below,
-the direction of [emph R1] is ambiguous since it is reflexive on [emph Element].
+the direction of [emph R1] is ambiguous since it is reflexive on [emph Element]
+and is a class based association.
 The [emph Group] associative class contains the referential attributes,
 [emph PrevElem] and [emph NextElem] but we still need to state
 that the forward path is when values of [emph PrevElem] match those of
@@ -10715,9 +10861,6 @@ test generate-8.1 {
 
 === Structuring Architectural Data
 
-image::arch-class-diagram.pdf[title="Class State Model Architecture Date"]
-
-image::link-classes.pdf[title="Class Linkage Architecture Data"]
 
 [source,tcl]
 ----
@@ -10757,36 +10900,6 @@ proc GenerateArchStructures {domns} {
             Class           string
             Event           string
         } {Class Event}
-        ral relvar create Link {
-            Name            string
-            SrcClass        string
-        } {Name SrcClass}
-        ral relvar create AssociationLink {
-            Name            string
-            SrcClass        string
-            DstClass        string
-            Attrs           list
-            PrevSrcClass    string
-        } {Name SrcClass}
-        ral relvar association R4\
-            AssociationLink {Name PrevSrcClass} ?\
-            AssociationLink {Name SrcClass} ?
-        ral relvar create PartitionLink {
-            Name            string
-            SrcClass        string
-        } {Name SrcClass}
-        ral relvar partition R3 Link {Name SrcClass}\
-            AssociationLink {Name SrcClass}\
-            PartitionLink {Name SrcClass}
-        ral relvar create PartitionDst {
-            Name            string
-            SrcClass        string
-            DstClass        string
-            Attrs           list
-        } {Name SrcClass DstClass}
-        ral relvar association R2\
-            PartitionDst {Name SrcClass} +\
-            PartitionLink {Name SrcClass} 1
         <<arch relvar definitions>>
     }
 
@@ -11481,7 +11594,7 @@ We log to a service that is the same name as the package.
 variable traceLogCmd [::logger::init rosea]
 ----
 
-== Trace Procedure
+=== Trace Procedure
 
 [source,tcl]
 ----
@@ -11626,7 +11739,7 @@ BAD_TRACEOP     {unknown trace operation, "%s"}
 NO_SAVEFILE     {no save file name provided}
 ----
 
-=== Trace Population
+==== Trace Population
 
 Each of the event dispatch procedrues that is involved with dispatching
 events into a state machine invokes a procedure to capture the dispatch
@@ -11929,7 +12042,7 @@ proc turnOffTraceLog {} {
 }
 ----
 
-=== Trace Operations
+==== Trace Operations
 
 It is difficult to provide all the conceivable operations that one
 may wish to perform on the captured state machine trace data.
@@ -13802,7 +13915,6 @@ namespace eval ::rosea::test {
     <<test utility procs>>
     <<helper command tests>>
     <<class command tests>>
-    <<relationship command tests>>
     <<instance command tests>>
     <<dispatch command tests>>
     <<config command tests>>
@@ -13884,7 +13996,6 @@ format state machine trace records.
 <<manual package commands>>
 [list_end]
 [section "Configuration Commands"]
-<<manual configuration description>>
 [list_begin definitions]
 [usage "Configuration Commands"]
 <<manual configuration commands>>
@@ -13916,8 +14027,9 @@ format state machine trace records.
 [list_end]
 [section "Architecture Commands"]
 The commands in this section are supplied by [cmd rosea].
-They are intended to be used in the translation of the activities of
-the domain.
+They are intended to be invoked by state activities and
+operations and provide the resolve to access model level
+semantics onto the implementation.
 [subsection "Class Commands"]
 Each class in a domain will have a class command defined for it.
 The class command has the same name as the class.
