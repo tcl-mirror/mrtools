@@ -4653,6 +4653,43 @@ Every class has a well defined *InitialState* (*R6*).
 To map a *polymorphicEvent*,
 we need only know its event name.
 
+// HERE! add the Terminal class to the graphic
+
+The class diagram is directly transliterated into TclRAL commands.
+
+[source,tcl]
+----
+<<arch relvar definitions>>=
+ral relvar create State {
+    Class string
+    State string
+} {Class State}
+ral relvar create Event {
+    Class string
+    Event string
+} {Class Event}
+ral relvar create Transition {
+    Class string
+    State string
+    Event string
+    NewState string
+} {Class State Event}
+ral relvar correlation R1 Transition\
+    {Class State} + State {Class State}\
+    {Class Event} + Event {Class Event}
+ral relvar create InitialState {
+    Class string
+    State string
+} Class
+ral relvar association R6\
+    InitialState {Class State} ?\
+    State {Class State} 1
+ral relvar create Terminal {
+    Class string
+    State string
+} {Class State}
+----
+
 We place the dispatch command in their own namespace to avoid any
 accidental invocation of these commands from state activity code.
 
@@ -4669,6 +4706,790 @@ namespace eval Dispatch {
     <<dispatch data>>
     <<dispatch commands>>
 }
+----
+
+==== Dispatching Events
+
+The core part of XUML execution sequencing is rooted in the dispatch
+of events to state machines and the subsequent execution of the state
+activities.
+There are several issues which the design must handle.
+
+* Since we are storing data using TclRAL and we wish to use TclRAL's ability
+to enforce referential integrity,
+we must define what constitutes a _transaction_ on the domain data model.
+Transactions are necessary since there will be times when it takes a
+set of operations to have a consistent data model.
+TclRAL supports the required transaction functionality,
+it is necessary to define what constitutes the processing of a transaction.
+* Support for delayed events requires support for canceling and
+querying the remaining time.
+When mapping XUML event concepts onto Tcl event concepts we will find it
+necessary to store some additional data to support fully delayed events.
+* Self directed events, _i.e._ those events that an instances signals to
+itself must be delivered before non-self directed events.
+
+The XUML execution rules require that a state activity either leave the
+domain data in a consistent state or generate events that will cause
+futher execution that eventually makes the data model consistent.
+In +rosea+ we interpret this rule as meaning that the data model must
+be consistent at the end of each _thread of control_.
+We define a thread of control as beginning with an event that is signaled
+from _outside_ of a state machine activity.
+We define the end of the thread of control to occur when the state activities
+initiated by dispatching the event that starts the thread of control
+have signaled no more events.
+
+Consider an event arising from the invocation of a domain operation.
+When that event is dispatched,
+it starts a thread of control.
+The state activity executed with the event is dispatched will, in general,
+cause other events to be signaled.
+These other events are then dispatched and the execution of the state
+activities may yet signal more events.
+Eventually, event signaling stops and all the signaled events are
+consumed.
+At that time,
+the thread of control is over and the data model must be consistent with
+respect to its relationships.
+So, the implementation will start a +relvar transaction+ at the beginning
+of the thread of control and end that transaction when the thread of control
+ends.
+When the transaction ends, TclRAL will evaluate the +relvar+ constraints
+that are associated with the class relationships.
+If one or more constraints fail,
+then the data is rolled back to its state before the transaction began.
+
+There is one other subtle aspect of event dispatch and transactions.
+We consider dispatching a delayed event as arising from _outside_ of
+a state activity.
+Although the delayed event may be signaled from inside a state activity,
+that signal is interpreted as a request to the system to signal the
+event at some future time.
+The event ultimately is delivered by the system and so is considered to have
+arisen from outside of any state activity that made the delayed signaling
+request.
+This interpretation is in effect even if the delay time is zero.
+A state activity signaling a delayed event with a zero delay
+time will result in the event being considered as beginning a new thread
+of control.
+This boundary condition case can actually be used to cause a state machine
+to _yield_ the thread of control to allow other processing to occur.
+Models that rely on such behavior should be considered suspect but
+the effect can be used as a means of yielding execution from a long running
+computation to allow other threads of control to be run.
+Given the single threaded nature of this implementation,
+that situation is sometimes needed.
+
+To implement these ideas we will use two queues,
+one to hold events that arise outside of a state machine context
+and another one to hold those that are signaled by state machine activites.
+
+[source,tcl]
+----
+<<dispatch data>>=
+variable toc_queue [list]
+variable event_queue [list]
+----
+
+We implement the queues as simple Tcl lists.
+The elements of the list are dictionaries holding the event information.
+
+For the +toc_queue+ new events that originate outside of a state activity
+are simply appended to the list and the inherent ordering of the list
+determines the sequence of threads of control execution.
+For the +event_queue+ the inherent order of the events placed in the list
+must account for self directed events.
+We want the +event_queue+ list order to be the order of event dispatch
+and this implies that when a self directed event is signaled it will be
+inserted into the +event_queue+ list at the beginning.
+
+==== SignalEvent
+
+The +SignalEvent+ procedure is invoked by the various instance commands that
+need to cause event generation.
+
+[float]
+===== Implementation
+
+The implementation must account for the fact that the instance reference
+for the target of the event may be multiple.
+An event must be signaled to each target instance.
+
+(((rosea,Dispatch,SignalEvent)))
+[source,tcl]
+----
+<<dispatch commands>>=
+proc SignalEvent {srcref dstset event arglist} {
+    <<SignalEvent: validate event>>
+
+    variable event_queue
+    variable toc_queue
+    # Iterate across all instances to receive the event.
+    forAllRefs dstref $dstset {
+        set eventInfo [dict create\
+            src $srcref\
+            event $event\
+            dst $dstref\
+            params $arglist\
+        ]
+        if {[isRefEqual $srcref [noInstRef]]} {
+            <<SignalEvent: queue thread of control event>>
+        } elseif {[isRefEqual $srcref $dstref]} {
+            <<SignalEvent: queue self directed event>>
+        } else {
+            <<SignalEvent: queue non self directed event>>
+        }
+        ::after 0 [namespace code DispatchEvent]
+    }
+}
+----
+
+We lookup the event to make sure that the class instances accept the event.
+
+[source,tcl]
+----
+<<SignalEvent: validate event>>=
+lassign $dstset relvar insts
+lassign [SplitRelvarName $relvar] domain class
+if {[relation isempty [relvar restrictone ${domain}::__Arch::Event\
+        Class $class Event $event]]} {
+    tailcall DeclError UNKNOWN_EVENT $event $class
+}
+----
+
+The event information is packed into a dictionary and then
+the following three cases are considered.
+
+* If the event is signaled from outside of a state activity it starts a new
+thread of control.
+This is determined by testing the source of the event against the
+instance reference that represents no instance reference at all.
+* Self directed events have to be placed in the event queue at the proper
+location.
+* Non-self directed events are queue at their location.
+
+Finally, we notice that the +::after+ command is used to interface to the
+Tcl event loop which ultimately causes the event to be delivered.
+
+Queuing an event that starts a thread of control is a simple matter of
+appending it to the list that holds such events.
+
+[source,tcl]
+----
+<<SignalEvent: queue thread of control event>>=
+lappend toc_queue $eventInfo
+----
+
+Finding the proper place for a self directed event requires inserting
+the event at the front of the event queue.
+However,
+there is a minor complication.
+If there is already a self directed event on the event queue,
+we don't want to place the new one directly on the front.
+That would invert the order of the self directed event generation.
+So we search the event queue to find the boundary between self directed
+and non-self directed events and insert the new event there.
+
+[source,tcl]
+----
+<<SignalEvent: queue self directed event>>=
+for {set eqindex 0} {$eqindex < [llength $event_queue]} {incr eqindex} {
+    set cmpevent [lindex $event_queue $eqindex]
+    if {![isRefEqual [dict get $cmpevent src] [dict get $cmpevent dst]]} {
+        break
+    }
+}
+set event_queue [linsert [K $event_queue [set event_queue {}]]\
+        $eqindex $eventInfo] ; # <1>
+----
+<1> This code uses the K combinator trick. This is an optimization
+that exploits a particular design characteristic of Tcl.
+The net effect is to prevent the sharing of the +event_queue+ value
+and save the copy that would otherwise have to be made when it is
+modified by the list insertion.
+See http://wiki.tcl.tk/1923[the Tcl wiki] for a complete discussion.
+We will use this optimization in several places where we are dealing
+with the event queues as they can, in principle, be quite large.
+
+Non-self directed events are always simply appended to the event queue.
+
+[source,tcl]
+----
+<<SignalEvent: queue non self directed event>>=
+lappend event_queue $eventInfo
+----
+
+[float]
+===== Testing
+
+[source,tcl]
+----
+<<dispatch command tests>>=
+test SignalEvent-1.0 {
+    Signal an event
+} -setup {
+    setupDomain foo
+    addClass foo c1 {A1 int A2 string} A1
+    relvar eval {
+        addState foo Class c1 State s1
+        addState foo Class c1 State s2
+        addEvent foo Class c1 Event e1
+        addInitialState foo Class c1 State s1
+        addTransition foo Class c1 State s1 Event e1 NewState s2
+        addTransition foo Class c1 State s2 Event e1 NewState s1
+    }
+
+    set ref [rosea::ClassCmds::create [namespace current]::foo::c1 A1 5 A2 baz]
+    rosea::InstCmds::signal $ref e1
+} -cleanup {
+    after cancel [namespace eval ::rosea::Dispatch namespace code DispatchEvent]
+    cleanupDomain foo
+    set ::rosea::Dispatch::toc_queue [list]
+} -body {
+    set event [lindex $::rosea::Dispatch::toc_queue 0]
+    dict get $event dst
+} -result {::rosea::test::foo::c1 {{A1 int} {{A1 5}}}} -match ref
+----
+
+==== DispatchEvent
+
+For each invocation of +SignalEvent+ we use the +::after+ command to
+have +DispatchEvent+ invoked as the callback.
+The events have been properly ordered on the two queues,
+so it is the job of +DispatchEvent+ to select an event and
+effect the state machine transition.
+
+[float]
+===== Implementation
+
+Dispatching an event first involves selecting the event.
+Here we need to make decisions about whether to start a new thread of control.
+In a Moore type machine,
+the new state is a function of the current state and the event.
+Once we have the new state,
+there is a state activity associated with the new state or
+the new state is one of the non-transitioning states that causes the
+event to be ignored or treated as an error.
+
+[source,tcl]
+----
+<<dispatch commands>>=
+proc DispatchEvent {} {
+    <<DispatchEvent: select event>>
+    <<DispatchEvent: get current state>>
+    <<DispatchEvent: determine new state>>
+    <<DispatchEvent: execute state action>>
+    return
+}
+----
+
+Events are removed from the +event_queue+ list first.
+This queue holds the events generated on the currently running
+thread of control and it is always our goal to run the current thread
+of control until it finishes.
+Otherwise, we start a new thread of control by removing an event
+from the +toc_queue+ list.
+If we find both lists empty,
+then there is nothing to do and we simply return.
+
+[source,tcl]
+----
+<<DispatchEvent: select event>>=
+variable event_queue
+variable toc_queue
+
+if {[llength $event_queue] != 0} {
+    set eventInfo [lindex $event_queue 0]
+    set event_queue [lrange [K $event_queue [set event_queue {}]] 1 end] ; # <1>
+} elseif {[llength $toc_queue] != 0} {
+    set eventInfo [lindex $toc_queue 0]
+    set toc_queue [lrange [K $toc_queue [set toc_queue {}]] 1 end]
+    relvar transaction begin ; # <2>
+} else {
+    return
+}
+----
+<1> Note the use of the +K+ trick here and immediately below.
+<2> Each time we start a new thread of control, we begin a transaction.
+
+Each class that has a state model also has an additional relvar
+that is used to hold the current state values for the instances of the class.
+That relvar is named, +__<class>__STATEINST+, where +<class>+ is replaced
+by the class name.
+The heading of the current state relvar consists of the attributes of the first
+identifier of the class plus an attribute named, +__State+, which holds the
+current state.
+So obtaining the current state means that we +semijoin+ the instance reference
+to the value of the +__<class>__STATEINST+ relvar.
+
+[source,tcl]
+----
+<<DispatchEvent: get current state>>=
+set dstref [dict get $eventInfo dst]
+lassign $dstref relvar ref
+lassign [SplitRelvarName $relvar] domain class
+
+set instrelvar ${domain}::__${class}__STATEINST
+set state [relation semijoin $ref [relvar set $instrelvar]]
+if {[relation isempty $state]} {
+    tailcall DeclError EVENT_IN_FLIGHT [dict get $eventInfo event] $ref
+}
+set currstate [relation extract $state __State]
+----
+
+(((error code,EVENT_IN_FLIGHT)))
+[source,tcl]
+----
+<<error code formats>>=
+EVENT_IN_FLIGHT     {event, "%s", sent to "%s", which does not exist}
+----
+
+It is possible for an event to be signaled to an instance and for
+that instance to be deleted before the event is actually delivered.
+This is known as the _event in flight_ error and is one of the few
+run-time errors that is diagnosed by +rosea+.
+This is considered an analysis error detected at run time.
+Correct analysis models must insure that no events are in flight to
+and instance before deleting it.
+
+To obtain the new state,
+we query the *Transition* relvar that was shown above.
+When the *Transition* relvar value is set up,
+it is the Cartesian product of the states and events for the class.
+So it can be considered the complete transition matrix.
+The query to obtain the new state is shown below.
+
+[source,tcl]
+----
+<<dispatch data>>=
+pipe {
+    relvar restrictone ${archns}::Transition\
+        Class $class State $currstate Event $event |
+    relation extract ~ NewState
+} transitionQuery
+----
+
+Combining the event name and the current state we perform the
+query to find the new state.
+
+[source,tcl]
+----
+<<DispatchEvent: determine new state>>=
+set archns ${domain}::__Arch
+set event [dict get $eventInfo event]
+variable transitionQuery
+set newState [eval $transitionQuery]
+
+# Trace the transition
+::rosea::Trace::TraceTransition [dict get $eventInfo src]\
+    $event $dstref $currstate $newState [dict get $eventInfo params]
+----
+
+Finally, we get to the heart of the event dispatch code.
+There are three cases to consider:
+
+* The event causes a CH (Can't Happen) transition and we throw an error.
+* The event causes an IG (Ignore) transition and we do nothing.
+* We transition to the new state and execute the state activity.
+
+In the end,
+we must decide if the thread of control has ended and if so then
+the transaction is also ended.
+
+[source,tcl]
+----
+<<DispatchEvent: execute state action>>=
+try {
+    if {$newState eq "CH"} {
+        tailcall DeclError CANT_HAPPEN_EVENT [dict get $eventInfo src]\
+            $event $dstref $currstate
+    } elseif {$newState ne "IG"} {
+        <<DispatchEvent: transition to new state>>
+    }
+} finally {
+    if {[llength $event_queue] == 0} {
+        relvar transaction end
+    }
+}
+----
+
+(((error code,EVENT_IN_FLIGHT)))
+[source,tcl]
+----
+<<error code formats>>=
+CANT_HAPPEN_EVENT   {can't happen transition, %s - %s -> %s ==> %s -> CH}
+----
+
+When transitioning to the new state,
+we update the value of the current state of the instance to be the newly
+determined state value.
+The identifiers of the +__<class>__STATEINST+ relvar are just the
+attributes of the instance reference for the instance.
+Note that the current state is updated to the new state _before_ the
+state activity is executed.
+Some architectures wait until after the state activity is executed.
+Which is better or correct is hard to determine and in practices does
+not matter since state activities are strongly discourages from knowledge
+of their own state.
+
+[source,tcl]
+----
+<<DispatchEvent: transition to new state>>=
+set idattrs [tuple get [relation tuple $ref]]
+relvar updateone $instrelvar is $idattrs {
+    tuple update $is __State $newState
+}
+----
+
+At last we execute the state activity.
+State activities are ordinary Tcl procedures named the same as the state and
+that have been placed in the +__Activity+ namespace that is a child of the
+namespace associated to the class.
+The instance reference of the event target is passed as the
+value of the +self+ parameter and any other parameters carried along
+with the event are also given to the activity procedure.
+Here is the explicit reason that the parameters carried with the
+event must match the arguments that the state activity expects
+or Tcl will throw an error.
+
+[source,tcl]
+----
+<<DispatchEvent: transition to new state>>=
+try {
+    ${relvar}::__Activity::$newState $dstref\
+            {*}[dict get $eventInfo params]
+} finally {
+    set term [relvar restrictone ${archns}::Terminal\
+            Class $class State $newState]
+    if {[relation isnotempty $term]} {
+        relvar deleteone $relvar {*}$idattrs
+        relvar deleteone $instrelvar {*}$idattrs
+    }
+}
+----
+
+After executing the state activity,
+we look to see if new state is a terminal state.
+If the state was marked as terminal when the state model was defined,
+the the system automatically deletes the class instance.
+Of course, we must also delete the tuple that records the current state.
+
+[source,tcl]
+----
+<<dispatch command tests>>=
+test DispatchEvent-1.0 {
+    Dispatch an event and execute a state action
+} -setup {
+    setupDomain foo
+    addClass foo c1 {A1 int A2 string} A1
+    relvar eval {
+        addState foo Class c1 State s1
+        addState foo Class c1 State s2
+        addEvent foo Class c1 Event e1
+        addInitialState foo Class c1 State s1
+        addTransition foo Class c1 State s1 Event e1 NewState s2
+        addTransition foo Class c1 State s2 Event e1 NewState s1
+    }
+    proc [namespace current]::foo::c1::__Activity::s2 {self} {
+        set ::done $self
+    }
+
+    set ref [rosea::ClassCmds::create [namespace current]::foo::c1 A1 5 A2 baz]
+    rosea::InstCmds::signal $ref e1
+} -cleanup {
+    cleanupDomain foo
+} -body {
+    vwait ::done
+    set ::done
+} -result {::rosea::test::foo::c1 {{A1 int} {{A1 5}}}} -match ref
+----
+
+==== Dispatching Delayed Events
+
+The mapping of delayed events onto the Tcl event loop again uses the
++::after+ command.
+However,
+there is not enough information available from +::after+ to support
+some of the features of delayed events.
+Further,
+callers of delayed event procedures use the source, target and event
+as identifiers of a delayed event and +::after+ uses its own generated
+identifiers.
+Consequently,
+we will maintain a relvar that contains the mapping between delayed event
+identifying attributes and the +::after+ timer id's.
+
+[source,tcl]
+----
+<<dispatch data>>=
+relvar create DelayedSignal {
+    SrcInstRef      list
+    Event           string
+    DstInstRef      list
+    TimerId         string
+    Expire          bignum
+} {SrcInstRef Event DstInstRef} TimerId
+----
+
+The *Expire* attributes allows us to keep track of the remaining delay time
+for an event.
+We keep that time in units of milliseconds.
+
+We will need some procedures to operate on the *DelayedSignal* relvar.
+In particular we need to find and delete instances of *DelayedSignal*.
+There is a complication.
+The *SrcInstRef* and *DstInstRef* attributes are instance references
+which are Tcl list types.
+If TclRAL is left to its own devices it would compare the
+string representations
+of the instance references when attempting operations on the relvar
+that imply a comparison for equality.
+Since part of the instance reference is a relation value we dont't
+really want to use string comparison to test for equality.
+We also have the necessary procedures defined that can properly compute
+whether two instance references are equal.
+So here we define produces that explicitly use the proper comparison
+to locate and delete DelayedSignal instances.
+
+[source,tcl]
+----
+<<dispatch commands>>=
+proc FindDelayedSignal {srcref event dstref} {
+    variable DelayedSignal
+    return [relation restrictwith $DelayedSignal {
+            [isRefEqual $SrcInstRef $srcref] && $Event eq $event &&\
+            [isRefEqual $DstInstRef $dstref]}]
+}
+----
+
+[source,tcl]
+----
+<<dispatch commands>>=
+proc DeleteDelayedSignal {srcref event dstref} {
+    relvar delete DelayedSignal dsig {
+        [isRefEqual [tuple extract $dsig SrcInstRef] $srcref] &&\
+        [tuple extract $dsig Event] eq $event &&\
+        [isRefEqual [tuple extract $dsig DstInstRef] $dstref]
+    }
+}
+----
+
+==== SignalDelayedEvent
+
+To signal a delayed event is much the same logic as signaling one that
+is not delayed.
+The addition work involves:
+
+* Creating an instance of *DelayedSignal* to record the additional
+information we need.
+* Having +::after+ invoke a different callback to handle the event
+when the delay time has expired.
+
+Here we must also deal with the issue referred to earlier regarding
+the rules for delayed events.
+There can be only one outstanding delayed event for any sending /
+receiving pair of class instances.
+In this architecture,
+requests to create duplicate delayed events are interpreted to mean that
+the outstanding one should be canceled and a new delayed event at the
+new delay time should be established.
+This is generally what is convenient.
+
+[float]
+===== Implementation
+
+The implementation does validate that the event is known for the class.
+Like +SignalEvent+ we treat the target instance reference as potentially
+refering to multiple instances and each must have the event signaled to it.
+
+[source,tcl]
+----
+<<dispatch commands>>=
+proc SignalDelayedEvent {time srcref dstset event arglist} {
+    lassign $dstset relvar insts
+    lassign [SplitRelvarName $relvar] domain class
+    if {[relation isempty [relvar restrictone ${domain}::__Arch::Event\
+            Class $class Event $event]]} {
+        tailcall DeclError UNKNOWN_EVENT $event $class
+    }
+
+    set eventInfo [dict create\
+        src $srcref\
+        event $event\
+        params $arglist\
+    ]
+    forAllRefs dstref $dstset {
+        dict set eventInfo dst $dstref
+        # Cancel any existing delayed signal that might have been in place.
+        CancelDelayedSignal $srcref $event $dstref
+        relvar insert DelayedSignal [list\
+            SrcInstRef  $srcref\
+            Event       $event\
+            DstInstRef  $dstref\
+            TimerId     [::after $time [list\
+                        ::rosea::Dispatch::DispatchDelayedEvent $eventInfo]]\
+            Expire      [expr {entier([clock milliseconds]) + entier($time)}]\
+        ]
+    }
+    return
+}
+----
+
+==== DispatchDelayedEvent
+
+Dispatching a delayed event is a simple operation since all delayed
+events are placed on the +toc_queue+.
+The only minor complication is that we must delete the instance of
+*DelayedSignal* that corresponds to the dispatched event.
+Otherwise, +DispatchEvent+ does all the real work.
+
+
+[source,tcl]
+----
+<<dispatch commands>>=
+proc DispatchDelayedEvent {eventInfo} {
+    DeleteDelayedSignal [dict get $eventInfo src] [dict get $eventInfo event]\
+            [dict get $eventInfo dst]
+    variable toc_queue
+    lappend toc_queue $eventInfo
+    tailcall DispatchEvent
+}
+----
+
+[source,tcl]
+----
+<<dispatch command tests>>=
+test DispatchDelayedEvent-1.0 {
+    Dispatch a delayed event and execute a state action
+} -setup {
+    setupDomain foo
+    addClass foo c1 {A1 int A2 string} A1
+    relvar eval {
+        addState foo Class c1 State s1
+        addState foo Class c1 State s2
+        addEvent foo Class c1 Event e1
+        addInitialState foo Class c1 State s1
+        addTransition foo Class c1 State s1 Event e1 NewState s2
+        addTransition foo Class c1 State s2 Event e1 NewState s1
+    }
+    proc [namespace current]::foo::c1::__Activity::s2 {self} {
+        set ::done $self
+    }
+
+    set ref [rosea::ClassCmds::create [namespace current]::foo::c1 A1 5 A2 baz]
+    rosea::InstCmds::delaysignal 100 $ref e1
+} -cleanup {
+    cleanupDomain foo
+} -body {
+    vwait ::done
+    set ::done
+} -result {::rosea::test::foo::c1 {{A1 int} {{A1 5}}}} -match ref
+----
+
+[source,tcl]
+----
+<<dispatch commands>>=
+proc CancelDelayedSignal {srcref event dstref} {
+    variable DelayedSignal
+    set sig [FindDelayedSignal $srcref $event $dstref]
+    if {[relation isnotempty $sig]} {
+        ::after cancel [relation extract $sig TimerId]
+        DeleteDelayedSignal $srcref $event $dstref
+    } else {
+        # Search the toc_queue to see if the signal delay has already expired
+        # and the event is awaiting dispatch.
+        variable toc_queue
+        for {set i 0} {$i < [llength $toc_queue]} {incr i} {
+            set eventInfo [lindex $toc_queue $i]
+            dict update eventInfo src evtsrc dst evtdst event evtevent {
+                if {[isRefEqual $evtsrc $srcref] &&\
+                        [isRefEqual $evtdst $dstref] &&\
+                        $evtevent eq $event} {
+                    set toc_queue [lreplace\
+                            [K $toc_queue [set toc_queue {}]] $i $i]
+                    break
+                }
+            }
+        }
+    }
+}
+----
+
+[source,tcl]
+----
+<<dispatch command tests>>=
+test CancelDelayedSignal-1.0 {
+    Cancel a delayed event
+} -setup {
+    setupDomain foo
+    addClass foo c1 {A1 int A2 string} A1
+    relvar eval {
+        addState foo Class c1 State s1
+        addState foo Class c1 State s2
+        addEvent foo Class c1 Event e1
+        addInitialState foo Class c1 State s1
+        addTransition foo Class c1 State s1 Event e1 NewState s2
+        addTransition foo Class c1 State s2 Event e1 NewState s1
+    }
+
+    set ref [rosea::ClassCmds::create [namespace current]::foo::c1 A1 5 A2 baz]
+} -cleanup {
+    cleanupDomain foo
+} -body {
+    rosea::InstCmds::delaysignal 100 $ref e1
+    set src [rosea::Helpers::noInstRef]
+    rosea::InstCmds::canceldelayed $src $ref e1
+    relation cardinality [rosea::Dispatch::FindDelayedSignal $src e1 $ref]
+} -result {0}
+----
+
+[source,tcl]
+----
+<<dispatch commands>>=
+proc SignalTimeRemaining {srcref event dstref} {
+    set sig [FindDelayedSignal $srcref $event $dstref]
+    if {[relation isnotempty $sig]} {
+        set remaining [expr {[relation extract $sig Expire] -\
+            [clock milliseconds]}]
+        if {$remaining < 0} {
+            set remaining 0
+        }
+    } else {
+        set remaining 0
+    }
+
+    return $remaining
+}
+----
+
+[source,tcl]
+----
+<<dispatch command tests>>=
+test SignalTimeRemaining-1.0 {
+    Obtain remaining time on a delayed signal
+} -setup {
+    setupDomain foo
+    addClass foo c1 {A1 int A2 string} A1
+    relvar eval {
+        addState foo Class c1 State s1
+        addState foo Class c1 State s2
+        addEvent foo Class c1 Event e1
+        addInitialState foo Class c1 State s1
+        addTransition foo Class c1 State s1 Event e1 NewState s2
+        addTransition foo Class c1 State s2 Event e1 NewState s1
+    }
+
+    set ref [rosea::ClassCmds::create [namespace current]::foo::c1 A1 5 A2 baz]
+} -cleanup {
+    cleanupDomain foo
+} -body {
+    rosea::InstCmds::delaysignal 100 $ref e1
+    set src {{} {{} {}}}
+    set remain [rosea::InstCmds::delayremaining $src $ref e1]
+    rosea::InstCmds::canceldelayed $src $ref e1
+    expr {$remain <= 100 && $remain >= 95}
+} -result {1}
 ----
 
 ==== Dispatching Polymorphic Events
@@ -4808,398 +5629,6 @@ test MapPolymorphicEvent-1.0 {
     rosea::Dispatch::MapPolymorphicEvent [namespace current]::polysignal\
         {} $ref e1 {}
 } -result {true} -output {::rosea::test::polysignal {} {::rosea::test::bar::X {{X1 int} {{X1 5}}}} e1 {}}
-----
-
-[source,tcl]
-----
-<<dispatch data>>=
-variable event_queue [list]
-variable toc_queue [list]
-variable inTransaction false
-----
-
-(((rosea,Dispatch,SignalEvent)))
-[source,tcl]
-----
-<<dispatch commands>>=
-proc SignalEvent {srcref dstset event arglist} {
-    variable event_queue
-    variable toc_queue
-    forAllRefs dstref $dstset {
-        set eventInfo [dict create\
-            src $srcref\
-            event $event\
-            dst $dstref\
-            params $arglist\
-        ]
-        if {[isRefEqual $srcref [noInstRef]]} {
-            lappend toc_queue $eventInfo
-        } elseif {[isRefEqual $srcref $dstref]} {
-            set eqindex 0
-            foreach cmpevent $event_queue {
-                if {![isRefEqual [dict get $cmpevent src]\
-                        [dict get $cmpevent dst]]} {
-                    break
-                }
-                incr eqindex
-            }
-            set event_queue [linsert $event_queue $eqindex $eventInfo]
-        } else {
-            lappend event_queue $eventInfo
-        }
-        ::after 0 [namespace code DispatchEvent]
-    }
-}
-----
-
-[source,tcl]
-----
-<<dispatch command tests>>=
-test SignalEvent-1.0 {
-    Signal an event
-} -setup {
-    setupDomain foo
-    addClass foo c1 {A1 int A2 string} A1
-    relvar eval {
-        addState foo Class c1 State s1
-        addState foo Class c1 State s2
-        addEvent foo Class c1 Event e1
-        addInitialState foo Class c1 State s1
-        addTransition foo Class c1 State s1 Event e1 NewState s2
-        addTransition foo Class c1 State s2 Event e1 NewState s1
-    }
-
-    set ref [rosea::ClassCmds::create [namespace current]::foo::c1 A1 5 A2 baz]
-    rosea::InstCmds::signal $ref e1
-} -cleanup {
-    after cancel [namespace eval ::rosea::Dispatch namespace code DispatchEvent]
-    cleanupDomain foo
-    set ::rosea::Dispatch::toc_queue [list]
-} -body {
-    set event [lindex $::rosea::Dispatch::toc_queue 0]
-    dict get $event dst
-} -result {::rosea::test::foo::c1 {{A1 int} {{A1 5}}}} -match ref
-----
-
-[source,tcl]
-----
-<<dispatch commands>>=
-proc DispatchEvent {} {
-    variable event_queue
-    variable toc_queue
-    variable inTransaction
-
-    if {[llength $event_queue] != 0} {
-        set eventInfo [lindex $event_queue 0]
-        set event_queue [lrange [K $event_queue [set event_queue {}]] 1 end]
-    } elseif {[llength $toc_queue] != 0} {
-        set eventInfo [lindex $toc_queue 0]
-        set toc_queue [lrange [K $toc_queue [set toc_queue {}]] 1 end]
-    } else {
-        return
-    }
-
-    set dstref [dict get $eventInfo dst]
-    lassign $dstref relvar ref
-    lassign [SplitRelvarName $relvar] domain class
-    set archns ${domain}::__Arch
-
-    set instrelvar ${domain}::__${class}__STATEINST
-    set state [relation semijoin $ref [relvar set $instrelvar]]
-    if {[relation isempty $state]} {
-        tailcall DeclError EVENT_IN_FLIGHT [dict get $eventInfo event]\
-            $ref
-    }
-    set currstate [relation extract $state __State]
-    set event [dict get $eventInfo event]
-
-    set newState [pipe {
-        relvar restrictone ${archns}::Transition\
-            Class $class State $currstate Event $event |
-        relation extract ~ NewState
-    }]
-    ::rosea::Trace::TraceTransition [dict get $eventInfo src]\
-        $event $dstref $currstate $newState [dict get $eventInfo params]
-
-    if {!$inTransaction} {
-        set inTransaction true
-        relvar transaction begin
-    }
-    if {$newState eq "CH"} {
-        set inTransaction false
-        relvar transaction rollback
-        tailcall DeclError CANT_HAPPEN_EVENT [dict get $eventInfo src]\
-            $event $dstref $currstate
-    } elseif {$newState ne "IG"} {
-        set idattrs [tuple get [ral relation tuple $ref]]
-        relvar updateone $instrelvar is $idattrs {
-            tuple update $is __State $newState
-        }
-        try {
-            ${relvar}::__Activity::$newState $dstref\
-                    {*}[dict get $eventInfo params]
-        } finally {
-            set term [relvar restrictone ${domain}::__Arch::Terminal\
-                    Class $class State $newState]
-            if {[relation isnotempty $term]} {
-                relvar deleteone $relvar {*}$idattrs
-                relvar deleteone $instrelvar {*}$idattrs
-            }
-            if {[llength $event_queue] == 0} {
-                set inTransaction false
-                relvar transaction end
-            }
-        }
-    }
-    return
-}
-----
-
-(((error code,EVENT_IN_FLIGHT)))
-(((error code,CANT_HAPPEN_EVENT)))
-[source,tcl]
-----
-<<error code formats>>=
-EVENT_IN_FLIGHT     {event, "%s", sent to "%s", which does not exist}
-CANT_HAPPEN_EVENT   {can't happen transition, %s - %s -> %s ==> %s -> CH}
-----
-
-[source,tcl]
-----
-<<dispatch command tests>>=
-test DispatchEvent-1.0 {
-    Dispatch an event and execute a state action
-} -setup {
-    setupDomain foo
-    addClass foo c1 {A1 int A2 string} A1
-    relvar eval {
-        addState foo Class c1 State s1
-        addState foo Class c1 State s2
-        addEvent foo Class c1 Event e1
-        addInitialState foo Class c1 State s1
-        addTransition foo Class c1 State s1 Event e1 NewState s2
-        addTransition foo Class c1 State s2 Event e1 NewState s1
-    }
-    proc [namespace current]::foo::c1::__Activity::s2 {self} {
-        set ::done $self
-    }
-
-    set ref [rosea::ClassCmds::create [namespace current]::foo::c1 A1 5 A2 baz]
-    rosea::InstCmds::signal $ref e1
-} -cleanup {
-    cleanupDomain foo
-} -body {
-    vwait ::done
-    set ::done
-} -result {::rosea::test::foo::c1 {{A1 int} {{A1 5}}}} -match ref
-----
-
-[source,tcl]
-----
-<<dispatch data>>=
-relvar create DelayedSignal {
-    SrcInstRef      list
-    Event           string
-    DstInstRef      list
-    TimerId         string
-    Expire          bignum
-} {SrcInstRef Event DstInstRef}
-----
-
-[source,tcl]
-----
-<<dispatch commands>>=
-proc SignalDelayedEvent {time srcref dstset event arglist} {
-    set eventInfo [dict create\
-        src $srcref\
-        event $event\
-        params $arglist\
-    ]
-    forAllRefs dstref $dstset {
-        dict set eventInfo dst $dstref
-        # Cancel any existing delayed signal that might have been in place.
-        CancelDelayedSignal $srcref $event $dstref
-        relvar insert DelayedSignal [list\
-            SrcInstRef  $srcref\
-            Event       $event\
-            DstInstRef  $dstref\
-            TimerId     [::after $time [list\
-                        ::rosea::Dispatch::DispatchDelayedEvent $eventInfo]]\
-            Expire      [expr {entier([clock milliseconds]) + entier($time)}]\
-        ]
-    }
-    return
-}
-----
-
-[source,tcl]
-----
-<<dispatch commands>>=
-proc DispatchDelayedEvent {eventInfo} {
-    DeleteDelayedSignal [dict get $eventInfo src] [dict get $eventInfo event]\
-            [dict get $eventInfo dst]
-    variable toc_queue
-    lappend toc_queue $eventInfo
-    tailcall DispatchEvent
-}
-----
-
-[source,tcl]
-----
-<<dispatch command tests>>=
-test DispatchDelayedEvent-1.0 {
-    Dispatch a delayed event and execute a state action
-} -setup {
-    setupDomain foo
-    addClass foo c1 {A1 int A2 string} A1
-    relvar eval {
-        addState foo Class c1 State s1
-        addState foo Class c1 State s2
-        addEvent foo Class c1 Event e1
-        addInitialState foo Class c1 State s1
-        addTransition foo Class c1 State s1 Event e1 NewState s2
-        addTransition foo Class c1 State s2 Event e1 NewState s1
-    }
-    proc [namespace current]::foo::c1::__Activity::s2 {self} {
-        set ::done $self
-    }
-
-    set ref [rosea::ClassCmds::create [namespace current]::foo::c1 A1 5 A2 baz]
-    rosea::InstCmds::delaysignal 100 $ref e1
-} -cleanup {
-    cleanupDomain foo
-} -body {
-    vwait ::done
-    set ::done
-} -result {::rosea::test::foo::c1 {{A1 int} {{A1 5}}}} -match ref
-----
-
-[source,tcl]
-----
-<<dispatch commands>>=
-proc CancelDelayedSignal {srcref event dstref} {
-    variable DelayedSignal
-    set sig [FindDelayedSignal $srcref $event $dstref]
-    if {[relation isnotempty $sig]} {
-        ::after cancel [relation extract $sig TimerId]
-        DeleteDelayedSignal $srcref $event $dstref
-    } else {
-        # Search the toc_queue to see if the signal delay has already expired
-        # and the event is awaiting dispatch.
-        variable toc_queue
-        for {set i 0} {$i < [llength $toc_queue]} {incr i} {
-            set eventInfo [lindex $toc_queue $i]
-            dict update eventInfo src evtsrc dst evtdst event evtevent {
-                if {[isRefEqual $evtsrc $srcref] &&\
-                        [isRefEqual $evtdst $dstref] &&\
-                        $evtevent eq $event} {
-                    set toc_queue [lreplace\
-                            [K $toc_queue [set toc_queue {}]] $i $i]
-                    break
-                }
-            }
-        }
-    }
-}
-----
-
-[source,tcl]
-----
-<<dispatch command tests>>=
-test CancelDelayedSignal-1.0 {
-    Cancel a delayed event
-} -setup {
-    setupDomain foo
-    addClass foo c1 {A1 int A2 string} A1
-    relvar eval {
-        addState foo Class c1 State s1
-        addState foo Class c1 State s2
-        addEvent foo Class c1 Event e1
-        addInitialState foo Class c1 State s1
-        addTransition foo Class c1 State s1 Event e1 NewState s2
-        addTransition foo Class c1 State s2 Event e1 NewState s1
-    }
-
-    set ref [rosea::ClassCmds::create [namespace current]::foo::c1 A1 5 A2 baz]
-} -cleanup {
-    cleanupDomain foo
-} -body {
-    rosea::InstCmds::delaysignal 100 $ref e1
-    set src {{} {{} {}}}
-    rosea::InstCmds::canceldelayed $src $ref e1
-    relation cardinality [rosea::Dispatch::FindDelayedSignal $src e1 $ref]
-} -result {0}
-----
-
-[source,tcl]
-----
-<<dispatch commands>>=
-proc SignalTimeRemaining {srcref event dstref} {
-    set sig [FindDelayedSignal $srcref $event $dstref]
-    if {[relation isnotempty $sig]} {
-        set remaining [expr {[relation extract $sig Expire] -\
-            [clock milliseconds]}]
-        if {$remaining < 0} {
-            set remaining 0
-        }
-    } else {
-        set remaining 0
-    }
-
-    return $remaining
-}
-----
-
-[source,tcl]
-----
-<<dispatch command tests>>=
-test SignalTimeRemaining-1.0 {
-    Obtain remaining time on a delayed signal
-} -setup {
-    setupDomain foo
-    addClass foo c1 {A1 int A2 string} A1
-    relvar eval {
-        addState foo Class c1 State s1
-        addState foo Class c1 State s2
-        addEvent foo Class c1 Event e1
-        addInitialState foo Class c1 State s1
-        addTransition foo Class c1 State s1 Event e1 NewState s2
-        addTransition foo Class c1 State s2 Event e1 NewState s1
-    }
-
-    set ref [rosea::ClassCmds::create [namespace current]::foo::c1 A1 5 A2 baz]
-} -cleanup {
-    cleanupDomain foo
-} -body {
-    rosea::InstCmds::delaysignal 100 $ref e1
-    set src {{} {{} {}}}
-    set remain [rosea::InstCmds::delayremaining $src $ref e1]
-    rosea::InstCmds::canceldelayed $src $ref e1
-    expr {$remain <= 100 && $remain >= 95}
-} -result {1}
-----
-
-[source,tcl]
-----
-<<dispatch commands>>=
-proc FindDelayedSignal {srcref event dstref} {
-    variable DelayedSignal
-    return [relation restrictwith $DelayedSignal {
-            [isRefEqual $SrcInstRef $srcref] && $Event eq $event &&\
-            [isRefEqual $DstInstRef $dstref]}]
-}
-----
-
-[source,tcl]
-----
-<<dispatch commands>>=
-proc DeleteDelayedSignal {srcref event dstref} {
-    relvar delete DelayedSignal dsig {
-        [isRefEqual [tuple extract $dsig SrcInstRef] $srcref] &&\
-        [tuple extract $dsig Event] eq $event &&\
-        [isRefEqual [tuple extract $dsig DstInstRef] $dstref]
-    }
-}
 ----
 
 === Helper Commands
@@ -10868,34 +11297,6 @@ test generate-8.1 {
 proc GenerateArchStructures {domns} {
     set archns ${domns}::__Arch
     namespace eval ${archns} {
-        ral relvar create State {
-            Class string
-            State string
-        } {Class State}
-        ral relvar create Event {
-            Class string
-            Event string
-        } {Class Event}
-        ral relvar create Transition {
-            Class string
-            State string
-            Event string
-            NewState string
-        } {Class State Event}
-        ral relvar correlation R1 Transition\
-            {Class State} + State {Class State}\
-            {Class Event} + Event {Class Event}
-        ral relvar create InitialState {
-            Class string
-            State string
-        } Class
-        ral relvar association R6\
-            InitialState {Class State} ?\
-            State {Class State} 1
-        ral relvar create Terminal {
-            Class string
-            State string
-        } {Class State}
         ral relvar create PolymorphicEvent {
             Class           string
             Event           string
