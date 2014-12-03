@@ -1123,7 +1123,7 @@ blockdiag {
     event [label = "Event", class = "rvstyle"]
     trans [label = "Transition", class = "rvstyle"]
     istate [label = "InitialState", class = "rvstyle"]
-    term [label = "Terminal", class = "rvstyle"]
+    term [label = "TerminalState", class = "rvstyle"]
     link [label = "Link", class = "rvstyle"]
     assoclink [label = "AssociationLink", class = "rvstyle"]
     partlink [label = "PartitionLink", class = "rvstyle"]
@@ -2970,8 +2970,7 @@ proc signalAssigner {rname event args} {
         relation project ~ {*}[lindex [relvar identifiers $assignrelvar] 0] |
         list $rname ~
     }]
-    set srcref [SelfInstRef]
-    ::rosea::Dispatch::SignalEvent $srcref $dstref $event $args
+    ::rosea::Dispatch::SignalEvent [SelfInstRef] $dstref $event $args
 
     return
 }
@@ -4650,10 +4649,10 @@ in the currently related subclass.
 The *Transition* table here is the Cartesian product of
 the *State* and *Event* instances (*R1*).
 Every class has a well defined *InitialState* (*R6*).
-To map a *polymorphicEvent*,
+Some states also server as a *TerminalState* (*R7*),
+and the system will delete instances that transition into those states.
+To map a *PolymorphicEvent*,
 we need only know its event name.
-
-// HERE! add the Terminal class to the graphic
 
 The class diagram is directly transliterated into TclRAL commands.
 
@@ -4684,10 +4683,13 @@ ral relvar create InitialState {
 ral relvar association R6\
     InitialState {Class State} ?\
     State {Class State} 1
-ral relvar create Terminal {
+ral relvar create TerminalState {
     Class string
     State string
 } {Class State}
+ral relvar association R7\
+    TerminalState {Class State} *\
+    State {Class State} 1
 ----
 
 We place the dispatch command in their own namespace to avoid any
@@ -4718,21 +4720,24 @@ There are several issues which the design must handle.
 * Since we are storing data using TclRAL and we wish to use TclRAL's ability
 to enforce referential integrity,
 we must define what constitutes a _transaction_ on the domain data model.
-Transactions are necessary since there will be times when it takes a
-set of operations to have a consistent data model.
+Transactions are necessary since there will be times when a
+set of operations must be executed to have a consistent data model.
 TclRAL supports the required transaction functionality,
-it is necessary to define what constitutes the processing of a transaction.
+it is only necessary to define what constitutes the processing in a transaction.
 * Support for delayed events requires support for canceling and
 querying the remaining time.
 When mapping XUML event concepts onto Tcl event concepts we will find it
-necessary to store some additional data to support fully delayed events.
-* Self directed events, _i.e._ those events that an instances signals to
-itself must be delivered before non-self directed events.
+necessary to store some additional data to support fully delayed event
+operations.
+* Self directed events, _i.e._ those events that an instance signals to
+itself must be delivered before non-self directed events directed
+to the same instance.
 
 The XUML execution rules require that a state activity either leave the
 domain data in a consistent state or generate events that will cause
-futher execution that eventually makes the data model consistent.
-In +rosea+ we interpret this rule as meaning that the data model must
+further execution that eventually makes the data model consistent.
+In +rosea+,
+we interpret this rule to mean that the data model must
 be consistent at the end of each _thread of control_.
 We define a thread of control as beginning with an event that is signaled
 from _outside_ of a state machine activity.
@@ -4743,11 +4748,11 @@ have signaled no more events.
 Consider an event arising from the invocation of a domain operation.
 When that event is dispatched,
 it starts a thread of control.
-The state activity executed with the event is dispatched will, in general,
+The state activity executed when the event is dispatched will, in general,
 cause other events to be signaled.
 These other events are then dispatched and the execution of the state
 activities may yet signal more events.
-Eventually, event signaling stops and all the signaled events are
+Eventually, signaling new events stops and all the signaled events are
 consumed.
 At that time,
 the thread of control is over and the data model must be consistent with
@@ -4764,17 +4769,20 @@ There is one other subtle aspect of event dispatch and transactions.
 We consider dispatching a delayed event as arising from _outside_ of
 a state activity.
 Although the delayed event may be signaled from inside a state activity,
-that signal is interpreted as a request to the system to signal the
-event at some future time.
+that signaling operation is interpreted as a request to the system to signal
+the event at some future time.
 The event ultimately is delivered by the system and so is considered to have
 arisen from outside of any state activity that made the delayed signaling
 request.
+We consider time to be somewhat magical, pervasive and
+as existing outside of any domain.
 This interpretation is in effect even if the delay time is zero.
 A state activity signaling a delayed event with a zero delay
-time will result in the event being considered as beginning a new thread
-of control.
+time will result,
+when the event is dispatched,
+in the start of a new thread of control.
 This boundary condition case can actually be used to cause a state machine
-to _yield_ the thread of control to allow other processing to occur.
+to _yield_ the thread of control allowing other processing to occur.
 Models that rely on such behavior should be considered suspect but
 the effect can be used as a means of yielding execution from a long running
 computation to allow other threads of control to be run.
@@ -4797,7 +4805,7 @@ The elements of the list are dictionaries holding the event information.
 
 For the +toc_queue+ new events that originate outside of a state activity
 are simply appended to the list and the inherent ordering of the list
-determines the sequence of threads of control execution.
+determines the sequence of execution for the threads of control.
 For the +event_queue+ the inherent order of the events placed in the list
 must account for self directed events.
 We want the +event_queue+ list order to be the order of event dispatch
@@ -4812,9 +4820,16 @@ need to cause event generation.
 [float]
 ===== Implementation
 
-The implementation must account for the fact that the instance reference
-for the target of the event may be multiple.
-An event must be signaled to each target instance.
+We first decide whether the signaled event will start a new thread of
+control.
+
+* If the event is signaled from outside of a state activity it starts a new
+thread of control.
+This is determined by testing the source of the event against the
+instance reference that represents no instance reference at all.
+* Self directed events have to be placed in the event queue at the proper
+location.
+* Non-self directed events are queued at the end of the queue.
 
 (((rosea,Dispatch,SignalEvent)))
 [source,tcl]
@@ -4823,29 +4838,44 @@ An event must be signaled to each target instance.
 proc SignalEvent {srcref dstset event arglist} {
     <<SignalEvent: validate event>>
 
-    variable event_queue
-    variable toc_queue
-    # Iterate across all instances to receive the event.
-    forAllRefs dstref $dstset {
-        set eventInfo [dict create\
-            src $srcref\
-            event $event\
-            dst $dstref\
-            params $arglist\
-        ]
-        if {[isRefEqual $srcref [noInstRef]]} {
+    set callback [namespace code DispatchEvent]
+    set eventInfo [dict create\
+        src $srcref\
+        event $event\
+        params $arglist\
+    ]
+    if {[isRefEqual $srcref [noInstRef]]} {
+        variable toc_queue
+        forAllRefs dstref $dstset {
             <<SignalEvent: queue thread of control event>>
-        } elseif {[isRefEqual $srcref $dstref]} {
-            <<SignalEvent: queue self directed event>>
-        } else {
-            <<SignalEvent: queue non self directed event>>
         }
-        ::after 0 [namespace code DispatchEvent]
+    } else {
+        variable event_queue
+        forAllRefs dstref $dstset { # <1>
+            dict set eventInfo dst $dstref
+            if {[isRefEqual $srcref $dstref]} { # <2>
+                <<SignalEvent: queue self directed event>>
+            } else {
+                <<SignalEvent: queue non self directed event>>
+            }
+            ::after 0 $callback
+        }
     }
 }
 ----
+<1> For events queued to the +event_queue+ we then have to deal with
+whether the event is self directed.
+<2> We deem the event to be self directed if the +srcref+ and +dstref+ are
+equal.
 
-We lookup the event to make sure that the class instances accept the event.
+Finally, we use the +::after+ command to interface to the
+Tcl event loop which ultimately causes the event to be delivered.
+The above code insures that each event placed in queue
+is also accompanied by creating a Tcl event using +::after+.
+Thus each state machine event is mapped to a Tcl event.
+
+We validate the event to insure
+sure that the class instances accept the event.
 
 [source,tcl]
 ----
@@ -4858,27 +4888,15 @@ if {[relation isempty [relvar restrictone ${domain}::__Arch::Event\
 }
 ----
 
-The event information is packed into a dictionary and then
-the following three cases are considered.
-
-* If the event is signaled from outside of a state activity it starts a new
-thread of control.
-This is determined by testing the source of the event against the
-instance reference that represents no instance reference at all.
-* Self directed events have to be placed in the event queue at the proper
-location.
-* Non-self directed events are queue at their location.
-
-Finally, we notice that the +::after+ command is used to interface to the
-Tcl event loop which ultimately causes the event to be delivered.
-
 Queuing an event that starts a thread of control is a simple matter of
 appending it to the list that holds such events.
 
 [source,tcl]
 ----
 <<SignalEvent: queue thread of control event>>=
+dict set eventInfo dst $dstref
 lappend toc_queue $eventInfo
+::after 0 $callback
 ----
 
 Finding the proper place for a self directed event requires inserting
@@ -5015,13 +5033,13 @@ if {[llength $event_queue] != 0} {
 
 Each class that has a state model also has an additional relvar
 that is used to hold the current state values for the instances of the class.
-That relvar is named, +__<class>__STATEINST+, where +<class>+ is replaced
+That relvar is named, +\_\_<class>\_\_STATEINST+, where +<class>+ is replaced
 by the class name.
 The heading of the current state relvar consists of the attributes of the first
-identifier of the class plus an attribute named, +__State+, which holds the
+identifier of the class plus an attribute named, +\_\_State+, which holds the
 current state.
 So obtaining the current state means that we +semijoin+ the instance reference
-to the value of the +__<class>__STATEINST+ relvar.
+to the value of the +\_\_<class>\_\_STATEINST+ relvar.
 
 [source,tcl]
 ----
@@ -5124,7 +5142,7 @@ CANT_HAPPEN_EVENT   {can't happen transition, %s - %s -> %s ==> %s -> CH}
 When transitioning to the new state,
 we update the value of the current state of the instance to be the newly
 determined state value.
-The identifiers of the +__<class>__STATEINST+ relvar are just the
+The identifiers of the +\_\_<class>__STATEINST+ relvar are just the
 attributes of the instance reference for the instance.
 Note that the current state is updated to the new state _before_ the
 state activity is executed.
@@ -5144,7 +5162,7 @@ relvar updateone $instrelvar is $idattrs {
 
 At last we execute the state activity.
 State activities are ordinary Tcl procedures named the same as the state and
-that have been placed in the +__Activity+ namespace that is a child of the
+that have been placed in the +\_\_Activity+ namespace that is a child of the
 namespace associated to the class.
 The instance reference of the event target is passed as the
 value of the +self+ parameter and any other parameters carried along
@@ -5160,7 +5178,7 @@ try {
     ${relvar}::__Activity::$newState $dstref\
             {*}[dict get $eventInfo params]
 } finally {
-    set term [relvar restrictone ${archns}::Terminal\
+    set term [relvar restrictone ${archns}::TerminalState\
             Class $class State $newState]
     if {[relation isnotempty $term]} {
         relvar deleteone $relvar {*}$idattrs
@@ -9746,7 +9764,7 @@ proc generate {{prefix {}} {pattern *}} {
                 relation project $states Model Name |
                 relation rename ~ Model Class Name State
             }]
-            relvar union ${archns}::Terminal [pipe {
+            relvar union ${archns}::TerminalState [pipe {
                 relation semijoin $domain $State -using {Name Domain} |
                 relation restrict ~ termtuple\
                         {[tuple extract $termtuple IsFinal]} |
