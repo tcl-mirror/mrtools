@@ -4847,32 +4847,48 @@ proc SignalEvent {srcref dstset event arglist} {
     if {[isRefEqual $srcref [noInstRef]]} {
         variable toc_queue
         forAllRefs dstref $dstset {
-            <<SignalEvent: queue thread of control event>>
+            # Queue the thread of control events.
+            dict set eventInfo dst $dstref
+            lappend toc_queue $eventInfo
+            ::after 0 $callback
         }
     } else {
         variable event_queue
-        forAllRefs dstref $dstset { # <1>
+        forAllRefs dstref $dstset {
             dict set eventInfo dst $dstref
-            if {[isRefEqual $srcref $dstref]} { # <2>
+            if {[isRefEqual $srcref $dstref]} { # <1>
                 <<SignalEvent: queue self directed event>>
             } else {
-                <<SignalEvent: queue non self directed event>>
+                # Non-self directed events are always simply appended to the
+                # event queue.
+                lappend event_queue $eventInfo
             }
             ::after 0 $callback
         }
     }
 }
 ----
-<1> For events queued to the +event_queue+ we then have to deal with
-whether the event is self directed.
-<2> We deem the event to be self directed if the +srcref+ and +dstref+ are
+<1> We deem the event to be self directed if the +srcref+ and +dstref+ are
 equal.
+There is a bit of a strange case here.
+We would expect that when signaling a self directed event that +dstset+
+would be a singular reference, probably just the value of +self+ in
+the state activity.
+It's not clear that signaling the same event to +self+ multiple times is a
+particularly meaningful operation.
+However, since instance references can be computed in many ways and since
+there is nothing blatantly wrong with signaling yourself with the same
+event multiple times,
+we iterate through the target instance references for self directed events
+eventhough we would expect under the vast majority of cases that there
+would be only one target instance for a self directed event.
 
 Finally, we use the +::after+ command to interface to the
-Tcl event loop which ultimately causes the event to be delivered.
+Tcl event loop which ultimately causes the event to be delivered via
+the associated callback.
 The above code insures that each event placed in queue
 is also accompanied by creating a Tcl event using +::after+.
-Thus each state machine event is mapped to a Tcl event.
+In this way each state machine event is mapped to a Tcl event.
 
 We validate the event to insure
 sure that the class instances accept the event.
@@ -4888,17 +4904,6 @@ if {[relation isempty [relvar restrictone ${domain}::__Arch::Event\
 }
 ----
 
-Queuing an event that starts a thread of control is a simple matter of
-appending it to the list that holds such events.
-
-[source,tcl]
-----
-<<SignalEvent: queue thread of control event>>=
-dict set eventInfo dst $dstref
-lappend toc_queue $eventInfo
-::after 0 $callback
-----
-
 Finding the proper place for a self directed event requires inserting
 the event at the front of the event queue.
 However,
@@ -4908,6 +4913,19 @@ we don't want to place the new one directly on the front.
 That would invert the order of the self directed event generation.
 So we search the event queue to find the boundary between self directed
 and non-self directed events and insert the new event there.
+
+Note there is another design alternative here.
+We could simply keep the self directed events on their own queue and
+then the problem of ordering of the self directed events is solved by
+appending new self directed events to the queue.
+It is, however, a trade off between another queue and the logic surrounding
+both selecting the next event to deliver and
+determining when the thread of control has finished.
+In this case we have decided upon a single queue, expecting that we will
+make only a single comparison in the loop below.
+In the majority of cases,
+a self directed event will be placed directly on the front of the event queue.
+
 
 [source,tcl]
 ----
@@ -4924,19 +4942,12 @@ set event_queue [linsert [K $event_queue [set event_queue {}]]\
 <1> This code uses the K combinator trick. This is an optimization
 that exploits a particular design characteristic of Tcl.
 The net effect is to prevent the sharing of the +event_queue+ value
-and save the copy that would otherwise have to be made when it is
-modified by the list insertion.
+and save the copy that would otherwise have to be made when the list value is
+modified by the list insertion command.
 See http://wiki.tcl.tk/1923[the Tcl wiki] for a complete discussion.
 We will use this optimization in several places where we are dealing
-with the event queues as they can, in principle, be quite large.
-
-Non-self directed events are always simply appended to the event queue.
-
-[source,tcl]
-----
-<<SignalEvent: queue non self directed event>>=
-lappend event_queue $eventInfo
-----
+with the event queues as they can, in principle, be quite large and
+dealing with the event queues is a frequent operation.
 
 [float]
 ===== Testing
@@ -4974,9 +4985,11 @@ test SignalEvent-1.0 {
 
 For each invocation of +SignalEvent+ we use the +::after+ command to
 have +DispatchEvent+ invoked as the callback.
-The events have been properly ordered on the two queues,
+The events have been properly ordered on the two queues by +SignalEvent+,
 so it is the job of +DispatchEvent+ to select an event and
 effect the state machine transition.
+Layered on the event dispatch determining the boundaries of the
+thread of control.
 
 [float]
 ===== Implementation
@@ -5005,7 +5018,7 @@ proc DispatchEvent {} {
 Events are removed from the +event_queue+ list first.
 This queue holds the events generated on the currently running
 thread of control and it is always our goal to run the current thread
-of control until it finishes.
+of control to completion.
 Otherwise, we start a new thread of control by removing an event
 from the +toc_queue+ list.
 If we find both lists empty,
@@ -5031,8 +5044,8 @@ if {[llength $event_queue] != 0} {
 <1> Note the use of the +K+ trick here and immediately below.
 <2> Each time we start a new thread of control, we begin a transaction.
 
-Each class that has a state model also has an additional relvar
-that is used to hold the current state values for the instances of the class.
+Each class that has a state model also has an additional relvar that is used to
+hold the value of the current state for the instances of the class.
 That relvar is named, +\_\_<class>\_\_STATEINST+, where +<class>+ is replaced
 by the class name.
 The heading of the current state relvar consists of the attributes of the first
@@ -5063,20 +5076,24 @@ set currstate [relation extract $state __State]
 EVENT_IN_FLIGHT     {event, "%s", sent to "%s", which does not exist}
 ----
 
-It is possible for an event to be signaled to an instance and for
-that instance to be deleted before the event is actually delivered.
+It is possible for an event to be signaled to an instance that
+has been deleted before the event is actually delivered.
 This is known as the _event in flight_ error and is one of the few
 run-time errors that is diagnosed by +rosea+.
 This is considered an analysis error detected at run time.
 Correct analysis models must insure that no events are in flight to
-and instance before deleting it.
+an instance before deleting it.
+In general, deletion protocols within a domain model can be quite
+complicated as the model is responsible for all the compensatory
+operations needed to make the instance population consistent with
+the relationship constraints.
 
 To obtain the new state,
 we query the *Transition* relvar that was shown above.
 When the *Transition* relvar value is set up,
 it is the Cartesian product of the states and events for the class.
-So it can be considered the complete transition matrix.
-The query to obtain the new state is shown below.
+So it can be considered the complete transition matrix and the
+query below will alway find a tuple with the new state.
 
 [source,tcl]
 ----
@@ -5099,15 +5116,18 @@ set event [dict get $eventInfo event]
 variable transitionQuery
 set newState [eval $transitionQuery]
 
-# Trace the transition
 ::rosea::Trace::TraceTransition [dict get $eventInfo src]\
-    $event $dstref $currstate $newState [dict get $eventInfo params]
+    $event $dstref $currstate $newState [dict get $eventInfo params] ; # <1>
 ----
+<1> Note that we trace the transition _before_ we take any action on it.
+It is a simpler control path.
+We will have much more to say about state machine tracing.
 
 Finally, we get to the heart of the event dispatch code.
 There are three cases to consider:
 
-* The event causes a CH (Can't Happen) transition and we throw an error.
+* The event causes a CH (Can't Happen) transition and that is considered
+a serious error.
 * The event causes an IG (Ignore) transition and we do nothing.
 * We transition to the new state and execute the state activity.
 
@@ -5120,8 +5140,7 @@ the transaction is also ended.
 <<DispatchEvent: execute state action>>=
 try {
     if {$newState eq "CH"} {
-        tailcall DeclError CANT_HAPPEN_EVENT [dict get $eventInfo src]\
-            $event $dstref $currstate
+        <<DispatchEvent: handle transition error>>
     } elseif {$newState ne "IG"} {
         <<DispatchEvent: transition to new state>>
     }
@@ -5129,6 +5148,44 @@ try {
     if {[llength $event_queue] == 0} {
         relvar transaction end
     }
+}
+----
+
+The *CH* (can't happen) transition deserves special consideration.
+You can think of a *CH* transition as an analogy to the +assert+ macro
+in ordinary ``C'' code.
+Triggering a *CH* transition is a serious error that should never
+happen in production code.
+If it does, usually there is no clear way to proceed and how to
+handle such situation is very application dependent.
+Often the only recourse is to exit or reset to some saved checkpoint.
+However during development and testing,
+the *CH* transition can uncover a wealth of analysis errors and
+misunderstandings.
+Consequently,
+it is very useful to have some control over what happens should
+a *CH* transition occur.
+We delegate the error handling for *CH* transitions to
+the +TransitionError+ footnote:[The fully qualified name is
++::rosea::Dispatch::TransitionError+]
+procedure.
+
+[source,tcl]
+----
+<<DispatchEvent: handle transition error>>=
+TransitionError [dict get $eventInfo src] $event $dstref $currstate
+----
+
+We supply a default implementation of +TransitionError+ which simply
+throws an error.
+Application can redefine this procedure to gain control over the error
+handling.
+
+[source,tcl]
+----
+<<dispatch commands>>=
+proc TransitionError {src event dst currstate} {
+    tailcall DeclError CANT_HAPPEN_EVENT $src $event $dst $currstate
 }
 ----
 
@@ -5176,7 +5233,7 @@ or Tcl will throw an error.
 <<DispatchEvent: transition to new state>>=
 try {
     ${relvar}::__Activity::$newState $dstref\
-            {*}[dict get $eventInfo params]
+            {*}[dict get $eventInfo params] ; # <1>
 } finally {
     set term [relvar restrictone ${archns}::TerminalState\
             Class $class State $newState]
@@ -5186,12 +5243,22 @@ try {
     }
 }
 ----
+<1> This command invocation has a lot of variable substitution.
+Each state activity is actually a procedure.
+Those procedures are placed in the +\_\_Activity+ child namespace
+of the class so that there is no naming conflict.
+The value of +dstref+ becomes +self+ in the state activity.
+Finally, we expand out the list of event parameters to be
+any additional arguments to the state activity procedure.
 
 After executing the state activity,
 we look to see if new state is a terminal state.
 If the state was marked as terminal when the state model was defined,
 the the system automatically deletes the class instance.
 Of course, we must also delete the tuple that records the current state.
+
+[float]
+===== Testing
 
 [source,tcl]
 ----
@@ -5236,7 +5303,9 @@ as identifiers of a delayed event and +::after+ uses its own generated
 identifiers.
 Consequently,
 we will maintain a relvar that contains the mapping between delayed event
-identifying attributes and the +::after+ timer id's.
+identifying attributes and the +::after+ timer id's
+along with additional data we need to support all the delayed event
+operations.
 
 [source,tcl]
 ----
@@ -5259,15 +5328,15 @@ In particular we need to find and delete instances of *DelayedSignal*.
 There is a complication.
 The *SrcInstRef* and *DstInstRef* attributes are instance references
 which are Tcl list types.
-If TclRAL is left to its own devices it would compare the
-string representations
-of the instance references when attempting operations on the relvar
-that imply a comparison for equality.
-Since part of the instance reference is a relation value we dont't
-really want to use string comparison to test for equality.
-We also have the necessary procedures defined that can properly compute
+If TclRAL is left to its own devices,
+it would compare the string representations of the instance references when
+performing operations on the relvar that require a comparison for equality.
+Since part of the instance reference is a relation value we don't
+want to use string comparison to test for equality.
+Relation values do not have a canonical string representation.
+We have defined the necessary procedures to properly compute
 whether two instance references are equal.
-So here we define produces that explicitly use the proper comparison
+So here we define procedures that explicitly use the proper comparison
 to locate and delete DelayedSignal instances.
 
 [source,tcl]
@@ -5375,6 +5444,9 @@ proc DispatchDelayedEvent {eventInfo} {
 }
 ----
 
+[float]
+===== Testing
+
 [source,tcl]
 ----
 <<dispatch command tests>>=
@@ -5405,6 +5477,15 @@ test DispatchDelayedEvent-1.0 {
 } -result {::rosea::test::foo::c1 {{A1 int} {{A1 5}}}} -match ref
 ----
 
+==== CancelDelayedEvent
+
+To cancel a delayed event,
+we handle both cases where the delay time has not expired and where it
+has expired and the event may be queued for dispatch.
+
+[float]
+===== Implementation
+
 [source,tcl]
 ----
 <<dispatch commands>>=
@@ -5434,6 +5515,9 @@ proc CancelDelayedSignal {srcref event dstref} {
 }
 ----
 
+[float]
+===== Testing
+
 [source,tcl]
 ----
 <<dispatch command tests>>=
@@ -5462,24 +5546,42 @@ test CancelDelayedSignal-1.0 {
 } -result {0}
 ----
 
+==== SignalTimeRemaining
+
+To support determining the remaining delay time for an event,
+we stored the time at which the event was due to expire into its
+*DelayedSignal* tuple at the time we created the delayed event.
+The remaining time computation then just computes the difference
+between the expiration time and the current time.
+There are a few boundary conditions to consider and zero is
+returned in those cases.
+
+[float]
+===== Implementation
+
 [source,tcl]
 ----
 <<dispatch commands>>=
 proc SignalTimeRemaining {srcref event dstref} {
     set sig [FindDelayedSignal $srcref $event $dstref]
-    if {[relation isnotempty $sig]} {
-        set remaining [expr {[relation extract $sig Expire] -\
-            [clock milliseconds]}]
-        if {$remaining < 0} {
-            set remaining 0
-        }
-    } else {
-        set remaining 0
-    }
-
-    return $remaining
+    return [expr {[relation isempty $sig] ? 0 :\
+        max([relation extract $sig Expire] - [clock milliseconds], 0)}] ; # <1>
 }
 ----
+<1> Okay, this is rather dense.
+If we don't find a matching delayed event, then just return zero under
+the assumption that it has already been dispatched or never existed in
+the first place.
+Otherwise, we want to return the difference between the expiration time
+and the current time unless that difference is negative.
+A negative difference means that we were executing when expiration
+time occurred and we just haven't gotten back to the event loop
+to dispatch the event.
+We will soon enough so,
+just return zero to indicate that the ship has sailed.
+
+[float]
+===== Testing
 
 [source,tcl]
 ----
@@ -5503,7 +5605,7 @@ test SignalTimeRemaining-1.0 {
     cleanupDomain foo
 } -body {
     rosea::InstCmds::delaysignal 100 $ref e1
-    set src {{} {{} {}}}
+    set src [rosea::Helpers::noInstRef]
     set remain [rosea::InstCmds::delayremaining $src $ref e1]
     rosea::InstCmds::canceldelayed $src $ref e1
     expr {$remain <= 100 && $remain >= 95}
@@ -5512,60 +5614,137 @@ test SignalTimeRemaining-1.0 {
 
 ==== Dispatching Polymorphic Events
 
+We now consider the job of dispatching polymorphic events.
+Polymorphic events are events directed at the superclass of a generalization
+that are mapped at run time to an event in the subclass to which the
+superclass instance is currently related.
+This is the only type of polymorphism that XUML execution rules
+supportfootnote:[In particular note there are no polymorphic operations
+supported].
+
+The rules for polymorphic events can, in general, be rather intricate
+and complicated.
+These rules are also the least well specified,
+so it is important to state here the rules that +rosea+ uses.
+
+* Polymorphic events are directed at superclass instances and are mapped
+to event in one of the subclasses.
+* If the superclass of a generalization defines a polymorphic event,
+then the ultimate leaf subclasses of the generalization hierarchy
+must have defined state models to consume the polymorphic events.
+Although, the leaf subclasses may choose to ignore the ordinary events
+mapped to it,
+such constructs should be considered as suspect analysis
+albeit the execution rules operate properly in that case.
+* The name of the ordinary event consumed in the leaf subclass instances
+is the same as the name of the polymorphic event.
+Using a naming convention to distinguish ordinary events from polymorphic
+event may be useful but such conventions do not affect the event dispatch.
+* Polymorphic events have no effect on the superclass instance.
+A superclass may have its own state model and react to ordinary events
+directed at the superclass state model independent of any polymorphic events
+defined for the state model.
+If a superclass does have a state model,
+the names of the events to which it responds must be disjoint from any
+polymorphic events.
+* A class may serve as the superclass for multiple generalization hierarchies,
+a so called _compound generalization_.
+For a compound generalization,
+polymorphic events directed at the superclass will propagate down all the
+hierarchies for which the class serves as a superclass.
+This implies that signaling a single polymorphic event may cause multiple
+events to ultimately be signaled.
+* A class may serve as both the subclass of one generalization and the
+superclass of a different generalization, a so called _repeated specialization_.
+In this case,
+polymorphic events defined for the generalization where the class serves as a
+subclass are inherited by the generalization for which the class serves as
+a superclass.
+A class that is subject to repeated specialization may also define it own
+polymorphic events and the generalization for which it is the superclass
+will inherit the union of the events from its superclass and those defined
+by it.
+* A class may be the subclass of _multiple generalization_
+hierarchiesfootnote:[XUML rules prohibit multiple generalizations the have
+a common root class since such arrangements violate the requirement that
+the subclass instances form a disjoint union].
+In this case,
+the state model must respond to the union of the events
+from all the generalization for which the class is a subclass.
+Note that some care might have to be taken to insure that the polymorphic
+event names of the multiple hierarches are distinct.
+
+==== MapPolymorphicEvent
+
+The +MapPolymorphicEvent+ procedure is called by the instance commands
+that deal with signalling events to determine if the event
+is indeed polymorphic.
+It is,
+then the the event is recursively signaled to the currently related
+subclass instance.
+Otherwise,
++MapPolymorphicEvent+ returns an indication that the event is not
+polymorphic and the instance signaling commands can then perform
+the operation of signaling an ordinary event.
+Ultimately,
+execution sequencing is only accomplished by delivering ordinary events.
+Event polymorphism is a convenience and optimization that prevents
+state activities from performing event mapping themselves.
+
+[float]
+===== Implementation
+
+One consideration for the implementation of the +MapPolymorphicEvent+
+procedure is that we want to use this procedure to handle both
+immediate and delayed events.
+The function of mapping the event is the same.
+The only difference is how the mapped event is handled.
+So we will pass in a forwarding command prefix as an argument.
+Once the work of determining to which subclass instance the event is to
+be signaled is accomplished,
+the forwarding command will determine if it is a delayed or immediate event.
+
 (((rosea,Dispatch,MapPolymorphicEvent)))
 [source,tcl]
 ----
 <<dispatch commands>>=
 proc MapPolymorphicEvent {frwdcmd srcref dstrefs event arglist} {
-    lassign $dstrefs dstrelvar dstinsts ; # <1>
-    lassign [SplitRelvarName $dstrelvar] domain dstclass
-    set archns ${domain}::__Arch
-    set polyevent [relvar restrictone ${archns}::PolymorphicEvent\
-        Class $dstclass Event $event]
-    if {[relation isempty $polyevent]} {
-        return false
-    }
+    <<MapPolymorphicEvent: check if event is polymorphic>>
+    <<MapPolymorphicEvent: find subclasses>>
+    <<MapPolymorphicEvent: map event>>
 
-    variable polymapQuery
-    set partitions [eval $polymapQuery] ; # <2>
-
-    relation foreach inst $dstinsts { # <3>
-        relation foreach partition $partitions {
-            relation assign $partition
-            relation foreach dstlink $DstLinks {
-                relation assign $dstlink
-                set related [relation semijoin $inst\
-                    [relvar set ${domain}::$DstClass] -using $Attrs] ; # <4>
-                if {[relation isnotempty $related]} {
-                    set dstreference [ToRef ${domain}::$DstClass $related]
-                    ::rosea::Trace::TracePolymorphic $srcref\
-                        $event $dstreference ${domain}::SrcClass $Name
-                    {*}$frwdcmd $srcref $dstreference $event $arglist
-                    break
-                }
-            }
-        }
-    }
     return true
 }
 ----
-<1> First we must determine if the event is polymorphic.
+
+We use the *PolymorphicEvent* relvar to determine if is the event
+is polymorphic.
 If not, then we just return and the event will be signaled as a
 transition event.
-<2> See query explanation <<polymapQuery,below>>.
-<3> There are three nested iterations.
-The outside loop iterates over the superclass instances
-since we may be signaling several instances in the same call.
-The next iteration is over all the hierarchies that orginate from
-the superclass.
-Typically, this is only one, but it can be several for a compound
-generalization.
-Finally, we iterate over all the subclass links.
-<4> We must traverse the relationship to find the one subclass that is
-actually linked and forward the event on to that one.
-Once forwarding has happened, we can stop looking any futher since
-we _know_ that there is exactly one subclass linked up to any given
-superclass instance because the partition constraint enforces that.
+
+[source,tcl]
+----
+<<MapPolymorphicEvent: check if event is polymorphic>>=
+lassign $dstrefs dstrelvar dstinsts
+lassign [SplitRelvarName $dstrelvar] domain dstclass
+set archns ${domain}::__Arch
+set polyevent [relvar restrictone ${archns}::PolymorphicEvent\
+    Class $dstclass Event $event]
+if {[relation isempty $polyevent]} {
+    return false
+}
+----
+
+If we indeed have a polymorphic event,
+we need to determine the generalization hierarchies that are affected.
+We do that with a query.
+
+[source,tcl]
+----
+<<MapPolymorphicEvent: find subclasses>>=
+variable polymapQuery
+set partitions [eval $polymapQuery]
+----
 
 [[polymapQuery,polymorphic event query]]
 The essential query for dispatching a polymorphic event is to find the set of
@@ -5583,9 +5762,7 @@ pipe {
 
 This query is accomplished by finding all the partition link tuples that
 originate at the relvar which is the target of the event signaling.
-These are joined with the link superclass to pick up the attributes
-that are used to relate tuples across the partition.
-The result of the join is grouped so we may consider all the superclass to
+The result is grouped so we may consider all the superclass to
 subclass links for a given hierarchy.
 We want to do this because we know that a superclass instance will reference
 exactly one subclass from among all the subclasses in the generalization and
@@ -5603,6 +5780,62 @@ The heading of the result of this query will be:
 
 Note that the *DstLinks* attribute is relation valued.footnote:[That is what
 the +group+ operation does]
+
+The polymorphic event mapping operation consists of three nested iterations.
+The outside loop iterates over the target superclass instances
+since we may be signaling several instances in the same call.
+The next iteration is over all the hierarchies that orginate from
+the superclass.
+Typically, this is only one, but it can be several for a compound
+generalization.
+Finally, we iterate over all the subclass links.
+
+[source,tcl]
+----
+<<MapPolymorphicEvent: map event>>=
+relation foreach inst $dstinsts {
+    relation foreach partition $partitions {
+        relation assign $partition
+        relation foreach dstlink $DstLinks {
+            relation assign $dstlink
+            <<MapPolymorphicEvent: signal subclass>>
+        }
+    }
+}
+----
+
+We must traverse the generalization relationship to find the one subclass that
+is actually linked and forward the event on to that one.
+Note that we are semijoining to each subclass in the generalization until
+one is found.
+Once we know which is the related subclass instance we can formulate
+an instance reference to it and
+trace the polymorphic event dispatch.
+We _forward_ the event to the subclass instance by recursively signaling
+the event.
+Once forwarding has happened, we can stop looking any futher since
+we _know_ that there is exactly one subclass instance linked to any given
+superclass instance because the partition constraint guarantees that.
+
+[source,tcl]
+----
+<<MapPolymorphicEvent: signal subclass>>=
+set related [relation semijoin $inst\
+    [relvar set ${domain}::$DstClass] -using $Attrs]
+if {[relation isnotempty $related]} {
+    set dstreference [ToRef ${domain}::$DstClass $related]
+    ::rosea::Trace::TracePolymorphic $srcref\
+        $event $dstreference ${domain}::SrcClass $Name
+    {*}$frwdcmd $srcref $dstreference $event $arglist ; # <1>
+    break
+}
+----
+<1> The forward command prefix will either be +SignalEvent+ or
++SignalDelayedEvent <time>+ depending whether we arrived
+here via the +signal+ instance command or the +delaysignal+ instance command.
+
+[float]
+===== Testing
 
 [source,tcl]
 ----
