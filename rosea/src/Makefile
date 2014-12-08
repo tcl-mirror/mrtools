@@ -135,7 +135,7 @@ code : $(TCLSRC) pkgIndex.tcl
 
 tests : code $(TESTS)
 
-example : $(TCLSRC) wmctrl.tcl
+example : $(TCLSRC) runwm.tcl
 
 manual : $(MANDOC)
 
@@ -143,10 +143,10 @@ runtests : tests
 	cd $(TESTDIR) ; tclsh $(TESTS) -verbose bet -level info
 
 runexample : example
-	tclsh wmctrl.tcl | tee wmctrl-trace.txt
+	tclsh runwm.tcl | tee wmctrl-trace.txt
 
 wmctrl-trace.txt wmctrl-seqdiag.diag : wmctrl.tcl $(TCLSRC)
-	tclsh wmctrl.tcl | tee wmctrl-trace.txt
+	tclsh runwm.tcl | tee wmctrl-trace.txt
 
 clean :
 	$(RM) $(CLEANFILES)
@@ -159,6 +159,9 @@ pkgIndex.tcl : $(DOCSRC)
 	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
 
 wmctrl.tcl : $(DOCSRC)
+	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
+
+runwm.tcl : $(DOCSRC)
 	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
 
 $(DOCDIR)/%.pdf : %.aweb
