@@ -11214,6 +11214,53 @@ As before,
 we will factor out the queries that are used inside the iteration
 loop to save the command rewriting that the +pipe+ command would otherwise
 perform on each iteration.
+We bring the variables containing the queries into scope,
+but show the queries below close to the code that uses them.
+
+[source,tcl]
+----
+<<generate: create class data and commands>>=
+<<class query variables>>
+
+set classes [relation semijoin $domain $DomainElement $Class]
+relation foreach class $classes {
+    <<generate: create class namespace>>
+    <<generate: create class relvar>>
+    <<generate: create state model>>
+    <<generate: create class operations>>
+    <<generate: create instance operations>>
+}
+----
+
+[float]
+====  Create Class Namespace
+
+For each class in the domain,
+we create a child namespace.
+That namespace is used to hold specifics of the class such as its
+class based and instance based operations.
+For convenience,
+we set up a command resolution path to the instance commands and the
+to the parent domain namespaces.
+
+[source,tcl]
+----
+<<generate: create class namespace>>=
+set className ${domns}::[relation extract $class Name]
+namespace eval $className {
+    <<tclral imports>>
+}
+namespace eval $className [list namespace path\
+        [list ::rosea::InstCmds $domns]]
+----
+
+[float]
+==== Create Class Relvar
+
+With the namespace defined,
+we can now create the relvar that holds the instance data.
+Each class of the domain has a relvar that holds its instances.
+To create the relvar we need to know the heading and the identitiers.
 
 The heading of a class consists of its attributes names and types.
 We will want that in the form of a dictionary which the
@@ -11227,11 +11274,15 @@ pipe {
     relation project ~ Name Type |
     relation dict ~ Name Type
 } headingQuery
+
+<<class query variables>>=
+variable headingQuery
 ----
 
 The other thing you need when creating the relvar for a class is the
-set of identifiers.
-The +relation group+ command will create a relation valued attribute
+set of identifiers and the attributes that make up those identfiers.
+In the query below,
+the +relation group+ command will create a relation valued attribute
 named +Attributes+ in this case.
 That relation valued attribute will have one tuple for each attribute
 of each identifier.
@@ -11244,6 +11295,9 @@ pipe {
             $IdentifyingAttribute |
     relation group ~ Attributes Attribute
 } idQuery
+
+<<class query variables>>=
+variable idQuery
 ----
 
 The heading of the result of this query will be:
@@ -11256,8 +11310,121 @@ The heading of the result of this query will be:
                                      |string
 |=========================
 
-Whether a class has an associated state model is also something we will
-need to know during the class generation.
+We need to transform the result of the +idQuery+ into the set of
+identifying attributes lists that the +relvar create+ command requires.
+This is done by iterating across all the identifiers of the class,
+extracting the grouped attributes for the identifier and then
+turning the attribute name tuples into a list.
+The required operations are all provided by +ral+.
+When dealing with these meta-model situations,
+we often need to convert the rows of some relation value in a list.
+
+[source,tcl]
+----
+<<generate: create class relvar>>=
+set heading [eval $headingQuery]
+set idset [list]
+relation foreach id [eval $idQuery] -ascending Number {
+    lappend idset [relation list\
+            [relation extract $id Attributes] Attribute]
+}
+
+relvar create $className $heading {*}$idset
+
+<<generate: setup default values>>
+----
+
+[float]
+====  Setup Default Values
+
+We will support the concept of a default attribute value by
+creating a relvar trace that is triggered when a tuple is inserted
+into the class relvar.
+Relvars support tracing in a manner analogous to Tcl variable tracing.
+
+First, let's examine the command that will be invoked as the trace.
+This command is shown below.
+The _op_, _relvar_ and _tuple_ arguments are added by the relvar tracing
+mechanism.
+The _defheading_ and _defvalues_ arguments are part of the command
+prefix that we must generate when the relvar trace is added.
+The _defheading_ argument is a dictionary of attribute name / type pairs for
+those attributes that have defined default values.
+It is that subset of the heading that contains attributes with
+defined defaults.
+The _defvalues_ argument is a dictionary of attribute name / value pairs
+that are the corresponding defined default values.
+
+The return value of a relvar insert trace command must be a tuple value
+whose heading matches that of the relvar on which the insert is performed.
+In the +InsertTuple+ procedure below,
+we construct a new tuple whose heading is the merge of the default
+values heading and the heading of the tuple as it was inserted.
+Similarly, the value of the newly constructed tuple is the merge of
+the default values and the tuple value as it was inserted.
+Note that +dict merge+ does just what we want when we merge the
+tuple onto the default heading and values.
+Any dictionary entries that are in the inserted tuple will take
+precedence over any defaults.
+If the defaults are missing from what is inserted, then the merge
+will put them into place.
+
+[source,tcl]
+----
+<<helper commands>>=
+proc InsertTrace {defheading defvalues op relvar tuple} {
+    tuple create\
+        [dict merge $defheading [tuple heading $tuple]]\
+        [dict merge $defvalues [tuple get $tuple]]
+}
+----
+
+To insert the trace,
+we must find the attributes of the class that have been configured
+to have a default value.
+That query is shown below.
+After finding all the attributes of the class,
+we join DefaultValue to obtain the set of attributes that
+have defined default values.
+
+[source,tcl]
+----
+<<rosea data>>=
+pipe {
+    relation semijoin $class $Attribute\
+        -using {Domain Domain Name Class} |
+    relation join ~ $DefaultValue\
+        -using {Domain Domain Class Class Name Attribute}
+} defaultValuesQuery
+
+<<class query variables>>=
+variable defaultValuesQuery
+----
+
+We test to make sure that we need to add a trace at all.
+The +relation dict+ command takes the default values relation and
+extracts the needed columns and returns just the form we need
+to create the command prefix involving +InsertTrace+.
+
+[source,tcl]
+----
+<<generate: setup default values>>=
+set defaultvalues [eval $defaultValuesQuery]
+
+if {[relation isnotempty $defaultvalues]} {
+    relvar trace add variable $className insert [list\
+        ::rosea::Helpers::InsertTrace\
+        [relation dict $defaultvalues Name Type]\
+        [relation dict $defaultvalues Name Value]\
+    ]
+}
+----
+
+[float]
+==== Create State Model
+
+To determine if a class has a state model,
+we use the following query.
 
 [source,tcl]
 ----
@@ -11266,108 +11433,178 @@ pipe {
     relation semijoin $class $StateModel -using {Domain Domain Name Model} |
     relation isnotempty
 } hasSMQuery
+
+<<class query variables>>=
+variable hasSMQuery
 ----
+
+For classes that have a state model,
+we must create a relvar to hold the current state of the instances.
+Further,
+we will create a child namespace to hold the state activities
+and the procedures for the activities themselves.
 
 [source,tcl]
 ----
-<<generate: create class data and commands>>=
-variable headingQuery
-variable idQuery
-variable hasSMQuery
+<<generate: create state model>>=
+set hasStateModel [eval $hasSMQuery]
+if {$hasStateModel} {
+    <<generate: create current state relvar>>
+    <<generate: create activity namespace>>
+    <<generate: create activity procedures>>
+}
+----
 
-set classes [relation semijoin $domain $DomainElement $Class]
-relation foreach class $classes {
-    set className ${domns}::[relation extract $class Name]
-    namespace eval $className {
-        <<tclral imports>>
-    }
-    namespace eval $className [list namespace path\
-            [list $domns ::rosea::InstCmds]]
-    # create class relvars
-    set heading [eval $headingQuery]
-    set ids [eval $idQuery]
-    set idset [list]
-    relation foreach id $ids -ascending Number {
-        lappend idset [relation list\
-                [relation extract $id Attributes] Attribute]
-    }
-    # create the relvar
-    relvar create $className $heading {*}$idset
+[float]
+==== Create Current State Relvar
 
-    set defaultvalues [pipe {
-        relation semijoin $class $Attribute\
-            -using {Domain Domain Name Class} |
-        relation join ~ $DefaultValue\
-            -using {Domain Domain Class Class Name Attribute}
+We store the current state for classes instances that have a state
+model in a separate relvar.
+This makes sure that the current state is not accidentally tampered
+with during normal access to the class model.
+Since this is Tcl,
+nothing is really hidden or inaccessible.
+If you know the name, you can get the data.
+However, separating the current state into its own relvar does prevent
+the worst case abuses.
+
+The heading for the relvar that holds the current state is different
+for each class.
+It is composed of the identifying attributes and one other attribute
+named, `__State`.
+We alway use the attributes of the lowest numbered identifier (_e.g._ 1)
+since that is the identifier that is used to construct instance references.
+The relvar is named in the form, `__<class name>__STATEINST` to prevent
+any name conflicts.
+
+[source,tcl]
+----
+<<generate: create current state relvar>>=
+set instid [lindex $idset 0]
+set instheading [list]
+foreach attr $instid {
+    lappend instheading $attr [dict get $heading $attr] ; # <1>
+}
+lappend instheading __State string
+relvar create\
+    ${domns}::__[relation extract $class Name]__STATEINST\
+    $instheading $instid
+----
+<1> In addition to the attribute name,
+we need the type information to construct the relvar header.
+
+[float]
+==== Create Activity Namespace
+We want to keep the state activity procedures in their own namespace
+to avoid any naming conflicts with class operations.
+Also,
+a separate namespace allows us to set the command resolution path
+to something convenient so that when the state activities execute
+the common procedures they will use can be invoked using unqualified names.
+
+[source,tcl]
+----
+<<generate: create activity namespace>>=
+set actns ${className}::__Activity
+namespace eval $actns {
+    <<tclral imports>>
+}
+namespace eval $actns [list\
+    namespace path [list\
+        ::rosea::InstCmds\
+        $className\
+        $domns\
+    ]\
+]
+----
+
+[float]
+==== Create Activity Procedures
+
+The state activities are realized as ordinary procedures in the
+`__Activity` namespace of the class.
+
+We obtain the state names and code using the query below.
+
+[source,tcl]
+----
+<<rosea data>>=
+pipe {
+    relation semijoin $class $State -using {Domain Domain Name Model} |
+    relation project ~ Name Parameters Action
+} statesQuery
+
+<<class query variables>>=
+variable statesQuery
+----
+
+Iterating across the queried relation value,
+we invoke `::proc` to create the state activity procedures.
+Note the insertion of `self` as the first argument of the activity
+procedure.
+
+[source,tcl]
+----
+<<generate: create activity procedures>>=
+set states [eval $statesQuery]
+relation foreach state $states {
+    relation assign $state\
+        {Name stateName}\
+        {Parameters params}\
+        {Action stateAction}
+    proc ${actns}::$stateName [linsert $params 0 self] $stateAction
+}
+----
+
+[float]
+==== Create Class Operations
+
+For each class in the domain we will create an ensemble command
+that is the same name as the fully qualified name of the class.
+There two sources of class operations, those supplied by the system
+and those defined when the class was configured.
+Further,
+some of the system supplied operations are only valid for classes
+that have a state model.
+It is also the case,
+that the same considerations apply regarding instance based operations.
+Some are system supplied others are user supplied and some of the
+system instance operations only make sense if there is a state model
+associated with the class.
+Consequently,
+we will factor out some helper procedures to make these queries for us.
+
+We start with a query to obtain system supplied operations.
+The procedure below obtains the system supplied operations,
+filters out those that meet the criterial for a state model and then
+joins to select the desired type, either instance or class based.
+
+[source,tcl]
+----
+<<helper commands>>=
+proc QuerySystemOperations {which requiresSM} {
+    return [pipe {
+        relvar set ::rosea::Config::SuppliedOperation |
+        relation restrictwith ~ {$RequiresStateModel == $requiresSM} |
+        relation join [relvar set ::rosea::Config::$which] ~
     }]
-    #puts [relformat $defaultvalues defaultvalues]
+}
+----
 
-    if {[relation isnotempty $defaultvalues]} {
-        set defheading [relation dict $defaultvalues Name Type]
-        set defvalues [relation dict $defaultvalues Name Value]
-        relvar trace add variable $className insert [list\
-            ::rosea::Helpers::InsertTrace $defheading $defvalues]
-    }
+We can specialize this query for class based operations.
+Here we need to augment the Command attribute by including the name
+of the class (it is fully qualified here).
+This supplies the first argument to all class based operations,
+the name of the class itself.
+The return value is a dictionary that we will use in creating the
+ensemble command.
 
-    # Check if we need an "instance" relvar to hold current state.
-    set hasStateModel [eval $hasSMQuery]
-    if {$hasStateModel} {
-        set instid [lindex $idset 0]
-        set instheading [list]
-        foreach attr $instid {
-            lappend instheading $attr [dict get $heading $attr]
-        }
-        lappend instheading __State string
-        relvar create\
-            ${domns}::__[relation extract $class Name]__STATEINST\
-            $instheading $instid
-
-        set actns ${className}::__Activity
-        namespace eval $actns {
-            <<tclral imports>>
-        }
-        namespace eval $actns [list\
-            namespace path [list\
-                ::rosea::InstCmds\
-                $className\
-                $domns\
-            ]\
-        ]
-        #puts "$actns path = [namespace eval $actns namespace path]"
-        set states [pipe {
-            relation semijoin $class $State\
-                -using {Domain Domain Name Model} |
-            relation project ~ Name Parameters Action
-        }]
-        relation foreach state $states {
-            relation assign $state\
-                {Name stateName}\
-                {Parameters params}\
-                {Action stateAction}
-            set params [linsert $params 0 self]
-            proc ${actns}::$stateName $params $stateAction
-        }
-    }
-
-    set opmap [dict create]
-    set classops [relation semijoin $class $UserClassOperation\
-        -using {Domain Domain Name Class}]
-    relation foreach classop $classops {
-        relation assign $classop\
-            {Name opname}\
-            {Parameters params}\
-            {Body opbody}
-
-        set params [linsert $params 0 class]
-        proc ${className}::$opname $params $opbody
-        dict set opmap $opname [list ${className}::$opname\
-                $className]
-    }
-
-    set sysmap [pipe {
-        relation restrictwith $SuppliedOperation\
-                {!$RequiresStateModel} |
-        relation join $SystemClassOperation ~ |
+[source,tcl]
+----
+<<helper commands>>=
+proc QuerySystemClassOperations {className requiresSM} {
+    return [pipe {
+        QuerySystemOperations SystemClassOperation $requiresSM |
         relation update ~ sco 1 {
             tuple update $sco Command\
                 [concat [tuple extract $sco Command]\
@@ -11375,55 +11612,90 @@ relation foreach class $classes {
         } |
         relation dict ~ Name Command
     }]
-    if {$hasStateModel} {
-        set sysmap [dict merge $sysmap [pipe {
-            relation restrictwith $SuppliedOperation\
-                {$RequiresStateModel} |
-            relation join $SystemClassOperation ~ |
-            relation update ~ sco 1 {
-                tuple update $sco Command\
-                    [concat [tuple extract $sco Command]\
-                    [list $className]]
-            } |
-            relation dict ~ Name Command
-        }]]
-    }
+}
+----
 
-    namespace ensemble create\
-        -command $className\
-        -map [dict merge $opmap $sysmap]
+For instance based operations,
+the instance reference is supplied by the caller and
+so we can just return the dictionary we find.
 
-    set opmap [dict create]
-    set instops [relation semijoin $class $UserInstanceOperation\
-        -using {Domain Domain Name Class}]
-    relation foreach instop $instops {
-        relation assign $instop\
-            {Name opname}\
-            {Parameters params}\
-            {Body opbody}
-
-        proc ${className}::$opname [linsert $params 0 self] $opbody
-        dict set opmap $opname ${className}::$opname
-    }
-    set sysmap [pipe {
-        relation restrictwith $SuppliedOperation\
-                {!$RequiresStateModel} |
-        relation join $SystemInstanceOperation ~ |
+[source,tcl]
+----
+<<helper commands>>=
+proc QuerySystemInstanceOperations {requiresSM} {
+    return [pipe {
+        QuerySystemOperations SystemInstanceOperation $requiresSM |
         relation dict ~ Name Command
     }]
-    if {$hasStateModel} {
-        set sysmap [dict merge $sysmap [pipe {
-            relation restrictwith $SuppliedOperation\
-                {$RequiresStateModel} |
-            relation join $SystemInstanceOperation ~ |
-            relation dict ~ Name Command
-        }]]
-    }
-    namespace ensemble create\
-        -command ${className}::instop\
-        -parameters instref\
-        -map [dict merge $opmap $sysmap]
 }
+----
+
+To create the class based operations,
+we use the `::proc` command to create the ones configured for the class.
+We keep track of a mapping dictionary as we go along.
+This mapping dictionary is used when the class ensemble command
+is created to provide for the mapping of ensemble subcommand onto the
+procedures that implement them.
+That mapping is an essential feature of namespace ensemble commands
+and we make use of the feature here.
+The system supplied operations do depend upon whether the class has a
+state model.
+
+[source,tcl]
+----
+<<generate: create class operations>>=
+set opmap [dict create]
+set classops [relation semijoin $class $UserClassOperation\
+    -using {Domain Domain Name Class}]
+relation foreach classop $classops {
+    relation assign $classop\
+        {Name opname}\
+        {Parameters params}\
+        {Body opbody}
+
+    proc ${className}::$opname [linsert $params 0 class] $opbody
+    dict set opmap $opname [list ${className}::$opname $className]
+}
+
+set sysmap [QuerySystemClassOperations $className false]
+if {$hasStateModel} {
+    set sysmap [dict merge $sysmap [QuerySystemClassOperations $className true]]
+}
+
+namespace ensemble create\
+    -command $className\
+    -map [dict merge $opmap $sysmap]
+----
+
+[float]
+==== Create Instance Operations
+Similar logic applies when creating the instance based operations for a class.
+It is somewhat simpler in that the instance reference is a caller supplied
+
+[source,tcl]
+----
+<<generate: create instance operations>>=
+set opmap [dict create]
+set instops [relation semijoin $class $UserInstanceOperation\
+    -using {Domain Domain Name Class}]
+relation foreach instop $instops {
+    relation assign $instop\
+        {Name opname}\
+        {Parameters params}\
+        {Body opbody}
+
+    proc ${className}::$opname [linsert $params 0 self] $opbody
+    dict set opmap $opname ${className}::$opname
+}
+set sysmap [QuerySystemInstanceOperations false]
+if {$hasStateModel} {
+    set sysmap [dict merge $sysmap [QuerySystemInstanceOperations true]]
+}
+
+namespace ensemble create\
+    -command ${className}::instop\
+    -parameters instref\
+    -map [dict merge $opmap $sysmap]
 ----
 
 [float]
@@ -11860,16 +12132,6 @@ proc Interleave {l1 l2} {
 
 proc WeaveLists {l1 l2} {
     tailcall list [Interleave $l1 $l2] [Interleave $l2 $l1]
-}
-----
-
-[source,tcl]
-----
-<<helper commands>>=
-proc InsertTrace {defheading defvalues op relvar tuple} {
-    tuple create\
-        [dict merge $defheading [tuple heading $tuple]]\
-        [dict merge $defvalues [tuple get $tuple]]
 }
 ----
 
