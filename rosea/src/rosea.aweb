@@ -7586,6 +7586,8 @@ class WashingMachine {
 proc classop {name params body} {
     if {$name eq {}} {
         tailcall DeclError EMPTY_NAME "class operation"
+    } elseif {[string first :: $name] != -1} {
+        tailcall DeclError NS_QUALIFIERS $name
     }
 
     namespace upvar ::rosea::Config::DomainDef DomainName DomainName
@@ -7610,7 +7612,8 @@ proc classop {name params body} {
 [source,tcl]
 ----
 <<error code formats>>=
-DUP_OP_NAME      {operation call, "%s", already exists}
+DUP_OP_NAME     {operation call, "%s", already exists}
+NS_QUALIFIERS   {name, "%s", contains namespace qualifiers}
 ----
 
 ==== Instop
@@ -7786,6 +7789,8 @@ and can be invoked using the [cmd instop] instance command.
 proc instop {name params body} {
     if {$name eq {}} {
         tailcall DeclError EMPTY_NAME "instance operation"
+    } elseif {[string first :: $name] != -1} {
+        tailcall DeclError NS_QUALIFIERS $name
     }
 
     namespace upvar ::rosea::Config::DomainDef DomainName DomainName
@@ -10857,12 +10862,13 @@ if {$prefix ne {}} {
 [float]
 ==== Reference Config Data
 
-Generating a domain involves querying all the data that was stored
+Generating a domain involves querying the data that was stored
 away during the configuration of the domain.
-The relvars that hold that data are only ever read by this procedure.
+The relvars holding the data are only read by this procedure.
 Since each relvar has backing read-only Tcl variable,
 we bring them into scope so that we can refer to the relvar contents
 using simple variable syntax.
+Turns out there are a lot of these relvars.
 
 [source,tcl]
 ----
@@ -11094,11 +11100,13 @@ the states and events.
 The transitions that were explicitly set during the domain configuration
 are tuples in the TransitionPlace relvar.
 The difference between all the transitions and those in the
-TransitionPlace must be the ones where we must assign the default
+TransitionPlace are the ones to which we must assign the default
 transition.
 There are a few other twists along the way as we see below.
 
 First, we get all the transitions.
+The attribute renaming will make the header the same as the TransitionPlace
+header.
 
 [source,tcl]
 ----
@@ -11130,13 +11138,12 @@ match.
 ----
 <<generate: populate Transition>>=
 set nontrans [pipe {
-    relation semijoin $domain $NonStateTransition\
-        -using {Name Domain} |
+    relation semijoin $domain $NonStateTransition -using {Name Domain} |
     relation rename ~ TransRule NewState
 }]
 ----
 
-Computing the default transition is worth taking operation by operation:
+We will discuss computing the default transition step by step.
 
 . The difference between all the transitions and the explicitly defined
 ones is the set of transitions where we need to supply the  default transition.
@@ -11150,11 +11157,15 @@ what we are after.
 The ``@'' state is the pseudo initial state used used for creation events.
 We insist that any events not explicitly specified as causing an outbound
 transition from the pseudo-initial state be ``CH'' transitions.
-Mainly we don't want to create an instance asynchronously and then have its
-event ignored if that was the default transition.
+We want to avoid the circumstance where an instance is created asynchronously
+but using the wrong event.
+If the default transition is then ``IG'',
+we would end up with an instance forever sitting in the pseudo-initial
+state and the semantics of asynchronous creation would be violated.
 Asynchronous event creation must either cause a transition or create an
 error.
-Ignoring such an event would reek havoc.
+So regardless of the default transition given for the state model,
+unspecified creation events cause an error and we force that in this step.
 
 [source,tcl]
 ----
@@ -11214,8 +11225,9 @@ As before,
 we will factor out the queries that are used inside the iteration
 loop to save the command rewriting that the +pipe+ command would otherwise
 perform on each iteration.
-We bring the variables containing the queries into scope,
-but show the queries below close to the code that uses them.
+We bring the variables containing the queries into scope
+but show the queries below,
+lexically close to the code that uses them.
 
 [source,tcl]
 ----
@@ -11343,9 +11355,9 @@ into the class relvar.
 Relvars support tracing in a manner analogous to Tcl variable tracing.
 
 First, let's examine the command that will be invoked as the trace.
-This command is shown below.
+This command, +InsertTrace+, is shown below.
 The _op_, _relvar_ and _tuple_ arguments are added by the relvar tracing
-mechanism.
+mechanism and are not interesting to us for this usage.
 The _defheading_ and _defvalues_ arguments are part of the command
 prefix that we must generate when the relvar trace is added.
 The _defheading_ argument is a dictionary of attribute name / type pairs for
@@ -11391,10 +11403,8 @@ have defined default values.
 ----
 <<rosea data>>=
 pipe {
-    relation semijoin $class $Attribute\
-        -using {Domain Domain Name Class} |
-    relation join ~ $DefaultValue\
-        -using {Domain Domain Class Class Name Attribute}
+    relation semijoin $class $Attribute -using {Domain Domain Name Class} |
+    relation join ~ $DefaultValue -using {Domain Domain Class Class Name Attribute}
 } defaultValuesQuery
 
 <<class query variables>>=
@@ -11404,7 +11414,7 @@ variable defaultValuesQuery
 We test to make sure that we need to add a trace at all.
 The +relation dict+ command takes the default values relation and
 extracts the needed columns and returns just the form we need
-to create the command prefix involving +InsertTrace+.
+to create the command prefix using the +InsertTrace+ command.
 
 [source,tcl]
 ----
@@ -11466,13 +11476,13 @@ Since this is Tcl,
 nothing is really hidden or inaccessible.
 If you know the name, you can get the data.
 However, separating the current state into its own relvar does prevent
-the worst case abuses.
+the worst case accidents and abuses.
 
 The heading for the relvar that holds the current state is different
 for each class.
 It is composed of the identifying attributes and one other attribute
 named, `__State`.
-We alway use the attributes of the lowest numbered identifier (_e.g._ 1)
+We use the attributes of the lowest numbered identifier (_i.e._ 1)
 since that is the identifier that is used to construct instance references.
 The relvar is named in the form, `__<class name>__STATEINST` to prevent
 any name conflicts.
@@ -11486,8 +11496,7 @@ foreach attr $instid {
     lappend instheading $attr [dict get $heading $attr] ; # <1>
 }
 lappend instheading __State string
-relvar create\
-    ${domns}::__[relation extract $class Name]__STATEINST\
+relvar create ${domns}::__[relation extract $class Name]__STATEINST\
     $instheading $instid
 ----
 <1> In addition to the attribute name,
@@ -11523,7 +11532,6 @@ namespace eval $actns [list\
 
 The state activities are realized as ordinary procedures in the
 `__Activity` namespace of the class.
-
 We obtain the state names and code using the query below.
 
 [source,tcl]
@@ -11546,8 +11554,7 @@ procedure.
 [source,tcl]
 ----
 <<generate: create activity procedures>>=
-set states [eval $statesQuery]
-relation foreach state $states {
+relation foreach state [eval $statesQuery] {
     relation assign $state\
         {Name stateName}\
         {Parameters params}\
@@ -11559,9 +11566,10 @@ relation foreach state $states {
 [float]
 ==== Create Class Operations
 
-For each class in the domain we will create an ensemble command
-that is the same name as the fully qualified name of the class.
-There two sources of class operations, those supplied by the system
+For each class in the domain,
+we will create an ensemble command that is the same name as the fully qualified
+name of the class.
+There are two sources of class operations, those supplied by the system
 and those defined when the class was configured.
 Further,
 some of the system supplied operations are only valid for classes
@@ -11591,7 +11599,8 @@ proc QuerySystemOperations {which requiresSM} {
 }
 ----
 
-We can specialize this query for class based operations.
+We can specialize this query for class based operations
+by supplying the variable parts.
 Here we need to augment the Command attribute by including the name
 of the class (it is fully qualified here).
 This supplies the first argument to all class based operations,
@@ -11653,8 +11662,8 @@ relation foreach classop $classops {
         {Parameters params}\
         {Body opbody}
 
-    proc ${className}::$opname [linsert $params 0 class] $opbody
-    dict set opmap $opname [list ${className}::$opname $className]
+    proc ${className}::$opname $params $opbody
+    dict set opmap $opname ${className}::$opname
 }
 
 set sysmap [QuerySystemClassOperations $className false]
