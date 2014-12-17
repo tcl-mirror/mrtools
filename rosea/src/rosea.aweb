@@ -10831,6 +10831,8 @@ proc generate {{prefix {}} {pattern *}} {
     <<generate: fix up prefix>>
     <<generate: reference config data>>
 
+    puts [relvar names ::rosea::Config::Domain]
+    puts [relformat $Domain]
     set genDomain [relation restrictwith $Domain {
             [string match $pattern $Domain]}]
     relation foreach domain $genDomain {
@@ -11756,7 +11758,7 @@ set refed [relation semijoin $sassocs $SimpleReferencedClass\
 We now undertake a query on the configuration relvars to gather up all
 the information required for the later parts of the generation
 of simple relationships.
-Gathing all the information in one query makes that query rather complicated.
+Gathering all the information in one query makes that query rather complicated.
 Much of the complexity arises from needing the same information in
 slightly different forms in order to satisfy the interface requirement
 of the procedures that create underlying +ral+ entities.
@@ -11867,6 +11869,9 @@ The interleaving process forms a new list by taking an element from each
 list alternately.
 . Lastly, we discard the tagged attributes as they are no longer needed.
 
+The +Interleave+ procedure used above is creates a list by alternating
+elements form two lists.
+
 [source,tcl]
 ----
 <<helper commands>>=
@@ -11884,15 +11889,19 @@ can now be projected out and placed into the architecture relvars
 used at run time and can be used to create the relationship ensemble
 commands.
 The processing performed here is a good example of why the
-the run time procedures were designed to operate on the data as we
-have shown.
+the run time procedures were designed to operate on much simpler
+data structures.
 The data used by the run time is the results of a rather complicated
 query, pulled apart for specific operations.
-This prevents have to perform such complicated queries at run time.
+This prevents having to perform such complicated queries at run time.
 You can also think of the run time data as a _simplified view_ of the
 configuration data that is accomplished by pushing the computation
-of the view to _generate_ time since class structure and relationships
+of the view to the time when the domain is
+_generated_ since class structure and relationships
 definitions do not change during the running of the domain.
+
+Continuing on, we need to populate the run time data that
+deals with simple associations.
 
 [source,tcl]
 ----
@@ -11931,12 +11940,10 @@ relvar union ${archns}::Link [pipe {
 character to the association name.
 It turns out that tilde has a special meaning to the +pipe+ command
 and so we have to ask +pipe+ to use percent (`%`) as its special
-character to represent where the previous command is substituted.
+character to represent where the previous command result is substituted.
 
 The manipulations for populating the AssociationLink relvar are
 similar.
-Note that we need to supply a PrevSrcClass attribute as the
-empty string and this is easily accomplished using +relation extend+.
 
 [source,tcl]
 ----
@@ -11947,7 +11954,7 @@ relvar union ${archns}::AssociationLink [pipe {
     relation rename ~ Relationship Name ReferringClass SrcClass\
             ReferencedClass DstClass ForwAttrs Attrs |
     relation extend ~ al PrevSrcClass string {{}}
-}]
+}] ; # <1>
 relvar union ${archns}::AssociationLink [pipe {
     relation project $references Relationship ReferringClass\
             ReferencedClass RevAttrs |
@@ -11958,6 +11965,8 @@ relvar union ${archns}::AssociationLink [pipe {
         tuple update $lnk Name ~[tuple extract $lnk Name]}
 } {} |%]
 ----
+<1> We need to supply a PrevSrcClass attribute as the
+empty string and this is accomplished using +relation extend+.
 
 For the case of RefLink,
 the ReferringAttrs attribute matches exactly and so a simple projection
@@ -11971,9 +11980,13 @@ relvar union ${archns}::RefLink [relation project $references\
 ----
 
 The last step for simple associations is to create the relvar constraint
-and relationship ensemble command.
-For that we will iterate across the +references+ relation so we can
+and relationship ensemble commands.
+For that we will iterate across the +references+ relation since we must
 invoke the necessary commands one by one.
+It is usually necessary to iterate across relation values when
+needing to interface to scalar oriented procedures.
+Otherwise, we prefer to use the set-at-a-time operations of
+relational algebra.
 
 [source,tcl]
 ----
@@ -12087,14 +12100,16 @@ relvar eval {
         relation update % lnk {1} {
             tuple update $lnk Name ~[tuple extract $lnk Name]}
     } {} |%]
+    set sources [relation restrict $assocrefs aref {
+        [tuple extract $aref ReferencedRole] eq "source"}]
     relvar union ${archns}::Link [pipe {
-        relation restrictwith $assocrefs {$ReferencedRole eq "source"} |
-        relation project ~ Relationship ReferencedClass |
+        relation project $sources Relationship ReferencedClass |
         relation rename ~ Relationship Name ReferencedClass SrcClass
     }]
+    set targets [relation restrict $assocrefs aref {
+        [tuple extract $aref ReferencedRole] eq "target"}]
     relvar union ${archns}::Link [pipe {
-        relation restrictwith $assocrefs {$ReferencedRole eq "target"} |
-        relation project % Relationship ReferencedClass |
+        relation project $targets Relationship ReferencedClass |
         relation rename % Relationship Name ReferencedClass SrcClass |
         relation update % lnk {1} {
             tuple update $lnk Name ~[tuple extract $lnk Name]}
@@ -12102,7 +12117,66 @@ relvar eval {
 
     puts [relformat [relvar set ${archns}::Link] Link]
 
-    # HERE !!! debug and add in AssocLink stuff.
+    relvar union ${archns}::AssociationLink [pipe {
+        relation project $sources Relationship ReferringClass ReferencedClass\
+            ForwAttrs |
+        relation rename ~ Relationship Name ReferringClass DstClass\
+            ReferencedClass SrcClass ForwAttrs Attrs |
+        relation extend ~ al PrevSrcClass string {{}}
+    }]
+    relvar union ${archns}::AssociationLink [pipe {
+        relation project $targets Relationship ReferringClass ReferencedClass\
+            ForwAttrs |
+        relation rename % Relationship Name ReferringClass DstClass\
+            ReferencedClass SrcClass ForwAttrs Attrs |
+        relation extend % al PrevSrcClass string {{}} |
+        relation update % lnk {1} {
+            tuple update $lnk Name ~[tuple extract $lnk Name]}
+    } {} |%]
+
+    puts [relformat [relvar set ${archns}::AssociationLink] AssociationLink]
+
+    set onerefs [pipe {
+        relation eliminate $sources ReferencedRole |
+        relation rename ~ ReferencedClass OneClass Conditionality OneCond\
+            Multiplicity OneMult ReferringAttrs OneReferringAttrs\
+            SrcAttrs OneSrcAttrs DstAttrs OneDstAttrs\
+            ForwAttrs OneForwAttrs RevAttrs OneRevAttrs
+    }]
+    set otherrefs [pipe {
+        relation eliminate $targets ReferencedRole |
+        relation rename ~ ReferencedClass OtherClass Conditionality OtherCond\
+            Multiplicity OtherMult ReferringAttrs OtherReferringAttrs\
+            SrcAttrs OtherSrcAttrs DstAttrs OtherDstAttrs\
+            ForwAttrs OtherForwAttrs RevAttrs OtherRevAttrs
+    }]
+    set bothrefs [relation join $onerefs $otherrefs\
+        -using {Domain Domain ReferringClass ReferringClass\
+            Relationship Relationship}]
+
+    puts [relformat $bothrefs bothrefs]
+    # HERE -- project bothrefs to obtain the required attributes
+
+    if 0 {
+    relvar union ${archns}::AssociationLink [pipe {
+    }]
+    relvar insert ${archns}::AssociationLink [list\
+        Name            ~$relationship\
+        SrcClass        $associator\
+        DstClass        $refclass(source)\
+        Attrs   $revattrs\
+        PrevSrcClass    $refclass(target)\
+    ]
+    relvar union ${archns}::AssociationLink [pipe {
+    }]
+    relvar insert ${archns}::AssociationLink [list\
+        Name            $relationship\
+        SrcClass        $associator\
+        DstClass        $refclass(target)\
+        Attrs   $revattrs\
+        PrevSrcClass    $refclass(source)\
+    ]
+    }
 }
 ----
 
@@ -12260,7 +12334,11 @@ relation foreach cassoc $cassocs {
     }
     namespace ensemble create -command $rpath -map $ensemblemap
 }
+----
 
+[source,tcl]
+----
+<<generate: generalizations>>=
 set gens [relation semijoin $rships $Generalization]
 relation foreach gen $gens {
     set subrefs [pipe {
