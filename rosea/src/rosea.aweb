@@ -2486,6 +2486,7 @@ new created associator class instances.
 The run time data required to create class based associations
 must describe both the classes participating in the association
 as well as the associator class itself.
+[[assoc-ref-graphic]]
 The diagram below shows the structure of the architectural relvars
 that support linking class based associations.
 
@@ -10831,8 +10832,6 @@ proc generate {{prefix {}} {pattern *}} {
     <<generate: fix up prefix>>
     <<generate: reference config data>>
 
-    puts [relvar names ::rosea::Config::Domain]
-    puts [relformat $Domain]
     set genDomain [relation restrictwith $Domain {
             [string match $pattern $Domain]}]
     relation foreach domain $genDomain {
@@ -11739,7 +11738,7 @@ set rships [relation semijoin $domain $DomainElement $Relationship]
 
 For simple associations,
 we traverse the R30 and R31 generalizations in the
-<<config-relation-diagram, configuration model>>.
+<<config-relation-diagram,configuration model>>.
 Continuing on we can come up with a set of SimpleReferringClass and
 SimpleReferencedClass instances.
 
@@ -11919,22 +11918,26 @@ We first take the referring class information and associate it
 with the forward direction for navigation.
 The reverse direction, _i.e._ that direction given by the `~RX` notation
 originates at the referenced class.
+For simple associations,
+we add two tuples to Link,one for each direction of traversal.
 The operations just project out the required attributes and then
 juggle the names to make the headers match.
 
 [source,tcl]
 ----
 <<generate: populate Link for simple associations>>=
-relvar union ${archns}::Link [pipe {
+set flink [pipe {
     relation project $references Relationship ReferringClass |
     relation rename ~ Relationship Name ReferringClass SrcClass
 }]
-relvar union ${archns}::Link [pipe {
+set blink [pipe {
     relation project $references Relationship ReferencedClass |
     relation rename % Relationship Name ReferencedClass SrcClass |
     relation update % lnk {1} {
         tuple update $lnk Name ~[tuple extract $lnk Name]}
 } {} |%] ; # <1>
+
+relvar union ${archns}::Link $flink $blink
 ----
 <1> For the reverse direction we need to tack on the tilde (`~`)
 character to the association name.
@@ -11948,14 +11951,14 @@ similar.
 [source,tcl]
 ----
 <<generate: populate AssociationLink for simple associations>>=
-relvar union ${archns}::AssociationLink [pipe {
+set flink [pipe {
     relation project $references Relationship ReferringClass\
             ReferencedClass ForwAttrs |
     relation rename ~ Relationship Name ReferringClass SrcClass\
             ReferencedClass DstClass ForwAttrs Attrs |
     relation extend ~ al PrevSrcClass string {{}}
 }] ; # <1>
-relvar union ${archns}::AssociationLink [pipe {
+set blink [pipe {
     relation project $references Relationship ReferringClass\
             ReferencedClass RevAttrs |
     relation rename % Relationship Name ReferencedClass SrcClass\
@@ -11964,6 +11967,8 @@ relvar union ${archns}::AssociationLink [pipe {
     relation update % lnk {1} {
         tuple update $lnk Name ~[tuple extract $lnk Name]}
 } {} |%]
+
+relvar union ${archns}::AssociationLink $flink $blink
 ----
 <1> We need to supply a PrevSrcClass attribute as the
 empty string and this is accomplished using +relation extend+.
@@ -12038,6 +12043,37 @@ relation foreach reference $references {
 }
 ----
 
+The configuration data holds the conditionality and multiplicity of the
+associations as booleans.
+We need to translate that into the regular expression like syntax
+that TclRAL uses.
+[source,tcl]
+----
+<<helper commands>>=
+proc MapCondMultToConstraint {cond mult} {
+    if {$cond} {
+        return [expr {$mult ? "*" : "?"}]
+    } else {
+        return [expr {$mult ? "+" : "1"}]
+    }
+}
+----
+
+[float]
+====  Class Based Associations
+
+For class based associations,
+we will follow a similar strategy as for simple associations.
+The use of an association class does cause some additional complexity
+as we shall see.
+
+We have to traverse the 
+<<config-relation-diagram,configuration model>> 
+down the path to the Class Based Association relvar.
+From there we obtain the source and target classes that participate
+in the association.
+
+
 [source,tcl]
 ----
 <<generate: class based associations>>=
@@ -12047,19 +12083,367 @@ set sourceclass [relation semijoin $cassocs $SourceClass\
     -using {Domain Domain Name Relationship}]
 set targetclass [relation semijoin $cassocs $TargetClass\
     -using {Domain Domain Name Relationship}]
+set bothclass [relation union $sourceclass $targetclass] ; # <1>
+----
+<1> The headings of Source Class and Target Class are the same so this
+union is defined.
 
+As with simple associations,
+we make one large query to accumulate the information we need.
+We present the query below, followed by a step by step explanation.
+
+[source,tcl]
+----
+<<generate: class based associations>>=
 set assocrefs [pipe {
     relation semijoin $cassocs $AssociatorClass\
             -using {Domain Domain Name Relationship}\
         $ReferringClass $AttributeReference\
             -using {Domain Domain Class ReferringClass\
             Relationship Relationship Role ReferringRole} |
-    relation project ~ Domain ReferringClass ReferringAttribute\
-        ReferencedClass ReferencedAttribute ReferencedRole\
-        Relationship |
-    relation join ~ [relation union $sourceclass $targetclass]\
-            -using {Domain Domain Relationship Relationship\
+    relation project ~ Domain Relationship ReferringClass ReferringAttribute\
+            ReferencedClass ReferencedAttribute ReferencedRole |
+    relation join ~ $bothclass -using {Domain Domain Relationship Relationship\
             ReferencedClass Class ReferencedRole Role} |
+    relation group ~ ReferringAttrs ReferringAttribute ReferencedAttribute |
+    relation extend ~ rfa\
+        TagReferringAttrs {Relation {RefOrder int ReferringAttribute string\
+            ReferencedAttribute string}} {
+                [relation tag [tuple extract $rfa ReferringAttrs] RefOrder]
+            } |
+    relation extend ~ wfa\
+        SrcAttrs list {
+            [relation list [tuple extract $wfa TagReferringAttrs]\
+                ReferringAttribute -ascending RefOrder]
+        }\
+        DstAttrs list {
+            [relation list [tuple extract $wfa TagReferringAttrs]\
+                ReferencedAttribute -ascending RefOrder]
+        } |
+    relation extend ~ ram\
+        ForwAttrs list {
+            [Interleave [tuple extract $ram SrcAttrs]\
+                [tuple extract $ram DstAttrs]]
+        }\
+        RevAttrs list {
+            [Interleave [tuple extract $ram DstAttrs]\
+                [tuple extract $ram SrcAttrs]]
+        } |
+    relation eliminate ~ TagReferringAttrs
+}]
+----
+
+. Traverse from the Associator Class to the Referring Class and on to the
+Attribute Reference class.
+This is like the query for the simple associations but we take a different
+path from the Relationship class to get there.
+This query is really all about working out the attribute references.
+. Project the attributes we find useful.
+. Joining the Source Class and Target Class tuples now gives us
+a relation with references that the associator class makes to both the
+Source and Target Classes.
+The ReferencedRole attribute distinguishes the two cases.
+. The +group+ operation gives a relation valued attribute that contains
+the correspondence between referential attributes in the associator
+class and the referenced attributes in the source or target class.
+. Like in the simple associations case, we need to take the attribute
+references to be able to preserve the correspondence in later operations.
+. Compute the form of the attribute references needed for creating
+the relvar constraint.
+. Compute the form of the attribute references needed for relationship
+traversal.
+. The TagReferringAttrs attribute is no longer needed.
+
+With the query done,
+we can now populate the run time data that is needed for
+class based associations.
+We have to populate Link and AssociationLink to support relationship
+navigation and ASsocRef to support relationship linkage.
+
+[source,tcl]
+----
+<<generate: class based associations>>=
+relvar eval {
+    <<generate: populate Link for class based associations>>
+    <<generate: populate AssociationLink for class based associations>>
+    <<generate: populate AssocRef for class based associations>>
+}
+----
+
+For class based association,
+the Link relvar contains tuples for the implied two traversals needed
+to go from the source to the associator and then to the target
+and _vice versa_.
+For the associative class,
+there both a forward and reverse path that only differ by
+the syntax convention of naming the reverse path with a tilde.
+
+[source,tcl]
+----
+<<generate: populate Link for class based associations>>=
+set aforw [pipe {
+    relation project $assocrefs Relationship ReferringClass |
+    relation rename ~ Relationship Name ReferringClass SrcClass
+}]
+set arev [relation update $aforw lnk {1} {
+        tuple update $lnk Name ~[tuple extract $lnk Name]}]
+----
+
+For the classes that are sources,
+there is a forward path to the associative class.
+
+[source,tcl]
+----
+<<generate: populate Link for class based associations>>=
+set sources [pipe {
+    relation restrict $assocrefs aref {
+        [tuple extract $aref ReferencedRole] eq "source"} |
+    relation eliminate ~ ReferencedRole
+}]
+set sforw [pipe {
+    relation project $sources Relationship ReferencedClass |
+    relation rename ~ Relationship Name ReferencedClass SrcClass
+}]
+----
+
+And for classes that are targets,
+there is a reverse path from the target to the associative class.
+
+[source,tcl]
+----
+<<generate: populate Link for class based associations>>=
+set targets [pipe {
+    relation restrict $assocrefs aref {
+        [tuple extract $aref ReferencedRole] eq "target"} |
+    relation eliminate ~ ReferencedRole
+}]
+set trev [pipe {
+    relation project $targets Relationship ReferencedClass |
+    relation rename % Relationship Name ReferencedClass SrcClass |
+    relation update % lnk {1} {
+        tuple update $lnk Name ~[tuple extract $lnk Name]}
+} {} |%]
+
+relvar union ${archns}::Link $aforw $arev $sforw $trev
+----
+
+For each Link tuple we need a corresponding AssociationLink tuple.
+To describe the traversal from Source Class to Associator to Target Class
+requires entries that chain together the individual steps and so
+will have a non-empty value for the PrevSrcClass attribute.
+The start of the traversal from either end,
+_i.e._ forward from Source to Associator and reverse from Target to Associator,
+has an empty value for the PrevSrcClass attribute.
+We compute those first.
+
+[source,tcl]
+----
+<<generate: populate AssociationLink for class based associations>>=
+set sforw [pipe {
+    relation project $sources Relationship ReferringClass ReferencedClass\
+        RevAttrs |
+    relation rename ~ Relationship Name ReferringClass DstClass\
+        ReferencedClass SrcClass RevAttrs Attrs |
+    relation extend ~ al PrevSrcClass string {{}}
+}]
+set trev [pipe {
+    relation project $targets Relationship ReferringClass ReferencedClass\
+        RevAttrs |
+    relation rename % Relationship Name ReferringClass DstClass\
+        ReferencedClass SrcClass RevAttrs Attrs |
+    relation extend % al PrevSrcClass string {{}} |
+    relation update % lnk {1} {
+        tuple update $lnk Name ~[tuple extract $lnk Name]}
+} {} |%]
+----
+
+To compute the other two tuples in AssociationLink,
+we need the correct value for the PrevSrcClass attribute.
+When tranversing from the associator class to target class that is the
+name of the source class and _vice versa_ for the opposite direction.
+To get all this information in one relation value we will +join+
+the sources to the targets.
+To do that, we need to rename the attributes (they are the same name in
+both the +sources+ and +targets+ relations).
+We give the attributes associated with the SourceClass the prefix +One+
+and the attributes associated with the TargetClass the prefix +Other+.
+This is just a naming convention to try to keep things straight
+and minimize the confusion for something that is already difficult enough.
+
+[source,tcl]
+----
+<<generate: populate AssociationLink for class based associations>>=
+set onerefs [relation rename $sources ReferencedClass OneClass\
+        Conditionality OneCond Multiplicity OneMult\
+        ReferringAttrs OneReferringAttrs SrcAttrs OneSrcAttrs\
+        DstAttrs OneDstAttrs ForwAttrs OneForwAttrs RevAttrs OneRevAttrs]
+set otherrefs [relation rename $targets ReferencedClass OtherClass\
+        Conditionality OtherCond Multiplicity OtherMult ReferringAttrs\
+        OtherReferringAttrs SrcAttrs OtherSrcAttrs DstAttrs OtherDstAttrs\
+        ForwAttrs OtherForwAttrs RevAttrs OtherRevAttrs]
+----
+
+Now we can +join+ the two relation and get one big relation that
+contains all the information needed determine the other two
+tuples for the AssociationLink relvar.
+
+[source,tcl]
+----
+<<generate: populate AssociationLink for class based associations>>=
+set bothrefs [relation join $onerefs $otherrefs\
+    -using {Domain Domain ReferringClass ReferringClass\
+        Relationship Relationship}]
+----
+
+So now we go back to the pattern of projecting out the needed data.
+The navigation from the associative class to the target (aka OtherClass)
+is in the forward direction and preceded by the source (aka OneClass).
+
+[source,tcl]
+----
+<<generate: populate AssociationLink for class based associations>>=
+set aforw [pipe {
+    relation project $bothrefs Relationship ReferringClass OtherClass\
+        OtherForwAttrs OneClass |
+    relation rename ~ Relationship Name ReferringClass SrcClass\
+            OtherClass DstClass OtherForwAttrs Attrs OneClass PrevSrcClass
+}]
+----
+
+The navigation from the association class to the source (aka OneClass)
+is in the reverse direction and preceded by the target (aka OtherClass).
+
+[source,tcl]
+----
+<<generate: populate AssociationLink for class based associations>>=
+set arev [pipe {
+    relation project $bothrefs Relationship ReferringClass OneClass\
+            OneForwAttrs OtherClass |
+    relation rename % Relationship Name ReferringClass SrcClass\
+            OneClass DstClass OneForwAttrs Attrs OtherClass PrevSrcClass |
+    relation update % lnk {1} {
+        tuple update $lnk Name ~[tuple extract $lnk Name]}
+} {} |%]
+----
+
+Finally, we can combine the four types of AssociationLink relations
+and install the result into the relvar.
+
+[source,tcl]
+----
+<<generate: populate AssociationLink for class based associations>>=
+relvar union ${archns}::AssociationLink $sforw $trev $aforw $arev
+----
+
+The AssocRef relvar holds the information needed to link and unlink
+class based association.
+All the information is present,
+we need only project it out and juggle the naming.
+The relation value attribute shown in the
+<<assoc-ref-graphic,graphic>>
+is obtained using +relation group+.
+
+[source,tcl]
+----
+<<generate: populate AssocRef for class based associations>>=
+relvar union ${archns}::AssocRef [pipe {
+    relation project $assocrefs Relationship ReferringClass\
+        ReferencedClass ReferencedRole ReferringAttrs |
+    relation rename ~ ReferringClass AssocClass ReferencedClass Participant\
+        ReferencedRole Role |
+    relation group ~ References Participant Role ReferringAttrs
+}]
+----
+
+Again,
+following the pattern from simple associations,
+we will need to iterate over the class based association so that
+we can create the +relvar correlation+ constraint and the relationship
+ensemble command.
+We will iterate over the tuples in the +bothrefs+ variable
+since it has all the information about the relationship in one place.
+
+[source,tcl]
+----
+<<generate: class based associations>>=
+relation foreach bothref $bothrefs {
+    relation assign $bothref\
+        {Relationship relationship}\
+        {ReferringClass associator}\
+        {OneClass sourceClass}\
+        {OneCond sourceCond}\
+        {OneMult sourceMult}\
+        {OneSrcAttrs sourceAssocAttrs}\
+        {OneDstAttrs sourceDstAttrs}\
+        {OtherClass targetClass}\
+        {OtherCond targetCond}\
+        {OtherMult targetMult}\
+        {OtherSrcAttrs targetAssocAttrs}\
+        {OtherDstAttrs targetDstAttrs}
+
+    # Create the correlation constraint
+    relvar correlation ${domns}::$relationship ${domns}::$associator\
+        $sourceAssocAttrs [MapCondMultToConstraint $targetCond $targetMult]\
+        ${domns}::$sourceClass $sourceDstAttrs\
+        $targetAssocAttrs [MapCondMultToConstraint $sourceCond $sourceMult]\
+        ${domns}::$targetClass $targetDstAttrs ; # <1>
+
+
+    set ensemblemap [dict create\
+        link [list ::rosea::RelCmds::linkAssoc $relationship]\
+        unlink [list ::rosea::RelCmds::unlinkAssoc $relationship]\
+    ]
+    # Determine if we have any assigners
+    set rpath ${domns}::$relationship
+    set assigner [relation semijoin $bothref $SingleAssigner\
+        -using {Domain Domain Relationship Relationship}]
+    if {[relation isnotempty $assigner]} {
+        dict set ensemblemap signal\
+            [list ::rosea::RelCmds::signalAssigner $rpath]
+    } else {
+        set assigner [relation semijoin $bothref $MultipleAssigner\
+            -using {Domain Domain Relationship Relationship}]
+        if {[relation isnotempty $assigner]} {
+            dict set ensemblemap signal [list\
+                ::rosea::RelCmds::signalMultiAssigner $rpath]
+            dict set ensemblemap create [list\
+                ::rosea::RelCmds::createMultiAssigner $rpath]
+        }
+    }
+    namespace ensemble create -command $rpath -map $ensemblemap
+}
+----
+<1> How the conditionality and multiplicy are set needs some explanation.
+The configuration DSL uses syntax that mimics the UML graphic.
+This specifies the multiplicity and conditionality from the point of
+view of the two participating classes.
+However, the +relvar correlation+ command specifies multiplicity and
+conditionality from the point of view of the associative class.
+If you work out that difference,
+it means you have to invert the mulitiplicity and conditionality from
+source and target for the benefit of TclRAL.
+Both ways of specifying this work well in the respective worlds,
+but when you cross the boundary you have to remember the switch.
+
+The last type of relationship we must generate data and commands for is
+generalization.
+We will following the same pattern as earlier.
+We formulate a query to gather all the information we need and
+then procede to parcel out the information into the run time data
+structures and to create the needed relvar constraints and relationship
+commands.
+
+[source,tcl]
+----
+<<generate: generalizations>>=
+set gens [relation semijoin $rships $Generalization]
+set subrefs [pipe {
+    relation semijoin $gens $Subclass -using {Domain Domain Name Relationship}\
+            $ReferringClass $AttributeReference\
+                -using {Domain Domain Class ReferringClass\
+                Relationship Relationship Role ReferringRole} |
+    relation project ~ Domain Relationship ReferringClass ReferringAttribute\
+            ReferencedClass ReferencedAttribute |
     relation group ~ ReferringAttrs\
             ReferringAttribute ReferencedAttribute |
     relation extend ~ rfa\
@@ -12086,330 +12470,77 @@ set assocrefs [pipe {
                 [tuple extract $ram SrcAttrs]]
         } |
     relation eliminate ~ TagReferringAttrs
-
 }]
-puts [relformat $assocrefs assocrefs]
+----
+
+[source,tcl]
+----
+<<generate: generalizations>>=
 relvar eval {
-    relvar union ${archns}::Link [pipe {
-        relation project $assocrefs Relationship ReferringClass |
+    set sublinks [pipe {
+        relation project $subrefs Relationship ReferringClass |
         relation rename ~ Relationship Name ReferringClass SrcClass
     }]
-    relvar union ${archns}::Link [pipe {
-        relation project $assocrefs Relationship ReferringClass |
-        relation rename % Relationship Name ReferringClass SrcClass |
-        relation update % lnk {1} {
-            tuple update $lnk Name ~[tuple extract $lnk Name]}
-    } {} |%]
-    set sources [relation restrict $assocrefs aref {
-        [tuple extract $aref ReferencedRole] eq "source"}]
-    relvar union ${archns}::Link [pipe {
-        relation project $sources Relationship ReferencedClass |
-        relation rename ~ Relationship Name ReferencedClass SrcClass
-    }]
-    set targets [relation restrict $assocrefs aref {
-        [tuple extract $aref ReferencedRole] eq "target"}]
-    relvar union ${archns}::Link [pipe {
-        relation project $targets Relationship ReferencedClass |
+    set superlinks [pipe {
+        relation project $subrefs Relationship ReferencedClass |
         relation rename % Relationship Name ReferencedClass SrcClass |
         relation update % lnk {1} {
             tuple update $lnk Name ~[tuple extract $lnk Name]}
     } {} |%]
 
-    puts [relformat [relvar set ${archns}::Link] Link]
+    relvar union ${archns}::Link $sublinks $superlinks
+    relvar union ${archns}::PartitionLink $superlinks
 
     relvar union ${archns}::AssociationLink [pipe {
-        relation project $sources Relationship ReferringClass ReferencedClass\
-            ForwAttrs |
-        relation rename ~ Relationship Name ReferringClass DstClass\
-            ReferencedClass SrcClass ForwAttrs Attrs |
+        relation project $subrefs Relationship ReferringClass ReferencedClass\
+                ForwAttrs |
+        relation rename ~ Relationship Name ReferringClass SrcClass\
+                ReferencedClass DstClass ForwAttrs Attrs |
         relation extend ~ al PrevSrcClass string {{}}
     }]
-    relvar union ${archns}::AssociationLink [pipe {
-        relation project $targets Relationship ReferringClass ReferencedClass\
-            ForwAttrs |
-        relation rename % Relationship Name ReferringClass DstClass\
-            ReferencedClass SrcClass ForwAttrs Attrs |
-        relation extend % al PrevSrcClass string {{}} |
+
+    relvar union ${archns}::PartitionDst [pipe {
+        relation project $subrefs Relationship ReferencedClass\
+                ReferringClass RevAttrs |
+        relation rename % Relationship Name ReferencedClass SrcClass\
+                ReferringClass DstClass RevAttrs Attrs |
         relation update % lnk {1} {
             tuple update $lnk Name ~[tuple extract $lnk Name]}
     } {} |%]
 
-    puts [relformat [relvar set ${archns}::AssociationLink] AssociationLink]
-
-    set onerefs [pipe {
-        relation eliminate $sources ReferencedRole |
-        relation rename ~ ReferencedClass OneClass Conditionality OneCond\
-            Multiplicity OneMult ReferringAttrs OneReferringAttrs\
-            SrcAttrs OneSrcAttrs DstAttrs OneDstAttrs\
-            ForwAttrs OneForwAttrs RevAttrs OneRevAttrs
+    relvar union ${archns}::SuperLink [pipe {
+        relation project $subrefs Relationship ReferencedClass |
+        relation rename ~ ReferencedClass SuperClass
     }]
-    set otherrefs [pipe {
-        relation eliminate $targets ReferencedRole |
-        relation rename ~ ReferencedClass OtherClass Conditionality OtherCond\
-            Multiplicity OtherMult ReferringAttrs OtherReferringAttrs\
-            SrcAttrs OtherSrcAttrs DstAttrs OtherDstAttrs\
-            ForwAttrs OtherForwAttrs RevAttrs OtherRevAttrs
+    relvar union ${archns}::SubLink [pipe {
+        relation project $subrefs Relationship ReferringClass ReferringAttrs |
+        relation rename ~ ReferringClass SubClass
     }]
-    set bothrefs [relation join $onerefs $otherrefs\
-        -using {Domain Domain ReferringClass ReferringClass\
-            Relationship Relationship}]
-
-    puts [relformat $bothrefs bothrefs]
-    # HERE -- project bothrefs to obtain the required attributes
-
-    if 0 {
-    relvar union ${archns}::AssociationLink [pipe {
-    }]
-    relvar insert ${archns}::AssociationLink [list\
-        Name            ~$relationship\
-        SrcClass        $associator\
-        DstClass        $refclass(source)\
-        Attrs   $revattrs\
-        PrevSrcClass    $refclass(target)\
-    ]
-    relvar union ${archns}::AssociationLink [pipe {
-    }]
-    relvar insert ${archns}::AssociationLink [list\
-        Name            $relationship\
-        SrcClass        $associator\
-        DstClass        $refclass(target)\
-        Attrs   $revattrs\
-        PrevSrcClass    $refclass(source)\
-    ]
-    }
-}
-----
-
-[source,tcl]
-----
-set cassocs [relation semijoin $rships $Association\
-        $ClassBasedAssociation]
-relation foreach cassoc $cassocs {
-    set sourceclass [relation semijoin $cassoc $SourceClass\
-        -using {Domain Domain Name Relationship}]
-    set targetclass [relation semijoin $cassoc $TargetClass\
-        -using {Domain Domain Name Relationship}]
-
-    set assocrefs [pipe {
-        relation semijoin $cassoc $AssociatorClass\
-                -using {Domain Domain Name Relationship}\
-            $ReferringClass $AttributeReference\
-                -using {Domain Domain Class ReferringClass\
-                Relationship Relationship Role ReferringRole} |
-        relation project ~ Domain ReferringClass ReferringAttribute\
-            ReferencedClass ReferencedAttribute ReferencedRole\
-            Relationship |
-        relation join ~ [relation union $sourceclass $targetclass]\
-                -using {Domain Domain Relationship Relationship\
-                ReferencedClass Class ReferencedRole Role} |
-        relation group ~ ReferringAttrs\
-                ReferringAttribute ReferencedAttribute |
-        relation group ~ References ReferencedClass ReferencedRole\
-                Conditionality Multiplicity ReferringAttrs
-
-    }]
-    #puts [relformat $assocrefs assocrefs]
-
-    relation foreach assocref $assocrefs {
-        relation assign $assocref\
-            {ReferringClass associator}\
-            {Relationship relationship}\
-            {References references}
-        set assoclinks [relation create\
-            {Participant string Role string\
-            ReferringAttrs {Relation {ReferringAttribute string\
-                ReferencedAttribute string}}}]
-        relation foreach reference $references {
-            relation assign $reference\
-                {ReferencedClass referencedClass}\
-                {ReferencedRole referencedRole}\
-                {Conditionality conditionality}\
-                {Multiplicity multiplicity}\
-                {ReferringAttrs referringAttrs}
-
-            set attrrefs [relation tag $referringAttrs RefOrder]
-            set assocattrs($referencedRole)\
-                [relation list $attrrefs ReferringAttribute\
-                    -ascending RefOrder]
-            set refattrs($referencedRole)\
-                [relation list $attrrefs ReferencedAttribute\
-                    -ascending RefOrder]
-            set multcond($referencedRole)\
-                [MapCondMultToConstraint $conditionality\
-                    $multiplicity]
-            set refclass($referencedRole) $referencedClass
-
-            set assoclinks [relation insert $assoclinks [list\
-                Participant $refclass($referencedRole)\
-                Role $referencedRole\
-                ReferringAttrs $referringAttrs\
-            ]]
-        }
-
-        relvar correlation ${domns}::$relationship\
-            ${domns}::$associator\
-            $assocattrs(source) $multcond(target)\
-                ${domns}::$refclass(source) $refattrs(source)\
-            $assocattrs(target) $multcond(source)\
-                ${domns}::$refclass(target) $refattrs(target)
-
-        lassign [WeaveLists $refattrs(source) $assocattrs(source)]\
-            forwattrs revattrs
-        relvar eval {
-            relvar insert ${archns}::Link [list\
-                Name    $relationship\
-                SrcClass   $refclass(source)\
-            ]
-            relvar insert ${archns}::AssociationLink [list\
-                Name            $relationship\
-                SrcClass        $refclass(source)\
-                DstClass        $associator\
-                Attrs           $forwattrs\
-                PrevSrcClass    {}\
-            ]
-            relvar insert ${archns}::Link [list\
-                Name        ~$relationship\
-                SrcClass    $associator\
-            ]
-            relvar insert ${archns}::AssociationLink [list\
-                Name            ~$relationship\
-                SrcClass        $associator\
-                DstClass        $refclass(source)\
-                Attrs   $revattrs\
-                PrevSrcClass    $refclass(target)\
-            ]
-            relvar insert ${archns}::AssocRef [list\
-                Relationship    $relationship\
-                AssocClass      $associator\
-                References      $assoclinks\
-            ]
-
-            lassign [WeaveLists $refattrs(target) $assocattrs(target)]\
-                forwattrs revattrs
-            relvar insert ${archns}::Link [list\
-                Name        $relationship\
-                SrcClass    $associator\
-            ]
-            relvar insert ${archns}::AssociationLink [list\
-                Name            $relationship\
-                SrcClass        $associator\
-                DstClass        $refclass(target)\
-                Attrs   $revattrs\
-                PrevSrcClass    $refclass(source)\
-            ]
-            relvar insert ${archns}::Link [list\
-                Name        ~$relationship\
-                SrcClass    $refclass(target)\
-            ]
-            relvar insert ${archns}::AssociationLink [list\
-                Name            ~$relationship\
-                SrcClass        $refclass(target)\
-                DstClass        $associator\
-                Attrs   $forwattrs\
-                PrevSrcClass    {}\
-            ]
-        }
-    }
-
-    set rpath ${domns}::$relationship
-    set ensemblemap [dict create\
-        link [list ::rosea::RelCmds::linkAssoc $relationship]\
-        unlink [list ::rosea::RelCmds::unlinkAssoc $relationship]\
-    ]
-    # Determine if we have any assigners
-    set assigner [relation semijoin $cassoc $SingleAssigner\
-        -using {Domain Domain Name Relationship}]
-    if {[relation isnotempty $assigner]} {
-        dict set ensemblemap signal\
-            [list ::rosea::RelCmds::signalAssigner $rpath]
-    } else {
-        set assigner [relation semijoin $cassoc $MultipleAssigner\
-            -using {Domain Domain Name Relationship}]
-        if {[relation isnotempty $assigner]} {
-            dict set ensemblemap signal [list\
-                ::rosea::RelCmds::signalMultiAssigner $rpath]
-            dict set ensemblemap create [list\
-                ::rosea::RelCmds::createMultiAssigner $rpath]
-        }
-    }
-    namespace ensemble create -command $rpath -map $ensemblemap
 }
 ----
 
 [source,tcl]
 ----
 <<generate: generalizations>>=
-set gens [relation semijoin $rships $Generalization]
-relation foreach gen $gens {
-    set subrefs [pipe {
-        relation semijoin $gen $Subclass\
-                -using {Domain Domain Name Relationship}\
-            $ReferringClass $AttributeReference\
-                -using {Domain Domain Class ReferringClass\
-                Relationship Relationship Role ReferringRole} |
-        relation project ~ Domain ReferringClass ReferringAttribute\
-            ReferencedClass ReferencedAttribute Relationship |
-        relation group ~ ReferringAttrs\
-                ReferringAttribute ReferencedAttribute
-    }]
-    #puts [relformat $subrefs subrefs]
+set partrefs [pipe {
+    relation project $subrefs Relationship ReferencedClass DstAttrs\
+            ReferringClass SrcAttrs |
+    relation extend ~ prs SubAttrMap list {[list\
+            ${domns}::[tuple extract $prs ReferringClass]\
+            [tuple extract $prs SrcAttrs]]} |
+    relation eliminate ~ ReferringClass SrcAttrs |
+    relation group ~ SubClassRefs SubAttrMap |
+    relation extend ~ spt SubParts list {
+            [concat {*}[relation list [tuple extract $spt SubClassRefs]]]} |
+    relation eliminate ~ SubClassRefs
+}]
 
-    set subparts [list]
-    relation foreach subref $subrefs {
-        relation assign $subref\
-            {ReferringClass subclass}\
-            {ReferencedClass superclass}\
-            {Relationship relationship}\
-            {ReferringAttrs referringAttrs}
-
-        set attrrefs [relation tag $referringAttrs RefOrder]
-        set subattrs [relation list $attrrefs ReferringAttribute\
-                -ascending RefOrder]
-        set superattrs [relation list $attrrefs ReferencedAttribute\
-                -ascending RefOrder]
-        lassign [WeaveLists $subattrs $superattrs]\
-                forwattrs revattrs
-
-        lappend subparts ${domns}::$subclass $subattrs
-
-        relvar eval {
-            relvar insert ${archns}::Link [list\
-                Name        $relationship\
-                SrcClass    $subclass\
-            ]
-            relvar insert ${archns}::AssociationLink [list\
-                Name            $relationship\
-                SrcClass        $subclass\
-                DstClass        $superclass\
-                Attrs           $forwattrs\
-                PrevSrcClass    {}\
-            ]
-            # Here!! need to figure out how to get rid of the uinserts
-            relvar uinsert ${archns}::Link [list\
-                Name        ~$relationship\
-                SrcClass    $superclass\
-            ]
-            relvar uinsert ${archns}::PartitionLink [list\
-                Name        ~$relationship\
-                SrcClass    $superclass\
-            ]
-            relvar insert ${archns}::PartitionDst [list\
-                Name        ~$relationship\
-                SrcClass    $superclass\
-                DstClass    $subclass\
-                Attrs   $revattrs\
-            ]
-            relvar uinsert ${archns}::SuperLink [list\
-                Relationship    $relationship\
-                SuperClass      $superclass\
-            ]
-            relvar insert ${archns}::SubLink [list\
-                Relationship    $relationship\
-                SubClass        $subclass\
-                ReferringAttrs  $referringAttrs\
-            ]
-        }
-    }
+relation foreach partref $partrefs {
+    relation assign $partref\
+        {Relationship relationship}\
+        {ReferencedClass superclass}\
+        {DstAttrs superattrs}\
+        {SubParts subparts}
 
     relvar partition ${domns}::$relationship ${domns}::$superclass\
             $superattrs {*}$subparts
@@ -12488,18 +12619,6 @@ relation foreach massigner\
 [source,tcl]
 ----
 <<helper commands>>=
-proc MapCondMultToConstraint {cond mult} {
-    if {$cond && $mult} {
-        return *
-    } elseif {$cond && !$mult} {
-        return ?
-    } elseif {!$cond && $mult} {
-        return +
-    } elseif {!($cond || $mult)} {
-        return 1
-    }
-}
-
 proc WeaveLists {l1 l2} {
     tailcall list [Interleave $l1 $l2] [Interleave $l2 $l1]
 }
