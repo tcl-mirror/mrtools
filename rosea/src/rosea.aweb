@@ -953,7 +953,7 @@ proc RefSetCommand {op instref1 instref2} {
 [source,tcl]
 ----
 <<error code formats>>=
-SAME_CLASS   {operation is only allow for references of the same class,\
+SAME_CLASS   {operation is only allowed for references to the same class,\
                 got "%s" and "%s"}
 ----
 
@@ -4386,7 +4386,7 @@ This is the preferred way to perform _set-at-a-time_ computations.
 ====
 
 +instref+::
-    An instance reference to those instances that are to be updated.
+    An instance reference to the instances whose attribute is to be read.
     This instance reference must be a singular reference.
 +attrN+::
     The +attrN+ arguments are a set of attribute names.
@@ -4489,13 +4489,22 @@ before deleting instance.
 If this is not done,
 then you will most assuredly encounter a contraint violation error.
 
+[float]
+===== Synopsis
+====
++delete+ `?instref1 instref2 ...?`
+====
+
++instrefN+::
+    An instance reference to those instances that are to be deleted.
+
 ///////
 ----
 <<manual architecture instance commands>>=
-[call [cmd delete] [arg instref]]
+[call [cmd delete] [arg [opt "instref ..."]]]
 
 The [cmd delete] command deletes all the class instances referenced by
-[arg instref].
+the [arg instrefN] arguments.
 ----
 ///////
 
@@ -4505,19 +4514,49 @@ The [cmd delete] command deletes all the class instances referenced by
 [source,tcl]
 ----
 <<instance commands>>=
-proc delete {instref} {
-    lassign $instref relvar insts
-    set tuples [deRef $instref]
-    relvar minus $relvar $tuples
+proc delete {args} {
+    foreach instref $args {
+        lassign $instref relvar insts
+        relvar minus $relvar [deRef $instref]
 
-    SplitRelvarName $relvar domain class
-    set instrelvar ${domain}::__${class}__STATEINST
-    if {[relvar exists $instrelvar]} {
-        relvar minus $instrelvar [relvar semijoin $insts $instrelvar]
+        SplitRelvarName $relvar domain class
+        set instrelvar ${domain}::__${class}__STATEINST
+        if {[relvar exists $instrelvar]} {
+            relvar minus $instrelvar [relation semijoin $insts\
+                [relvar set $instrelvar]]
+        }
     }
 
     return
 }
+----
+
+[float]
+===== Tests
+
+[source,tcl]
+----
+<<instance command tests>>=
+test delete-1.1 {
+    delete class instances
+} -setup {
+    setupDomain bar
+    addClass bar c1 {A1 int A2 string A3 int} A1
+    rosea::ClassCmds::create [namespace current]::bar::c1 A1 5 A2 baz A3 27
+    rosea::ClassCmds::create [namespace current]::bar::c1 A1 6 A2 foo A3 37
+    rosea::ClassCmds::create [namespace current]::bar::c1 A1 7 A2 bar A3 47
+} -cleanup {
+    cleanupDomain bar
+} -body {
+    set before [relation cardinality [relvar set [namespace current]::bar::c1]]
+    rosea::InstCmds::delete [rosea::Helpers::ToRef\
+        [namespace current]::bar::c1\
+        [relvar set [namespace current]::bar::c1]]
+    set after [relation cardinality [relvar set [namespace current]::bar::c1]]
+    testConditions\
+        {$before == 3}\
+        {$after == 0}
+} -result {1}
 ----
 
 ==== Signaling Events
@@ -4534,8 +4573,8 @@ We can make this determination because state activities have a local
 variable named +self+ defined.
 The contents of the +self+ variable are an instance reference.
 If we are outside of a state activity,
-then will signify that by using the `nilInstRef`,
-a special instance reference that does not refer to anything.
+then we will signify that by using the `nilInstRef`,
+a special instance reference value that does not refer to anything.
 
 The following procedure determines if +self+ exists in the caller.
 During translation, some caution must be used to insure that domain
@@ -4558,14 +4597,14 @@ proc SelfInstRef {{level 2}} {
 ====
 
 +instref+::
-    An instance reference whose instances that are to be signaled.
+    An instance reference whose instances are to be signaled.
 +event+::
     The name of the event to signal.
 +paramN+::
     The +paramN+ arguments are a set of optional event parameter values.
     These values are delivered to the state activity when it is run.
     It is a corollary of the rules of Moore type state machines that
-    any event that causes a transition into a state must supply any
+    any event that causes a transition into a state must supply the
     parametric event data defined by the signature of the state activity.
     Failing to do so will result in a runtime error when the event is
     dispatched.
@@ -6513,7 +6552,7 @@ proc configure {script} {
             ConfigEvaluate ::rosea::Config $script
         }
     } on error {result} {
-        log::error $result
+        Config::HandleConfigError $result
         incr errcount
     }
     if {$errcount > 0} {
@@ -6880,6 +6919,7 @@ proc cleanupConfigData {} {
         ::rosea::Config::SuppliedInstanceOperation
         ::rosea::Config::SuppliedClassOperation
         ::rosea::Config::Config_AssocSpec
+        ::rosea::Config::Config_DataError
     }
     relvar eval {
         foreach rname [relvar names ::rosea::Config::*] {
@@ -9494,6 +9534,8 @@ polymorphic and local events must have distinct names.
 An *Effective Event* is either a *Local Event*, defined specifically
 for the state model, or a *Mapped Event* that has be subjected to
 a polymorphic mapping (*R82*).
+*Effective Events* are those which drive transitions
+in a *State Model* (*R87*).
 A *Deferred Event* is an event that must eventually be polymorphically
 mapped (*R84*) and consists of the *Polymorphic Event* defined for
 a superclass or the *Inherited Event* (*R81*) should the class be
@@ -9599,6 +9641,10 @@ relvar partition R83 NonLocalEvent {Domain Model Event}\
 relvar association R85\
     NonLocalEvent {Domain Model Relationship Role} *\
     Subclass {Domain Class Relationship Role} 1
+
+relvar association R87\
+    EffectiveEvent {Domain Model} +\
+    StateModel {Domain Model} 1
 ----
 
 Compared to events,
@@ -10165,16 +10211,29 @@ test configure-6.0 {
         domain foo {
             class S {
                 attribute id string -id 1
-
                 polymorphic e1 e2
             }
             class X {
                 attribute id string -id 1
                 reference R1 S -link id
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                }
             }
             class Y {
                 attribute id string -id 1
                 reference R1 S -link id
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                }
             }
             generalization R1 S X Y
         }
@@ -10196,7 +10255,6 @@ test configure-6.1 {
         domain foo {
             class S {
                 attribute id string -id 1
-
                 polymorphic e1 e2
             }
             class X {
@@ -10206,16 +10264,37 @@ test configure-6.1 {
             class Y {
                 attribute id string -id 1
                 reference R1 S -link id
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                }
             }
             generalization R1 S X Y
 
             class A {
                 attribute id string -id 1
                 reference R2 X -link id
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                }
             }
             class B {
                 attribute id string -id 1
                 reference R2 X -link id
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                }
             }
             generalization R2 X A B
         }
@@ -10290,28 +10369,47 @@ test configure-6.3 {
         domain foo {
             class S {
                 attribute id string -id 1
-
                 polymorphic e1 e2
             }
             class X {
                 attribute id string -id 1
                 reference R1 S -link id
-
                 polymorphic e3
             }
             class Y {
                 attribute id string -id 1
                 reference R1 S -link id
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                }
             }
             generalization R1 S X Y
 
             class A {
                 attribute id string -id 1
                 reference R2 X -link id
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                }
             }
             class B {
                 attribute id string -id 1
                 reference R2 X -link id
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                }
             }
             generalization R2 X A B
         }
@@ -10333,26 +10431,53 @@ test configure-6.4 {
         domain foo {
             class S {
                 attribute id string -id 1
-
                 polymorphic e1 e2
             }
             class X {
                 attribute id string -id 1
                 reference R1 S -link id
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                }
             }
             class Y {
                 attribute id string -id 1
                 reference R1 S -link id
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                }
             }
             generalization R1 S X Y
 
             class A {
                 attribute id string -id 1
                 reference R2 S -link id
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                }
             }
             class B {
                 attribute id string -id 1
                 reference R2 S -link id
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                }
             }
             generalization R2 S A B
         }
@@ -10374,7 +10499,6 @@ test configure-6.5 {
         domain foo {
             class S {
                 attribute id string -id 1
-
                 polymorphic e1 e2
             }
             class X {
@@ -10382,22 +10506,38 @@ test configure-6.5 {
                 attribute zid string -id 2
                 reference R1 S -link id
                 reference R2 Z -link zid
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                    transition s1 - e3 -> s1
+                }
             }
             class Y {
                 attribute id string -id 1
                 reference R1 S -link id
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                }
             }
             generalization R1 S X Y
 
             class Z {
                 attribute zid string -id 1
-
                 polymorphic e3
             }
-
             class A {
                 attribute zid string -id 1
                 reference R2 Z -link zid
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                }
             }
             generalization R2 Z A X
         }
@@ -10906,6 +11046,400 @@ proc operation {name params body} {
 }
 ----
 
+=== Handling Configuration Errors
+
+One of the design elements of the configuration DSL is the use of
+a set of relvar and relvar constraints as the data structures
+to hold the configuration information.
+This design approach allows us to encode the rules for what is a valid
+domain configuration into the constraints.
+Any attempt to define domain elements that violate those rules
+will be caught at the end of the relvar transaction that end
+the `configure` command.
+
+The problem with this approach is that the error messages the are
+returned refer to the relvars of the domain meta-model not those of
+the domain we were attempting to define.
+For example,
+if a domain configuration script fails to define any identifiers for
+a class,
+the error that is generated by TclRAL describes the failure of the
+contraint on *R4* between *Class* and *Identifier*.
+All of these terms are meaningless to someone trying to run a `configure`
+script and finding out which class is lacking the identifier means
+looking at the values of tuples of the *Class* relvar for the value
+of the *Name* attribute.
+
+We will mitigate this problem by capturing the result returned by
+TclRAL and turning it into error messages that are more meaningful
+to the task of configuring a domain.
+
+(((rosea,Config,HandleConfigError)))
+[source,tcl]
+----
+<<config commands>>=
+proc HandleConfigError {result} {
+    set lines [split [string trimright $result] \n]
+    set nlines [llength $lines]
+    set lineno 0
+    while {$lineno < $nlines} {
+        set line [lindex $lines $lineno]
+        incr lineno
+        if {[string match {for*} $line]} {
+            regexp {^for[^:]+([^(]+)\(.+\), in relvar (.+)$}\
+                $line match rnum refclass
+
+            set rnum [namespace tail $rnum]
+            set refclass [namespace tail $refclass]
+
+            while {true} {
+                set tupline [lindex $lines $lineno]
+                if {[string match {tuple*} $tupline]} {
+                    incr lineno
+                    regexp {^tuple {(.+)} (.+)$} $tupline match tuple phrase
+                    if {[string match {is not referenced*} $phrase]} {
+                        set reftype notrefed
+                    } elseif {[string match {references no*} $phrase]} {
+                        set reftype refnone
+                    } elseif {[string match {*to by multiple*} $phrase]} {
+                        set reftype multrefed
+                    } else {
+                        log::error "unknown constraint phrasing, \"$phrase\""
+                        continue
+                    }
+                    set cde [relvar restrictone Config_DataError\
+                        Relationship $rnum RefClass $refclass RefType $reftype]
+                    if {[relation isnotempty $cde]} {
+                        dict with tuple {
+                            log::error [subst -nocommands\
+                                [relation extract $cde Format]]
+                        }
+                    } else {
+                        log::error "for $rnum, in class $refclass, $tupline"
+                    }
+                } else {
+                    break
+                }
+            }
+        } else {
+            log::error "unknown configuration error, \"$result\""
+        }
+    }
+    return
+}
+----
+
+[source,tcl]
+----
+<<config data>>=
+relvar create Config_DataError {
+    Relationship        string
+    RefClass            string
+    RefType             string
+    Format              string
+} {Relationship RefClass RefType}
+
+relvar insert Config_DataError {
+    Relationship        R3
+    RefClass            Class
+    RefType             notrefed
+    Format              {in domain, \"$Domain\", class, \"$Name\",\
+                        has no attributes}
+} {
+    Relationship        R4
+    RefClass            Class
+    RefType             notrefed
+    Format              {in domain, \"$Domain\", class, \"$Name\",\
+                        has no identifiers}
+} {
+    Relationship        R11
+    RefClass            ReferencedClass
+    RefType             notrefed
+    Format              {in domain, \"$Domain\", for relationship,\
+                        \"$Relationship\", no class has defined a reference\
+                        to class, \"$Class\"}
+} {
+    Relationship        R41
+    RefClass            ClassRole
+    RefType             refnone
+    Format              {in domain, \"$Domain\", relationship,\
+                        \"$Relationship\", references class, \"$Class\",\
+                        which does not exist}
+} {
+    Relationship        R11
+    RefClass            ReferencedIdAttribute
+    RefType             refnone
+    Format              {in domain, \"$Domain\", relationship,\
+                        \"$Relationship\", references class, \"$Class\",\
+                        and attribute, \"$Attribute\", either or both of\
+                        which do not exist}
+} {
+    Relationship        R72
+    RefClass            StateTransition
+    RefType             refnone
+    Format              {in domain, \"$Domain\", the state model for,\
+                        \"$Model\", contains the transition,\
+                        \"$State - $Event -> $NewState\",\
+                        but state \"$NewState\" does not exist}
+} {
+    Relationship        R81
+    RefClass            DeferredEvent
+    RefType             multrefed
+    Format              {in domain, \"$Domain\", in the state model for,\
+                        \"$Model\", event, \"$Event\", is both\
+                        an inherited polymorphic event and a newly defined one}
+} {
+    Relationship        R87
+    RefClass            EffectiveEvent
+    RefType             refnone
+    Format              {in domain, \"$Domain\", event, \"$Event\" has been\
+                        inherited, but no state model exists for, \"$Model\"}
+}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test configure-8.0 {
+    configure error -- no attributes defined for class
+} -setup {
+} -cleanup {
+    cleanupConfigData
+} -body {
+    rosea configure {
+        domain foo {
+            class c1 {
+            }
+        }
+    }
+} -result {encountered 1 configuration script errors} -returnCodes error\
+-output {*in domain, "foo", class, "c1", has no attributes*} -match glob
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test configure-8.1 {
+    configure error -- no identifier defined for class
+} -setup {
+} -cleanup {
+    cleanupConfigData
+} -body {
+    rosea configure {
+        domain foo {
+            class c1 {
+                attribute a1 string
+            }
+        }
+    }
+} -result {encountered 1 configuration script errors} -returnCodes error\
+-output {*in domain, "foo", class, "c1", has no identifiers*} -match glob
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test configure-8.2 {
+    configure error -- no reference
+} -setup {
+} -cleanup {
+    cleanupConfigData
+} -body {
+    rosea configure {
+        domain foo {
+            class c1 {
+                attribute a1 string -id 1
+            }
+            class c2 {
+                attribute a2 string -id 1
+            }
+            association R1 c1 1--1 c2
+        }
+    }
+} -result {encountered 1 configuration script errors} -returnCodes error\
+-output {*in domain, "foo", for relationship, "R1", no class has defined a reference to class, "c2"*}\
+-match glob
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test configure-8.3 {
+    configure error -- bad reference
+} -setup {
+} -cleanup {
+    cleanupConfigData
+} -body {
+    rosea configure {
+        domain foo {
+            class c1 {
+                attribute a1 string -id 1
+                reference R1 c3 -link a1
+            }
+            class c2 {
+                attribute a2 string -id 1
+            }
+            association R1 c1 1--1 c2
+        }
+    }
+} -result {encountered 1 configuration script errors} -returnCodes error\
+-output {*in domain, "foo", relationship, "R1", references class, "c3", and attribute, "a1", either or both of which do not exist*}\
+-match glob
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test configure-8.4 {
+    configure error -- bad referential attribute linkage
+} -setup {
+} -cleanup {
+    cleanupConfigData
+} -body {
+    rosea configure {
+        domain foo {
+            class c1 {
+                attribute a1 string -id 1
+                reference R1 c2 -link {a1 a3}
+            }
+            class c2 {
+                attribute a2 string -id 1
+            }
+            association R1 c1 1--1 c2
+        }
+    }
+} -result {encountered 1 configuration script errors} -returnCodes error\
+-output {*in domain, "foo", relationship, "R1", references class, "c2", and attribute, "a3", either or both of which do not exist*}\
+-match glob
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test configure-8.5 {
+    configure error -- transition refers to non-existant state
+} -setup {
+} -cleanup {
+    cleanupConfigData
+} -body {
+    rosea configure {
+        domain foo {
+            class c1 {
+                attribute a1 string -id 1
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s2
+                }
+            }
+        }
+    }
+} -result {encountered 1 configuration script errors} -returnCodes error\
+-output {*in domain, "foo", the state model for, "c1", contains the transition, "s1 - e1 -> s2", but state "s2" does not exist*}\
+-match glob
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test configure-8.6 {
+    configure error -- duplicated polymorphic events
+} -setup {
+} -cleanup {
+    cleanupConfigData
+} -body {
+    rosea configure {
+        domain foo {
+            class super {
+                attribute a1 string -id 1
+                polymorphic e1
+            }
+            class sub1 {
+                attribute a1 string -id 1
+                reference R1 super -link a1
+
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                }
+            }
+            class sub2 {
+                attribute a1 string -id 1
+                reference R1 super -link a1
+                polymorphic e1
+            }
+            class ssub1 {
+                attribute a1 string -id 1
+                reference R2 sub2 -link a1
+            }
+            class ssub2 {
+                attribute a1 string -id 1
+                reference R2 sub2 -link a1
+            }
+            generalization R1 super sub1 sub2
+            generalization R2 sub2 ssub1 ssub2
+        }
+    }
+} -result {encountered 1 configuration script errors} -returnCodes error\
+-output {*in domain, "foo", in the state model for, "sub2", event, "e1", is both an inherited polymorphic event and a newly defined one*}\
+-match glob
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test configure-8.7 {
+    configure error -- no leaf state models
+} -setup {
+} -cleanup {
+    cleanupConfigData
+} -body {
+    rosea configure {
+        domain foo {
+            class super {
+                attribute a1 string -id 1
+                polymorphic e1
+            }
+            class sub1 {
+                attribute a1 string -id 1
+                reference R1 super -link a1
+
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                }
+            }
+            class sub2 {
+                attribute a1 string -id 1
+                reference R1 super -link a1
+            }
+            class ssub1 {
+                attribute a1 string -id 1
+                reference R2 sub2 -link a1
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                }
+            }
+            class ssub2 {
+                attribute a1 string -id 1
+                reference R2 sub2 -link a1
+            }
+            generalization R1 super sub1 sub2
+            generalization R2 sub2 ssub1 ssub2
+        }
+    }
+} -result {encountered 1 configuration script errors} -returnCodes error\
+-output {*in domain, "foo", event, "e1" has been inherited, but no state model exists for, "ssub2"*}\
+-match glob
+----
+
 == Generating Domains
 
 After specifying the domain using the configuration DSL,
@@ -11166,6 +11700,7 @@ set domns ${prefix}::$domainName
 namespace eval $domns {
     <<tclral imports>>
 }
+namespace eval $domns namespace path ::rosea::InstCmds
 
 set archns ${domns}::__Arch
 namespace eval ${archns} {
@@ -11402,6 +11937,55 @@ relvar set ${archns}::Transition [pipe {
     relation eliminate ~ Domain |
     relation rename ~ Model Class
 }]
+----
+
+[source,tcl]
+----
+<<generate command tests>>=
+test generate-5.0 {
+    Classes with state models
+} -setup {
+    rosea configure {
+        domain foo {
+            class Dog {
+                attribute Name string -id 1
+                attribute Breed string
+
+                statemodel {
+                    state Born {} {
+                        puts "In Born"
+                    }
+                    state Grown {} {
+                        puts "In Grown"
+                        delaysignal 200 $self Time
+                    }
+                    state Old {} {
+                        puts "In Old"
+                        delaysignal 200 $self Time
+                    }
+                    state Dead {} {
+                        puts "In Dead"
+                        set ::done 1
+                    }
+                    terminal Dead
+
+                    transition Born - Time -> Grown
+                    transition Grown - Time -> Old
+                    transition Old - Time -> Dead
+                }
+            }
+        }
+    }
+    rosea generate
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::foo
+} -body {
+    testConditions\
+        {[relation cardinality [relvar set ::foo::__Arch::Transition]] == 4}\
+        {[relation cardinality [relvar set ::foo::__Arch::State]] == 4}\
+        {[relation cardinality [relvar set ::foo::__Arch::Event]] == 1}\
+} -result {1}
 ----
 
 [float]
@@ -12604,6 +13188,212 @@ test generate-2.3 {
 } -result {20}
 ----
 
+[source,tcl]
+----
+<<generate command tests>>=
+test generate-2.4 {
+    navigate associative relationship
+} -setup {
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::meta
+} -body {
+    rosea configure {
+        domain meta {
+            class Class {
+                attribute Domain string -id 1
+                attribute Name string -id 1
+            }
+
+            class Attribute {
+                attribute Domain string -id 1
+                attribute Class string -id 1
+                attribute Name string -id 1
+                attribute Type string
+
+                reference R3 Class -link Domain -link {Class Name}
+            }
+            association R3 Attribute 1..n--1 Class
+
+            operation showAttrs {class} {
+                set c1 [Class findWhere\
+                        {$Domain eq "foo" && $Name eq $class}]
+                set attrs [Class::instop $c1 findRelated ~R3]
+                return [Attribute::instop $attrs deRef]
+            }
+        }
+    }
+    rosea generate
+    relvar eval {
+        meta::Class create Domain foo Name c1
+        meta::Attribute create Domain foo Class c1 Name a1 Type string
+        meta::Attribute create Domain foo Class c1 Name a2 Type string
+    }
+    meta::showAttrs c1
+} -result {{Domain string Class string Name string Type string} {{Domain foo Class c1 Name a1 Type string} {Domain foo Class c1 Name a2 Type string}}}\
+    -match relation
+----
+
+[source,tcl]
+----
+<<generate command tests>>=
+test generate-2.5 {
+    link instances across association
+} -setup {
+    rosea configure {
+        domain meta {
+            class C1 {
+                attribute Id string -id 1
+                attribute A1 int
+            }
+
+            class C2 {
+                attribute Id string -id 1
+                attribute C1Id string
+                reference R1 C1 -link {C1Id Id}
+            }
+            association R1 C2 1..n--1 C1
+        }
+    }
+    rosea generate
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::meta
+} -body {
+    relvar eval {
+        set c1 [meta::C1 create Id foo A1 20]
+        meta::C2 create Id bar C1Id {}
+        meta::C2 create Id baz C1Id {}
+        set c2 [meta::C2 create Id fub C1Id {}]
+        meta::R1 link $c1 [meta::C2 findAll]
+    }
+    meta::C2::instop $c2 readAttribute C1Id
+} -result {foo}
+----
+
+[source,tcl]
+----
+<<generate command tests>>=
+test generate-2.6 {
+    unlink instances across association
+} -setup {
+    rosea configure {
+        domain meta {
+            class C1 {
+                attribute Id string -id 1
+                attribute A1 int
+            }
+
+            class C2 {
+                attribute Id string -id 1
+                attribute C1Id string
+                reference R1 C1 -link {C1Id Id}
+            }
+            association R1 C2 0..n--0..1 C1
+        }
+    }
+    rosea generate
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::meta
+} -body {
+    relvar eval {
+        set c1 [meta::C1 create Id foo A1 20]
+        meta::C2 create Id bar C1Id foo
+        meta::C2 create Id baz C1Id foo
+        set c2 [meta::C2 create Id fub C1Id foo]
+    }
+    set before [rosea::InstCmds::refMultiplicity\
+        [rosea::InstCmds::findRelated $c1 ~R1]]
+    meta::R1 unlink [meta::C2 findWhere {[string match b* $Id]}]
+    set after [rosea::InstCmds::refMultiplicity\
+        [rosea::InstCmds::findRelated $c1 ~R1]]
+    testConditions\
+        {$before == 3}\
+        {$after == 1}
+} -result {1}
+----
+
+[source,tcl]
+----
+<<generate command tests>>=
+test generate-2.7 {
+    unlink using referred to instance
+} -setup {
+    rosea configure {
+        domain meta {
+            class C1 {
+                attribute Id string -id 1
+                attribute A1 int
+            }
+
+            class C2 {
+                attribute Id string -id 1
+                attribute C1Id string
+                reference R1 C1 -link {C1Id Id}
+            }
+            association R1 C2 0..n--0..1 C1
+        }
+    }
+    rosea generate
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::meta
+} -body {
+    relvar eval {
+        set c1 [meta::C1 create Id foo A1 20]
+        meta::C2 create Id bar C1Id foo
+        meta::C2 create Id baz C1Id foo
+        meta::C2 create Id fub C1Id foo
+    }
+    set before [rosea::InstCmds::refMultiplicity\
+        [rosea::InstCmds::findRelated $c1 ~R1]]
+    meta::R1 unlink $c1
+    set after [rosea::InstCmds::refMultiplicity\
+        [rosea::InstCmds::findRelated $c1 ~R1]]
+    testConditions\
+        {$before == 3}\
+        {$after == 0}
+} -result {1}
+----
+
+[source,tcl]
+----
+<<generate command tests>>=
+test generate-2.8 {
+    unlink and violate referential integrity
+} -setup {
+    rosea configure {
+        domain meta {
+            class C1 {
+                attribute Id string -id 1
+                attribute A1 int
+            }
+
+            class C2 {
+                attribute Id string -id 1
+                attribute C1Id string
+                reference R1 C1 -link {C1Id Id}
+            }
+            association R1 C2 1..n--0..1 C1
+        }
+    }
+    rosea generate
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::meta
+} -body {
+    catch {relvar eval {
+        set c1 [meta::C1 create Id foo A1 20]
+        meta::C2 create Id bar C1Id foo
+        meta::C2 create Id baz C1Id foo
+        meta::C2 create Id fub C1Id foo
+        meta::R1 unlink $c1}
+    } result
+    set result
+} -result {for association*::meta::R1*} -match glob
+----
+
 [float]
 ====  Class Based Associations
 
@@ -12768,7 +13558,14 @@ set trev [pipe {
     relation update % lnk {1} {
         tuple update $lnk Name ~[tuple extract $lnk Name]}
 } {} |%]
+----
 
+The set of link instances that we need is then just the union
+of the four sets we just computed.
+
+[source,tcl]
+----
+<<generate: populate Link for class based associations>>=
 relvar union ${archns}::Link $aforw $arev $sforw $trev
 ----
 
@@ -12857,6 +13654,7 @@ set aforw [pipe {
 
 The navigation from the association class to the source (aka OneClass)
 is in the reverse direction and preceded by the target (aka OtherClass).
+And we have change the relationship name to include the tilde.
 
 [source,tcl]
 ----
@@ -12933,7 +13731,6 @@ relation foreach bothref $bothrefs {
         $targetAssocAttrs [MapCondMultToConstraint $sourceCond $sourceMult]\
         ${domns}::$targetClass $targetDstAttrs ; # <1>
 
-
     set ensemblemap [dict create\
         link [list ::rosea::RelCmds::linkAssoc $relationship]\
         unlink [list ::rosea::RelCmds::unlinkAssoc $relationship]\
@@ -12964,7 +13761,7 @@ This specifies the multiplicity and conditionality from the point of
 view of the two participating classes.
 However, the +relvar correlation+ command specifies multiplicity and
 conditionality from the point of view of the associative class.
-If you work out that difference,
+If you work through that difference in perspective,
 it means you have to invert the mulitiplicity and conditionality from
 source and target for the benefit of TclRAL.
 Both ways of specifying this work well in the respective worlds,
@@ -13111,6 +13908,98 @@ test generate-3.3 {
     set r [::foo::Element::instop $s findRelated ~R1]
     ::foo::Element::instop $r readAttribute ElemNumber
 } -result {10}
+----
+
+[source,tcl]
+----
+<<generate command tests>>=
+test generate-3.4 {
+    link class bases association instances
+} -setup {
+    rosea configure {
+        domain foo {
+            class A {
+                attribute ax1 string -id 1
+                attribute ax2 string -id 1
+                attribute ay1 string -id 1
+                attribute ay2 string -id 1
+                reference R1 X -link {ax1 x1} -link {ax2 x2}
+                reference R1 Y -link {ay1 y1} -link {ay2 y2}
+            }
+            class X {
+                attribute x1 string -id 1
+                attribute x2 string -id 1
+                attribute x3 int
+            }
+            class Y {
+                attribute y1 string -id 1
+                attribute y2 string -id 1
+                attribute y3 int
+            }
+            association R1 X 1..n--1..n Y -associator A
+        }
+    }
+    rosea generate
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::foo
+} -body {
+    relvar eval {
+        ::foo::X create x1 x1-1 x2 x2-1 x3 27
+        ::foo::X create x1 x1-2 x2 x2-2 x3 47
+        ::foo::Y create y1 y1-1 y2 y2-1 y3 57
+        ::foo::Y create y1 y1-2 y2 y2-2 y3 67
+
+        set assoc [::foo::R1 link [::foo::X findAll] [::foo::Y findAll]]
+    }
+    foo::A::instop $assoc refMultiplicity
+} -result {4}
+----
+
+[source,tcl]
+----
+<<generate command tests>>=
+test generate-3.5 {
+    unlink class based association instances.
+} -setup {
+    rosea configure {
+        domain foo {
+            class A {
+                attribute ax1 string -id 1
+                attribute ax2 string -id 1
+                attribute ay1 string -id 1
+                attribute ay2 string -id 1
+                reference R1 X -link {ax1 x1} -link {ax2 x2}
+                reference R1 Y -link {ay1 y1} -link {ay2 y2}
+            }
+            class X {
+                attribute x1 string -id 1
+                attribute x2 string -id 1
+                attribute x3 int
+            }
+            class Y {
+                attribute y1 string -id 1
+                attribute y2 string -id 1
+                attribute y3 int
+            }
+            association R1 X 0..n--0..n Y -associator A
+        }
+    }
+    rosea generate
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::foo
+} -body {
+    relvar eval {
+        ::foo::X create x1 x1-1 x2 x2-1 x3 27
+        ::foo::X create x1 x1-2 x2 x2-2 x3 47
+        ::foo::Y create y1 y1-1 y2 y2-1 y3 57
+        ::foo::Y create y1 y1-2 y2 y2-2 y3 67
+    }
+    set assoc [::foo::R1 link [::foo::X findAll] [::foo::Y findAll]]
+    ::foo::R1 unlink [::foo::X findAll]
+    relation cardinality [relvar set ::foo::A]
+} -result {0}
 ----
 
 [float]
@@ -13497,7 +14386,7 @@ test generate-4.3 {
 ----
 <<generate command tests>>=
 test generate-4.4 {
-    signal a compound generalization
+    signal a polymorphic event to a compound generalization
 } -setup {
 } -cleanup {
     cleanupConfigData
@@ -13698,323 +14587,6 @@ the domain is populated or at run time.
 ----
 <<generate command tests>>=
 test generate-6.0 {
-    generate multiple classes and relationships, navigate
-} -setup {
-} -cleanup {
-    cleanupConfigData
-    removeDomain ::meta
-} -body {
-    rosea configure {
-        domain meta {
-            class Class {
-                attribute Domain string -id 1
-                attribute Name string -id 1
-            }
-
-            class Attribute {
-                attribute Domain string -id 1
-                attribute Class string -id 1
-                attribute Name string -id 1
-                attribute Type string
-
-                reference R3 Class -link Domain -link {Class Name}
-            }
-            association R3 Attribute 1..n--1 Class
-
-            operation showAttrs {class} {
-                set c1 [Class findWhere\
-                        {$Domain eq "foo" && $Name eq $class}]
-                set attrs [Class::instop $c1 findRelated ~R3]
-                return [Attribute::instop $attrs deRef]
-            }
-        }
-    }
-    rosea generate
-    relvar eval {
-        meta::Class create Domain foo Name c1
-        meta::Attribute create Domain foo Class c1 Name a1 Type string
-        meta::Attribute create Domain foo Class c1 Name a2 Type string
-    }
-    meta::showAttrs c1
-} -result {{Domain string Class string Name string Type string} {{Domain foo Class c1 Name a1 Type string} {Domain foo Class c1 Name a2 Type string}}}\
-    -match relation
-----
-
-[source,tcl]
-----
-<<generate command tests>>=
-test generate-6.1 {
-    generate multiple classes and a relationship, link instances together
-} -setup {
-    rosea configure {
-        domain meta {
-            class C1 {
-                attribute Id string -id 1
-                attribute A1 int
-            }
-
-            class C2 {
-                attribute Id string -id 1
-                attribute C1Id string
-                reference R1 C1 -link {C1Id Id}
-            }
-            association R1 C2 1..n--1 C1
-        }
-    }
-    rosea generate
-} -cleanup {
-    cleanupConfigData
-    removeDomain ::meta
-} -body {
-    relvar eval {
-        set c1 [meta::C1 create Id foo A1 20]
-        meta::C2 create Id bar C1Id {}
-        meta::C2 create Id baz C1Id {}
-        set c2 [meta::C2 create Id fub C1Id {}]
-        meta::R1 link $c1 [meta::C2 findAll]
-    }
-    #puts [relformat [relvar set ::meta::C2] C2]
-    meta::C2::instop $c2 readAttribute C1Id
-} -result {foo}
-----
-
-[source,tcl]
-----
-<<generate command tests>>=
-test generate-6.2 {
-    generate multiple classes and a relationship, unlink instances
-} -setup {
-    rosea configure {
-        domain meta {
-            class C1 {
-                attribute Id string -id 1
-                attribute A1 int
-            }
-
-            class C2 {
-                attribute Id string -id 1
-                attribute C1Id string
-                reference R1 C1 -link {C1Id Id}
-            }
-            association R1 C2 0..n--0..1 C1
-        }
-    }
-    rosea generate
-} -cleanup {
-    cleanupConfigData
-    removeDomain ::meta
-} -body {
-    relvar eval {
-        set c1 [meta::C1 create Id foo A1 20]
-        meta::C2 create Id bar C1Id foo
-        meta::C2 create Id baz C1Id foo
-        set c2 [meta::C2 create Id fub C1Id foo]
-    }
-    meta::R1 unlink [meta::C2 findWhere {[string match b* $Id]}]
-    #puts [relformat [relvar set ::meta::C2] C2]
-    meta::C2::instop $c2 readAttribute C1Id
-} -result {foo}
-----
-
-[source,tcl]
-----
-<<generate command tests>>=
-test generate-6.3 {
-    generate multiple classes and a relationship, unlink by referred to instance
-} -setup {
-    rosea configure {
-        domain meta {
-            class C1 {
-                attribute Id string -id 1
-                attribute A1 int
-            }
-
-            class C2 {
-                attribute Id string -id 1
-                attribute C1Id string
-                reference R1 C1 -link {C1Id Id}
-            }
-            association R1 C2 0..n--0..1 C1
-        }
-    }
-    rosea generate
-} -cleanup {
-    cleanupConfigData
-    removeDomain ::meta
-} -body {
-    relvar eval {
-        set c1 [meta::C1 create Id foo A1 20]
-        meta::C2 create Id bar C1Id foo
-        meta::C2 create Id baz C1Id foo
-        set c2 [meta::C2 create Id fub C1Id foo]
-    }
-    meta::R1 unlink $c1
-    #puts [relformat [relvar set ::meta::C2] C2]
-    meta::C2::instop $c2 readAttribute C1Id
-} -result {}
-----
-
-[source,tcl]
-----
-<<generate command tests>>=
-test generate-6.4 {
-    generate class-based association and link instances
-} -setup {
-    rosea configure {
-        domain foo {
-            class A {
-                attribute ax1 string -id 1
-                attribute ax2 string -id 1
-                attribute ay1 string -id 1
-                attribute ay2 string -id 1
-                reference R1 X -link {ax1 x1} -link {ax2 x2}
-                reference R1 Y -link {ay1 y1} -link {ay2 y2}
-            }
-            class X {
-                attribute x1 string -id 1
-                attribute x2 string -id 1
-                attribute x3 int
-            }
-            class Y {
-                attribute y1 string -id 1
-                attribute y2 string -id 1
-                attribute y3 int
-            }
-            association R1 X 1..n--1..n Y -associator A
-        }
-    }
-    rosea generate
-} -cleanup {
-    cleanupConfigData
-    removeDomain ::foo
-} -body {
-    relvar eval {
-        ::foo::X create x1 x1-1 x2 x2-1 x3 27
-        ::foo::X create x1 x1-2 x2 x2-2 x3 47
-        ::foo::Y create y1 y1-1 y2 y2-1 y3 57
-        ::foo::Y create y1 y1-2 y2 y2-2 y3 67
-
-        set assoc [::foo::R1 link [::foo::X findAll] [::foo::Y findAll]]
-    }
-    #puts [relformat [relvar set ::foo::A] A]
-    foo::A::instop $assoc refMultiplicity
-} -result {4}
-----
-
-[source,tcl]
-----
-<<generate command tests>>=
-test generate-6.5 {
-    generate class-based association and unlink instances
-} -setup {
-    rosea configure {
-        domain foo {
-            class A {
-                attribute ax1 string -id 1
-                attribute ax2 string -id 1
-                attribute ay1 string -id 1
-                attribute ay2 string -id 1
-                reference R1 X -link {ax1 x1} -link {ax2 x2}
-                reference R1 Y -link {ay1 y1} -link {ay2 y2}
-            }
-            class X {
-                attribute x1 string -id 1
-                attribute x2 string -id 1
-                attribute x3 int
-            }
-            class Y {
-                attribute y1 string -id 1
-                attribute y2 string -id 1
-                attribute y3 int
-            }
-            association R1 X 0..n--0..n Y -associator A
-        }
-    }
-    rosea generate
-} -cleanup {
-    cleanupConfigData
-    removeDomain ::foo
-} -body {
-    relvar eval {
-        ::foo::X create x1 x1-1 x2 x2-1 x3 27
-        ::foo::X create x1 x1-2 x2 x2-2 x3 47
-        ::foo::Y create y1 y1-1 y2 y2-1 y3 57
-        ::foo::Y create y1 y1-2 y2 y2-2 y3 67
-    }
-    set assoc [::foo::R1 link [::foo::X findAll] [::foo::Y findAll]]
-    ::foo::R1 unlink [::foo::X findAll]
-    relation cardinality [relvar set ::foo::A]
-} -result {0}
-----
-
-[source,tcl]
-----
-<<generate command tests>>=
-test generate-7.0 {
-    Classes with state models
-} -setup {
-    rosea configure {
-        domain foo {
-            class Dog {
-                attribute Name string -id 1
-                attribute Breed string
-
-                statemodel {
-                    state Born {} {
-                        puts "In Born"
-                    }
-                    state Grown {} {
-                        puts "In Grown"
-                        delaysignal 200 $self Time
-                    }
-                    state Old {} {
-                        puts "In Old"
-                        delaysignal 200 $self Time
-                    }
-                    state Dead {} {
-                        puts "In Dead"
-                        set ::done 1
-                    }
-                    terminal Dead
-
-                    transition Born - Time -> Grown
-                    transition Grown - Time -> Old
-                    transition Old - Time -> Dead
-                }
-            }
-            class Owner {
-                attribute Name string -id 1
-            }
-            class Ownership {
-                attribute DogName string -id 1
-                attribute OwnerName string -id 1
-                attribute Aquired string
-
-                reference R1 Dog -link {DogName Name}
-                reference R1 Owner -link {OwnerName Name}
-            }
-            association R1 Dog 0..n--0..n Owner -associator Ownership
-        }
-    }
-    rosea generate
-} -cleanup {
-    cleanupConfigData
-    removeDomain ::foo
-} -body {
-    set ref [::foo::Dog create Name fido Breed mutt]
-
-    ::foo::Dog::instop $ref signal Time
-    set timer [after 1000 set ::done TIMEOUT]
-    vwait ::done
-    after cancel $timer
-    set ::done
-} -result {1}
-----
-
-[source,tcl]
-----
-<<generate command tests>>=
-test generate-8.0 {
     signal an assigner
 } -setup {
     rosea configure {
@@ -14058,7 +14630,7 @@ test generate-8.0 {
 [source,tcl]
 ----
 <<generate command tests>>=
-test generate-8.1 {
+test generate-6.1 {
     signal a multi assigner
 } -setup {
     rosea configure {
@@ -14215,6 +14787,19 @@ proc populate {script} {
 Like the `configure` command,
 we supply variations to take the data from a channel or a file.
 
+[float]
+==== Synopsis
+====
++populateFromChan+ _channel_
+====
+
+`channel`::
+    A handle to a Tcl channel, _e.g._ as returned from `::open`.
+
+The `populateFromChan` command executes the `populate`
+command on the script that is obtained by reading the contents of
+_channel_.
+
 ///////
 ----
 <<manual package commands>>=
@@ -14239,6 +14824,18 @@ proc populateFromChan {chan} {
     tailcall populate [read $chan]
 }
 ----
+
+[float]
+==== Synopsis
+====
++populateFromFile+ _filename_
+====
+
+`filename`::
+    The name of a file containing a population script.
+
+The `populateFromFile` command executes the `populate`
+command on the script that is contained in the file named, _filename_.
 
 ///////
 ----
@@ -16837,17 +17434,23 @@ In delivered code, we might be more succinct.
 
 // %Action WashingMachine Stopped
 .Stopped Activity
-The Stopped state of the Washing Machine is entered when the cycle
-is complete and we must signal the Clothes Tub to stop spinning.
-The action consists of finding the related Clothes Tub instance
-and signaling the Stop event to it.
 ----
 # Stop spinning -- wash complete
 select one ct related by self->R1[CT]
 signal Stop to ct
 ----
+The Stopped state of the Washing Machine is entered when the cycle
+is complete and we must signal the Clothes Tub to stop spinning.
+The action consists of finding the related Clothes Tub instance
+and signaling the Stop event to it.
 
 .Stopped Implementation
+[source,tcl]
+----
+<<WM stopped activity>>=
+set ct [findRelated $self ~R1]
+signal $ct Stop
+----
 The corresponding Tcl code invokes the `findRelated` instance command
 on the `self` instance.
 Recall that all state activities have an implicit `self` argument
@@ -16855,14 +17458,6 @@ defined for them.
 With the Clothes Tub instance in hand,
 it is then signaled to Stop using the <<signal-command,`signal`>>
 instance command that we have already seen.
-
-[source,tcl]
-----
-<<WM stopped activity>>=
-set ct [findRelated $self ~R1]
-signal $ct Stop
-----
-
 There are a couple things to note here.
 
 . The use of the direction syntax, _i.e._ `~R1`, obviates the need to
@@ -16872,8 +17467,8 @@ Because of the syntax convention and the manner in which the
 association was defined,
 the system knows the destination class.
 . The question arises whether the instance reference returned from
-`findRelated` can ever be the empty reference or ever reference multiple
-instances.
+`findRelated` in the above traversal across `~R1`
+can ever be the empty reference or ever reference multiple instances.
 The answer is no!
 The `R1` association,
 as shown in the class diagram,
@@ -16884,7 +17479,7 @@ Any operation in the domain that would perturb that state of affairs
 is rejected as violating the referential integrity of the
 class diagram.
 Consequently, no test of the multiplity of the returned reference is
-necessary as it would be stricly redundant.
+necessary as it would be strictly redundant.
 In general,
 traversing unconditional relationships never requires a test to determine if
 we obtained an instance reference and traversing a conditional relationship
@@ -16917,11 +17512,6 @@ signal $ct Fill [readAttribute $wc WashWaterTemp]
 
 // %Action WashingMachine Washing
 .Washing Activity
-While in the Washing state, clothes are being agitated in the tub.
-The state uses a delayed event to determine when the washing part of
-the cycle is finished.
-Note that the delay time of the signal is an attribute value.
-This is a common arrangement.
 ----
 # Agitate the tub to wash.
 select one ct related by self->R1[CT]
@@ -16929,15 +17519,16 @@ signal Agitate to ct
 select one wc related by self->R4[WC]
 signal Done to self at wc.WashDuration
 ----
+While in the Washing state, clothes are being agitated in the tub.
+The state uses a delayed event to determine when the washing part of
+the cycle is finished.
+Note that the delay time of the signal is an attribute value obtained
+from the Washing Cycle class.
+Here Washing Cycle serves a role of holding attributes that just specify
+conditions for another class
+This is a common arrangement.
 
 .Washing Implementation
-The delayed signal is accomplished by using the `delaysignal` procedure.
-Notice that the event is self directed, albeit delayed by the washing
-cycle time.
-So this state sends two signals,
-one to the Clothes Tub to tell it to start agitating the clothes
-and a delayed signal to itself so it when know when the clothes have
-been washing long enough.
 [source,tcl]
 ----
 <<WM washing activity>>=
@@ -16949,6 +17540,14 @@ delaysignal [expr {[readAttribute $wc WashDuration] * 1000}] $self Done ; # <1>
 <1> We are implicitly assuming the units of WashDuration are seconds.
 In truth, the units are minutes, but we are not patient enough
 to wait that long for a run of the example to finish.
+
+The delayed signal is accomplished by using the `delaysignal` procedure.
+Notice that the event is self directed, albeit delayed by the washing
+cycle time.
+So this state sends two signals,
+one to the Clothes Tub to tell it to start agitating the clothes
+and a delayed signal to itself so it when know when the clothes have
+been washing long enough.
 
 '''
 
@@ -17382,6 +17981,30 @@ operation createWasher {washer} {
     WaterLevelSensor create MachineID $washer
 
     return $wm
+}
+----
+
+[float]
+==== Delete Washer
+
+If we can create a washer, it is also necessary to be able to delete one.
+Here we must be careful to leave the data model referentially consistent.
+
+(((proc,domain operation,deleteWasher)))
+[source,tcl]
+----
+<<wmctrl operations>>=
+operation deleteWasher {washer} {
+    set wm [WashingMachine findById MachineID $washer]
+    if {[isNotEmptyRef $wm]} {
+        set ct [findRelated $wm ~R1]
+        delete\
+            [findRelated $ct ~R3]\
+            [findRelated $ct ~R2]\
+            [findRelated $ct ~R5]
+        delete $ct $wm
+    }
+    return
 }
 ----
 
@@ -17900,7 +18523,6 @@ namespace eval ::rosea::test {
     cleanupTests
 }
 ----
-
 
 ////
 ----
