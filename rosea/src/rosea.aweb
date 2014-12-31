@@ -6547,23 +6547,15 @@ proc configure {script} {
     namespace upvar Config errcount errcount configlineno configlineno
     set errcount 0
     set configlineno 1
-    try {
-        relvar eval { # <1>
-            ConfigEvaluate ::rosea::Config $script
-        }
-    } on error {result} {
-        Config::HandleConfigError $result
-        incr errcount
-    }
+
+    ConfigEvaluate ::rosea::Config $script
+
     if {$errcount > 0} {
         tailcall DeclError CONFIG_ERRORS $errcount
     }
     return $errcount
 }
 ----
-<1> Evaluating the script must be done as a +relvar+ transaction
-as we will need to defer the constraint checking until all the domain
-components have been defined.
 
 (((error code,CONFIG_ERRORS)))
 [source,tcl]
@@ -6814,18 +6806,20 @@ proc domain {name body} {
             tailcall DeclError EMPTY_NAME domain
         }
 
-        ConfigEvaluate [namespace current]::DomainDef  $body
+        relvar eval { # <3>
+            ConfigEvaluate [namespace current]::DomainDef $body
 
-        # At this point we have the definition of the domain and enough
-        # information to tie together the referential attributes and
-        # the association definitions.
-        <<domain: bind association references>>
+            # At this point we have the definition of the domain and enough
+            # information to tie together the referential attributes and
+            # the association definitions.
+            <<domain: bind association references>>
 
-        # We must also compute how polymorphic events are inherited
-        # down generalization hierarchies.
-        <<domain: propagate polymorphic events>>
-    } on error {result opts} {
-        log::error $result
+            # We must also compute how polymorphic events are inherited
+            # down generalization hierarchies.
+            <<domain: propagate polymorphic events>>
+        }
+    } on error {result} {
+        ::rosea::Config::HandleConfigError $result
         upvar #0 ::rosea::Config::errcount errcount
         incr errcount
     }
@@ -6836,6 +6830,9 @@ implies that all the components defined are to be part of this domain.
 <2> We allow the +domain+ command to be invoked more than once.
 Domains are open ended definitions and the +uinsert+ command will not
 throw an error upon a duplicate.
+<3> Evaluating the script must be done as a +relvar+ transaction
+as we will need to defer the constraint checking until all the domain
+components have been defined.
 
 (((error code,EMPTY_NAME)))
 [source,tcl]
@@ -6965,6 +6962,7 @@ An XUML class represents a real world entity.
 It is defined by giving it a name and providing a script to
 further define its characteristics.
 
+[[config-classes-diagram]]
 Below is a UML class diagram of the configuration data for defining
 classes.
 
@@ -7096,47 +7094,53 @@ proc class {name body} {
     namespace upvar ClassDef ClassName ClassName
     set ClassName $name
 
+    if {$name eq {}} {
+        tailcall DeclError EMPTY_NAME class
+    }
     try {
-        if {$name eq {}} {
-            tailcall DeclError EMPTY_NAME class
-        }
         relvar insert ::rosea::Config::DomainElement [list\
             Domain  $DomainName\
             Element $name\
         ]
-        relvar insert ::rosea::Config::Class [list\
-            Domain  $DomainName\
-            Name    $name\
-        ]
-        set instops [pipe {
-            relvar set ::rosea::Config::SuppliedInstanceOperation |
-            relation extend ~ ioptuple\
-                Domain string {[set DomainName]}\
-                Class string {[set ClassName]}
-        }]
-        relvar union ::rosea::Config::SystemInstanceOperation $instops
-        relvar union ::rosea::Config::InstanceOperation $instops
-        relvar union ::rosea::Config::Operation $instops
-        set classops [pipe {
-            relvar set ::rosea::Config::SuppliedClassOperation |
-            relation extend ~ coptuple\
-                Domain string {[set DomainName]}\
-                Class string {[set ClassName]}
-        }]
-        relvar union ::rosea::Config::SystemClassOperation $classops
-        relvar union ::rosea::Config::ClassOperation $classops
-        relvar union ::rosea::Config::Operation $classops
-
-        ConfigEvaluate [namespace current]::ClassDef $body
-    } on error {result opts} {
-        log::error $result
-        upvar #0 ::rosea::Config::errcount errcount
-        incr errcount
+    } trap {RAL relvar insert DUPLICATE_TUPLE} {result opts} {
+        tailcall DeclError DUP_ELEMENT_NAME $name
     }
+    relvar insert ::rosea::Config::Class [list\
+        Domain  $DomainName\
+        Name    $name\
+    ]
+    set instops [pipe {
+        relvar set ::rosea::Config::SuppliedInstanceOperation |
+        relation extend ~ ioptuple\
+            Domain string {[set DomainName]}\
+            Class string {[set ClassName]}
+    }]
+    relvar union ::rosea::Config::SystemInstanceOperation $instops
+    relvar union ::rosea::Config::InstanceOperation $instops
+    relvar union ::rosea::Config::Operation $instops
+    set classops [pipe {
+        relvar set ::rosea::Config::SuppliedClassOperation |
+        relation extend ~ coptuple\
+            Domain string {[set DomainName]}\
+            Class string {[set ClassName]}
+    }]
+    relvar union ::rosea::Config::SystemClassOperation $classops
+    relvar union ::rosea::Config::ClassOperation $classops
+    relvar union ::rosea::Config::Operation $classops
+
+    ConfigEvaluate [namespace current]::ClassDef $body
 }
 ----
 <1> Again we arrange for namespace variables to hold the current
 domain and class names to provide the context of the definition.
+
+(((error code,DUP_ELEMENT_NAME)))
+[source,tcl]
+----
+<<error code formats>>=
+DUP_ELEMENT_NAME    {a class, relationship or domain operation named, "%s",\
+                    already exists}
+----
 
 === Defining Classes Components
 
@@ -7821,6 +7825,7 @@ proc classop {name params body} {
 ----
 
 (((error code,DUP_OP_NAME)))
+(((error code,NS_QUALIFIERS)))
 [source,tcl]
 ----
 <<error code formats>>=
@@ -8518,10 +8523,14 @@ proc association {name source spec target args} {
 
     <<association: parse arguments>>
 
-    relvar insert ::rosea::Config::DomainElement [list\
-        Domain  $DomainName\
-        Element $name\
-    ]
+    try {
+        relvar insert ::rosea::Config::DomainElement [list\
+            Domain  $DomainName\
+            Element $name\
+        ]
+    } trap {RAL relvar insert DUPLICATE_TUPLE} {result opts} {
+        tailcall DeclError DUP_ELEMENT_NAME $name
+    }
 
     # Many relvars have tuples with the same heading, so we construct it
     # once here.
@@ -9100,10 +9109,14 @@ proc generalization {name super args} {
 
     namespace upvar ::rosea::Config::DomainDef DomainName DomainName
 
-    relvar insert ::rosea::Config::DomainElement [list\
-        Domain  $DomainName\
-        Element $name\
-    ]
+    try {
+        relvar insert ::rosea::Config::DomainElement [list\
+            Domain  $DomainName\
+            Element $name\
+        ]
+    } trap {RAL relvar insert DUPLICATE_TUPLE} {result opts} {
+        tailcall DeclError DUP_ELEMENT_NAME $name
+    }
 
     set reltuple [list\
         Domain  $DomainName\
@@ -11033,10 +11046,14 @@ ensemble command.
 proc operation {name params body} {
     namespace upvar ::rosea::Config::DomainDef DomainName DomainName
 
-    relvar insert ::rosea::Config::DomainElement [list\
-        Domain      $DomainName\
-        Element     $name\
-    ]
+    try {
+        relvar insert ::rosea::Config::DomainElement [list\
+            Domain      $DomainName\
+            Element     $name\
+        ]
+    } trap {RAL relvar insert DUPLICATE_TUPLE} {result opts} {
+        tailcall DeclError DUP_ELEMENT_NAME $name
+    }
     relvar insert ::rosea::Config::DomainOperation [list\
         Domain      $DomainName\
         Name        $name\
@@ -11073,61 +11090,41 @@ of the *Name* attribute.
 We will mitigate this problem by capturing the result returned by
 TclRAL and turning it into error messages that are more meaningful
 to the task of configuring a domain.
+Unfortunately,
+the messages produced by TclRAL are intended to be human readable,
+so we will have to parse them into a form that is easier to deal
+with programmatically.
+Fortunately, the messages are very regular in structure so
+the parsing code need not be very sophisticated.
 
-(((rosea,Config,HandleConfigError)))
-[source,tcl]
-----
-<<config commands>>=
-proc HandleConfigError {result} {
-    set lines [split [string trimright $result] \n]
-    set nlines [llength $lines]
-    set lineno 0
-    while {$lineno < $nlines} {
-        set line [lindex $lines $lineno]
-        incr lineno
-        if {[string match {for*} $line]} {
-            regexp {^for[^:]+([^(]+)\(.+\), in relvar (.+)$}\
-                $line match rnum refclass
+As an example of the output of TclRAL, consider the following error message.
 
-            set rnum [namespace tail $rnum]
-            set refclass [namespace tail $refclass]
+............
+for association ::rosea::Config::R4(::rosea::Config::Identifier [+] ==> [1] ::rosea::Config::Class), in relvar ::rosea::Config::Class
+tuple {Domain d1 Name c2} is not referenced by any tuple
+............
 
-            while {true} {
-                set tupline [lindex $lines $lineno]
-                if {[string match {tuple*} $tupline]} {
-                    incr lineno
-                    regexp {^tuple {(.+)} (.+)$} $tupline match tuple phrase
-                    if {[string match {is not referenced*} $phrase]} {
-                        set reftype notrefed
-                    } elseif {[string match {references no*} $phrase]} {
-                        set reftype refnone
-                    } elseif {[string match {*to by multiple*} $phrase]} {
-                        set reftype multrefed
-                    } else {
-                        log::error "unknown constraint phrasing, \"$phrase\""
-                        continue
-                    }
-                    set cde [relvar restrictone Config_DataError\
-                        Relationship $rnum RefClass $refclass RefType $reftype]
-                    if {[relation isnotempty $cde]} {
-                        dict with tuple {
-                            log::error [subst -nocommands\
-                                [relation extract $cde Format]]
-                        }
-                    } else {
-                        log::error "for $rnum, in class $refclass, $tupline"
-                    }
-                } else {
-                    break
-                }
-            }
-        } else {
-            log::error "unknown configuration error, \"$result\""
-        }
-    }
-    return
-}
-----
+This message results when a class is defined but no attributes are
+designated as identfiers.
+The first line describes the contraint violation and that is followed
+by one or more lines that name the tuple values and which aspect of the
+constraint is violated.
+For our example, in domain, `d1`, there was a tuple in the *Class* class named,
+`c2`,
+which was not referenced by any tuples in the in the *Identifier* class
+as is required by the *R4* association.
+You can see this on the class diagram for
+<<config-classes-diagram,configuring classes>>.
+
+Our strategy here is to extract only the essential information from the
+error message and then map the information onto a more meaningful error
+message.
+Part of what we want to include in the error message is the values
+form the tuples that fail the constraint.
+These values contain information that the user entered rather than the
+abstractions of the meta-model.
+
+The essential information mapping is shown below.
 
 [source,tcl]
 ----
@@ -11138,7 +11135,125 @@ relvar create Config_DataError {
     RefType             string
     Format              string
 } {Relationship RefClass RefType}
+----
 
+The *Relationship* attribute is the name of the relationship in the
+metamodel that failed the constraint check.
+The *RefClass* attribute is the meta-model class that has the tuples
+that failed the constraint check.
+The *RefType* attribute defines the way in which the constraint failed.
+The *Format* attribute is a string that contains the text of the
+error message that we want to display.
+The text in the *Format* attribute may also contain variable references
+to attributes in the tuple of *RefClass* that failed.
+The variable references in the *Format* will be substituted
+with the values from the failing tuples in order to give specifics of
+the error back to the user.
+
+[float]
+===== Implementation
+
+The design of the `HandleConfigError` procedure is shown below.
+It is a nested iteration over the lines of the error result, pulling
+off the constraint violation details and then iterating over the
+tuples that were found in the violation.
+
+(((rosea,Config,HandleConfigError)))
+[source,tcl]
+----
+<<config commands>>=
+proc HandleConfigError {result} {
+    set lines [split [string trimright $result] \n]
+    set nlines [llength $lines]
+    set lineno 0
+    while {$lineno < $nlines} {
+        <<HandleConfigError: example one failure>>
+    }
+
+    return
+}
+----
+
+The information in the TclRAL error message is simple enough
+and well structured enough that a regular expression can be used
+to match and extract the interesting parts.
+
+[source,tcl]
+----
+<<HandleConfigError: example one failure>>=
+set line [lindex $lines $lineno]
+incr lineno
+if {[regexp {^for[^:]+([^(]+)\(.+\), in relvar (.+)$} $line\
+        match rnum refclass]} {
+    set rnum [namespace tail $rnum]
+    set refclass [namespace tail $refclass]
+
+    # Now iterate over the "tuple" lines that follow the constraint message.
+    while {$lineno < $nlines} {
+        set tupline [lindex $lines $lineno]
+        if {[regexp {^tuple {(.+)} (.+)$} $tupline match tuple phrase]} {
+            incr lineno
+            <<HandleConfigError: example one tuple>>
+        } else {
+            break
+        }
+    }
+} else {
+    log::error "unknown configuration error, \"$result\""
+}
+----
+
+We match the phrase in the tuple message to create an enumeration of
+the types of constraint violations.
+These are just a bit simpler to handle and look up.
+
+[source,tcl]
+----
+<<HandleConfigError: example one tuple>>=
+if {[string match {is not referenced*} $phrase]} {
+    set reftype notrefed
+} elseif {[string match {references no*} $phrase]} {
+    set reftype refnone
+} elseif {[string match {*to by multiple*} $phrase]} {
+    set reftype multrefed
+} else {
+    log::error "unknown constraint phrasing, \"$phrase\""
+    continue
+}
+<<HandleConfigError: format error message>>
+----
+
+Finally, we look up the format information and generate an error message.
+Using the `dict with` command allows us to take the tuple value from the
+error message, treat it like a dictionary and get the values into
+Tcl variable.
+The `subst` command then will perform the variable substitutions in the
+format string.
+
+[source,tcl]
+----
+<<HandleConfigError: format error message>>=
+set cde [relvar restrictone Config_DataError Relationship $rnum RefClass\
+        $refclass RefType $reftype]
+if {[relation isnotempty $cde]} {
+    dict with tuple {
+        log::error [subst -nocommands [relation extract $cde Format]]
+    }
+} else {
+    log::error "$line\n$tupline"
+}
+----
+
+We now need to enumerate all the meta-model constraints that can be violated
+and supply messages that provide less abstract and more useful user error
+messages.
+Because of the way the configuration data is stored into the meta-model
+relvars,
+not all violations are even possible.
+
+[source,tcl]
+----
+<<config data>>=
 relvar insert Config_DataError {
     Relationship        R3
     RefClass            Class
@@ -11159,6 +11274,24 @@ relvar insert Config_DataError {
                         \"$Relationship\", no class has defined a reference\
                         to class, \"$Class\"}
 } {
+    Relationship        R11
+    RefClass            ReferencedIdAttribute
+    RefType             refnone
+    Format              {in domain, \"$Domain\", relationship,\
+                        \"$Relationship\", references attribute,\
+                        \"$Attribute\", in class, \"$Class\", which is\
+                        not an identifying attribute, does not exist\
+                        or \"$Relationship\" does not exist}
+} {
+    Relationship        R12
+    RefClass            AttributeReference
+    RefType             refnone
+    Format              {in domain, \"$Domain\", the attribute,\
+                        \"$ReferringAttribute\", in class, \"$ReferringClass\",\
+                        refers to, \"$ReferencedAttribute\", in class,\
+                        \"$ReferencedClass\", but the class, attribute or\
+                        relationship does not exist}
+} {
     Relationship        R41
     RefClass            ClassRole
     RefType             refnone
@@ -11166,13 +11299,12 @@ relvar insert Config_DataError {
                         \"$Relationship\", references class, \"$Class\",\
                         which does not exist}
 } {
-    Relationship        R11
-    RefClass            ReferencedIdAttribute
+    Relationship        R52
+    RefClass            AssignerStateModel
     RefType             refnone
-    Format              {in domain, \"$Domain\", relationship,\
-                        \"$Relationship\", references class, \"$Class\",\
-                        and attribute, \"$Attribute\", either or both of\
-                        which do not exist}
+    Format              {in domain, \"$Domain\", an assigner state model is\
+                        defined on relationship, \"$Relationship\", which is\
+                        not an association type relationship}
 } {
     Relationship        R72
     RefClass            StateTransition
@@ -11186,8 +11318,16 @@ relvar insert Config_DataError {
     RefClass            DeferredEvent
     RefType             multrefed
     Format              {in domain, \"$Domain\", in the state model for,\
-                        \"$Model\", event, \"$Event\", is both\
-                        an inherited polymorphic event and a newly defined one}
+                        \"$Model\", event, \"$Event\", is both an inherited\
+                        polymorphic event and a locally defined one}
+} {
+    Relationship        R86
+    RefClass            DeferredEvent
+    RefType             notrefed
+    Format              {in domain, \"$Domain\", in the state model for,\
+                        \"$Model\", event, \"$Event\", is defined as\
+                        polymorphic but \"$Model\" is not a superclass\
+                        of a generalization}
 } {
     Relationship        R87
     RefClass            EffectiveEvent
@@ -11196,6 +11336,9 @@ relvar insert Config_DataError {
                         inherited, but no state model exists for, \"$Model\"}
 }
 ----
+
+[float]
+===== Tests
 
 [source,tcl]
 ----
@@ -11283,7 +11426,7 @@ test configure-8.3 {
         }
     }
 } -result {encountered 1 configuration script errors} -returnCodes error\
--output {*in domain, "foo", relationship, "R1", references class, "c3", and attribute, "a1", either or both of which do not exist*}\
+-output {*in domain, "foo", relationship, "R1", references attribute, "a1", in class, "c3", which is not an identifying attribute, does not exist or "R1" does not exist*}\
 -match glob
 ----
 
@@ -11309,7 +11452,7 @@ test configure-8.4 {
         }
     }
 } -result {encountered 1 configuration script errors} -returnCodes error\
--output {*in domain, "foo", relationship, "R1", references class, "c2", and attribute, "a3", either or both of which do not exist*}\
+-output {*in domain, "foo", relationship, "R1", references attribute, "a3", in class, "c2", which is not an identifying attribute, does not exist or "R1" does not exist*}\
 -match glob
 ----
 
@@ -11384,7 +11527,7 @@ test configure-8.6 {
         }
     }
 } -result {encountered 1 configuration script errors} -returnCodes error\
--output {*in domain, "foo", in the state model for, "sub2", event, "e1", is both an inherited polymorphic event and a newly defined one*}\
+-output {*in domain, "foo", in the state model for, "sub2", event, "e1", is both an inherited polymorphic event and a locally defined one*}\
 -match glob
 ----
 

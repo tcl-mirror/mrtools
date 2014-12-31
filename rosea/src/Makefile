@@ -109,6 +109,7 @@ DOCINFO	=\
 EXTRAS =\
 	docinfo.xml\
 	$(DOCINFO)\
+	bibliography.txt\
 	$(NULL)
 
 ASCIIDOC_ATTRS =\
