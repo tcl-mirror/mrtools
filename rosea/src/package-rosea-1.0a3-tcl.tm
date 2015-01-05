@@ -2,7 +2,7 @@
 # -- Tcl Module
 
 # @@ Meta Begin
-# Package rosea 1.0a2
+# Package rosea 1.0a3
 # Meta description Rosea is a data and execution architecture for
 # Meta description translating XUML models using Tcl as the implementation
 # Meta description language.
@@ -12,6 +12,7 @@
 # Meta require     ral
 # Meta require     ralutil
 # Meta require     struct::set
+# Meta require     lambda
 # Meta summary     Rosea -- XUML Software Architecture
 # @@ Meta End
 
@@ -23,12 +24,13 @@ package require logger
 package require ral
 package require ralutil
 package require struct::set
+package require lambda
 
 # ACTIVESTATE TEAPOT-PKG END REQUIREMENTS
 
 # ACTIVESTATE TEAPOT-PKG BEGIN DECLARE
 
-package provide rosea 1.0a2
+package provide rosea 1.0a3
 
 # ACTIVESTATE TEAPOT-PKG END DECLARE
 # ACTIVESTATE TEAPOT-PKG END TM
@@ -80,9 +82,14 @@ package require logger
 package require ral
 package require ralutil
 package require struct::set
+package require lambda
+
+proc ::K {x y} {set x}
 
 namespace eval ::rosea {
     namespace export configure
+    
+    namespace export configureFromChan
     
     namespace export configureFromFile
     
@@ -90,25 +97,15 @@ namespace eval ::rosea {
     
     namespace export populate
     
+    namespace export populateFromChan
+    
     namespace export populateFromFile
     
-    namespace export traceControl
-    
-    namespace export decodeAllTraces
-    
-    namespace export decodeClassTraces
-    
-    namespace export decodeTargetTraces
-    
-    namespace export formatTraces
-    
-    namespace export diagAllTraces
-    
-    namespace export diagClassTraces
+    namespace export trace
     
     namespace ensemble create
 
-    variable version 1.0a2
+    variable version 1.0a3
 
     logger::initNamespace [namespace current]
 
@@ -117,27 +114,52 @@ namespace eval ::rosea {
     namespace import ::ral::relformat
     namespace import ::ralutil::pipe
     namespace import ::ral::relvar
+    pipe {
+        relation semijoin $class $Attribute -using {Domain Domain Name Class} |
+        relation project ~ Name Type |
+        relation dict ~ Name Type
+    } headingQuery
+    
+    pipe {
+        relation semijoin $class $Identifier -using {Domain Domain Name Class}\
+                $IdentifyingAttribute |
+        relation group ~ Attributes Attribute
+    } idQuery
+    
+    pipe {
+        relation semijoin $class $Attribute -using {Domain Domain Name Class} |
+        relation join ~ $DefaultValue -using {Domain Domain Class Class Name Attribute}
+    } defaultValuesQuery
+    
+    pipe {
+        relation semijoin $class $StateModel -using {Domain Domain Name Model} |
+        relation isnotempty
+    } hasSMQuery
+    
+    pipe {
+        relation semijoin $class $State -using {Domain Domain Name Model} |
+        relation project ~ Name Parameters Action
+    } statesQuery
+    
     proc configure {script} {
         namespace upvar Config errcount errcount configlineno configlineno
         set errcount 0
         set configlineno 1
-        try {
-            relvar eval { # <1>
-                ConfigEvaluate ::rosea::Config $script
-            }
-        } on error {result} {
-            log::error $result
-            incr errcount
-        }
+    
+        ConfigEvaluate ::rosea::Config $script
+    
         if {$errcount > 0} {
             tailcall DeclError CONFIG_ERRORS $errcount
         }
         return $errcount
     }
+    proc configureFromChan {chan} {
+        tailcall configure [read $chan]
+    }
     proc configureFromFile {filename} {
         set f [::open $filename r]
         try {
-            configure [read $f]
+            configureFromChan $f
         } finally {
             ::chan close $f
         }
@@ -145,12 +167,11 @@ namespace eval ::rosea {
     proc generate {{prefix {}} {pattern *}} {
         if {$prefix ne {}} {
             if {[string range $prefix 0 1] ne "::"} {
-                tailcall DeclError FULLY_QUALIFIED $prefix
+                set prefix [uplevel 1 {namespace current}]::$prefix
             }
             set prefix [string trimright $prefix :]
-            namespace eval $prefix {}
+            namespace eval $prefix {} ; # <1>
         }
-    
         namespace upvar Config\
             Domain Domain\
             DomainElement DomainElement\
@@ -192,85 +213,159 @@ namespace eval ::rosea {
             NonStateTransition NonStateTransition\
             AssignerStateModel AssignerStateModel\
             SingleAssigner SingleAssigner\
-            MultipleAssigner MultipleAssigner
+            MultipleAssigner MultipleAssigner\
+            PolymorphicEvent PolymorphicEvent
     
-        # Query for the heading
-        pipe {
-            relation semijoin $class $Attribute -using {Domain Domain Name Class} |
-            relation project ~ Name Type |
-            relation dict ~ Name Type
-        } headingQuery
-    
-        pipe {
-            relation semijoin $class $Identifier -using {Domain Domain Name Class}\
-                    $IdentifyingAttribute |
-            relation group ~ Attributes Attribute
-        } idQuery
-    
-        # Iterate over all domains.
-        set genDomain [relation restrictwith $Domain\
-                {[string match $pattern $Domain]}]
-        relation foreach domain $Domain {
+        set genDomain [relation restrictwith $Domain {
+                [string match $pattern $Domain]}]
+        relation foreach domain $genDomain {
             set domainName [relation extract $domain Name]
             relvar updateone Config::Domain dtup [list Name $domainName] {
                 tuple update $dtup Location $prefix
             }
+            
             set domns ${prefix}::$domainName
-            # We start by creating a namespace to house the domain.
             namespace eval $domns {
                 namespace import ::ral::relation
                 namespace import ::ral::tuple
                 namespace import ::ral::relformat
                 namespace import ::ralutil::pipe
             }
-            set archns [GenerateArchStructures $domns]
-    
+            namespace eval $domns namespace path ::rosea::InstCmds
+            
+            set archns ${domns}::__Arch
+            namespace eval ${archns} {
+                ral relvar create RefLink {
+                    Relationship    string
+                    ReferringClass  string
+                    ReferencedClass string
+                    ReferringAttrs  {Relation
+                            {ReferringAttribute string ReferencedAttribute string}}
+                } Relationship
+                ral relvar create AssocRef {
+                    Relationship    string
+                    AssocClass      string
+                    References      {Relation\
+                        {Participant string Role string ReferringAttrs {Relation\
+                            {ReferringAttribute string ReferencedAttribute string}}}}
+                } Relationship
+                ral relvar create SuperLink {
+                    Relationship    string
+                    SuperClass      string
+                } Relationship
+                
+                ral relvar create SubLink {
+                    Relationship    string
+                    SubClass        string
+                    ReferringAttrs  {Relation\
+                        {ReferringAttribute string ReferencedAttribute string}}
+                } {Relationship SubClass}
+                
+                ral relvar association R5\
+                    SubLink Relationship +\
+                    SuperLink Relationship 1
+                ral relvar create Link {
+                    Name            string
+                    SrcClass        string
+                } {Name SrcClass}
+                ral relvar create AssociationLink {
+                    Name            string
+                    SrcClass        string
+                    DstClass        string
+                    Attrs           list
+                    PrevSrcClass    string
+                } {Name SrcClass}
+                ral relvar association R4\
+                    AssociationLink {Name PrevSrcClass} ?\
+                    AssociationLink {Name SrcClass} ?
+                ral relvar create PartitionLink {
+                    Name            string
+                    SrcClass        string
+                } {Name SrcClass}
+                ral relvar partition R3 Link {Name SrcClass}\
+                    AssociationLink {Name SrcClass}\
+                    PartitionLink {Name SrcClass}
+                ral relvar create PartitionDst {
+                    Name            string
+                    SrcClass        string
+                    DstClass        string
+                    Attrs           list
+                } {Name SrcClass DstClass}
+                ral relvar association R2\
+                    PartitionDst {Name SrcClass} +\
+                    PartitionLink {Name SrcClass} 1
+                ral relvar create State {
+                    Class string
+                    State string
+                } {Class State}
+                ral relvar create Event {
+                    Class string
+                    Event string
+                } {Class Event}
+                ral relvar create Transition {
+                    Class string
+                    State string
+                    Event string
+                    NewState string
+                } {Class State Event}
+                ral relvar correlation R1 Transition\
+                    {Class State} + State {Class State}\
+                    {Class Event} + Event {Class Event}
+                ral relvar create InitialState {
+                    Class string
+                    State string
+                } Class
+                ral relvar association R6\
+                    InitialState {Class State} ?\
+                    State {Class State} 1
+                ral relvar create TerminalState {
+                    Class string
+                    State string
+                } {Class State}
+                ral relvar association R7\
+                    TerminalState {Class State} *\
+                    State {Class State} 1
+                ral relvar create PolymorphicEvent {
+                    Class           string
+                    Event           string
+                } {Class Event}
+            }
+            set domops [relation semijoin $domain $DomainOperation -using {Name Domain}]
+            relation foreach domop $domops {
+                relation assign $domop\
+                    {Name name} {Parameters parameters} {Body body}
+                proc ${domns}::$name $parameters [list ::ral relvar eval $body] ; # <1>
+            }
+            
+            namespace eval $domns [list\
+                namespace export {*}[relation list $domops Name]\
+            ]
+            namespace eval $domns namespace ensemble create
+            set statemodels [relation semijoin $domain $StateModel\
+                -using {Name Domain}]
+            
             relvar eval {
-                set domops [relation semijoin $domain $DomainOperation\
-                        -using {Name Domain}]
-                relation foreach domop $domops {
-                    relation assign $domop\
-                        {Name name} {Parameters parameters} {Body body}
-                    proc ${domns}::$name $parameters [list ral relvar eval $body]
-                }
-    
-                namespace eval $domns [list\
-                    namespace export {*}[relation list $domops Name]\
-                ]
-                namespace eval $domns namespace ensemble create
-    
-                set statemodels [relation semijoin $domain $StateModel\
-                    -using {Name Domain}]
-    
-                # Much of the architectural data can be built in large queries
-                # across the entire domain capturing the data for all the classes
-                # in the domain.
-                relvar union ${archns}::InitialState [pipe {
+                relvar set ${archns}::InitialState [pipe {
                     relation project $statemodels Model InitialState |
                     relation rename ~ Model Class InitialState State
                 }]
-    
-    
-                set states [relation semijoin $domain $StatePlace\
-                    -using {Name Domain}]
-                relvar union ${archns}::State [pipe {
+                set states [relation semijoin $domain $StatePlace -using {Name Domain}]
+                relvar set ${archns}::State [pipe {
                     relation project $states Model Name |
                     relation rename ~ Model Class Name State
                 }]
-                relvar union ${archns}::Terminal [pipe {
+                relvar set ${archns}::TerminalState [pipe {
                     relation semijoin $domain $State -using {Name Domain} |
-                    relation restrict ~ termtuple\
-                            {[tuple extract $termtuple IsFinal]} |
+                    relation restrict ~ termtuple {[tuple extract $termtuple IsFinal]} |
                     relation project ~ Model Name |
                     relation rename ~ Model Class Name State
                 }]
                 set events [relation semijoin $domain $EffectiveEvent\
                     -using {Name Domain}]
-                relvar union ${archns}::Event [pipe {
+                relvar set ${archns}::Event [pipe {
                     relation project $events Model Event |
                     relation rename ~ Model Class
                 }]
-    
                 set alltrans [pipe {
                     relation join $states $events |
                     relation rename ~ Name State
@@ -278,33 +373,35 @@ namespace eval ::rosea {
                 set statetrans [relation semijoin $domain $StateTransition\
                     -using {Name Domain}]
                 set nontrans [pipe {
-                    relation semijoin $domain $NonStateTransition\
-                        -using {Name Domain} |
+                    relation semijoin $domain $NonStateTransition -using {Name Domain} |
                     relation rename ~ TransRule NewState
                 }]
                 set deftrans [pipe {
                     relation minus $alltrans $TransitionPlace |
                     relation join ~ $StateModel |
                     relation eliminate ~ InitialState |
-                    relation rename ~ DefaultTrans NewState
+                    relation rename ~ DefaultTrans NewState |
+                    relation update ~ dttup {[tuple extract $dttup State] eq "@"} {
+                        tuple update $dttup NewState CH}
                 }]
-                relvar union ${archns}::Transition [pipe {
+                relvar set ${archns}::Transition [pipe {
                     relation union $statetrans $nontrans $deftrans |
                     relation eliminate ~ Domain |
                     relation rename ~ Model Class
                 }]
-                #puts [relformat [relvar set ${archns}::State] State]
-                #puts [relformat [relvar set ${archns}::Event] Event]
-                #puts [relformat [relvar set ${archns}::Transition] Transition]
-    
-                relvar union ${archns}::PolymorphicEvent [pipe {
+                relvar set ${archns}::PolymorphicEvent [pipe {
                     relation semijoin $domain $DeferredEvent\
                         -using {Name Domain} |
                     relation project ~ Model Event |
                     relation rename ~ Model Class
                 }]
             }
-    
+            variable headingQuery
+            variable idQuery
+            variable defaultValuesQuery
+            variable hasSMQuery
+            variable statesQuery
+            
             set classes [relation semijoin $domain $DomainElement $Class]
             relation foreach class $classes {
                 set className ${domns}::[relation extract $class Name]
@@ -315,50 +412,35 @@ namespace eval ::rosea {
                     namespace import ::ralutil::pipe
                 }
                 namespace eval $className [list namespace path\
-                        [list $domns ::rosea::InstCmds]]
-                # create class relvars
+                        [list ::rosea::InstCmds $domns]]
                 set heading [eval $headingQuery]
-                set ids [eval $idQuery]
                 set idset [list]
-                relation foreach id $ids -ascending Number {
+                relation foreach id [eval $idQuery] -ascending Number {
                     lappend idset [relation list\
                             [relation extract $id Attributes] Attribute]
                 }
-                # create the relvar
+                
                 relvar create $className $heading {*}$idset
-    
-                set defaultvalues [pipe {
-                    relation semijoin $class $Attribute\
-                        -using {Domain Domain Name Class} |
-                    relation join ~ $DefaultValue\
-                        -using {Domain Domain Class Class Name Attribute}
-                }]
-                #puts [relformat $defaultvalues defaultvalues]
-    
+                
+                set defaultvalues [eval $defaultValuesQuery]
+                
                 if {[relation isnotempty $defaultvalues]} {
-                    set defheading [relation dict $defaultvalues Name Type]
-                    set defvalues [relation dict $defaultvalues Name Value]
                     relvar trace add variable $className insert [list\
-                        ::rosea::Helpers::InsertTrace $defheading $defvalues]
+                        ::rosea::Helpers::DefValueTrace\
+                        [relation dict $defaultvalues Name Type]\
+                        [relation dict $defaultvalues Name Value]\
+                    ]
                 }
-    
-                # Check if we need an "instance" relvar to hold current state.
-                set hasStateModel [pipe {
-                    relation semijoin $class $StateModel\
-                        -using {Domain Domain Name Model} |
-                    relation isnotempty
-                }]
+                set hasStateModel [eval $hasSMQuery]
                 if {$hasStateModel} {
                     set instid [lindex $idset 0]
                     set instheading [list]
                     foreach attr $instid {
-                        lappend instheading $attr [dict get $heading $attr]
+                        lappend instheading $attr [dict get $heading $attr] ; # <1>
                     }
                     lappend instheading __State string
-                    relvar create\
-                        ${domns}::__[relation extract $class Name]__STATEINST\
+                    relvar create ${domns}::__[relation extract $class Name]__STATEINST\
                         $instheading $instid
-    
                     set actns ${className}::__Activity
                     namespace eval $actns {
                         namespace import ::ral::relation
@@ -373,22 +455,14 @@ namespace eval ::rosea {
                             $domns\
                         ]\
                     ]
-                    #puts "$actns path = [namespace eval $actns namespace path]"
-                    set states [pipe {
-                        relation semijoin $class $State\
-                            -using {Domain Domain Name Model} |
-                        relation project ~ Name Parameters Action
-                    }]
-                    relation foreach state $states {
+                    relation foreach state [eval $statesQuery] {
                         relation assign $state\
                             {Name stateName}\
                             {Parameters params}\
                             {Action stateAction}
-                        set params [linsert $params 0 self]
-                        proc ${actns}::$stateName $params $stateAction
+                        proc ${actns}::$stateName [linsert $params 0 self] $stateAction
                     }
                 }
-    
                 set opmap [dict create]
                 set classops [relation semijoin $class $UserClassOperation\
                     -using {Domain Domain Name Class}]
@@ -397,42 +471,19 @@ namespace eval ::rosea {
                         {Name opname}\
                         {Parameters params}\
                         {Body opbody}
-    
-                    set params [linsert $params 0 class]
+                
                     proc ${className}::$opname $params $opbody
-                    dict set opmap $opname [list ${className}::$opname\
-                            $className]
+                    dict set opmap $opname ${className}::$opname
                 }
-    
-                set sysmap [pipe {
-                    relation restrictwith $SuppliedOperation\
-                            {!$RequiresStateModel} |
-                    relation join $SystemClassOperation ~ |
-                    relation update ~ sco 1 {
-                        tuple update $sco Command\
-                            [concat [tuple extract $sco Command]\
-                            [list $className]]
-                    } |
-                    relation dict ~ Name Command
-                }]
+                
+                set sysmap [QuerySystemClassOperations $className false]
                 if {$hasStateModel} {
-                    set sysmap [dict merge $sysmap [pipe {
-                        relation restrictwith $SuppliedOperation\
-                            {$RequiresStateModel} |
-                        relation join $SystemClassOperation ~ |
-                        relation update ~ sco 1 {
-                            tuple update $sco Command\
-                                [concat [tuple extract $sco Command]\
-                                [list $className]]
-                        } |
-                        relation dict ~ Name Command
-                    }]]
+                    set sysmap [dict merge $sysmap [QuerySystemClassOperations $className true]]
                 }
-    
+                
                 namespace ensemble create\
                     -command $className\
                     -map [dict merge $opmap $sysmap]
-    
                 set opmap [dict create]
                 set instops [relation semijoin $class $UserInstanceOperation\
                     -using {Domain Domain Name Class}]
@@ -441,57 +492,108 @@ namespace eval ::rosea {
                         {Name opname}\
                         {Parameters params}\
                         {Body opbody}
-    
+                
                     proc ${className}::$opname [linsert $params 0 self] $opbody
                     dict set opmap $opname ${className}::$opname
                 }
-                set sysmap [pipe {
-                    relation restrictwith $SuppliedOperation\
-                            {!$RequiresStateModel} |
-                    relation join $SystemInstanceOperation ~ |
-                    relation dict ~ Name Command
-                }]
-                if {$hasStateModel} {
-                    set sysmap [dict merge $sysmap [pipe {
-                        relation restrictwith $SuppliedOperation\
-                            {$RequiresStateModel} |
-                        relation join $SystemInstanceOperation ~ |
-                        relation dict ~ Name Command
-                    }]]
+                set sysmap [QuerySystemInstanceOperations false]
+                set hasPolyEvents [relation isnotempty\
+                    [relation semijoin $class $PolymorphicEvent\
+                        -using {Domain Domain Name Model}]\
+                ]
+                if {$hasStateModel || $hasPolyEvents} {
+                    set sysmap [dict merge $sysmap [QuerySystemInstanceOperations true]]
                 }
+                
                 namespace ensemble create\
                     -command ${className}::instop\
                     -parameters instref\
                     -map [dict merge $opmap $sysmap]
             }
-    
+            set rships [relation semijoin $domain $DomainElement $Relationship]
+            
             set rships [relation semijoin $domain $DomainElement $Relationship]
             set sassocs [relation semijoin $rships $Association\
                     $SimpleAssociation]
-            relation foreach sassoc $sassocs {
-                set refing [relation semijoin $sassoc $SimpleReferringClass\
-                        -using {Domain Domain Name Relationship}]
-                set refed [relation semijoin $sassoc $SimpleReferencedClass\
-                        -using {Domain Domain Name Relationship}]
-    
-                set reference [pipe {
-                    relation join $AttributeReference $refing\
-                        -using {Domain Domain ReferringClass Class\
-                        Relationship Relationship ReferringRole Role} |
-                    relation rename ~ Conditionality ReferringCond\
-                            Multiplicity ReferringMult |
-                    relation join ~ $refed -using {Domain Domain\
-                        ReferencedClass Class Relationship\
-                        Relationship ReferencedRole Role} |
-                    relation project ~ Domain Relationship\
-                        ReferringClass ReferringAttribute\
-                        ReferencedClass ReferencedAttribute\
-                        ReferringCond ReferringMult Conditionality |
-                    relation group ~ ReferringAttrs\
-                            ReferringAttribute ReferencedAttribute
+            set refing [relation semijoin $sassocs $SimpleReferringClass\
+                    -using {Domain Domain Name Relationship}]
+            set refed [relation semijoin $sassocs $SimpleReferencedClass\
+                    -using {Domain Domain Name Relationship}]
+            set references [pipe {
+                relation join $AttributeReference $refing\
+                    -using {Domain Domain ReferringClass Class\
+                    Relationship Relationship ReferringRole Role} |
+                relation rename ~ Conditionality ReferringCond\
+                        Multiplicity ReferringMult |
+                relation join ~ $refed -using {Domain Domain\
+                    ReferencedClass Class Relationship\
+                    Relationship ReferencedRole Role} |
+                relation project ~ Domain Relationship\
+                    ReferringClass ReferringAttribute\
+                    ReferencedClass ReferencedAttribute\
+                    ReferringCond ReferringMult Conditionality |
+                relation group ~ ReferringAttrs\
+                        ReferringAttribute ReferencedAttribute |
+                relation extend ~ rfa\
+                    TagReferringAttrs {Relation {RefOrder int ReferringAttribute string\
+                        ReferencedAttribute string}} {
+                            [relation tag [tuple extract $rfa ReferringAttrs] RefOrder]
+                        } |
+                relation extend ~ wfa\
+                    SrcAttrs list {
+                        [relation list [tuple extract $wfa TagReferringAttrs]\
+                            ReferringAttribute -ascending RefOrder]
+                    }\
+                    DstAttrs list {
+                        [relation list [tuple extract $wfa TagReferringAttrs]\
+                            ReferencedAttribute -ascending RefOrder]
+                    } |
+                relation extend ~ ram\
+                    ForwAttrs list {
+                        [Interleave [tuple extract $ram SrcAttrs]\
+                            [tuple extract $ram DstAttrs]]
+                    }\
+                    RevAttrs list {
+                        [Interleave [tuple extract $ram DstAttrs]\
+                            [tuple extract $ram SrcAttrs]]
+                    } |
+                relation eliminate ~ TagReferringAttrs
+            }]
+            relvar eval {
+                set flink [pipe {
+                    relation project $references Relationship ReferringClass |
+                    relation rename ~ Relationship Name ReferringClass SrcClass
                 }]
-                #puts [relformat $reference reference]
-    
+                set blink [pipe {
+                    relation project $references Relationship ReferencedClass |
+                    relation rename % Relationship Name ReferencedClass SrcClass |
+                    relation update % lnk {1} {
+                        tuple update $lnk Name ~[tuple extract $lnk Name]}
+                } {} |%] ; # <1>
+                
+                relvar union ${archns}::Link $flink $blink
+                set flink [pipe {
+                    relation project $references Relationship ReferringClass\
+                            ReferencedClass ForwAttrs |
+                    relation rename ~ Relationship Name ReferringClass SrcClass\
+                            ReferencedClass DstClass ForwAttrs Attrs |
+                    relation extend ~ al PrevSrcClass string {{}}
+                }] ; # <1>
+                set blink [pipe {
+                    relation project $references Relationship ReferringClass\
+                            ReferencedClass RevAttrs |
+                    relation rename % Relationship Name ReferencedClass SrcClass\
+                            ReferringClass DstClass RevAttrs Attrs |
+                    relation extend % al PrevSrcClass string {{}} |
+                    relation update % lnk {1} {
+                        tuple update $lnk Name ~[tuple extract $lnk Name]}
+                } {} |%]
+                
+                relvar union ${archns}::AssociationLink $flink $blink
+                relvar union ${archns}::RefLink [relation project $references\
+                    Relationship ReferringClass ReferencedClass ReferringAttrs]
+            }
+            relation foreach reference $references {
                 relation assign $reference\
                     {Relationship relationship}\
                     {ReferringClass referringClass}\
@@ -499,66 +601,33 @@ namespace eval ::rosea {
                     {ReferringCond referringCond}\
                     {ReferringMult referringMult}\
                     {Conditionality referencedCond}\
-                    {ReferringAttrs referringAttrs}
-                set attrrefs [relation tag $referringAttrs RefOrder]
-                #puts [relformat $attrrefs attrrefs]
-                set srcattrs [relation list $attrrefs ReferringAttribute\
-                        -ascending RefOrder]
-                set destattrs [relation list $attrrefs ReferencedAttribute\
-                        -ascending RefOrder]
-                lassign [WeaveLists $srcattrs $destattrs] forwattrs revattrs
-    
+                    {SrcAttrs srcAttrs}\
+                    {DstAttrs dstAttrs}
+            
+                # Create the relvar constraint.
                 relvar association ${domns}::$relationship\
-                     ${domns}::$referringClass $srcattrs\
+                     ${domns}::$referringClass $srcAttrs\
                     [MapCondMultToConstraint $referringCond $referringMult]\
-                    ${domns}::$referencedClass $destattrs\
+                    ${domns}::$referencedClass $dstAttrs\
                     [MapCondMultToConstraint $referencedCond false]
-    
-                relvar eval {
-                    relvar insert ${archns}::Link [list\
-                        Name        $relationship\
-                        SrcClass    $referringClass\
-                    ]
-                    relvar insert ${archns}::AssociationLink [list\
-                        Name            $relationship\
-                        SrcClass        $referringClass\
-                        DstClass        $referencedClass\
-                        Attrs   $forwattrs\
-                        PrevSrcClass    {}\
-                    ]
-                    relvar insert ${archns}::Link [list\
-                        Name        ~$relationship\
-                        SrcClass    $referencedClass\
-                    ]
-                    relvar insert ${archns}::AssociationLink [list\
-                        Name            ~$relationship\
-                        SrcClass        $referencedClass\
-                        DstClass        $referringClass\
-                        Attrs           $revattrs\
-                        PrevSrcClass    {}\
-                    ]
-                    relvar insert ${archns}::RefLink [list\
-                        Relationship    $relationship\
-                        ReferringClass  $referringClass\
-                        ReferencedClass $referencedClass\
-                        ReferringAttrs  $referringAttrs\
-                    ]
-                }
-    
-                set rpath ${domns}::$relationship
+            
+                # All simple associations get a link and unlink command in their ensemble.
                 set ensemblemap [dict create\
                     link [list ::rosea::RelCmds::linkSimple $relationship]\
                     unlink [list ::rosea::RelCmds::unlinkSimple $relationship]\
                 ]
-                # Determine if we have any assigners
-                set assigner [relation semijoin $sassoc $SingleAssigner\
-                    -using {Domain Domain Name Relationship}]
+            
+                # Determine if we have any assigners assocated  with the relationship.
+                # Single assigners get different commands from multiple assigners.
+                set rpath ${domns}::$relationship
+                set assigner [relation semijoin $reference $SingleAssigner\
+                    -using {Domain Domain Relationship Relationship}]
                 if {[relation isnotempty $assigner]} {
                     dict set ensemblemap signal\
                         [list ::rosea::RelCmds::signalAssigner $rpath]
                 } else {
-                    set assigner [relation semijoin $sassoc $MultipleAssigner\
-                        -using {Domain Domain Name Relationship}]
+                    set assigner [relation semijoin $reference $MultipleAssigner\
+                        -using {Domain Domain Relationship Relationship}]
                     if {[relation isnotempty $assigner]} {
                         dict set ensemblemap signal [list\
                             ::rosea::RelCmds::signalMultiAssigner $rpath]
@@ -566,152 +635,166 @@ namespace eval ::rosea {
                             ::rosea::RelCmds::createMultiAssigner $rpath]
                     }
                 }
+                # Create the relationship ensemble command.
                 namespace ensemble create -command $rpath -map $ensemblemap
             }
-    
             set cassocs [relation semijoin $rships $Association\
                     $ClassBasedAssociation]
-            relation foreach cassoc $cassocs {
-                set sourceclass [relation semijoin $cassoc $SourceClass\
-                    -using {Domain Domain Name Relationship}]
-                set targetclass [relation semijoin $cassoc $TargetClass\
-                    -using {Domain Domain Name Relationship}]
-    
-                set assocrefs [pipe {
-                    relation semijoin $cassoc $AssociatorClass\
-                            -using {Domain Domain Name Relationship}\
-                        $ReferringClass $AttributeReference\
-                            -using {Domain Domain Class ReferringClass\
-                            Relationship Relationship Role ReferringRole} |
-                    relation project ~ Domain ReferringClass ReferringAttribute\
-                        ReferencedClass ReferencedAttribute ReferencedRole\
-                        Relationship |
-                    relation join ~ [relation union $sourceclass $targetclass]\
-                            -using {Domain Domain Relationship Relationship\
-                            ReferencedClass Class ReferencedRole Role} |
-                    relation group ~ ReferringAttrs\
-                            ReferringAttribute ReferencedAttribute |
-                    relation group ~ References ReferencedClass ReferencedRole\
-                            Conditionality Multiplicity ReferringAttrs
-    
+            set sourceclass [relation semijoin $cassocs $SourceClass\
+                -using {Domain Domain Name Relationship}]
+            set targetclass [relation semijoin $cassocs $TargetClass\
+                -using {Domain Domain Name Relationship}]
+            set bothclass [relation union $sourceclass $targetclass] ; # <1>
+            set assocrefs [pipe {
+                relation semijoin $cassocs $AssociatorClass\
+                        -using {Domain Domain Name Relationship}\
+                    $ReferringClass $AttributeReference\
+                        -using {Domain Domain Class ReferringClass\
+                        Relationship Relationship Role ReferringRole} |
+                relation project ~ Domain Relationship ReferringClass ReferringAttribute\
+                        ReferencedClass ReferencedAttribute ReferencedRole |
+                relation join ~ $bothclass -using {Domain Domain Relationship Relationship\
+                        ReferencedClass Class ReferencedRole Role} |
+                relation group ~ ReferringAttrs ReferringAttribute ReferencedAttribute |
+                relation extend ~ rfa\
+                    TagReferringAttrs {Relation {RefOrder int ReferringAttribute string\
+                        ReferencedAttribute string}} {
+                            [relation tag [tuple extract $rfa ReferringAttrs] RefOrder]
+                        } |
+                relation extend ~ wfa\
+                    SrcAttrs list {
+                        [relation list [tuple extract $wfa TagReferringAttrs]\
+                            ReferringAttribute -ascending RefOrder]
+                    }\
+                    DstAttrs list {
+                        [relation list [tuple extract $wfa TagReferringAttrs]\
+                            ReferencedAttribute -ascending RefOrder]
+                    } |
+                relation extend ~ ram\
+                    ForwAttrs list {
+                        [Interleave [tuple extract $ram SrcAttrs]\
+                            [tuple extract $ram DstAttrs]]
+                    }\
+                    RevAttrs list {
+                        [Interleave [tuple extract $ram DstAttrs]\
+                            [tuple extract $ram SrcAttrs]]
+                    } |
+                relation eliminate ~ TagReferringAttrs
+            }]
+            relvar eval {
+                set aforw [pipe {
+                    relation project $assocrefs Relationship ReferringClass |
+                    relation rename ~ Relationship Name ReferringClass SrcClass
                 }]
-                #puts [relformat $assocrefs assocrefs]
-    
-                relation foreach assocref $assocrefs {
-                    relation assign $assocref\
-                        {ReferringClass associator}\
-                        {Relationship relationship}\
-                        {References references}
-                    set assoclinks [relation create\
-                        {Participant string Role string\
-                        ReferringAttrs {Relation {ReferringAttribute string\
-                            ReferencedAttribute string}}}]
-                    relation foreach reference $references {
-                        relation assign $reference\
-                            {ReferencedClass referencedClass}\
-                            {ReferencedRole referencedRole}\
-                            {Conditionality conditionality}\
-                            {Multiplicity multiplicity}\
-                            {ReferringAttrs referringAttrs}
-    
-                        set attrrefs [relation tag $referringAttrs RefOrder]
-                        set assocattrs($referencedRole)\
-                            [relation list $attrrefs ReferringAttribute\
-                                -ascending RefOrder]
-                        set refattrs($referencedRole)\
-                            [relation list $attrrefs ReferencedAttribute\
-                                -ascending RefOrder]
-                        set multcond($referencedRole)\
-                            [MapCondMultToConstraint $conditionality\
-                                $multiplicity]
-                        set refclass($referencedRole) $referencedClass
-    
-                        set assoclinks [relation insert $assoclinks [list\
-                            Participant $refclass($referencedRole)\
-                            Role $referencedRole\
-                            ReferringAttrs $referringAttrs\
-                        ]]
-                    }
-    
-                    relvar correlation ${domns}::$relationship\
-                        ${domns}::$associator\
-                        $assocattrs(source) $multcond(target)\
-                            ${domns}::$refclass(source) $refattrs(source)\
-                        $assocattrs(target) $multcond(source)\
-                            ${domns}::$refclass(target) $refattrs(target)
-    
-                    lassign [WeaveLists $refattrs(source) $assocattrs(source)]\
-                        forwattrs revattrs
-                    relvar eval {
-                        relvar insert ${archns}::Link [list\
-                            Name    $relationship\
-                            SrcClass   $refclass(source)\
-                        ]
-                        relvar insert ${archns}::AssociationLink [list\
-                            Name            $relationship\
-                            SrcClass        $refclass(source)\
-                            DstClass        $associator\
-                            Attrs           $forwattrs\
-                            PrevSrcClass    {}\
-                        ]
-                        relvar insert ${archns}::Link [list\
-                            Name        ~$relationship\
-                            SrcClass    $associator\
-                        ]
-                        relvar insert ${archns}::AssociationLink [list\
-                            Name            ~$relationship\
-                            SrcClass        $associator\
-                            DstClass        $refclass(source)\
-                            Attrs   $revattrs\
-                            PrevSrcClass    $refclass(target)\
-                        ]
-                        relvar insert ${archns}::AssocRef [list\
-                            Relationship    $relationship\
-                            AssocClass      $associator\
-                            References      $assoclinks\
-                        ]
-    
-                        lassign [WeaveLists $refattrs(target) $assocattrs(target)]\
-                            forwattrs revattrs
-                        relvar insert ${archns}::Link [list\
-                            Name        $relationship\
-                            SrcClass    $associator\
-                        ]
-                        relvar insert ${archns}::AssociationLink [list\
-                            Name            $relationship\
-                            SrcClass        $associator\
-                            DstClass        $refclass(target)\
-                            Attrs   $revattrs\
-                            PrevSrcClass    $refclass(source)\
-                        ]
-                        relvar insert ${archns}::Link [list\
-                            Name        ~$relationship\
-                            SrcClass    $refclass(target)\
-                        ]
-                        relvar insert ${archns}::AssociationLink [list\
-                            Name            ~$relationship\
-                            SrcClass        $refclass(target)\
-                            DstClass        $associator\
-                            Attrs   $forwattrs\
-                            PrevSrcClass    {}\
-                        ]
-                    }
-                }
-    
-                set rpath ${domns}::$relationship
+                set arev [relation update $aforw lnk {1} {
+                        tuple update $lnk Name ~[tuple extract $lnk Name]}]
+                set sources [pipe {
+                    relation restrict $assocrefs aref {
+                        [tuple extract $aref ReferencedRole] eq "source"} |
+                    relation eliminate ~ ReferencedRole
+                }]
+                set sforw [pipe {
+                    relation project $sources Relationship ReferencedClass |
+                    relation rename ~ Relationship Name ReferencedClass SrcClass
+                }]
+                set targets [pipe {
+                    relation restrict $assocrefs aref {
+                        [tuple extract $aref ReferencedRole] eq "target"} |
+                    relation eliminate ~ ReferencedRole
+                }]
+                set trev [pipe {
+                    relation project $targets Relationship ReferencedClass |
+                    relation rename % Relationship Name ReferencedClass SrcClass |
+                    relation update % lnk {1} {
+                        tuple update $lnk Name ~[tuple extract $lnk Name]}
+                } {} |%]
+                relvar union ${archns}::Link $aforw $arev $sforw $trev
+                set sforw [pipe {
+                    relation project $sources Relationship ReferringClass ReferencedClass\
+                        RevAttrs |
+                    relation rename ~ Relationship Name ReferringClass DstClass\
+                        ReferencedClass SrcClass RevAttrs Attrs |
+                    relation extend ~ al PrevSrcClass string {{}}
+                }]
+                set trev [pipe {
+                    relation project $targets Relationship ReferringClass ReferencedClass\
+                        RevAttrs |
+                    relation rename % Relationship Name ReferringClass DstClass\
+                        ReferencedClass SrcClass RevAttrs Attrs |
+                    relation extend % al PrevSrcClass string {{}} |
+                    relation update % lnk {1} {
+                        tuple update $lnk Name ~[tuple extract $lnk Name]}
+                } {} |%]
+                set onerefs [relation rename $sources ReferencedClass OneClass\
+                        Conditionality OneCond Multiplicity OneMult\
+                        ReferringAttrs OneReferringAttrs SrcAttrs OneSrcAttrs\
+                        DstAttrs OneDstAttrs ForwAttrs OneForwAttrs RevAttrs OneRevAttrs]
+                set otherrefs [relation rename $targets ReferencedClass OtherClass\
+                        Conditionality OtherCond Multiplicity OtherMult ReferringAttrs\
+                        OtherReferringAttrs SrcAttrs OtherSrcAttrs DstAttrs OtherDstAttrs\
+                        ForwAttrs OtherForwAttrs RevAttrs OtherRevAttrs]
+                set bothrefs [relation join $onerefs $otherrefs\
+                    -using {Domain Domain ReferringClass ReferringClass\
+                        Relationship Relationship}]
+                set aforw [pipe {
+                    relation project $bothrefs Relationship ReferringClass OtherClass\
+                        OtherForwAttrs OneClass |
+                    relation rename ~ Relationship Name ReferringClass SrcClass\
+                            OtherClass DstClass OtherForwAttrs Attrs OneClass PrevSrcClass
+                }]
+                set arev [pipe {
+                    relation project $bothrefs Relationship ReferringClass OneClass\
+                            OneForwAttrs OtherClass |
+                    relation rename % Relationship Name ReferringClass SrcClass\
+                            OneClass DstClass OneForwAttrs Attrs OtherClass PrevSrcClass |
+                    relation update % lnk {1} {
+                        tuple update $lnk Name ~[tuple extract $lnk Name]}
+                } {} |%]
+                relvar union ${archns}::AssociationLink $sforw $trev $aforw $arev
+                relvar union ${archns}::AssocRef [pipe {
+                    relation project $assocrefs Relationship ReferringClass\
+                        ReferencedClass ReferencedRole ReferringAttrs |
+                    relation rename ~ ReferringClass AssocClass ReferencedClass Participant\
+                        ReferencedRole Role |
+                    relation group ~ References Participant Role ReferringAttrs
+                }]
+            }
+            relation foreach bothref $bothrefs {
+                relation assign $bothref\
+                    {Relationship relationship}\
+                    {ReferringClass associator}\
+                    {OneClass sourceClass}\
+                    {OneCond sourceCond}\
+                    {OneMult sourceMult}\
+                    {OneSrcAttrs sourceAssocAttrs}\
+                    {OneDstAttrs sourceDstAttrs}\
+                    {OtherClass targetClass}\
+                    {OtherCond targetCond}\
+                    {OtherMult targetMult}\
+                    {OtherSrcAttrs targetAssocAttrs}\
+                    {OtherDstAttrs targetDstAttrs}
+            
+                # Create the correlation constraint
+                relvar correlation ${domns}::$relationship ${domns}::$associator\
+                    $sourceAssocAttrs [MapCondMultToConstraint $targetCond $targetMult]\
+                    ${domns}::$sourceClass $sourceDstAttrs\
+                    $targetAssocAttrs [MapCondMultToConstraint $sourceCond $sourceMult]\
+                    ${domns}::$targetClass $targetDstAttrs ; # <1>
+            
                 set ensemblemap [dict create\
                     link [list ::rosea::RelCmds::linkAssoc $relationship]\
                     unlink [list ::rosea::RelCmds::unlinkAssoc $relationship]\
                 ]
                 # Determine if we have any assigners
-                set assigner [relation semijoin $cassoc $SingleAssigner\
-                    -using {Domain Domain Name Relationship}]
+                set rpath ${domns}::$relationship
+                set assigner [relation semijoin $bothref $SingleAssigner\
+                    -using {Domain Domain Relationship Relationship}]
                 if {[relation isnotempty $assigner]} {
                     dict set ensemblemap signal\
                         [list ::rosea::RelCmds::signalAssigner $rpath]
                 } else {
-                    set assigner [relation semijoin $cassoc $MultipleAssigner\
-                        -using {Domain Domain Name Relationship}]
+                    set assigner [relation semijoin $bothref $MultipleAssigner\
+                        -using {Domain Domain Relationship Relationship}]
                     if {[relation isnotempty $assigner]} {
                         dict set ensemblemap signal [list\
                             ::rosea::RelCmds::signalMultiAssigner $rpath]
@@ -721,79 +804,99 @@ namespace eval ::rosea {
                 }
                 namespace ensemble create -command $rpath -map $ensemblemap
             }
-    
-            set gens [relation semijoin $rships $Generalization]
-            relation foreach gen $gens {
-                set subrefs [pipe {
-                    relation semijoin $gen $Subclass\
-                            -using {Domain Domain Name Relationship}\
+            set subrefs [pipe {
+                relation semijoin $rships $Generalization\
+                        $Subclass -using {Domain Domain Name Relationship}\
                         $ReferringClass $AttributeReference\
                             -using {Domain Domain Class ReferringClass\
                             Relationship Relationship Role ReferringRole} |
-                    relation project ~ Domain ReferringClass ReferringAttribute\
-                        ReferencedClass ReferencedAttribute Relationship |
-                    relation group ~ ReferringAttrs\
-                            ReferringAttribute ReferencedAttribute
+                relation project ~ Domain Relationship ReferringClass ReferringAttribute\
+                        ReferencedClass ReferencedAttribute |
+                relation group ~ ReferringAttrs\
+                        ReferringAttribute ReferencedAttribute |
+                relation extend ~ rfa\
+                    TagReferringAttrs {Relation {RefOrder int ReferringAttribute string\
+                        ReferencedAttribute string}} {
+                            [relation tag [tuple extract $rfa ReferringAttrs] RefOrder]
+                        } |
+                relation extend ~ wfa\
+                    SrcAttrs list {
+                        [relation list [tuple extract $wfa TagReferringAttrs]\
+                            ReferringAttribute -ascending RefOrder]
+                    }\
+                    DstAttrs list {
+                        [relation list [tuple extract $wfa TagReferringAttrs]\
+                            ReferencedAttribute -ascending RefOrder]
+                    } |
+                relation extend ~ ram\
+                    ForwAttrs list {
+                        [Interleave [tuple extract $ram SrcAttrs]\
+                            [tuple extract $ram DstAttrs]]
+                    }\
+                    RevAttrs list {
+                        [Interleave [tuple extract $ram DstAttrs]\
+                            [tuple extract $ram SrcAttrs]]
+                    } |
+                relation eliminate ~ TagReferringAttrs
+            }]
+            relvar eval {
+                set sublinks [pipe {
+                    relation project $subrefs Relationship ReferringClass |
+                    relation rename ~ Relationship Name ReferringClass SrcClass
                 }]
-                #puts [relformat $subrefs subrefs]
-    
-                set subparts [list]
-                relation foreach subref $subrefs {
-                    relation assign $subref\
-                        {ReferringClass subclass}\
-                        {ReferencedClass superclass}\
-                        {Relationship relationship}\
-                        {ReferringAttrs referringAttrs}
-    
-                    set attrrefs [relation tag $referringAttrs RefOrder]
-                    set subattrs [relation list $attrrefs ReferringAttribute\
-                            -ascending RefOrder]
-                    set superattrs [relation list $attrrefs ReferencedAttribute\
-                            -ascending RefOrder]
-                    lassign [WeaveLists $subattrs $superattrs]\
-                            forwattrs revattrs
-    
-                    lappend subparts ${domns}::$subclass $subattrs
-    
-                    relvar eval {
-                        relvar insert ${archns}::Link [list\
-                            Name        $relationship\
-                            SrcClass    $subclass\
-                        ]
-                        relvar insert ${archns}::AssociationLink [list\
-                            Name            $relationship\
-                            SrcClass        $subclass\
-                            DstClass        $superclass\
-                            Attrs           $forwattrs\
-                            PrevSrcClass    {}\
-                        ]
-                        # Here!! need to figure out how to get rid of the uinserts
-                        relvar uinsert ${archns}::Link [list\
-                            Name        ~$relationship\
-                            SrcClass    $superclass\
-                        ]
-                        relvar uinsert ${archns}::PartitionLink [list\
-                            Name        ~$relationship\
-                            SrcClass    $superclass\
-                        ]
-                        relvar insert ${archns}::PartitionDst [list\
-                            Name        ~$relationship\
-                            SrcClass    $superclass\
-                            DstClass    $subclass\
-                            Attrs   $revattrs\
-                        ]
-                        relvar uinsert ${archns}::SuperLink [list\
-                            Relationship    $relationship\
-                            SuperClass      $superclass\
-                        ]
-                        relvar insert ${archns}::SubLink [list\
-                            Relationship    $relationship\
-                            SubClass        $subclass\
-                            ReferringAttrs  $referringAttrs\
-                        ]
-                    }
-                }
-    
+                set superlinks [pipe {
+                    relation project $subrefs Relationship ReferencedClass |
+                    relation rename % Relationship Name ReferencedClass SrcClass |
+                    relation update % lnk {1} {
+                        tuple update $lnk Name ~[tuple extract $lnk Name]}
+                } {} |%]
+                
+                relvar union ${archns}::Link $sublinks $superlinks
+                relvar union ${archns}::AssociationLink [pipe {
+                    relation project $subrefs Relationship ReferringClass ReferencedClass\
+                            ForwAttrs |
+                    relation rename ~ Relationship Name ReferringClass SrcClass\
+                            ReferencedClass DstClass ForwAttrs Attrs |
+                    relation extend ~ al PrevSrcClass string {{}}
+                }]
+                relvar union ${archns}::PartitionLink $superlinks
+                relvar union ${archns}::PartitionDst [pipe {
+                    relation project $subrefs Relationship ReferencedClass\
+                            ReferringClass RevAttrs |
+                    relation rename % Relationship Name ReferencedClass SrcClass\
+                            ReferringClass DstClass RevAttrs Attrs |
+                    relation update % lnk {1} {
+                        tuple update $lnk Name ~[tuple extract $lnk Name]}
+                } {} |%]
+                relvar union ${archns}::SuperLink [pipe {
+                    relation project $subrefs Relationship ReferencedClass |
+                    relation rename ~ ReferencedClass SuperClass
+                }]
+                relvar union ${archns}::SubLink [pipe {
+                    relation project $subrefs Relationship ReferringClass ReferringAttrs |
+                    relation rename ~ ReferringClass SubClass
+                }]
+            }
+            set partrefs [pipe {
+                relation project $subrefs Relationship ReferencedClass DstAttrs\
+                        ReferringClass SrcAttrs |
+                relation extend ~ prs SubAttrMap list {[list\
+                        ${domns}::[tuple extract $prs ReferringClass]\
+                        [tuple extract $prs SrcAttrs]]} |
+                relation eliminate ~ ReferringClass SrcAttrs |
+                relation group ~ SubClassRefs SubAttrMap |
+                relation extend ~ spt SubParts list {
+                        [concat {*}[relation list [tuple extract $spt SubClassRefs]]]} |
+                relation eliminate ~ SubClassRefs
+            }]
+            
+            relation foreach partref $partrefs {
+                relation assign $partref\
+                    {Relationship relationship}\
+                    {ReferencedClass superclass}\
+                    {DstAttrs superattrs}\
+                    {SubParts subparts}
+            
                 relvar partition ${domns}::$relationship ${domns}::$superclass\
                         $superattrs {*}$subparts
                 namespace ensemble create\
@@ -801,7 +904,6 @@ namespace eval ::rosea {
                     -map [dict create migrate [list ::rosea::RelCmds::migrate\
                             $relationship]]
             }
-    
             set assigners [relation semijoin $domain $AssignerStateModel\
                     -using {Name Domain}]
             relation foreach assigner $assigners {
@@ -833,7 +935,6 @@ namespace eval ::rosea {
                     proc ${asgnns}::$stateName $params $stateAction
                 }
             }
-    
             relation foreach sassigner\
                     [relation semijoin $domain $SingleAssigner\
                     -using {Name Domain}] {
@@ -842,15 +943,14 @@ namespace eval ::rosea {
                     Id      int
                     __State string
                 } Id
-                CreateInInitialState $domns $relationship {Id 0}
+                CreateInInitialState $domns $relationship {Id 0} ; # <1>
             }
-    
             relation foreach massigner\
                     [relation semijoin $domain $MultipleAssigner\
                     -using {Name Domain}] {
                 relation assign $massigner {Relationship relationship}
                 set assignvar ${domns}::__${relationship}__STATEINST
-    
+            
                 set idattrs [pipe {
                     relation semijoin $massigner $Identifier\
                         $IdentifyingAttribute\
@@ -863,134 +963,73 @@ namespace eval ::rosea {
                     [dict keys $idattrs]
             }
         }
-        #puts [relformat [relvar set ${archns}::Link] Link]
-        #puts [relformat [relvar set ${archns}::AssociationLink] AssociationLink]
-        #puts [relformat [relvar set ${archns}::PartitionLink] PartitionLink]
-        #puts [relformat [relvar set ${archns}::PartitionDst] PartitionDst]
-        #puts [relformat [relvar set ${archns}::RefLink] RefLink]
-        #puts [relformat [relvar set ${archns}::AssocRef] AssocRef]
-        #puts [relformat [relvar set ${archns}::SuperLink] SuperLink]
-        #puts [relformat [relvar set ${archns}::SubLink] SubLink]
-    }
-    proc GenerateArchStructures {domns} {
-        set archns ${domns}::__Arch
-        namespace eval ${archns} {
-            ral relvar create State {
-                Class string
-                State string
-            } {Class State}
-            ral relvar create Event {
-                Class string
-                Event string
-            } {Class Event}
-            ral relvar create Transition {
-                Class string
-                State string
-                Event string
-                NewState string
-            } {Class State Event}
-            ral relvar correlation R1 Transition\
-                {Class State} + State {Class State}\
-                {Class Event} + Event {Class Event}
-            ral relvar create InitialState {
-                Class string
-                State string
-            } Class
-            ral relvar association R6\
-                InitialState {Class State} ?\
-                State {Class State} 1
-            ral relvar create Terminal {
-                Class string
-                State string
-            } {Class State}
-            ral relvar create PolymorphicEvent {
-                Class           string
-                Event           string
-            } {Class Event}
-            ral relvar create Link {
-                Name            string
-                SrcClass        string
-            } {Name SrcClass}
-            ral relvar create AssociationLink {
-                Name            string
-                SrcClass        string
-                DstClass        string
-                Attrs           list
-                PrevSrcClass    string
-            } {Name SrcClass}
-            ral relvar association R4\
-                AssociationLink {Name PrevSrcClass} ?\
-                AssociationLink {Name SrcClass} ?
-            ral relvar create PartitionLink {
-                Name            string
-                SrcClass        string
-            } {Name SrcClass}
-            ral relvar partition R3 Link {Name SrcClass}\
-                AssociationLink {Name SrcClass}\
-                PartitionLink {Name SrcClass}
-            ral relvar create PartitionDst {
-                Name            string
-                SrcClass        string
-                DstClass        string
-                Attrs           list
-            } {Name SrcClass DstClass}
-            ral relvar association R2\
-                PartitionDst {Name SrcClass} +\
-                PartitionLink {Name SrcClass} 1
-            ral relvar create SuperLink {
-                Relationship    string
-                SuperClass      string
-            } Relationship
-            ral relvar create SubLink {
-                Relationship    string
-                SubClass        string
-                ReferringAttrs  {Relation {ReferringAttribute string\
-                                ReferencedAttribute string}}
-            } {Relationship SubClass}
-            ral relvar association R5\
-                SubLink Relationship +\
-                SuperLink Relationship 1
-            ral relvar create RefLink {
-                Relationship    string
-                ReferringClass  string
-                ReferencedClass string
-                ReferringAttrs  {Relation {ReferringAttribute string\
-                                    ReferencedAttribute string}}
-            } Relationship
-            ral relvar create AssocRef {
-                Relationship    string
-                AssocClass      string
-                References      {Relation {Participant string Role string\
-                        ReferringAttrs {Relation\
-                        {ReferringAttribute string ReferencedAttribute string}}}}
-            } Relationship
-        }
-    
-        return $archns
     }
     proc populate {script} {
         namespace upvar Config errcount errcount configlineno configlineno
         set errcount 0
         set configlineno 1
-        try {
-            relvar eval {
-                ConfigEvaluate ::rosea::Populate $script
-            }
-        } on error {result} {
-            log::error $result
-            incr errcount
-        }
+    
+        ConfigEvaluate ::rosea::Populate $script ; # <1>
+    
         if {$errcount > 0} {
             tailcall DeclError CONFIG_ERRORS $errcount
         }
         return $errcount
     }
+    proc populateFromChan {chan} {
+        tailcall populate [read $chan]
+    }
     proc populateFromFile {filename} {
         set f [::open $filename r]
         try {
-            populate [read $f]
+            populateFromChan $f
         } finally {
             ::chan close $f
+        }
+    }
+    proc trace {subcmd args} {
+        switch -exact -- $subcmd {
+            control {
+                tailcall traceControl {*}$args
+            }
+            decode {
+                switch -exact -- [lindex $args 0] {
+                    all {
+                        tailcall Trace::DecodeAllTraces
+                    }
+                    class {
+                        tailcall Trace::DecodeClassTraces {*}[lrange $args 1 end]
+                    }
+                    target {
+                        tailcall Trace::DecodeTargetTraces {*}[lrange $args 1 end]
+                    }
+                    default {
+                        tailcall DeclError UNKNOWN_TRACE_CMD [lindex $args 0]
+                    }
+                }
+            }
+            format {
+                tailcall formatTraces {*}$args
+            }
+            diagram {
+                switch -exact -- [lindex $args 0] {
+                    all {
+                        tailcall Trace::DiagAllTraces {*}[lrange $args 1 end]
+                    }
+                    class {
+                        tailcall Trace::DiagClassTraces {*}[lrange $args 1 end]
+                    }
+                    target {
+                        tailcall Trace::DiagTargetTraces {*}[lrange $args 1 end]
+                    }
+                    default {
+                        tailcall DeclError UNKNOWN_TRACE_CMD [lindex $args 0]
+                    }
+                }
+            }
+            default {
+                tailcall DeclError UNKNOWN_TRACE_CMD $subcmd
+            }
         }
     }
     proc traceControl {op args} {
@@ -1043,21 +1082,6 @@ namespace eval ::rosea {
             }
         }
     }
-    proc decodeAllTraces {} {
-        tailcall Trace::TracesToRecords [relvar set Trace::Trace]
-    }
-    proc decodeClassTraces {args} {
-        tailcall Trace::TracesToRecords [pipe {
-            relvar set Trace::Trace |
-            relation restrictwith ~ {$Class in $args}
-        }]
-    }
-    proc decodeTargetTraces {args} {
-        tailcall TracesToRecords [pipe {
-            relvar set Trace |
-            relation restrictwith ~ {$Target in $args}
-        }]
-    }
     proc formatTraces {tracerecs} {
         if {[llength $tracerecs] == 0} {
             return {}
@@ -1074,29 +1098,6 @@ namespace eval ::rosea {
         }
         return [string trimright $result]
     }
-    proc diagAllTraces {filename args} {
-        set chan [open $filename w]
-        try {
-            chan puts $chan [Trace::DiagTraces [relvar set Trace::Trace] {*}$args]
-        } finally {
-            chan close $chan
-        }
-        return
-    }
-    proc diagClassTraces {filename classes args} {
-        set chan [open $filename w]
-        try {
-            set traces [pipe {
-                relvar set Config::Trace >
-                relation restrictwith ~\
-                    {$Class in $classes || [namespace tail $Class] in $classes}
-            }] {} >~
-            chan puts $chan [Trace::DiagTraces $traces {*}$args]
-        } finally {
-            chan close $chan
-        }
-        return
-    }
     namespace eval Helpers {
         namespace import ::ral::relation
         namespace import ::ral::tuple
@@ -1105,7 +1106,7 @@ namespace eval ::rosea {
         namespace import ::ral::relvar
         variable errFormats
         set errFormats [dict create {*}{
-            SAME_CLASS   {operation is only allow for references of the same class,\
+            SAME_CLASS   {operation is only allowed for references to the same class,\
                             got "%s" and "%s"}
             UNKNOWN_STATE   {unknown state, "%s", for class, "%s"}
             UNKNOWN_EVENT   {unknown event, "%s", for class, "%s"}
@@ -1124,8 +1125,9 @@ namespace eval ::rosea {
             UNKNOWN_ASSIGNER    {unknown assigner instance, "%s", for relationship, "%s"}
             UNKNOWN_LINKAGE {unknown relationship, "%s", for class, "%s"}
             PATH_ERROR      {relationship, "%s", from "%s" to "%s", does not end at "%s"}
-            ARG_ERROR      {attribute updates must be name / value pairs, got "%s"}
-            ID_UPDATE      {cannot update identifying attributes, "%s"}
+            ARG_ERROR           {attribute updates must be name / value pairs, got "%s"}
+            ID_UPDATE           {cannot update identifying attributes, "%s"}
+            UNKNOWN_ATTRIBUTE   {unknown attribute, "%s"}
             INVALID_TIME    {invalid time value, "%s"}
             SINGLE_OR_EMPTY_REF_REQUIRED {single valued or nil reference required, %d found}
             SINGLE_REF_REQUIRED     {single valued reference required, %d found}
@@ -1133,24 +1135,30 @@ namespace eval ::rosea {
             CANT_HAPPEN_EVENT   {can't happen transition, %s - %s -> %s ==> %s -> CH}
             CONFIG_ERRORS     {encountered %d configuration script errors}
             EMPTY_NAME      {the empty string is not a value name for a %s}
+            DUP_ELEMENT_NAME    {a class, relationship or domain operation named, "%s",\
+                                already exists}
             RESERVED_NAME {names beginning with two underscore characters are reserved,\
                     "%s"}
                 
             ARG_FORMAT      {options and values must come in pairs, got "%s"}
             UNKNOWN_OPTION  {unknown %s command option, "%s"}
-            DUP_OP_NAME      {operation call, "%s", already exists}
+            DUP_OP_NAME     {operation call, "%s", already exists}
+            NS_QUALIFIERS   {name, "%s", contains namespace qualifiers}
+            TILDE_NAME {names beginning with the tilde character are not allowed\
+                in this context, "%s"}
+                
             BAD_RELATIONSHIP_SPEC  {bad relationship specifier, "%s"}
             NEED_ASSOCIATOR {relationship of type, "%s", requires associative class}
             NEED_REFLEXIVE_PATH {traversal path must be specified for reflexive\
                     association, %s, %s %s %s}
             REFLEXIVE_NOT_ALLOWED   {associations of type, "%s", cannot be reflexive}
             TOO_FEW_SUBCLASSES  {at least 2 subclasses must be specified, got %d}
-            PSEUDO_STATE    {the transition action, "%s", is not valid as %s}
-            EXPECTED_PSEUDO_STATE    {expected CH or IG, got "%s"}
             BAD_CREATION_TARGET {the target of a creation event must be a state,\
                     got "%s"}
-            FULLY_QUALIFIED {fully qualified namespace required, got "%s"}
+            PSEUDO_STATE    {the transition action, "%s", is not valid as %s}
+            EXPECTED_PSEUDO_STATE    {expected CH or IG, got "%s"}
             ARG_MISMATCH      {number of population values must be a multiple of %d, got %d}
+            UNKNOWN_ASSIGNER    {unknown trace subcomand, "%s"}
             BAD_TRACEOP     {unknown trace operation, "%s"}
             NO_SAVEFILE     {no save file name provided}
             BAD_TRACETYPE   {unknown trace type, "%s"}
@@ -1158,6 +1166,9 @@ namespace eval ::rosea {
         proc ToRef {relvar relvalue} {
             tailcall list $relvar [relation project $relvalue\
                 {*}[lindex [relvar identifiers $relvar] 0]] ; # <1>
+        }
+        proc nilInstRef {} {
+            return {{} {{} {}}}
         }
         proc CreateStateInstance {domns class state value} {
             tailcall relvar insert ${domns}::__${class}__STATEINST\
@@ -1187,10 +1198,7 @@ namespace eval ::rosea {
         }
         proc SelfInstRef {{level 2}} {
             upvar $level self srcself
-            return [expr {[info exists srcself] ? $srcself : {{} {{} {}}}}]
-        }
-        proc SplitRelvarName {relvar} {
-            tailcall list [namespace qualifiers $relvar] [namespace tail $relvar]
+            return [expr {[info exists srcself] ? $srcself : [nilInstRef]}]
         }
         namespace export DeclError
         
@@ -1198,6 +1206,11 @@ namespace eval ::rosea {
             variable errFormats
             set errmsg [format [dict get $errFormats $errcode] {*}$args]
             tailcall throw [list ROSEA $errcode {*}$args $errmsg] $errmsg
+        }
+        proc SplitRelvarName {relvar {dvarname domain} {cvarname class}} {
+            upvar 1 $dvarname domain $cvarname class
+            set domain [namespace qualifiers $relvar]
+            set class [namespace tail $relvar]
         }
         proc PropagatePolyEvents {super} {
             namespace upvar ::rosea::Config\
@@ -1265,18 +1278,35 @@ namespace eval ::rosea {
                 }
             }
         }
-        proc MapCondMultToConstraint {cond mult} {
-            if {$cond && $mult} {
-                return *
-            } elseif {$cond && !$mult} {
-                return ?
-            } elseif {!$cond && $mult} {
-                return +
-            } elseif {!($cond || $mult)} {
-                return 1
-            }
+        proc DefValueTrace {defheading defvalues op relvar tuple} {
+            tuple create\
+                [dict merge $defheading [tuple heading $tuple]]\
+                [dict merge $defvalues [tuple get $tuple]]
         }
-        
+        proc QuerySystemOperations {which requiresSM} {
+            return [pipe {
+                relvar set ::rosea::Config::SuppliedOperation |
+                relation restrictwith ~ {$RequiresStateModel == $requiresSM} |
+                relation join [relvar set ::rosea::Config::$which] ~
+            }]
+        }
+        proc QuerySystemClassOperations {className requiresSM} {
+            return [pipe {
+                QuerySystemOperations SystemClassOperation $requiresSM |
+                relation update ~ sco 1 {
+                    tuple update $sco Command\
+                        [concat [tuple extract $sco Command]\
+                        [list $className]]
+                } |
+                relation dict ~ Name Command
+            }]
+        }
+        proc QuerySystemInstanceOperations {requiresSM} {
+            return [pipe {
+                QuerySystemOperations SystemInstanceOperation $requiresSM |
+                relation dict ~ Name Command
+            }]
+        }
         proc Interleave {l1 l2} {
             set result [list]
             foreach a $l1 b $l2 {
@@ -1284,14 +1314,12 @@ namespace eval ::rosea {
             }
             return $result
         }
-        
-        proc WeaveLists {l1 l2} {
-            tailcall list [Interleave $l1 $l2] [Interleave $l2 $l1]
-        }
-        proc InsertTrace {defheading defvalues op relvar tuple} {
-            tuple create\
-                [dict merge $defheading [tuple heading $tuple]]\
-                [dict merge $defvalues [tuple get $tuple]]
+        proc MapCondMultToConstraint {cond mult} {
+            if {$cond} {
+                return [expr {$mult ? "*" : "?"}]
+            } else {
+                return [expr {$mult ? "+" : "1"}]
+            }
         }
     }
     namespace eval ClassCmds {
@@ -1316,7 +1344,7 @@ namespace eval ::rosea {
                 tailcall DeclError ARG_FORMAT $args
             }
             set ref [ToRef $relvar [relvar insert $relvar $args]] ; # <1>
-            lassign [SplitRelvarName $relvar] domain class
+            SplitRelvarName $relvar domain class
             CreateInInitialStateFromRef $domain $class $ref
             return $ref
         }
@@ -1324,7 +1352,7 @@ namespace eval ::rosea {
             if {[llength $args] % 2 != 0} {
                 tailcall DeclError ARG_FORMAT $args
             }
-            lassign [SplitRelvarName $relvar] domain class
+            SplitRelvarName $relvar domain class
             set initstate [relvar restrictone ${domain}::__Arch::State\
                 Class $class State $state]
             if {[relation isempty $initstate]} { # <1>
@@ -1335,7 +1363,7 @@ namespace eval ::rosea {
             return $ref
         }
         proc createasync {relvar event eventparams args} {
-            lassign [SplitRelvarName $relvar] domain class
+            SplitRelvarName $relvar domain class
             set knownevent [relvar restrictone ${domain}::__Arch::Event\
                 Class $class Event $event]
             if {[relation isempty $knownevent]} { # <1>
@@ -1384,7 +1412,7 @@ namespace eval ::rosea {
         proc isRefEqual {instref1 instref2} {
             lassign $instref1 relvar1 inst1
             lassign $instref2 relvar2 inst2
-            return [expr {$relvar1 eq $relvar2 && [relation is $inst1 == $inst2]}]
+            return [expr {$relvar1 eq $relvar2 && [relation is $inst1 equal $inst2]}]
         }
         proc RefSetCommand {op instref1 instref2} {
             lassign $instref1 relvar1 inst1
@@ -1414,8 +1442,8 @@ namespace eval ::rosea {
         }
         proc FindRelatedInsts {instref op args} {
             set srcrelvar [lindex $instref 0]
-            lassign [SplitRelvarName $srcrelvar] domain class
-        
+            SplitRelvarName $srcrelvar domain class
+            
             # This procedure queries the architectural data about relationship linkage,
             # so we bring the relvar variables into scope.
             namespace upvar ${domain}::__Arch\
@@ -1423,21 +1451,12 @@ namespace eval ::rosea {
                     AssociationLink AssociationLink\
                     PartitionLink PartitionLink\
                     PartitionDst PartitionDst
-            #puts [relformat $Link Link]
-            #puts [relformat $AssociationLink AssociationLink]
-            #puts [relformat $PartitionLink PartitionLink]
-            #puts [relformat $PartitionDst PartitionDst]
             variable relatedQuery ; # <1>
-        
-            # The strategy here is to iterage over the relationship chain to build
-            # semijoin (or semiminus) commands from the architectural data values.
+            # We start by dereferencing the instance reference.
             set related [deRef $instref]
             foreach linkage $args {
-                # Recall that the linkage specification may contain a destination class
-                # for those types of linkages where there may be multiple paths along
-                # the relationship (i.e. to associative classes or subclasses).
-                lassign $linkage lname dst
-        
+                lassign $linkage lname dst ; # split out the linkage spec
+                
                 set link [relvar restrictone ${domain}::__Arch::Link\
                         Name $lname SrcClass $class]
                 if {[ral relation isempty $link]} {
@@ -1452,9 +1471,9 @@ namespace eval ::rosea {
                     if {$dst eq {}} {
                         # Find the set of instances related to the current set.
                         set related [eval $relatedQuery]
-                        # We must see if this is a class-based association.  If so,
-                        # then the first traversal was to the associator and we must
-                        # traverse again to the other class.
+                        # We must see if this is a class-based association.  If so, then the first
+                        # traversal was to the associator and we must traverse again to the other
+                        # class.
                         set assoc [relation semijoin $assoc $AssociationLink\
                             -using {Name Name SrcClass PrevSrcClass}]
                         if {[relation isnotempty $assoc]} {
@@ -1462,8 +1481,8 @@ namespace eval ::rosea {
                             set related [eval $relatedQuery]
                         }
                     } else {
-                        # If a destination was specified in the linkage, then we need
-                        # to verify that it is actually part of the relationship.
+                        # If a destination was specified in the linkage, then we need to verify
+                        # that it is actually part of the relationship.
                         if {$dst ne $DstClass} {
                             tailcall DeclError PATH_ERROR $lname $class $DstClass\
                                 $dst
@@ -1471,10 +1490,6 @@ namespace eval ::rosea {
                         set related [eval $relatedQuery]
                     }
                 } else {
-                    # If the linkage is not associative, then it must be a superclass
-                    # to subclass traversal. Recall that subclass to superclass
-                    # traversal is just an ordinary associative linkage. In this case
-                    # we simply find the partition linkage information.
                     set partdst [relvar restrictone ${domain}::__Arch::PartitionDst\
                         Name $lname SrcClass $class DstClass $dst]
                     if {[relation isempty $partdst]} {
@@ -1494,15 +1509,15 @@ namespace eval ::rosea {
             return [list $srcrelvar $related]
         }
         proc findRelated {instref args} {
-            tailcall ToRef {*}[FindRelatedInsts $instref semijoin {*}$args]
+            tailcall ToRef {*}[FindRelatedInsts $instref semijoin {*}$args] ; # <1>
         }
         proc findUnrelated {instref args} {
-            tailcall ToRef {*}[FindRelatedInsts $instref semiminus {*}$args]
+            tailcall ToRef {*}[FindRelatedInsts $instref semiminus {*}$args] ; # <1>
         }
         proc findRelatedWhere {instref rchain expr} {
             lassign [FindRelatedInsts $instref semijoin {*}$rchain] relvar insts
             tailcall ToRef $relvar [uplevel 1\
-                [list ::ral relation restrictwith $insts $expr]]
+                [list ::ral relation restrictwith $insts $expr]] ; # <1>
         }
         proc findUnrelatedWhere {instref rchain expr} {
             lassign [FindRelatedInsts $instref semiminus {*}$rchain] relvar insts
@@ -1516,30 +1531,31 @@ namespace eval ::rosea {
         
             lassign $instref relvar insts
         
-            # We do not allow updates to the values of identifying attributes.  Changes
-            # to identifiers must be accomplished by creating and deleting instances.
-            # So we want to make sure that none of the attributes listed in the
-            # arguments are actually identifying attributes.
-            set idattrs [::struct::set union {*}[relvar identifiers $relvar]]
-            set idupdates [::struct::set intersect [dict keys $args] $idattrs]
-            if {![::struct::set empty $idupdates]} {
-                tailcall DeclError ID_UPDATE $idupdates
+            set identifiers [relvar identifiers $relvar]
+            if {[llength $identifiers] > 1} {
+                set idrelations [list]
+                foreach identifier $identifiers {
+                    lappend idrelations [relation fromlist $identifier Name string]
+                }
+                set idattrs [relation union {*}$idrelations]
+            } else {
+                set idattrs [relation fromlist [lindex $identifiers 0] Name string]
             }
-        
-            # The update strategy is to use the "relvar updateper" command. This
-            # command was tailored for this particular purpose. It takes a relation
-            # value uses the identifiers in that value and will update non-identifying
-            # attributes. So we can create a relation value by extending the instance
-            # reference value with the attributes to be updated.  Conveniently, the
-            # instance reference contains the identifying attributes.  To perform the
-            # extend operation we will need the type of the attribute which we can get
-            # from the heading of the relvar.
-            set cmd [list relation extend $insts exttuple]
+            set updateattrs [relation fromlist [dict keys $args] Name string]
+            set idupdates [relation intersect $idattrs $updateattrs]
+            
+            if {[relation isnotempty $idupdates]} {
+                tailcall DeclError ID_UPDATE [relation list $idupdates Name]
+            }
+            set extcmd [list relation extend $insts exttuple]
             set heading [relation heading [relvar set $relvar]]
             foreach {attr value} $args {
-                lappend cmd $attr [dict get $heading $attr] \"$value\"
+                if {![dict exists $heading $attr]} {
+                    tailcall DeclError UNKNOWN_ATTRIBUTE $attr
+                }
+                lappend extcmd $attr [dict get $heading $attr] \"$value\"
             }
-            relvar updateper $relvar [eval $cmd]
+            relvar updateper $relvar [eval $extcmd]
             return
         }
         proc readAttribute {ref args} {
@@ -1551,17 +1567,19 @@ namespace eval ::rosea {
             }
         
             return [expr {[llength $args] == 0 ? {} :\
-                [relation extract [deRef $ref {*}$args] {*}$args]}]
+                [relation extract [deRef $ref {*}$args] {*}$args]}] ; # <1>
         }
-        proc delete {instref} {
-            lassign $instref relvar insts
-            set tuples [deRef $instref]
-            relvar minus $relvar $tuples
+        proc delete {args} {
+            foreach instref $args {
+                lassign $instref relvar insts
+                relvar minus $relvar [deRef $instref]
         
-            lassign [SplitRelvarName $relvar] domain class
-            set instrelvar ${domain}::${class}::__${class}__STATEINST
-            if {[relvar exists $instrelvar]} {
-                relvar minus $instrelvar [relvar semijoin $insts $instrelvar]
+                SplitRelvarName $relvar domain class
+                set instrelvar ${domain}::__${class}__STATEINST
+                if {[relvar exists $instrelvar]} {
+                    relvar minus $instrelvar [relation semijoin $insts\
+                        [relvar set $instrelvar]]
+                }
             }
         
             return
@@ -1622,17 +1640,16 @@ namespace eval ::rosea {
         ]
         proc linkSimple {rname instref1 instref2} {
             lassign $instref1 relvar1 inst1
-            lassign [SplitRelvarName $relvar1] domain1 class1
-        
+            SplitRelvarName $relvar1 domain1 class1
+            
             lassign $instref2 relvar2 inst2
-            lassign [SplitRelvarName $relvar2] domain2 class2
-        
+            SplitRelvarName $relvar2 domain2 class2
+            
             if {$domain1 ne $domain2} {
                 tailcall DeclError NO_CROSS_DOMAIN $domain1 $domain2
             }
-        
             set archns ${domain1}::__Arch
-        
+            
             set reflink [relvar restrictone ${archns}::RefLink Relationship $rname]
             if {[relation isempty $reflink]} {
                 tailcall DeclError UNKNOWN_RELATIONSHIP $rname
@@ -1640,10 +1657,7 @@ namespace eval ::rosea {
             relation assign $reflink\
                 {ReferringClass referringClass}\
                 {ReferencedClass referencedClass}\
-                {ReferringAttrs referringAttrs}
-        
-            # First we determine which of the argument instance references are from the
-            # referring class and which from the referenced class.
+                {ReferringAttrs referringAttrs} ; # <1>
             if {$class1 eq $referringClass && $class2 eq $referencedClass} {
                 set fromrelvar $relvar1
                 set frominsts $inst1
@@ -1658,41 +1672,20 @@ namespace eval ::rosea {
                 tailcall DeclError NON_PARTICIPANTS $relvar1 $relvar2 $rname\
                     $referringClass $referencedClass
             }
-        
-            # You may link many referring instances to the same referenced instance,
-            # but there can only be one referenced instance
             if {[relation cardinality $toinst] != 1} {
                 tailcall MUST_BE_SINGULAR $torelvar [relation cardinality $toinst]
             }
-        
-            # The update we want to perform is to modify the values of the referential
-            # attributes to match the values of the referenced attributes. First we
-            # deference the referenced instance.  We perform the implied semijoin in
-            # place since we have already split apart the instance reference into its
-            # components.
             set refedvalue [relation semijoin $toinst [relvar set $torelvar]]
-        
-            # Our stategy for updating the referential attributes is to create a
-            # dictionary whose keys are the referential attribute names the values are
-            # those of the referenced attributes.  It is important to maintain the
-            # correspondence between the referential and referenced attributes. The
-            # architectural data structures do this by have the ReferringAttrs as a
-            # relation valued attribute.  So it is a matter of extending that relation
-            # to include the values and extracting the dictionary.
             set tovalues [pipe {
                 relation extend $referringAttrs rfa RefValue string {
                     [relation extract $refedvalue\
-                        [tuple extract $rfa ReferencedAttribute]]
-                } |
+                        [tuple extract $rfa ReferencedAttribute]]} |
                 relation dict ~ ReferringAttribute RefValue
             }]
-        
-            # Now we iterate across the referring instances updating the referential
-            # attributes to be the values of the dictionary we just computed.
             relation foreach frominst $frominsts {
                 relvar updateone $fromrelvar fromtup\
-                        [tuple get [relation tuple $frominst]] {
-                    tuple update $fromtup {*}$tovalues
+                        [tuple get [relation tuple $frominst]] { # <1>
+                    tuple update $fromtup {*}$tovalues ; # <2>
                 }
             }
         
@@ -1700,68 +1693,42 @@ namespace eval ::rosea {
         }
         proc linkAssoc {rname instref1 instref2 args} {
             lassign $instref1 relvar1 inst1
-            lassign [SplitRelvarName $relvar1] domain1 class1
-        
+            SplitRelvarName $relvar1 domain1 class1
+            
             lassign $instref2 relvar2 inst2
-            lassign [SplitRelvarName $relvar2] domain2 class2
-        
+            SplitRelvarName $relvar2 domain2 class2
+            
             if {$domain1 ne $domain2} {
                 tailcall DeclError NO_CROSS_DOMAIN $domain1 $domain2
             }
-        
             set archns ${domain1}::__Arch
-        
+            
             set assocref [relvar restrictone ${archns}::AssocRef Relationship $rname]
             if {[relation isempty $assocref]} {
                 tailcall DeclError UNKNOWN_RELATIONSHIP $rname
             }
-        
+            
             relation assign $assocref\
                 {AssocClass assocClass}\
                 {References references}
-        
-            # For class based associations, we need to identify the participants
-            # and check that the instance references refer to relvar that
-            # indeed participate in the relationship.
             set ref1 [relation restrictwith $references {$Participant eq $class1}]
             if {[relation isempty $ref1]} {
                 tailcall DeclError NOT_IN_ASSOCIATION $class1 $rname
             }
-            # Reflexive associations have to be considered. If the association is
-            # reflexive then the above query will yield two tuples since the
-            # Participants are the same name. In this case, we query for the "target"
-            # as a means of disambiguating the reflexive relationship.
             if {[relation cardinality $ref1] > 1} {
                 set ref2 [relation restrictwith $ref1 {$Role eq "target"}]
-                set ref1 [relation minus $ref1 $ref2]
+                set ref1 [relation minus $ref1 $ref2] ; # <1>
             } else {
-                # For the non-reflexive case, we can just find the other participant,
-                # checking that it is indeed there.
                 set ref2 [relation restrictwith $references {$Participant eq $class2}]
                 if {[relation isempty $ref2]} {
                     tailcall DeclError NOT_IN_ASSOCIATION $class2 $rname
                 }
             }
-        
-            # Dereference the referenced values via the instance reference.
-            set values1 [pipe {
-                relvar set $relvar1 |
-                relation semijoin $inst1 ~
-            }]
-            set values2 [pipe {
-                relvar set $relvar2 |
-                relation semijoin $inst2 ~
-            }]
-        
-            # We use a similar strategy here as with "linkSimple". We want to create
-            # dictionaries with the referring attributes as keys and the referenced
-            # values as the dictionary values.
+            
             set rattr1 [relation extract $ref1 ReferringAttrs]
             set rattr2 [relation extract $ref2 ReferringAttrs]
-        
-            # Since linking a class based associations amounts to inserting tuples in
-            # the associator relvar, we will accumulate the set of tuples and perform a
-            # single "relvar insert".
+            set values1 [relation semijoin $inst1 [relvar set $relvar1]]
+            set values2 [relation semijoin $inst2 [relvar set $relvar2]]
             set assoctuples [list]
             relation foreach v1 $values1 { # <1>
                 set refto1 [pipe {
@@ -1778,21 +1745,16 @@ namespace eval ::rosea {
                         } |
                         relation dict ~ ReferringAttribute RefValue
                     }]
-        
-                    # It may be the case that the associator class has other
-                    # attributes. Those are passed as attribute/value pairs in the
-                    # "args". The merge order is important here just in case the caller
-                    # tried to set one of the referential attributes in the invocation.
-                    lappend assoctuples [dict merge $args $refto1 $refto2]
+            
+                    lappend assoctuples [dict merge $args $refto1 $refto2] ; # <2>
                 }
             }
-        
             return [ToRef ${domain1}::$assocClass\
                     [relvar insert ${domain1}::$assocClass {*}$assoctuples]]
         }
         proc unlinkSimple {rname instref} {
             lassign $instref relvar inst
-            lassign [SplitRelvarName $relvar] domain class
+            SplitRelvarName $relvar domain class
         
             set archns ${domain}::__Arch
         
@@ -1831,7 +1793,7 @@ namespace eval ::rosea {
         }
         proc unlinkAssoc {rname instref} {
             lassign $instref relvar insts
-            lassign [SplitRelvarName $relvar] domain class
+            SplitRelvarName $relvar domain class
         
             set archns ${domain}::__Arch
         
@@ -1844,15 +1806,18 @@ namespace eval ::rosea {
                 {AssocClass associator}\
                 {References references}
         
+            # If we are given instances to the associator class, then there is no
+            # more work to do.
             if {$class eq $associator} {
                 set associnsts [deRef $instref]
             } else {
+                # Otherwise, we have to find the associator class instances ourselves.
                 set part [relation restrictwith $references {$Participant eq $class}]
                 set partcard [relation cardinality $part]
                 if {$partcard == 0} {
                     tailcall DeclError NOT_IN_ASSOCIATION $class $rname
                 } elseif {$partcard > 1} {
-                    tailcall DeclError AMBIGUOUS_UNLINK $rname $relvar
+                    tailcall DeclError AMBIGUOUS_UNLINK $rname $relvar ; # <1>
                 } else {
                     # find associative class instances
                     set navdir [expr {[relation extract $part Role] eq "source" ?\
@@ -1866,11 +1831,13 @@ namespace eval ::rosea {
             return $associnsts
         }
         proc migrate {rname instref subclass args} {
+            # HERE !! remove this singular requirement, it is not necessary.
+            # We should be able to migrate multiple subclass instances.
             if {![isRefSingular $instref]} {
                 tailcall DeclError SINGLE_REF_REQUIRED [refMultiplicity $instref]
             }
             lassign $instref relvar inst
-            lassign [SplitRelvarName $relvar] domns class
+            SplitRelvarName $relvar domns class
             set archns ${domns}::__Arch
         
             set link [relvar restrictone ${archns}::AssociationLink Name $rname\
@@ -1917,7 +1884,7 @@ namespace eval ::rosea {
             return $ref
         }
         proc signalAssigner {rname event args} {
-            lassign [SplitRelvarName $rname] domain relationship
+            SplitRelvarName $rname domain relationship
             set assignrelvar ${domain}::__${relationship}__STATEINST
             if {![relvar exists $assignrelvar]} {
                 tailcall DeclError NO_ASSIGNER $rname
@@ -1928,13 +1895,12 @@ namespace eval ::rosea {
                 relation project ~ {*}[lindex [relvar identifiers $assignrelvar] 0] |
                 list $rname ~
             }]
-            set srcref [SelfInstRef]
-            ::rosea::Dispatch::SignalEvent $srcref $dstref $event $args
+            ::rosea::Dispatch::SignalEvent [SelfInstRef] $dstref $event $args
         
             return
         }
         proc signalMultiAssigner {rname idvalues event args} {
-            lassign [SplitRelvarName $rname] domain relationship
+            SplitRelvarName $rname domain relationship
             set assignrelvar ${domain}::__${relationship}__STATEINST
             if {![relvar exists $assignrelvar]} {
                 tailcall DeclError NO_ASSIGNER $rname
@@ -1963,7 +1929,7 @@ namespace eval ::rosea {
             }
         
             set dstref [list $rname $dstinst]
-            ::rosea::Dispatch::SignalEvent [SelfInstRef] $dstref $event $args
+            ::rosea::Dispatch::SignalEvent [SelfInstRef] $dstref $event $args ; # <1>
         
             return
         }
@@ -1971,7 +1937,7 @@ namespace eval ::rosea {
             if {[llength $args] % 2 != 0} {
                 tailcall DeclError ARG_FORMAT $args
             }
-            lassign [SplitRelvarName $rname] domain relationship
+            SplitRelvarName $rname domain relationship
             set assignrelvar ${domain}::__${relationship}__STATEINST
             if {![relvar exists $assignrelvar]} {
                 tailcall DeclError NO_ASSIGNER $rname
@@ -1993,130 +1959,115 @@ namespace eval ::rosea {
             [namespace parent]::Helpers\
             [namespace parent]::InstCmds\
         ]
-        pipe {
-            relvar set ${archns}::PartitionDst |
-            relation restrictwith ~ {$SrcClass eq $dstclass} |
-            relation group ~ DstLinks DstClass Attrs
-        } polymapQuery
+        variable toc_queue [list]
         variable event_queue [list]
-        variable inTransaction false
+        pipe {
+            relvar restrictone ${archns}::Transition\
+                Class $class State $currstate Event $event |
+            relation extract ~ NewState
+        } transitionQuery
         relvar create DelayedSignal {
+            RefId           int
             SrcInstRef      list
             Event           string
             DstInstRef      list
             TimerId         string
             Expire          bignum
-        } {SrcInstRef Event DstInstRef}
-        proc MapPolymorphicEvent {frwdcmd srcref dstrefs event arglist} {
-            lassign $dstrefs dstrelvar dstinsts ; # <1>
-            lassign [SplitRelvarName $dstrelvar] domain dstclass
-            set archns ${domain}::__Arch
-            set polyevent [relvar restrictone ${archns}::PolymorphicEvent\
-                Class $dstclass Event $event]
-            if {[relation isempty $polyevent]} {
-                return false
-            }
-        
-            variable polymapQuery
-            set partitions [eval $polymapQuery] ; # <2>
-        
-            relation foreach inst $dstinsts { # <3>
-                relation foreach partition $partitions {
-                    relation assign $partition
-                    relation foreach dstlink $DstLinks {
-                        relation assign $dstlink
-                        set related [relation semijoin $inst\
-                            [relvar set ${domain}::$DstClass] -using $Attrs] ; # <4>
-                        if {[relation isnotempty $related]} {
-                            set dstreference [ToRef ${domain}::$DstClass $related]
-                            ::rosea::Trace::TracePolymorphic $srcref\
-                                $event $dstreference ${domain}::SrcClass $Name
-                            {*}$frwdcmd $srcref $dstreference $event $arglist
-                            break
-                        }
-                    }
-                }
-            }
-            return true
-        }
+        } RefId {SrcInstRef Event DstInstRef} TimerId
+        variable DelayedSignalId 0
+        pipe {
+            relvar set ${archns}::PartitionDst |
+            relation restrictwith ~ {$SrcClass eq $dstclass} |
+            relation group ~ DstLinks DstClass Attrs
+        } polymapQuery
         proc SignalEvent {srcref dstset event arglist} {
-            variable event_queue
-            forAllRefs dstref $dstset {
-                set eventInfo [dict create\
-                    src $srcref\
-                    event $event\
-                    dst $dstref\
-                    params $arglist\
-                ]
-                if {[isRefEqual $srcref $dstref]} {
-                    set eqindex 0
-                    foreach cmpevent $event_queue {
-                        if {![isRefEqual [dict get $cmpevent src]\
-                                [dict get $cmpevent dst]]} {
-                            break
-                        }
-                        incr eqindex
-                    }
-                    set event_queue [linsert $event_queue $eqindex $eventInfo]
-                } else {
-                    lappend event_queue $eventInfo
+            lassign $dstset relvar insts
+            SplitRelvarName $relvar domain class
+            if {[relation isempty [relvar restrictone ${domain}::__Arch::Event\
+                    Class $class Event $event]]} {
+                tailcall DeclError UNKNOWN_EVENT $event $class
+            }
+        
+            set callback [namespace code DispatchEvent]
+            set eventInfo [dict create\
+                src $srcref\
+                event $event\
+                params $arglist\
+            ]
+            if {[isRefEqual $srcref [nilInstRef]]} {
+                variable toc_queue
+                forAllRefs dstref $dstset {
+                    # Queue the thread of control events.
+                    dict set eventInfo dst $dstref
+                    lappend toc_queue $eventInfo
+                    ::after 0 $callback
                 }
-                ::after 0 [namespace code DispatchEvent]
+            } else {
+                variable event_queue
+                forAllRefs dstref $dstset {
+                    dict set eventInfo dst $dstref
+                    if {[isRefEqual $srcref $dstref]} { # <1>
+                        for {set eqindex 0} {$eqindex < [llength $event_queue]} {incr eqindex} {
+                            set cmpevent [lindex $event_queue $eqindex]
+                            if {![isRefEqual [dict get $cmpevent src] [dict get $cmpevent dst]]} {
+                                break
+                            }
+                        }
+                        set event_queue [linsert [K $event_queue [set event_queue {}]]\
+                                $eqindex $eventInfo] ; # <1>
+                    } else {
+                        # Non-self directed events are always simply appended to the
+                        # event queue.
+                        lappend event_queue $eventInfo
+                    }
+                    ::after 0 $callback
+                }
             }
         }
         proc DispatchEvent {} {
             variable event_queue
-            variable inTransaction
-        
-            set eqlen [llength $event_queue]
-            if {$eqlen != 0} {
-                # Pull the event from the front of the queue.
+            variable toc_queue
+            
+            if {[llength $event_queue] != 0} {
                 set eventInfo [lindex $event_queue 0]
-                set event_queue [lrange $event_queue 1 end]
-        
-                set dstref [dict get $eventInfo dst]
-                lassign $dstref relvar ref
-                lassign [SplitRelvarName $relvar] domain class
-                set archns ${domain}::__Arch
-        
-                set instrelvar ${domain}::__${class}__STATEINST
-                set state [relation semijoin $ref [relvar set $instrelvar]]
-                if {[relation isempty $state]} {
-                    tailcall DeclError EVENT_IN_FLIGHT [dict get $eventInfo event]\
-                        $ref
-                }
-                set currstate [relation extract $state __State]
-                set event [dict get $eventInfo event]
-        
-                set newState [pipe {
-                    relvar restrictone ${archns}::Transition\
-                        Class $class State $currstate Event $event |
-                    relation extract ~ NewState
-                }]
-                ::rosea::Trace::TraceTransition [dict get $eventInfo src]\
-                    $event $dstref $currstate $newState [dict get $eventInfo params]
-        
+                set event_queue [lrange [K $event_queue [set event_queue {}]] 1 end] ; # <1>
+            } elseif {[llength $toc_queue] != 0} {
+                set eventInfo [lindex $toc_queue 0]
+                set toc_queue [lrange [K $toc_queue [set toc_queue {}]] 1 end]
+                relvar transaction begin ; # <2>
+            } else {
+                return
+            }
+            set dstref [dict get $eventInfo dst]
+            lassign $dstref relvar ref
+            SplitRelvarName $relvar domain class
+            
+            set instrelvar ${domain}::__${class}__STATEINST
+            set state [relation semijoin $ref [relvar set $instrelvar]]
+            if {[relation isempty $state]} {
+                tailcall DeclError EVENT_IN_FLIGHT [dict get $eventInfo event] $ref
+            }
+            set currstate [relation extract $state __State]
+            set archns ${domain}::__Arch
+            set event [dict get $eventInfo event]
+            variable transitionQuery
+            set newState [eval $transitionQuery]
+            
+            ::rosea::Trace::TraceTransition [dict get $eventInfo src]\
+                $event $dstref $currstate $newState [dict get $eventInfo params] ; # <1>
+            try {
                 if {$newState eq "CH"} {
-                    tailcall DeclError CANT_HAPPEN_EVENT [dict get $eventInfo src]\
-                        $event $dstref $currstate
+                    TransitionError [dict get $eventInfo src] $event $dstref $currstate
                 } elseif {$newState ne "IG"} {
-                    set idattrs [tuple get [ral relation tuple $ref]]
+                    set idattrs [tuple get [relation tuple $ref]]
                     relvar updateone $instrelvar is $idattrs {
                         tuple update $is __State $newState
                     }
                     try {
-                        if {$eqlen == 1 && !$inTransaction} {
-                            relvar transaction begin
-                            set inTransaction true
-                        }
                         ${relvar}::__Activity::$newState $dstref\
-                                {*}[dict get $eventInfo params]
+                                {*}[dict get $eventInfo params] ; # <1>
                     } finally {
-                        if {[llength $event_queue] == 0 && $inTransaction} {
-                            relvar transaction end
-                            set inTransaction false
-                        }
-                        set term [relvar restrictone ${domain}::__Arch::Terminal\
+                        set term [relvar restrictone ${archns}::TerminalState\
                                 Class $class State $newState]
                         if {[relation isnotempty $term]} {
                             relvar deleteone $relvar {*}$idattrs
@@ -2124,57 +2075,15 @@ namespace eval ::rosea {
                         }
                     }
                 }
-            }
-            return
-        }
-        proc SignalDelayedEvent {time srcref dstset event arglist} {
-            forAllRefs dstref $dstset {
-                # Cancel any existing delayed signal that might have been in place.
-                CancelDelayedSignal $srcref $event $dstref
-                relvar insert DelayedSignal [list\
-                    SrcInstRef  $srcref\
-                    Event       $event\
-                    DstInstRef  $dstref\
-                    TimerId     [::after $time\
-                                [list ::rosea::Dispatch::DispatchDelayedEvent\
-                                    $srcref $event $dstref $arglist]]\
-                    Expire      [expr {entier([clock milliseconds]) + entier($time)}]\
-                ]
-            }
-            return
-        }
-        proc DispatchDelayedEvent {srcref event dstref params} {
-            DeleteDelayedSignal $srcref $event $dstref
-            variable event_queue
-            lappend event_queue [dict create\
-                src $srcref\
-                event $event\
-                dst $dstref\
-                params $params\
-            ]
-            tailcall DispatchEvent
-        }
-        proc CancelDelayedSignal {srcref event dstref} {
-            variable DelayedSignal
-            set sig [FindDelayedSignal $srcref $event $dstref]
-            if {[relation isnotempty $sig]} {
-                ::after cancel [relation extract $sig TimerId]
-                DeleteDelayedSignal $srcref $event $dstref
-            }
-        }
-        proc SignalTimeRemaining {srcref event dstref} {
-            set sig [FindDelayedSignal $srcref $event $dstref]
-            if {[relation isnotempty $sig]} {
-                set remaining [expr {[relation extract $sig Expire] -\
-                    [clock milliseconds]}]
-                if {$remaining < 0} {
-                    set remaining 0
+            } finally {
+                if {[llength $event_queue] == 0} {
+                    relvar transaction end
                 }
-            } else {
-                set remaining 0
             }
-        
-            return $remaining
+            return
+        }
+        proc TransitionError {src event dst currstate} {
+            tailcall DeclError CANT_HAPPEN_EVENT $src $event $dst $currstate
         }
         proc FindDelayedSignal {srcref event dstref} {
             variable DelayedSignal
@@ -2189,6 +2098,102 @@ namespace eval ::rosea {
                 [isRefEqual [tuple extract $dsig DstInstRef] $dstref]
             }
         }
+        proc SignalDelayedEvent {time srcref dstset event arglist} {
+            lassign $dstset relvar insts
+            SplitRelvarName $relvar domain class
+            if {[relation isempty [relvar restrictone ${domain}::__Arch::Event\
+                    Class $class Event $event]]} {
+                tailcall DeclError UNKNOWN_EVENT $event $class
+            }
+        
+            variable DelayedSignalId
+            set eventInfo [dict create\
+                id [incr DelayedSignalId]\
+                src $srcref\
+                event $event\
+                params $arglist\
+            ]
+            forAllRefs dstref $dstset {
+                dict set eventInfo dst $dstref
+                DeleteDelayedSignal $srcref $event $dstref ; # <1>
+                relvar insert DelayedSignal [list\
+                    RefId       $DelayedSignalId\
+                    SrcInstRef  $srcref\
+                    Event       $event\
+                    DstInstRef  $dstref\
+                    TimerId     [::after $time [list\
+                                ::rosea::Dispatch::DispatchDelayedEvent $eventInfo]]\
+                    Expire      [expr {entier([clock milliseconds]) + entier($time)}]\
+                ]
+            }
+            return
+        }
+        proc DispatchDelayedEvent {eventInfo} {
+            relvar deleteone DelayedSignal RefId [dict get $eventInfo id]
+            variable toc_queue
+            lappend toc_queue $eventInfo
+            tailcall DispatchEvent
+        }
+        proc CancelDelayedSignal {srcref event dstref} {
+            variable DelayedSignal
+            set sig [FindDelayedSignal $srcref $event $dstref]
+            if {[relation isnotempty $sig]} {
+                ::after cancel [relation extract $sig TimerId]
+                DeleteDelayedSignal $srcref $event $dstref
+            } else {
+                # Search the toc_queue to see if the signal delay has already expired
+                # and the event is awaiting dispatch.
+                variable toc_queue
+                for {set i 0} {$i < [llength $toc_queue]} {incr i} {
+                    set eventInfo [lindex $toc_queue $i]
+                    dict update eventInfo src evtsrc dst evtdst event evtevent {
+                        if {[isRefEqual $evtsrc $srcref] &&\
+                                [isRefEqual $evtdst $dstref] &&\
+                                $evtevent eq $event} {
+                            set toc_queue [lreplace\
+                                    [K $toc_queue [set toc_queue {}]] $i $i]
+                            break
+                        }
+                    }
+                }
+            }
+        }
+        proc SignalTimeRemaining {srcref event dstref} {
+            set sig [FindDelayedSignal $srcref $event $dstref]
+            return [expr {[relation isempty $sig] ? 0 :\
+                max([relation extract $sig Expire] - [clock milliseconds], 0)}] ; # <1>
+        }
+        proc MapPolymorphicEvent {frwdcmd srcref dstrefs event arglist} {
+            lassign $dstrefs dstrelvar dstinsts
+            SplitRelvarName $dstrelvar domain dstclass
+            set archns ${domain}::__Arch
+            set polyevent [relvar restrictone ${archns}::PolymorphicEvent\
+                Class $dstclass Event $event]
+            if {[relation isempty $polyevent]} {
+                return false
+            }
+            variable polymapQuery
+            set partitions [eval $polymapQuery]
+            relation foreach inst $dstinsts {
+                relation foreach partition $partitions {
+                    relation assign $partition
+                    relation foreach dstlink $DstLinks {
+                        relation assign $dstlink
+                        set related [relation semijoin $inst\
+                            [relvar set ${domain}::$DstClass] -using $Attrs]
+                        if {[relation isnotempty $related]} {
+                            set dstreference [ToRef ${domain}::$DstClass $related]
+                            ::rosea::Trace::TracePolymorphic $srcref\
+                                $event $dstreference ${domain}::SrcClass $Name
+                            {*}$frwdcmd $srcref $dstreference $event $arglist ; # <1>
+                            break
+                        }
+                    }
+                }
+            }
+        
+            return true
+        }
     }
     namespace eval Config {
         logger::initNamespace [namespace current]
@@ -2202,11 +2207,11 @@ namespace eval ::rosea {
         variable evalLambda {{body} {
             upvar #0 ::rosea::Config::errcount errcount ; # <1>
             upvar #0 ::rosea::Config::configlineno configlineno
-            set cmdline $configlineno
+            set lineno $configlineno
             set command {}
             foreach line [split $body \n] { # <2>
                 append command $line \n
-                incr cmdline ; # <3>
+                incr lineno ; # <3>
                 if {[info complete $command]} {
                     try {
                         eval $command
@@ -2215,7 +2220,7 @@ namespace eval ::rosea {
                         incr errcount
                     }
                     set command {} ; # <4>
-                    set configlineno $cmdline
+                    set configlineno $lineno
                 }
             }
             return $errcount
@@ -2224,33 +2229,27 @@ namespace eval ::rosea {
             Name        string
             Location    string
         } Name
-        
         relvar create DomainElement {
             Domain  string
             Element string
         } {Domain Element}
-        
         relvar association R1\
             DomainElement Domain *\
             Domain Name 1
-        
         relvar create Class {
             Domain  string
             Name    string
         } {Domain Name}
-        
         relvar create Relationship {
             Domain  string
             Name    string
         } {Domain Name}
-        
         relvar create DomainOperation {
             Domain      string
             Name        string
             Parameters  list
             Body        string
         } {Domain Name}
-        
         relvar partition R2 DomainElement {Domain Element}\
             Class {Domain Name}\
             Relationship {Domain Name}\
@@ -2261,43 +2260,35 @@ namespace eval ::rosea {
             Name    string
             Type    string
         } {Domain Class Name}
-        
         relvar association R3\
             Attribute {Domain Class} +\
             Class {Domain Name} 1
-        
         relvar create Identifier {
             Domain  string
             Class   string
             Number  int
         } {Domain Class Number}
-        
         relvar association R4\
             Identifier {Domain Class} +\
             Class {Domain Name} 1
-        
         relvar create IdentifyingAttribute {
             Domain      string
             Class       string
             Attribute   string
             Number      int
         } {Domain Class Attribute Number}
-        
         relvar correlation R5 IdentifyingAttribute\
             {Domain Class Number} + Identifier {Domain Class Number}\
             {Domain Class Attribute} * Attribute {Domain Class Name}
-        
         relvar create DefaultValue {
             Domain      string
             Class       string
             Attribute   string
             Value       string
         } {Domain Class Attribute}
-        
         relvar association R6\
             DefaultValue {Domain Class Attribute} ?\
             Attribute {Domain Class Name} 1
-        
         relvar create AttributeReference {
             Domain              string
             ReferringClass      string
@@ -2311,11 +2302,9 @@ namespace eval ::rosea {
         } {Domain ReferringClass ReferringAttribute ReferringRole\
             ReferencedClass ReferencedAttribute ReferencedRole ReferencedIdNumber\
             Relationship}
-        
         relvar association R13\
             AttributeReference {Domain ReferringClass ReferringAttribute} *\
             Attribute {Domain Class Name} 1
-        
         relvar create ReferencedIdAttribute {
             Domain          string
             Class           string
@@ -2574,30 +2563,24 @@ namespace eval ::rosea {
             Domain      string
             Name        string
         } {Domain Name}
-        
         relvar create Generalization {
             Domain      string
             Name        string
         } {Domain Name}
-        
         relvar partition R30 Relationship {Domain Name}\
             Association {Domain Name}\
             Generalization {Domain Name}
-        
         relvar create SimpleAssociation {
             Domain      string
             Name        string
         } {Domain Name}
-        
         relvar create ClassBasedAssociation {
             Domain      string
             Name        string
         } {Domain Name}
-        
         relvar partition R31 Association {Domain Name}\
             SimpleAssociation {Domain Name}\
             ClassBasedAssociation {Domain Name}
-        
         relvar create SimpleReferringClass {
             Domain          string
             Class           string
@@ -2606,11 +2589,9 @@ namespace eval ::rosea {
             Conditionality  boolean
             Multiplicity    boolean
         } {Domain Class Relationship Role}
-        
         relvar association R32\
             SimpleReferringClass {Domain Relationship} 1\
             SimpleAssociation {Domain Name} 1
-        
         relvar create SimpleReferencedClass {
             Domain          string
             Class           string
@@ -2618,11 +2599,9 @@ namespace eval ::rosea {
             Role            string
             Conditionality  boolean
         } {Domain Class Relationship Role}
-        
         relvar association R33\
             SimpleReferencedClass {Domain Relationship} 1\
             SimpleAssociation {Domain Name} 1
-        
         relvar create SourceClass {
             Domain          string
             Class           string
@@ -2631,11 +2610,9 @@ namespace eval ::rosea {
             Conditionality  boolean
             Multiplicity    boolean
         } {Domain Class Relationship Role}
-        
         relvar association R34\
             SourceClass {Domain Relationship} 1\
             ClassBasedAssociation {Domain Name} 1
-        
         relvar create TargetClass {
             Domain          string
             Class           string
@@ -2644,97 +2621,81 @@ namespace eval ::rosea {
             Conditionality  boolean
             Multiplicity    boolean
         } {Domain Class Relationship Role}
-        
         relvar association R35\
             TargetClass {Domain Relationship} 1\
             ClassBasedAssociation {Domain Name} 1
-        
         relvar create AssociatorClass {
             Domain          string
             Class           string
             Relationship    string
             Role            string
         } {Domain Class Relationship Role}
-        
         relvar association R42\
             AssociatorClass {Domain Relationship} 1\
             ClassBasedAssociation {Domain Name} 1
-        
         relvar create Superclass {
             Domain          string
             Class           string
             Relationship    string
             Role            string
         } {Domain Class Relationship Role}
-        
         relvar association R36\
             Superclass {Domain Relationship} 1\
             Generalization {Domain Name} 1
-        
         relvar create Subclass {
             Domain          string
             Class           string
             Relationship    string
             Role            string
         } {Domain Class Relationship Role}
-        
         relvar association R37\
             Subclass {Domain Relationship} +\
             Generalization {Domain Name} 1
-        
         relvar create ReferringClass {
             Domain          string
             Class           string
             Relationship    string
             Role            string
         } {Domain Class Relationship Role}
-        
         relvar partition R38 ReferringClass {Domain Class Relationship Role}\
             SimpleReferringClass {Domain Class Relationship Role}\
             AssociatorClass {Domain Class Relationship Role}\
             Subclass {Domain Class Relationship Role}
-        
         relvar create ReferencedClass {
             Domain          string
             Class           string
             Relationship    string
             Role            string
         } {Domain Class Relationship Role}
-        
         relvar partition R39 ReferencedClass {Domain Class Relationship Role}\
             SimpleReferencedClass {Domain Class Relationship Role}\
             SourceClass {Domain Class Relationship Role}\
             TargetClass {Domain Class Relationship Role}\
             Superclass {Domain Class Relationship Role}
-        
         relvar create ClassRole {
             Domain          string
             Class           string
             Relationship    string
             Role            string
         } {Domain Class Relationship Role}
-        
         relvar partition R40 ClassRole {Domain Class Relationship Role}\
             ReferringClass {Domain Class Relationship Role}\
             ReferencedClass {Domain Class Relationship Role}
-        
         relvar correlation R41 ClassRole\
             {Domain Relationship} + Relationship {Domain Name}\
             {Domain Class} * Class {Domain Name}
-        
         relvar correlation R11 ReferencedIdAttribute\
             {Domain Class Relationship Role} +\
                 ReferencedClass {Domain Class Relationship Role}\
             {Domain Class Attribute Number} *\
                 IdentifyingAttribute {Domain Class Attribute Number}
-        
         relvar correlation R12 AttributeReference\
             {Domain ReferringClass Relationship ReferringRole} +\
                 ReferringClass {Domain Class Relationship Role}\
             {Domain ReferencedClass Relationship ReferencedRole ReferencedAttribute\
                     ReferencedIdNumber} +\
                 ReferencedIdAttribute {Domain Class Relationship Role Attribute Number}
-        relvar create __AssocInfo {
+        relvar create Config_AssocSpec {
             Spec                string
             NeedsAssociator     boolean
             ReflexiveAllowed    boolean
@@ -2744,7 +2705,7 @@ namespace eval ::rosea {
             ReferencedMult      boolean
         } Spec
         
-        relvar insert __AssocInfo {
+        relvar insert Config_AssocSpec {
             Spec 1--1 NeedsAssociator false ReflexiveAllowed true
                 ReferringCond false ReferringMult false
                 ReferencedCond false ReferencedMult false
@@ -2829,29 +2790,26 @@ namespace eval ::rosea {
                 ReferringCond true ReferringMult true
                 ReferencedCond true ReferencedMult true
         }
-        relvar create ClassAssoc {
+        relvar create Config_ClassAssoc {
             Domain              string
             Relationship        string
             AssocClass          string
             SourceClass         string
         } {Domain Relationship AssocClass SourceClass}
-        
-        relvar create NonReflexiveAssoc {
+        relvar create Config_NonReflexiveAssoc {
             Domain              string
             Relationship        string
             AssocClass          string
             SourceClass         string
             TargetClass         string
         } {Domain Relationship AssocClass SourceClass}
-        
-        relvar create ReflexiveAssoc {
+        relvar create Config_ReflexiveAssoc {
             Domain              string
             Relationship        string
             AssocClass          string
             SourceClass         string
         } {Domain Relationship AssocClass SourceClass}
-        
-        relvar create ReflexivePath {
+        relvar create Config_ReflexivePath {
             Domain              string
             Relationship        string
             AssocClass          string
@@ -2859,13 +2817,24 @@ namespace eval ::rosea {
             SourceAttr          string
             TargetAttr          string
         } {Domain Relationship AssocClass SourceClass SourceAttr}
-        
-        relvar partition X1 ClassAssoc {Domain Relationship AssocClass SourceClass}\
-            NonReflexiveAssoc {Domain Relationship AssocClass SourceClass}\
-            ReflexiveAssoc {Domain Relationship AssocClass SourceClass}
-        relvar association X2\
-            ReflexivePath {Domain Relationship AssocClass SourceClass} +\
-            ReflexiveAssoc {Domain Relationship AssocClass SourceClass} 1
+        relvar partition Config1\
+            Config_ClassAssoc\
+                {Domain Relationship AssocClass SourceClass}\
+            Config_NonReflexiveAssoc\
+                {Domain Relationship AssocClass SourceClass}\
+            Config_ReflexiveAssoc\
+                {Domain Relationship AssocClass SourceClass}
+        relvar association Config2\
+            Config_ReflexivePath {Domain Relationship AssocClass SourceClass} +\
+            Config_ReflexiveAssoc {Domain Relationship AssocClass SourceClass} 1
+        pipe {
+            relvar set ::rosea::Config::AttributeReference |
+            relation project ~ Domain ReferencedClass Relationship ReferencedRole\
+                    ReferencedAttribute ReferencedIdNumber |
+            relation rename ~ ReferencedClass Class ReferencedRole Role\
+                    ReferencedAttribute Attribute ReferencedIdNumber Number |
+            relvar union ::rosea::Config::ReferencedIdAttribute
+        } refIdQuery
         relvar create StateModel {
             Domain          string
             Model           string
@@ -3044,6 +3013,10 @@ namespace eval ::rosea {
         relvar association R85\
             NonLocalEvent {Domain Model Relationship Role} *\
             Subclass {Domain Class Relationship Role} 1
+        
+        relvar association R87\
+            EffectiveEvent {Domain Model} +\
+            StateModel {Domain Model} 1
         relvar create TransitionPlace {
             Domain  string
             Model   string
@@ -3082,6 +3055,93 @@ namespace eval ::rosea {
         relvar association R73\
             NonStateTransition TransRule *\
             TransitionRule Name 1
+        relvar create Config_DataError {
+            Relationship        string
+            RefClass            string
+            RefType             string
+            Format              string
+        } {Relationship RefClass RefType}
+        relvar insert Config_DataError {
+            Relationship        R3
+            RefClass            Class
+            RefType             notrefed
+            Format              {in domain, \"$Domain\", class, \"$Name\",\
+                                has no attributes}
+        } {
+            Relationship        R4
+            RefClass            Class
+            RefType             notrefed
+            Format              {in domain, \"$Domain\", class, \"$Name\",\
+                                has no identifiers}
+        } {
+            Relationship        R11
+            RefClass            ReferencedClass
+            RefType             notrefed
+            Format              {in domain, \"$Domain\", for relationship,\
+                                \"$Relationship\", no class has defined a reference\
+                                to class, \"$Class\"}
+        } {
+            Relationship        R11
+            RefClass            ReferencedIdAttribute
+            RefType             refnone
+            Format              {in domain, \"$Domain\", relationship,\
+                                \"$Relationship\", references attribute,\
+                                \"$Attribute\", in class, \"$Class\", which is\
+                                not an identifying attribute, does not exist\
+                                or \"$Relationship\" does not exist}
+        } {
+            Relationship        R12
+            RefClass            AttributeReference
+            RefType             refnone
+            Format              {in domain, \"$Domain\", the attribute,\
+                                \"$ReferringAttribute\", in class, \"$ReferringClass\",\
+                                refers to, \"$ReferencedAttribute\", in class,\
+                                \"$ReferencedClass\", but the class, attribute or\
+                                relationship does not exist}
+        } {
+            Relationship        R41
+            RefClass            ClassRole
+            RefType             refnone
+            Format              {in domain, \"$Domain\", relationship,\
+                                \"$Relationship\", references class, \"$Class\",\
+                                which does not exist}
+        } {
+            Relationship        R52
+            RefClass            AssignerStateModel
+            RefType             refnone
+            Format              {in domain, \"$Domain\", an assigner state model is\
+                                defined on relationship, \"$Relationship\", which is\
+                                not an association type relationship}
+        } {
+            Relationship        R72
+            RefClass            StateTransition
+            RefType             refnone
+            Format              {in domain, \"$Domain\", the state model for,\
+                                \"$Model\", contains the transition,\
+                                \"$State - $Event -> $NewState\",\
+                                but state \"$NewState\" does not exist}
+        } {
+            Relationship        R81
+            RefClass            DeferredEvent
+            RefType             multrefed
+            Format              {in domain, \"$Domain\", in the state model for,\
+                                \"$Model\", event, \"$Event\", is both an inherited\
+                                polymorphic event and a locally defined one}
+        } {
+            Relationship        R86
+            RefClass            DeferredEvent
+            RefType             notrefed
+            Format              {in domain, \"$Domain\", in the state model for,\
+                                \"$Model\", event, \"$Event\", is defined as\
+                                polymorphic but \"$Model\" is not a superclass\
+                                of a generalization}
+        } {
+            Relationship        R87
+            RefClass            EffectiveEvent
+            RefType             refnone
+            Format              {in domain, \"$Domain\", event, \"$Event\" has been\
+                                inherited, but no state model exists for, \"$Model\"}
+        }
         namespace export ConfigEvaluate
         
         proc ConfigEvaluate {ns body} {
@@ -3098,109 +3158,126 @@ namespace eval ::rosea {
                     tailcall DeclError EMPTY_NAME domain
                 }
         
-                ConfigEvaluate [namespace current]::DomainDef  $body
+                relvar eval { # <3>
+                    ConfigEvaluate [namespace current]::DomainDef $body
         
-                # At this point we have the definition of the domain and enough
-                # information to tie together the referential attributes and
-                # the association definitions.
-                variable ReferencedClass
-                variable ReferringClass
-                variable ReferencedIdAttribute
-                variable AttributeReference
-                variable NonReflexiveAssoc
-                variable ReflexivePath
-                
-                #puts [relformat $ReferencedClass ReferencedClass]
-                #puts [relformat $ReferringClass ReferringClass]
-                #puts [relformat $AttributeReference AttributeReference]
-                #puts [relformat $NonReflexiveAssoc NonReflexiveAssoc]
-                #puts [relformat $ReflexivePath ReflexivePath]
-                
-                relation foreach nra $NonReflexiveAssoc {
-                    relation assign $nra
-                    relvar update ::rosea::Config::AttributeReference ar {
-                        [tuple extract $ar Domain] eq $Domain &&
-                        [tuple extract $ar Relationship] eq $Relationship &&
-                        [tuple extract $ar ReferringClass] eq $AssocClass
-                    } {tuple update $ar ReferringRole associator}
-                
-                    relvar update ::rosea::Config::AttributeReference ar {
-                        [tuple extract $ar Domain] eq $Domain &&
-                        [tuple extract $ar Relationship] eq $Relationship &&
-                        [tuple extract $ar ReferringClass] eq $AssocClass &&
-                        [tuple extract $ar ReferencedClass] eq $SourceClass
-                    } {tuple update $ar ReferencedRole source}
-                }
-                
-                relation foreach rp $ReflexivePath {
-                    relation assign $rp
-                    relvar update ::rosea::Config::AttributeReference ar {
-                        [tuple extract $ar Domain] eq $Domain &&
-                        [tuple extract $ar Relationship] eq $Relationship &&
-                        [tuple extract $ar ReferringClass] eq $AssocClass
-                    } {tuple update $ar ReferringRole associator}
-                
-                    relvar update ::rosea::Config::AttributeReference ar {
-                        [tuple extract $ar Domain] eq $Domain &&
-                        [tuple extract $ar Relationship] eq $Relationship &&
-                        [tuple extract $ar ReferringClass] eq $AssocClass &&
-                        [tuple extract $ar ReferringAttribute] eq $SourceAttr
-                    } {tuple update $ar ReferencedRole source}
-                }
-                
-                pipe {
-                    relvar set ::rosea::Config::AttributeReference |
-                    relation project ~ Domain ReferencedClass Relationship ReferencedRole\
-                            ReferencedAttribute ReferencedIdNumber |
-                    relation rename ~ ReferencedClass Class ReferencedRole Role\
-                            ReferencedAttribute Attribute ReferencedIdNumber Number |
-                    relvar union ::rosea::Config::ReferencedIdAttribute
-                }
-                
-                #puts [relformat $AttributeReference AttributeReference]
-                #puts [relformat $ReferencedIdAttribute ReferencedIdAttribute]
+                    # At this point we have the definition of the domain and enough
+                    # information to tie together the referential attributes and
+                    # the association definitions.
+                    variable Config_NonReflexiveAssoc
+                    
+                    relation foreach nra $Config_NonReflexiveAssoc {
+                        relation assign $nra
+                        relvar update ::rosea::Config::AttributeReference ar {
+                            [tuple extract $ar Domain] eq $Domain &&
+                            [tuple extract $ar Relationship] eq $Relationship &&
+                            [tuple extract $ar ReferringClass] eq $AssocClass
+                        } {tuple update $ar ReferringRole associator}
+                    
+                        relvar update ::rosea::Config::AttributeReference ar {
+                            [tuple extract $ar Domain] eq $Domain &&
+                            [tuple extract $ar Relationship] eq $Relationship &&
+                            [tuple extract $ar ReferringClass] eq $AssocClass &&
+                            [tuple extract $ar ReferencedClass] eq $SourceClass
+                        } {tuple update $ar ReferencedRole source}
+                    }
+                    variable Config_ReflexivePath
+                    
+                    relation foreach rp $Config_ReflexivePath {
+                        relation assign $rp
+                        relvar update ::rosea::Config::AttributeReference ar {
+                            [tuple extract $ar Domain] eq $Domain &&
+                            [tuple extract $ar Relationship] eq $Relationship &&
+                            [tuple extract $ar ReferringClass] eq $AssocClass
+                        } {tuple update $ar ReferringRole associator}
+                    
+                        relvar update ::rosea::Config::AttributeReference ar {
+                            [tuple extract $ar Domain] eq $Domain &&
+                            [tuple extract $ar Relationship] eq $Relationship &&
+                            [tuple extract $ar ReferringClass] eq $AssocClass &&
+                            [tuple extract $ar ReferringAttribute] eq $SourceAttr
+                        } {tuple update $ar ReferencedRole source}
+                    }
+                    variable refIdQuery
+                    
+                    eval $refIdQuery
         
-                # We must also compute how polymorphic events are inherited
-                # down generalization hierarchies.
-                # Create Deferral Path instances
-                
-                variable PolymorphicEvent
-                variable DeferredEvent
-                variable Superclass
-                variable Subclass
-                variable DeferralPath
-                
-                set dpaths [pipe {
-                    relation restrictwith $PolymorphicEvent {$Domain eq $name} |
-                    relation semijoin ~ $DeferredEvent |
-                    relation join ~ $Superclass -using {Domain Domain Model Class}
-                }]
-                relvar insert ::rosea::Config::DeferralPath {*}[relation body $dpaths]
-                #puts [relformat $DeferralPath DeferralPath]
-                
-                set supers [relation semiminus $Subclass $Superclass\
-                    -using {Domain Domain Class Class}]
-                #puts [relformat $supers supers]
-                
-                relation foreach super $supers {
-                    PropagatePolyEvents $super
+                    # We must also compute how polymorphic events are inherited
+                    # down generalization hierarchies.
+                    # Create Deferral Path instances
+                    
+                    variable PolymorphicEvent
+                    variable DeferredEvent
+                    variable Superclass
+                    variable Subclass
+                    variable DeferralPath
+                    
+                    set dpaths [pipe {
+                        relation restrictwith $PolymorphicEvent {$Domain eq $name} |
+                        relation semijoin ~ $DeferredEvent |
+                        relation join ~ $Superclass -using {Domain Domain Model Class}
+                    }]
+                    relvar insert ::rosea::Config::DeferralPath {*}[relation body $dpaths]
+                    
+                    set supers [relation semiminus $Subclass $Superclass\
+                        -using {Domain Domain Class Class}]
+                    
+                    relation foreach super $supers {
+                        PropagatePolyEvents $super
+                    }
                 }
-                
-                if {[relation isnotempty $PolymorphicEvent]} {
-                #puts [relformat [relvar set ::rosea::Config::Event] Event]
-                #puts [relformat [relvar set ::rosea::Config::DeferredEvent] DeferredEvent]
-                #puts [relformat [relvar set ::rosea::Config::EffectiveEvent] EffectiveEvent]
-                #puts [relformat [relvar set ::rosea::Config::PolymorphicEvent] PolymorphicEvent]
-                #puts [relformat [relvar set ::rosea::Config::InheritedEvent] InheritedEvent]
-                #puts [relformat [relvar set ::rosea::Config::MappedEvent] MappedEvent]
-                #puts [relformat [relvar set ::rosea::Config::LocalEvent] LocalEvent]
-                #puts [relformat [relvar set ::rosea::Config::NonLocalEvent] NonLocalEvent]
-                }
-            } on error {result opts} {
-                log::error $result
+            } on error {result} {
+                ::rosea::Config::HandleConfigError $result
                 upvar #0 ::rosea::Config::errcount errcount
                 incr errcount
             }
+        }
+        proc HandleConfigError {result} {
+            set lines [split [string trimright $result] \n]
+            set nlines [llength $lines]
+            set lineno 0
+            while {$lineno < $nlines} {
+                set line [lindex $lines $lineno]
+                incr lineno
+                if {[regexp {^for[^:]+([^(]+)\(.+\), in relvar (.+)$} $line\
+                        match rnum refclass]} {
+                    set rnum [namespace tail $rnum]
+                    set refclass [namespace tail $refclass]
+                
+                    # Now iterate over the "tuple" lines that follow the constraint message.
+                    while {$lineno < $nlines} {
+                        set tupline [lindex $lines $lineno]
+                        if {[regexp {^tuple {(.+)} (.+)$} $tupline match tuple phrase]} {
+                            incr lineno
+                            if {[string match {is not referenced*} $phrase]} {
+                                set reftype notrefed
+                            } elseif {[string match {references no*} $phrase]} {
+                                set reftype refnone
+                            } elseif {[string match {*to by multiple*} $phrase]} {
+                                set reftype multrefed
+                            } else {
+                                log::error "unknown constraint phrasing, \"$phrase\""
+                                continue
+                            }
+                            set cde [relvar restrictone Config_DataError Relationship $rnum RefClass\
+                                    $refclass RefType $reftype]
+                            if {[relation isnotempty $cde]} {
+                                dict with tuple {
+                                    log::error [subst -nocommands [relation extract $cde Format]]
+                                }
+                            } else {
+                                log::error "$line\n$tupline"
+                            }
+                        } else {
+                            break
+                        }
+                    }
+                } else {
+                    log::error "unknown configuration error, \"$result\""
+                }
+            }
+        
+            return
         }
         namespace eval DomainDef {
             logger::initNamespace [namespace current]
@@ -3217,55 +3294,60 @@ namespace eval ::rosea {
                 namespace upvar ClassDef ClassName ClassName
                 set ClassName $name
             
+                if {$name eq {}} {
+                    tailcall DeclError EMPTY_NAME class
+                }
                 try {
-                    if {$name eq {}} {
-                        tailcall DeclError EMPTY_NAME class
-                    }
                     relvar insert ::rosea::Config::DomainElement [list\
                         Domain  $DomainName\
                         Element $name\
                     ]
-                    relvar insert ::rosea::Config::Class [list\
-                        Domain  $DomainName\
-                        Name    $name\
-                    ]
-                    set instops [pipe {
-                        relvar set ::rosea::Config::SuppliedInstanceOperation |
-                        relation extend ~ ioptuple\
-                            Domain string {[set DomainName]}\
-                            Class string {[set ClassName]}
-                    }]
-                    relvar union ::rosea::Config::SystemInstanceOperation $instops
-                    relvar union ::rosea::Config::InstanceOperation $instops
-                    relvar union ::rosea::Config::Operation $instops
-                    set classops [pipe {
-                        relvar set ::rosea::Config::SuppliedClassOperation |
-                        relation extend ~ coptuple\
-                            Domain string {[set DomainName]}\
-                            Class string {[set ClassName]}
-                    }]
-                    relvar union ::rosea::Config::SystemClassOperation $classops
-                    relvar union ::rosea::Config::ClassOperation $classops
-                    relvar union ::rosea::Config::Operation $classops
+                } trap {RAL relvar insert DUPLICATE_TUPLE} {} {
+                    tailcall DeclError DUP_ELEMENT_NAME $name
+                } ; # <2>
+                relvar insert ::rosea::Config::Class [list\
+                    Domain  $DomainName\
+                    Name    $name\
+                ]
+                set instops [pipe {
+                    relvar set ::rosea::Config::SuppliedInstanceOperation |
+                    relation extend ~ ioptuple\
+                        Domain string {[set DomainName]}\
+                        Class string {[set ClassName]}
+                }]
+                relvar union ::rosea::Config::SystemInstanceOperation $instops
+                relvar union ::rosea::Config::InstanceOperation $instops
+                relvar union ::rosea::Config::Operation $instops
+                set classops [pipe {
+                    relvar set ::rosea::Config::SuppliedClassOperation |
+                    relation extend ~ coptuple\
+                        Domain string {[set DomainName]}\
+                        Class string {[set ClassName]}
+                }]
+                relvar union ::rosea::Config::SystemClassOperation $classops
+                relvar union ::rosea::Config::ClassOperation $classops
+                relvar union ::rosea::Config::Operation $classops
             
-                    ConfigEvaluate [namespace current]::ClassDef  $body
-                } on error {result opts} {
-                    log::error $result
-                    upvar #0 ::rosea::Config::errcount errcount
-                    incr errcount
-                }
+                ConfigEvaluate [namespace current]::ClassDef $body
             }
             proc association {name source spec target args} {
                 if {[llength $args] % 2 != 0} {
                     tailcall DeclError ARG_FORMAT $args
                 }
+                if {$name eq {}} {
+                    tailcall DeclError EMPTY_NAME association
+                }
+                if {[string index $name 0] eq "~"} {
+                    tailcall DeclError TILDE_NAME $name
+                }
             
+                # Obtain references to the domain and class context.
                 namespace upvar ::rosea::Config::DomainDef DomainName DomainName
                 namespace upvar ::rosea::Config::DomainDef::ClassDef ClassName ClassName
             
                 set associator {}
                 set path {}
-            
+                
                 foreach {option value} $args {
                     switch -exact -- $option {
                         -associator {
@@ -3282,17 +3364,16 @@ namespace eval ::rosea {
                         }
                     }
                 }
-            
-                set ainfo [relvar restrictone ::rosea::Config::__AssocInfo Spec $spec]
-                if {[relation isempty $ainfo]} {
+                set cas [relvar restrictone ::rosea::Config::Config_AssocSpec Spec $spec]
+                if {[relation isempty $cas]} {
                     tailcall DeclError BAD_RELATIONSHIP_SPEC $spec
                 }
-                set needsassoc [relation extract $ainfo NeedsAssociator]
+                set needsassoc [relation extract $cas NeedsAssociator]
                 if {$needsassoc && $associator eq {}} {
                     tailcall DeclError NEED_ASSOCIATOR $spec
                 }
                 if {$source eq $target} {
-                    if {![relation extract $ainfo ReflexiveAllowed]} {
+                    if {![relation extract $cas ReflexiveAllowed]} {
                         tailcall DeclError REFLEXIVE_NOT_ALLOWED $spec
                     }
                     if {$needsassoc && $path eq {}} {
@@ -3300,20 +3381,28 @@ namespace eval ::rosea {
                     }
                 }
             
-                namespace upvar ::rosea::Config::DomainDef DomainName DomainName
+                try {
+                    relvar insert ::rosea::Config::DomainElement [list\
+                        Domain  $DomainName\
+                        Element $name\
+                    ]
+                } trap {RAL relvar insert DUPLICATE_TUPLE} {result opts} {
+                    tailcall DeclError DUP_ELEMENT_NAME $name
+                }
             
-                relvar insert ::rosea::Config::DomainElement [list\
-                    Domain  $DomainName\
-                    Element $name\
-                ]
-            
+                # Many relvars have tuples with the same heading, so we construct it
+                # once here.
                 set reltuple [list\
                     Domain  $DomainName\
                     Name $name\
                 ]
+            
+                # Populate the data for a Relationship and Association since that
+                # is what this command defines.
                 relvar insert ::rosea::Config::Relationship $reltuple
                 relvar insert ::rosea::Config::Association $reltuple
             
+                # Populate the type of association we are dealing with.
                 if {$associator eq {}} {
                     relvar insert ::rosea::Config::SimpleAssociation $reltuple
                     relvar insert ::rosea::Config::SimpleReferringClass [list\
@@ -3321,8 +3410,8 @@ namespace eval ::rosea {
                         Class           $source\
                         Relationship    $name\
                         Role            source\
-                        Conditionality  [relation extract $ainfo ReferringCond]\
-                        Multiplicity    [relation extract $ainfo ReferringMult]\
+                        Conditionality  [relation extract $cas ReferringCond]\
+                        Multiplicity    [relation extract $cas ReferringMult]\
                     ]
                     relvar insert ::rosea::Config::ReferringClass [list\
                         Domain          $DomainName\
@@ -3341,7 +3430,7 @@ namespace eval ::rosea {
                         Class           $target\
                         Relationship    $name\
                         Role            target\
-                        Conditionality  [relation extract $ainfo ReferencedCond]\
+                        Conditionality  [relation extract $cas ReferencedCond]\
                     ]
                     relvar insert ::rosea::Config::ReferencedClass [list\
                         Domain          $DomainName\
@@ -3356,14 +3445,14 @@ namespace eval ::rosea {
                         Role            target\
                     ]
                 } else {
-                    relvar insert ::rosea::Config::ClassAssoc [list\
+                    relvar insert ::rosea::Config::Config_ClassAssoc [list\
                         Domain              $DomainName\
                         Relationship        $name\
                         AssocClass          $associator\
                         SourceClass         $source\
                     ]
                     if {[llength $path] == 0} {
-                        relvar insert ::rosea::Config::NonReflexiveAssoc [list\
+                        relvar insert ::rosea::Config::Config_NonReflexiveAssoc [list\
                             Domain              $DomainName\
                             Relationship        $name\
                             AssocClass          $associator\
@@ -3371,14 +3460,14 @@ namespace eval ::rosea {
                             TargetClass         $target\
                         ]
                     } else {
-                        relvar insert ::rosea::Config::ReflexiveAssoc [list\
+                        relvar insert ::rosea::Config::Config_ReflexiveAssoc [list\
                             Domain              $DomainName\
                             Relationship        $name\
                             AssocClass          $associator\
                             SourceClass         $source\
                         ]
                         foreach {sourceattr targetattr} $path {
-                            relvar insert ::rosea::Config::ReflexivePath [list\
+                            relvar insert ::rosea::Config::Config_ReflexivePath [list\
                                 Domain              $DomainName\
                                 Relationship        $name\
                                 AssocClass          $associator\
@@ -3388,15 +3477,15 @@ namespace eval ::rosea {
                             ]
                         }
                     }
-            
+                    
                     relvar insert ::rosea::Config::ClassBasedAssociation $reltuple
                     relvar insert ::rosea::Config::SourceClass [list\
                         Domain          $DomainName\
                         Class           $source\
                         Relationship    $name\
                         Role            source\
-                        Conditionality  [relation extract $ainfo ReferringCond]\
-                        Multiplicity    [relation extract $ainfo ReferringMult]\
+                        Conditionality  [relation extract $cas ReferringCond]\
+                        Multiplicity    [relation extract $cas ReferringMult]\
                     ]
                     relvar insert ::rosea::Config::ReferencedClass [list\
                         Domain          $DomainName\
@@ -3415,8 +3504,8 @@ namespace eval ::rosea {
                         Class           $target\
                         Relationship    $name\
                         Role            target\
-                        Conditionality  [relation extract $ainfo ReferencedCond]\
-                        Multiplicity    [relation extract $ainfo ReferencedMult]\
+                        Conditionality  [relation extract $cas ReferencedCond]\
+                        Multiplicity    [relation extract $cas ReferencedMult]\
                     ]
                     relvar insert ::rosea::Config::ReferencedClass [list\
                         Domain          $DomainName\
@@ -3454,13 +3543,23 @@ namespace eval ::rosea {
                 if {[llength $args] < 2} {
                     tailcall DeclError TOO_FEW_SUBCLASSES [llength $args]
                 }
+                if {$name eq {}} {
+                    tailcall DeclError EMPTY_NAME generalization
+                }
+                if {[string index $name 0] eq "~"} {
+                    tailcall DeclError TILDE_NAME $name
+                }
             
                 namespace upvar ::rosea::Config::DomainDef DomainName DomainName
             
-                relvar insert ::rosea::Config::DomainElement [list\
-                    Domain  $DomainName\
-                    Element $name\
-                ]
+                try {
+                    relvar insert ::rosea::Config::DomainElement [list\
+                        Domain  $DomainName\
+                        Element $name\
+                    ]
+                } trap {RAL relvar insert DUPLICATE_TUPLE} {result opts} {
+                    tailcall DeclError DUP_ELEMENT_NAME $name
+                }
             
                 set reltuple [list\
                     Domain  $DomainName\
@@ -3536,12 +3635,19 @@ namespace eval ::rosea {
                 }
             }
             proc operation {name params body} {
+                if {$name eq {}} {
+                    tailcall DeclError EMPTY_NAME operation
+                }
                 namespace upvar ::rosea::Config::DomainDef DomainName DomainName
             
-                relvar insert ::rosea::Config::DomainElement [list\
-                    Domain      $DomainName\
-                    Element     $name\
-                ]
+                try {
+                    relvar insert ::rosea::Config::DomainElement [list\
+                        Domain      $DomainName\
+                        Element     $name\
+                    ]
+                } trap {RAL relvar insert DUPLICATE_TUPLE} {result opts} {
+                    tailcall DeclError DUP_ELEMENT_NAME $name
+                }
                 relvar insert ::rosea::Config::DomainOperation [list\
                     Domain      $DomainName\
                     Name        $name\
@@ -3597,7 +3703,7 @@ namespace eval ::rosea {
                                     Domain      $DomainName\
                                     Class       $ClassName\
                                     Number      $value\
-                                ]
+                                ] ; # <1>
                                 relvar insert ::rosea::Config::IdentifyingAttribute [list\
                                     Domain      $DomainName\
                                     Class       $ClassName\
@@ -3620,6 +3726,7 @@ namespace eval ::rosea {
                     namespace upvar ::rosea::Config::DomainDef::ClassDef ClassName ClassName
                 
                     set refnum 1
+                    set linkopts [list]
                 
                     foreach {option value} $args {
                         switch -exact -- $option {
@@ -3630,31 +3737,39 @@ namespace eval ::rosea {
                                 if {[llength $value] < 1 || [llength $value] > 2} {
                                     tailcall DeclError ARG_FORMAT $value
                                 }
-                                lassign $value referring referenced
-                                if {$referenced eq {}} {
-                                    set referenced $referring
-                                }
-                                relvar insert ::rosea::Config::AttributeReference [list\
-                                    Domain              $DomainName\
-                                    ReferringClass      $ClassName\
-                                    ReferringAttribute  $referring\
-                                    ReferringRole       source\
-                                    ReferencedClass     $rclass\
-                                    ReferencedAttribute $referenced\
-                                    ReferencedRole      target\
-                                    ReferencedIdNumber  $refnum\
-                                    Relationship        $relname
-                                ]
+                                lappend linkopts $value
                             }
                             default {
                                 tailcall DeclError UNKNOWN_OPTION reference $option
                             }
                         }
                     }
+                
+                    # We defer processing the link options until the end so as not
+                    # to impose an order on the -refid option.
+                    foreach linkopt $linkopts {
+                        lassign $linkopt referring referenced
+                        if {$referenced eq {}} {
+                            set referenced $referring
+                        }
+                        relvar insert ::rosea::Config::AttributeReference [list\
+                            Domain              $DomainName\
+                            ReferringClass      $ClassName\
+                            ReferringAttribute  $referring\
+                            ReferringRole       source\
+                            ReferencedClass     $rclass\
+                            ReferencedAttribute $referenced\
+                            ReferencedRole      target\
+                            ReferencedIdNumber  $refnum\
+                            Relationship        $relname
+                        ] ; # <1>
+                    }
                 }
                 proc classop {name params body} {
                     if {$name eq {}} {
                         tailcall DeclError EMPTY_NAME "class operation"
+                    } elseif {[string first :: $name] != -1} {
+                        tailcall DeclError NS_QUALIFIERS $name
                     }
                 
                     namespace upvar ::rosea::Config::DomainDef DomainName DomainName
@@ -3676,6 +3791,8 @@ namespace eval ::rosea {
                 proc instop {name params body} {
                     if {$name eq {}} {
                         tailcall DeclError EMPTY_NAME "instance operation"
+                    } elseif {[string first :: $name] != -1} {
+                        tailcall DeclError NS_QUALIFIERS $name
                     }
                 
                     namespace upvar ::rosea::Config::DomainDef DomainName DomainName
@@ -3768,7 +3885,7 @@ namespace eval ::rosea {
                         if {$name eq {}} {
                             tailcall DeclError EMPTY_NAME state
                         }
-                        if {$name in {CH IG}} {
+                        if {$name in {@ CH IG}} {
                             tailcall DeclError PSEUDO_STATE $name state
                         }
                     
@@ -3824,7 +3941,7 @@ namespace eval ::rosea {
                             Model   $ClassName\
                             Event   $event\
                         ]
-                        relvar uinsert ::rosea::Config::Event $eventtuple
+                        relvar uinsert ::rosea::Config::Event $eventtuple ; # <1>
                         relvar uinsert ::rosea::Config::EffectiveEvent $eventtuple
                         relvar uinsert ::rosea::Config::LocalEvent $eventtuple
                     
@@ -3852,7 +3969,7 @@ namespace eval ::rosea {
                         if {$name eq {}} {
                             tailcall DeclError EMPTY_NAME initialstate
                         }
-                        if {$name in {CH IG}} {
+                        if {$name in {@ CH IG}} {
                             tailcall DeclError PSEUDO_STATE $name initialstate
                         }
                         variable InitialState $name
@@ -3987,7 +4104,7 @@ namespace eval ::rosea {
                                 variable multiIdNum $value
                             }
                             default {
-                                tailcall DeclError UNKNOWN_OPTION  identifyby $option
+                                tailcall DeclError UNKNOWN_OPTION identifyby $option
                             }
                         }
                     }
@@ -4017,7 +4134,9 @@ namespace eval ::rosea {
             relation assign $domain {Name DomainName} {Location DomainLoc}
         
             try {
-                ConfigEvaluate [namespace current]::DomainPop $body
+                relvar eval {
+                    ConfigEvaluate [namespace current]::DomainPop $body
+                }
             } on error {result opts} {
                 log::error $result
                 upvar #0 ::rosea::Config::errcount errcount
@@ -4136,10 +4255,9 @@ namespace eval ::rosea {
         relvar create Trace {
             Trace_Id    int
             Timestamp   bignum
-            Source      string
+            Source      list
             Event       string
-            Target      string
-            Class       string
+            Target      list
         } Trace_Id
         
         relvar create Creation {
@@ -4163,11 +4281,33 @@ namespace eval ::rosea {
             Creation Trace_Id\
             Polymorphic Trace_Id\
             Transition Trace_Id
+        variable targetCmpFunc [lambda {instrefs target} {
+            lassign $target trelvar tinst
+            foreach instref $instrefs {
+                lassign $instref crelvar cinst
+                if {$trelvar eq $crelvar && [ral relation is $tinst subsetof $cinst]} {
+                    return true
+                }
+            }
+            return false
+        }]
         variable traceState off
         variable traceNumber 0
         variable traceLogState off
         variable traceLogLevel info
         variable traceLogCmd [::logger::init rosea]
+        proc QueryClassTraces {classes} {
+            variable Trace
+            return [relation restrictwith $Trace {
+                [lindex $Target 0] in $classes ||\
+                    [namespace tail [lindex $Target 0]] in $classes
+            }] ; # <1>
+        }
+        proc QueryTargetTraces {targets} {
+            variable Trace
+            variable targetCmpFunc
+            return [relation restrictwith $Trace {[{*}$targetCmpFunc $targets $Target]}]
+        }
         proc TraceCreation {source event target} {
             variable traceState
             if {$traceState} {
@@ -4217,7 +4357,6 @@ namespace eval ::rosea {
                 Source      $src\
                 Event       $event\
                 Target      $target\
-                Class       [lindex $target 0]\
             ]]
         }
         proc LogTrace {trace} {
@@ -4244,7 +4383,7 @@ namespace eval ::rosea {
                     source  $Source\
                     event   $Event\
                     target  $Target\
-                    class   $Class\
+                    class   [lindex $Target 0]\
                 ] ; # <3>
                 if {[relation isnotempty $Transition]} { # <4>
                     relation assign $Transition
@@ -4264,6 +4403,16 @@ namespace eval ::rosea {
                 lappend result $labeled
             }
             return $result
+        }
+        proc DecodeAllTraces {} {
+            variable Trace
+            tailcall TracesToRecords $Trace
+        }
+        proc DecodeClassTraces {args} {
+            return [TracesToRecords [QueryClassTraces $args]]
+        }
+        proc DecodeTargetTraces {args} {
+            tailcall TracesToRecords [QueryTargetTraces $args]
         }
         proc FormatTraceRec {rec} {
             dict with rec {
@@ -4356,6 +4505,34 @@ namespace eval ::rosea {
             append result "\}\n"
         
             return $result
+        }
+        proc DiagAllTraces {filename args} {
+            set chan [open $filename w]
+            variable Trace
+            try {
+                chan puts $chan [DiagTraces $Trace {*}$args]
+            } finally {
+                chan close $chan
+            }
+            return
+        }
+        proc DiagClassTraces {filename classes args} {
+            set chan [open $filename w]
+            try {
+                chan puts $chan [DiagTraces [QueryClassTraces $classes] {*}$args]
+            } finally {
+                chan close $chan
+            }
+            return
+        }
+        proc DiagTargetTraces {filename targets args} {
+            set chan [open $filename w]
+            try {
+                chan puts $chan [DiagTraces [QueryTargetTraces $targets] {*}$args]
+            } finally {
+                chan close $chan
+            }
+            return
         }
     }
 

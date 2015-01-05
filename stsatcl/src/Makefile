@@ -19,30 +19,13 @@ vpath %.test $(TESTDIR)
 vpath %.uxf $(IMAGEDIR)
 
 DOCSRC 	=\
-	rosea.aweb\
+	stsatcl.aweb\
 	$(NULL)
 
 DIAGRAMS =\
-	assoc-link.uxf\
-	partition-link.uxf\
-	correl-link.uxf\
-	link-classes.uxf\
 	trace-schema.uxf\
 	wmc-class-diagram.uxf\
 	wm-states.uxf\
-	arch-class-diagram.uxf\
-	ref-links.uxf\
-	assoc-ref-links.uxf\
-	gen-links.uxf\
-	config-domain.uxf\
-	$(NULL)
-
-LSDIAGRAMS =\
-	config-classes.uxf\
-	config-relation.uxf\
-	config-statemodel.uxf\
-	config-transition.uxf\
-	config-event.uxf\
 	ct-states.uxf\
 	$(NULL)
 
@@ -52,11 +35,10 @@ SEQDIAG	=\
 
 IMAGES =\
 	$(patsubst %.uxf,$(IMAGEDIR)/%.pdf,$(DIAGRAMS))\
-	$(patsubst %.uxf,$(IMAGEDIR)/%.pdf,$(LSDIAGRAMS))\
 	$(NULL)
 
 SEQIMAGES=\
-	$(patsubst %.diag,$(IMAGEDIR)/%.pdf,$(SEQDIAG))\
+	$(patsubst %.diag,$(IMAGEDIR)/%.svg,$(SEQDIAG))\
 	$(NULL)
 
 TCLSRC	=\
@@ -67,14 +49,6 @@ PDF 	=\
      	$(DOCDIR)/$(patsubst %.aweb,%.pdf,$(DOCSRC))\
      	$(NULL)
 
-MANSRC	=\
-     	$(DOCDIR)/$(patsubst %.aweb,%.man,$(DOCSRC))\
-     	$(NULL)
-
-MANDOC	=\
-     	$(DOCDIR)/$(patsubst %.aweb,%.html,$(DOCSRC))\
-     	$(NULL)
-
 TESTS	=\
      	$(patsubst %.aweb,%.test,$(DOCSRC))\
 	$(NULL)
@@ -82,12 +56,8 @@ TESTS	=\
 CLEANFILES =\
 	$(TCLSRC)\
 	$(IMAGES)\
-	$(SEQIMAGES)\
 	$(PDF)\
 	$(TESTDIR)/$(TESTS)\
-	wmctrl-trace.txt\
-	wmctrl.tcl\
-	runwm.tcl\
 	$(NULL)
 
 A2XOPTS =\
@@ -100,6 +70,8 @@ ATANGLEOPTS =\
 
 DBLATEX_PARAMS =\
 	doc.publisher.show=0\
+	glossary.numbered=0\
+	index.numbered=0\
 	doc.lot.show=figure,table\
 	toc.section.depth=3\
 	doc.section.depth=0\
@@ -112,7 +84,6 @@ DOCINFO	=\
 EXTRAS =\
 	docinfo.xml\
 	$(DOCINFO)\
-	bibliography.txt\
 	$(NULL)
 
 ASCIIDOC_ATTRS =\
@@ -129,9 +100,9 @@ ASCIIDOC_OPTS =\
 	$(patsubst %,--attribute=%,$(ASCIIDOC_ATTRS))\
 	$(NULL)
 
-.PHONY : all doc code tests runtests example clean
+.PHONY : all doc code tests runtests clean
 
-all : doc code tests example manual
+all : doc code tests example
 
 doc : $(PDF)
 
@@ -139,18 +110,16 @@ code : $(TCLSRC) pkgIndex.tcl
 
 tests : code $(TESTS)
 
-example : $(TCLSRC) runwm.tcl
-
-manual : $(MANDOC)
+example : $(TCLSRC) wmctrl.tcl
 
 runtests : tests
 	cd $(TESTDIR) ; tclsh $(TESTS) -verbose bet -level info
 
 runexample : example
-	tclsh runwm.tcl | tee wmctrl-trace.txt
+	tclsh wmctrl.tcl | tee wmctrl-trace.txt
 
-wmctrl-trace.txt $(IMAGEDIR)/wmctrl-seqdiag.diag : runwm.tcl wmctrl.tcl $(TCLSRC)
-	tclsh runwm.tcl | tee wmctrl-trace.txt
+wmctrl-trace.txt : wmctrl.tcl $(TCLSRC)
+	tclsh wmctrl.tcl | tee wmctrl-trace.txt
 
 clean :
 	$(RM) $(CLEANFILES)
@@ -165,14 +134,10 @@ pkgIndex.tcl : $(DOCSRC)
 wmctrl.tcl : $(DOCSRC)
 	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
 
-runwm.tcl : $(DOCSRC)
-	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
-
 $(DOCDIR)/%.pdf : %.aweb
-	a2x $(A2XOPTS) --doctype=book  --format=pdf\
+	a2x $(A2XOPTS) --doctype=article  --format=pdf\
 	    --destination-dir=$(DOCDIR)\
 	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) $<
-	$(RM) $(DOCDIR)/*__[0-9].pdf
 
 %.tcl : %.aweb
 	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
@@ -180,34 +145,12 @@ $(DOCDIR)/%.pdf : %.aweb
 %.test : %.aweb
 	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $(TESTDIR)/$@ $<
 
-$(IMAGEDIR)/config-domain.pdf : $(IMAGEDIR)/config-domain.uxf
-	umlet -action=convert -format=pdf\
-		-filename=$< -output=$(basename $@)
-
-$(IMAGEDIR)/config-%.pdf : config-%.uxf
-	umlet -action=convert -format=pdf\
-		-filename=$< -output=$(basename $@)-cvt
-	pdftk $(basename $@)-cvt.pdf cat 1left output $@
-	$(RM) $(basename $@)-cvt.pdf
-
-$(IMAGEDIR)/ct-states.pdf : ct-states.uxf
-	umlet -action=convert -format=pdf\
-		-filename=$< -output=$(basename $@)-cvt
-	pdftk $(basename $@)-cvt.pdf cat 1left output $@
-	$(RM) $(basename $@)-cvt.pdf
-
 $(IMAGEDIR)/%.pdf : %.uxf
 	umlet -action=convert -format=pdf\
 		-filename=$< -output=$(basename $@)
 
-$(IMAGEDIR)/%.pdf : $(IMAGEDIR)/%.diag
-	seqdiag --antialias -T pdf -o $@ $<
-
-$(MANSRC) : $(DOCSRC)
-	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $@ $<
-
-$(MANDOC) : $(MANSRC)
-	dtplite -o $@ html $<
+$(IMAGEDIR)/%.svg : %.diag
+	seqdiag --antialias -T svg -o $@ $<
 #
 # vim :set sw=8 ts=8 sts=8 noexpandtab:
 #
