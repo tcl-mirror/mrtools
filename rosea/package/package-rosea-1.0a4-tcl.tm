@@ -2,7 +2,7 @@
 # -- Tcl Module
 
 # @@ Meta Begin
-# Package rosea 1.0a3
+# Package rosea 1.0a4
 # Meta description Rosea is a data and execution architecture for
 # Meta description translating XUML models using Tcl as the implementation
 # Meta description language.
@@ -30,7 +30,7 @@ package require lambda
 
 # ACTIVESTATE TEAPOT-PKG BEGIN DECLARE
 
-package provide rosea 1.0a3
+package provide rosea 1.0a4
 
 # ACTIVESTATE TEAPOT-PKG END DECLARE
 # ACTIVESTATE TEAPOT-PKG END TM
@@ -101,11 +101,13 @@ namespace eval ::rosea {
     
     namespace export populateFromFile
     
+    namespace export tunnel
+    
     namespace export trace
     
     namespace ensemble create
 
-    variable version 1.0a3
+    variable version 1.0a4
 
     logger::initNamespace [namespace current]
 
@@ -506,7 +508,7 @@ namespace eval ::rosea {
                 }
                 
                 namespace ensemble create\
-                    -command ${className}::instop\
+                    -command ${className}::Instance\
                     -parameters instref\
                     -map [dict merge $opmap $sysmap]
             }
@@ -987,6 +989,9 @@ namespace eval ::rosea {
             ::chan close $f
         }
     }
+    proc tunnel {instref op args} {
+        tailcall [lindex $instref 0]::Instance $instref $op {*}$args
+    }
     proc trace {subcmd args} {
         switch -exact -- $subcmd {
             control {
@@ -1115,7 +1120,7 @@ namespace eval ::rosea {
             UNKNOWN_RELATIONSHIP    {unknown relationship, "%s"}
             NON_PARTICIPANTS        {"%s" and "%s" don't participate in %s,\
                                         expected "%s" and "%s"}
-            MUST_BE_SINGULAR        {number of refered to instances for "%s" must be one,\
+            MUST_BE_SINGULAR        {number of referred to instances for "%s" must be one,\
                                         got %d}
             NOT_IN_ASSOCIATION         {"%s" $relvar1 not a participant in "%s"}
             AMBIGUOUS_UNLINK         {"%s" is reflexive and linking via "%s" is ambiguous}
@@ -1158,7 +1163,7 @@ namespace eval ::rosea {
             PSEUDO_STATE    {the transition action, "%s", is not valid as %s}
             EXPECTED_PSEUDO_STATE    {expected CH or IG, got "%s"}
             ARG_MISMATCH      {number of population values must be a multiple of %d, got %d}
-            UNKNOWN_ASSIGNER    {unknown trace subcomand, "%s"}
+            UNKNOWN_TRACE_CMD   {unknown trace subcomand, "%s"}
             BAD_TRACEOP     {unknown trace operation, "%s"}
             NO_SAVEFILE     {no save file name provided}
             BAD_TRACETYPE   {unknown trace type, "%s"}
@@ -1197,8 +1202,23 @@ namespace eval ::rosea {
             return
         }
         proc SelfInstRef {{level 2}} {
-            upvar $level self srcself
-            return [expr {[info exists srcself] ? $srcself : [nilInstRef]}]
+            set foundRef false
+            set ref [nilInstRef]
+        
+            for {set ns [uplevel $level namespace current]} {$ns ne "::"}\
+                    {set ns [uplevel [incr level] namespace current]} {
+                if {!$foundRef} {
+                    upvar $level self srcself
+                    if {[info exists srcself]} {
+                        set ref $srcself
+                        set foundRef true
+                    }
+                }
+                if {[string match {*__Activity*} $ns]} {
+                    return $ref ; # <1>
+                }
+            }
+            return [nilInstRef]
         }
         namespace export DeclError
         
@@ -1625,7 +1645,7 @@ namespace eval ::rosea {
             tailcall ::rosea::Dispatch::SignalTimeRemaining $srcref $event $dstref
         }
         proc instop {instref op args} {
-            tailcall [lindex $instref 0]::instop $instref $op {*}$args
+            tailcall [lindex $instref 0]::Instance $instref $op {*}$args
         }
     }
     namespace eval RelCmds {
@@ -3228,14 +3248,13 @@ namespace eval ::rosea {
                 }
             } on error {result} {
                 ::rosea::Config::HandleConfigError $result
-                upvar #0 ::rosea::Config::errcount errcount
-                incr errcount
             }
         }
         proc HandleConfigError {result} {
             set lines [split [string trimright $result] \n]
             set nlines [llength $lines]
             set lineno 0
+            upvar #0 ::rosea::Config::errcount errcount
             while {$lineno < $nlines} {
                 set line [lindex $lines $lineno]
                 incr lineno
@@ -3249,6 +3268,7 @@ namespace eval ::rosea {
                         set tupline [lindex $lines $lineno]
                         if {[regexp {^tuple {(.+)} (.+)$} $tupline match tuple phrase]} {
                             incr lineno
+                            incr errcount
                             if {[string match {is not referenced*} $phrase]} {
                                 set reftype notrefed
                             } elseif {[string match {references no*} $phrase]} {
