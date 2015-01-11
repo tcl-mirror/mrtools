@@ -4747,6 +4747,7 @@ in finding a value for `self`.
 <<helper commands>>=
 proc SelfInstRef {{level 2}} {
     set foundRef false
+    set ref [nilInstRef]
 
     for {set ns [uplevel $level namespace current]} {$ns ne "::"}\
             {set ns [uplevel [incr level] namespace current]} {
@@ -4764,6 +4765,25 @@ proc SelfInstRef {{level 2}} {
     return [nilInstRef]
 }
 ----
+<1> One might conclude that it is not possible to reach this statement
+without `ref` being set. Under most circumstances that is true.
+Since only state activities reside in the `__Activity` namespace and all
+state activities have a `self` variable,
+we would expect `ref` to be set in the first `if` statement.
+But this is Tcl,
+and it is possible to _inject_ code into the namespace to be executed.
+Consider, for example, a Tk button command that is created in
+a state activity and given the command
+`[namespace code [list instop $self signal MyEvent]]`.
+This will cause execution in the `__Activity` namespace but no
+`self` variable will be defined when that execution takes place.
+So the initialization of `ref` outside of the `for` loop is necessary
+to protect against this situation.
+*N.B.* that the correct way to signal events or perform other
+instance based operations from outside of the domain (_e.g._ in
+Tk callbacks) is to use the `rosea tunnel` command.
+
+
 <1> Note that if we reach this statement we are assured the value of `ref` is
 set since only state activities reside in the `__Activity` namespace and all
 state activities have a `self` variable (_i.e._ we are assured to have executed
@@ -5090,7 +5110,83 @@ when it can be deduced from the instance reference.
 ----
 <<instance commands>>=
 proc instop {instref op args} {
-    tailcall [lindex $instref 0]::instance $instref $op {*}$args
+    tailcall [lindex $instref 0]::Instance $instref $op {*}$args
+}
+----
+
+==== Tunneling to Instance Operations
+
+It is necessary to provide a means to break the encapsulation of a domain,
+albeit in a very controlled fashion.
+Consider, for example, the problem of interfacing Tk events into
+a `rosea` domain.
+It is necessary to obtain an instance reference, since events are signaled
+to instances.
+This can be done in a variety of ways,
+but one choice is to use the `findById` operation on a class.
+We then wish to execute the `signal` operation on that instance and
+we wish that event to be signaled from outside of the domain,
+_i.e._ the transformation of a Tk event into a domain should start
+a new thread of control.
+The `tunnel` command provides this capability.
+
+///////
+----
+<<manual package commands>>=
+[call [cmd "::rosea tunnel"] [arg instref] [arg op] [opt [arg "param1 ..."]]]
+
+The [cmd tunnel] command invokes the instance based operation, [arg op],
+on the instance given by [arg instref] from outside of a domain's
+implementation.
+The [arg paramN] arguments are passed to the operation.
+This procedure is intended primarily for bridging other Tcl/Tk events
+into a domain.
+Consider the following command being run from within an
+instance operation of some class.
+
+[example {
+ttk::button .run -text Run -command [list ::rosea tunnel $self signal Run]
+}]
+
+The effect here is to tie a Tk event through the button command
+to the instance which invoked the above code.
+In this way, the Tk event has been transformed into a state machine event
+delivered from outside of the domain.
+----
+
+[float]
+===== Implementation
+
+Note that the implementation of `tunnel` is exactly the same as the
+implementation of `instop`.
+However, by providing a point of invocation that is outside of the
+domain,
+we will insure that any generated signals do not appear as if they
+came from inside the domain.
+
+In particular, users should *not* execute violate encapsulation by
+executing from within a state activity, command like:
+
+........
+.runbutton configure -command [namespace code [list instop $self signal Run]]
+........
+
+This has the effect on injecting code into the namespace of a state activity
+and should not be used as it can, under certain corner cases,
+confuse the determination of the source of an event.
+The `tunnel` command can be viewed as a convenience procedure
+to break domain encapsulation in a controlled manner without
+having to code a clumsy invocation of `::rosea::InstCmds::instop` directly.
+
+(((proc,rosea,configure)))
+[source,tcl]
+----
+<<rosea exports>>=
+namespace export tunnel
+
+<<rosea commands>>=
+proc tunnel {instref op args} {
+    tailcall [lindex $instref 0]::Instance $instref $op {*}$args
 }
 ----
 
@@ -12815,7 +12911,7 @@ test generate-1.2 {
     }
     rosea generate
     set ref [::foo::X create x1 red y1 truck]
-    ::foo::X::instance $ref readAttribute x2 x3
+    rosea tunnel $ref readAttribute x2 x3
 } -result {foo 20}
 ----
 
@@ -12841,7 +12937,7 @@ test generate-1.3 {
     }
     rosea generate
     set ref [::foo::X create x1 red y1 truck x2 bar x3 40]
-    ::foo::X::instance $ref readAttribute x2 x3
+    rosea tunnel $ref readAttribute x2 x3
 } -result {bar 40}
 ----
 
@@ -13151,7 +13247,7 @@ if {$hasStateModel || $hasPolyEvents} {
 }
 
 namespace ensemble create\
-    -command ${className}::instance\
+    -command ${className}::Instance\
     -parameters instref\
     -map [dict merge $opmap $sysmap]
 ----
@@ -13183,7 +13279,7 @@ test generate-1.5 {
     }
     rosea generate
     set ref [::foo::c1 create a1 bar a2 baz]
-    ::foo::c1::instance $ref echo 27
+    rosea tunnel $ref echo 27
 } -result {27}
 ----
 
@@ -13681,8 +13777,8 @@ test generate-2.3 {
         set f [::foo::x create a1 fred prev {} a2 10]
         set j [::foo::x create a1 john prev fred a2 20]
     }
-    set r [::foo::x::instance $f findRelated ~R1]
-    ::foo::x::instance $r readAttribute a2
+    set r [rosea tunnel $f findRelated ~R1]
+    rosea tunnel $r readAttribute a2
 } -result {20}
 ----
 
@@ -13765,7 +13861,7 @@ test generate-2.5 {
         set c2 [meta::C2 create Id fub C1Id {}]
         meta::R1 link $c1 [meta::C2 findAll]
     }
-    meta::C2::instance $c2 readAttribute C1Id
+    rosea tunnel $c2 readAttribute C1Id
 } -result {foo}
 ----
 
@@ -14403,8 +14499,8 @@ test generate-3.3 {
         ::foo::Group create PrevElem fred NextElem john
         ::foo::Group create PrevElem fred NextElem sally
     }
-    set r [::foo::Element::instance $s findRelated ~R1]
-    ::foo::Element::instance $r readAttribute ElemNumber
+    set r [rosea tunnel $s findRelated ~R1]
+    rosea tunnel $r readAttribute ElemNumber
 } -result {10}
 ----
 
@@ -14450,7 +14546,7 @@ test generate-3.4 {
 
         set assoc [::foo::R1 link [::foo::X findAll] [::foo::Y findAll]]
     }
-    foo::A::instance $assoc refMultiplicity
+    rosea tunnel $assoc refMultiplicity
 } -result {4}
 ----
 
@@ -14872,11 +14968,11 @@ test generate-4.3 {
         ::grocer::UnseededFruit create Name banana
         ::grocer::YellowFruit create Name banana
     }
-    set apple [grocer::Fruit::instance $aref findRelated {~R1 SeededFruit}]
-    set banana [grocer::Fruit::instance $bref findRelated {~R2 YellowFruit}]
+    set apple [rosea tunnel $aref findRelated {~R1 SeededFruit}]
+    set banana [rosea tunnel $bref findRelated {~R2 YellowFruit}]
     testConditions\
-        {[grocer::SeededFruit::instance $apple readAttribute Name] eq "apple"}\
-        {[grocer::YellowFruit::instance $banana readAttribute Name] eq "banana"}
+        {[rosea tunnel $apple readAttribute Name] eq "apple"}\
+        {[rosea tunnel $banana readAttribute Name] eq "banana"}
 } -result {1}
 ----
 
@@ -14975,7 +15071,7 @@ test generate-4.4 {
     }
 
     set ::rosea::test::states [list]
-    grocer::Fruit::instance $aref signal grow
+    rosea tunnel $aref signal grow
     vwait ::rosea::test::states
 
     testConditions\
@@ -16987,15 +17083,15 @@ test DecodeTargetTraces-1.0 {
     set i1 [foo::c1 findById Id first]
     set i2 [foo::c1 findById Id second]
     set i3 [foo::c1 findById Id third]
-    ::foo::c1::instance $i1 signal E1
-    ::foo::c1::instance $i2 signal E1
-    ::foo::c1::instance $i3 signal E1
-    ::foo::c1::instance $i1 signal E1
-    ::foo::c1::instance $i1 signal E1
+    rosea tunnel $i1 signal E1
+    rosea tunnel $i2 signal E1
+    rosea tunnel $i3 signal E1
+    rosea tunnel $i1 signal E1
+    rosea tunnel $i1 signal E1
 
-    ::foo::c1::instance $i1 signal E2
-    ::foo::c1::instance $i2 signal E2
-    ::foo::c1::instance $i3 signal E2
+    rosea tunnel $i1 signal E2
+    rosea tunnel $i2 signal E2
+    rosea tunnel $i3 signal E2
 
     waitForSync
     set traces [::rosea::Trace::DecodeTargetTraces $i1 $i2]
@@ -18746,7 +18842,7 @@ matches the sensor and signal an event.
         set ct [::wmctrl::ClothesTub findWhere {
             $MachineID eq $machine
         }]
-        ::wmctrl::ClothesTub::instance $ct signal $sensorState
+        rosea tunnel $ct signal $sensorState
     }
 }
 ----
@@ -19215,16 +19311,6 @@ The context in which a state activity runs is such that these
 commands will resolve using unqualified command names.
 [list_begin definitions]
 [usage "Instance Commands"]
-[call [cmd [arg class]::instance] [arg instref] [arg operation]\
-        [opt [arg "attr1 attr2 ..."]]]
-To access instance operations outside of a state activity or domain
-operation (_e.g._ in a bridge),
-each class has a command called [cmd [arg class]::instance], where
-[arg class] is the name of the class.
-This command is an ensemble command whose subcommands consist of all
-those commands listed below plus any instance operations specifically
-defined on the instances of the class ([emph i.e.] using the [cmd instop]
-command when the class was configured).
 <<manual architecture instance commands>>
 [list_end]
 [manpage_end]
