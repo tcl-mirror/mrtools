@@ -1,4 +1,4 @@
-# This software is copyrighted 2013 by G. Andrew Mangogna.
+# This software is copyrighted 2013-2015 by G. Andrew Mangogna.
 # The following terms apply to all files associated with the software unless
 # explicitly disclaimed in individual files.
 # 
@@ -67,7 +67,8 @@ package require Tcl 8.6
 package require ral
 package require ralutil
 package require logger
-package require oomoore
+package require oomoore 1.0
+package require struct::stack
 
 namespace eval ::aweb {
     namespace export parser
@@ -252,8 +253,10 @@ namespace eval ::aweb {
         return
     }
 
-    constructor {} {
+    constructor {{path {}}} {
         next
+
+        my variable incPath $path
 
         namespace import ::ral::*
         namespace import ::ralutil::*
@@ -308,15 +311,23 @@ namespace eval ::aweb {
         relvar association R2\
             ChunkRef {ChunkLineNum ChunkOffset} *\
             Chunk {BlockLineNum Offset} 1
+
+        # Define a stack to use for included files
+        my variable chanStack
+        set chanStack [::struct::stack]
     }
 
     destructor {
         next
+
+        my variable chanStack
+        $chanStack destroy
     }
 
     # Parse a file and build up the chunk information.
     method parse {infilename} {
         my variable infile
+        my variable chanStack
         if {$infilename eq "-"} {
             set infile stdin
             set ichan stdin
@@ -329,9 +340,35 @@ namespace eval ::aweb {
             relvar eval {
                 # We read the file, line by line so that we can count the
                 # lines for diagnostic purposes.
-                for {set lcnt [chan gets $ichan line]} {$lcnt >= 0}\
-                        {set lcnt [chan gets $ichan line]} {
+                while {true} {
+                    set lcnt [chan gets $ichan line]
+                    if {$lcnt < 0} {
+                        chan close $ichan
+                        if {[$chanStack size] == 0} {
+                            # We are finished when there is nothing
+                            # pushed onto the channel stack.
+                            break
+                        } else {
+                            lassign [$chanStack pop] ichan infile
+                            continue
+                        }
+                    }
                     log::debug "$lineno: $line"
+                    # Check for an "include" directive. We will filter those
+                    # out here and push them on the open channel stack.
+                    if {[regexp -- {^include::([^\[]+)\[[^\]]*\]} $line\
+                            match incfile]} {
+                        try {
+                            log::debug "found include file, \"$incfile\""
+                            set newchan [::open $incfile r]
+                            $chanStack push [list $ichan $infile]
+                            set ichan $newchan
+                            set infile $incfile
+                        } on error {result} {
+                            log::error $result
+                        }
+                        continue
+                    }
                     # Some simple lexical analysis to determine the type
                     # of event we need to generate.
                     set first [string index $line 0]
@@ -352,8 +389,8 @@ namespace eval ::aweb {
             chan puts stderr $result
             return -options $opts
         } finally {
-            if {$ichan ne "stdin"} {
-                chan close $ichan
+            while {[$chanStack size] != 0} {
+                chan close [$chanStack pop]
             }
         }
         log::debug \n[relformat [relvar set ChunkBlock] ChunkBlock]
