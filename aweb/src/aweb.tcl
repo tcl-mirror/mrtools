@@ -99,7 +99,7 @@ namespace eval ::aweb {
     superclass [::oomoore model create ::aweb::parserSM {
         # While in the InDocument state we are processing ordinary
         # source lines
-        state InDocument {line num} {
+        state InDocument {line file num} {
             my variable lineLength
             set lineLength [string length $line]
         }
@@ -114,11 +114,11 @@ namespace eval ::aweb {
         # the same as the length of the preceding line.  If so, then we
         # conclude we say a two line title. Otherwise, we think we have seen a
         # source block marker.
-        state CheckingForTitle {line num} {
+        state CheckingForTitle {line file num} {
             my variable lineLength
             set markerLength [string length $line]
             if {abs($lineLength - $markerLength) > 2} {
-                my receive BlockMarker $line $num
+                my receive BlockMarker $line $file $num
             }
         }
         transition CheckingForTitle - NewLine -> InDocument
@@ -129,7 +129,7 @@ namespace eval ::aweb {
         # If a source block marker is preceded by some directive, then it is
         # not a candidate for being a title. The GotControlLine state remembers
         # that we have seen such a line while scanning.
-        state GotControlLine {line num} {
+        state GotControlLine {line file num} {
         }
         transition GotControlLine - NewLine -> InDocument
         transition GotControlLine - CtrlLine -> GotControlLine
@@ -138,7 +138,7 @@ namespace eval ::aweb {
 
         # We enter the InSourceBlock state when we have determined that we are
         # at the beginning of an asciidoc source block.
-        state InSourceBlock {line num} {
+        state InSourceBlock {line file num} {
             my StartBlock $num
         }
         transition InSourceBlock - NewLine -> IG
@@ -148,7 +148,7 @@ namespace eval ::aweb {
 
         # If we are in a source block and see a chunk definition then we enter
         # the InChunk state.
-        state InChunk {line num} {
+        state InChunk {line file num} {
             my StartChunk $line $num
             my variable refOffset
             set refOffset 0
@@ -161,8 +161,8 @@ namespace eval ::aweb {
         # At the end of a chunk, we enter the EndChunk state. Chunks are ended
         # either by the end of the source block or the beginning of a new chunk
         # definition.
-        state EndChunk {line num} {
-            my EndChunk
+        state EndChunk {line file num} {
+            my EndChunk $file
             my StartChunk $line $num
             my variable refOffset
             set refOffset 0
@@ -174,7 +174,7 @@ namespace eval ::aweb {
 
         # In the GatheringChunk state we accumulate the content of the chunk
         # and record any chunk references that we encounter.
-        state GatheringChunk {line num} {
+        state GatheringChunk {line file num} {
             my variable chunkContents refOffset
             lappend chunkContents $line
 
@@ -182,6 +182,7 @@ namespace eval ::aweb {
             if {[regexp -- {^(\s*)<<([^>]+)>>\s*$} $line match ind ref]} {
                 my variable chunkName chunkOffset blockBeginNum
                 relvar insert ChunkRef [list\
+                    FileName        $file\
                     ChunkLineNum    $blockBeginNum\
                     ChunkOffset     $chunkOffset\
                     RefOffset       $refOffset\
@@ -198,9 +199,9 @@ namespace eval ::aweb {
 
         # After entering a source block, another block marker will take us to
         # the EndSourceBlock state.
-        state EndSourceBlock {line num} {
-            my EndChunk
-            my EndBlock $num
+        state EndSourceBlock {line file num} {
+            my EndChunk $file
+            my EndBlock $file $num
         }
         transition EndSourceBlock - NewLine -> InDocument
         transition EndSourceBlock - CtrlLine -> GotControlLine
@@ -221,10 +222,11 @@ namespace eval ::aweb {
         return
     }
 
-    method EndBlock {num} {
+    method EndBlock {file num} {
         log::debug "Block end @ $num"
         my variable blockBeginNum
         relvar insert ChunkBlock [list\
+            FileName        $file\
             BeginLineNum    $blockBeginNum\
             EndLineNum      $num\
         ]
@@ -241,22 +243,21 @@ namespace eval ::aweb {
         return
     }
 
-    method EndChunk {} {
+    method EndChunk {file} {
         log::debug "Chunk end"
         my variable chunkName chunkOffset chunkContents blockBeginNum
         relvar insert Chunk [list\
             Name            $chunkName\
             Content         $chunkContents\
+            FileName        $file\
             BlockLineNum    $blockBeginNum\
             Offset          $chunkOffset\
         ]
         return
     }
 
-    constructor {{path {}}} {
+    constructor {} {
         next
-
-        my variable incPath $path
 
         namespace import ::ral::*
         namespace import ::ralutil::*
@@ -273,9 +274,10 @@ namespace eval ::aweb {
         # insertions must happen before and after the source block itself.
 
         relvar create ChunkBlock {
+            FileName        string
             BeginLineNum    int
             EndLineNum      int
-        } BeginLineNum EndLineNum
+        } {FileName BeginLineNum} {FileName EndLineNum}
 
         # A Chunk is the literate program text.
         # "Offset" is the line offset in the ChunkBlock where the chunk
@@ -284,50 +286,45 @@ namespace eval ::aweb {
         relvar create Chunk {
             Name            string
             Content         list
+            FileName        string
             BlockLineNum    int
             Offset          int
-        } {BlockLineNum Offset}
+        } {FileName BlockLineNum Offset}
 
         # Chunks must occur in ChunkBlocks. A ChunkBlock must contain
         # at least on Chunk. Source blocks that do not contain chunks
         # are ignored during the parsing.
         relvar association R1\
-            Chunk BlockLineNum +\
-            ChunkBlock BeginLineNum 1
+            Chunk {FileName BlockLineNum} +\
+            ChunkBlock {FileName BeginLineNum} 1
 
         # Chunks may contain references to other Chunks
         # "RefOffset" is the offset in lines within the Chunk Content
         # where the reference  begins.
         relvar create ChunkRef {
+            FileName        string
             ChunkLineNum    int
             ChunkOffset     int
             RefOffset       int
             RefToChunk      string
             Indent          string
-        } {ChunkLineNum ChunkOffset RefOffset}
+        } {FileName ChunkLineNum ChunkOffset RefOffset}
 
         # A ChunkRef must be contained withing a Chunk but Chunks may 
         # make no references.
         relvar association R2\
-            ChunkRef {ChunkLineNum ChunkOffset} *\
-            Chunk {BlockLineNum Offset} 1
-
-        # Define a stack to use for included files
-        my variable chanStack
-        set chanStack [::struct::stack]
+            ChunkRef {FileName ChunkLineNum ChunkOffset} *\
+            Chunk {FileName BlockLineNum Offset} 1
     }
 
     destructor {
         next
-
-        my variable chanStack
-        $chanStack destroy
     }
 
     # Parse a file and build up the chunk information.
     method parse {infilename} {
-        my variable infile
-        my variable chanStack
+        # Stack used for included files
+        set chanStack [::struct::stack]
         if {$infilename eq "-"} {
             set infile stdin
             set ichan stdin
@@ -335,8 +332,8 @@ namespace eval ::aweb {
             set infile $infilename
             set ichan [open $infilename r]
         }
+        set lineno 1
         try {
-            set lineno 1
             relvar eval {
                 # We read the file, line by line so that we can count the
                 # lines for diagnostic purposes.
@@ -349,7 +346,7 @@ namespace eval ::aweb {
                             # pushed onto the channel stack.
                             break
                         } else {
-                            lassign [$chanStack pop] ichan infile
+                            lassign [$chanStack pop] ichan infile lineno
                             continue
                         }
                     }
@@ -361,9 +358,10 @@ namespace eval ::aweb {
                         try {
                             log::debug "found include file, \"$incfile\""
                             set newchan [::open $incfile r]
-                            $chanStack push [list $ichan $infile]
+                            $chanStack push [list $ichan $infile $lineno]
                             set ichan $newchan
                             set infile $incfile
+                            set lineno 1
                         } on error {result} {
                             log::error $result
                         }
@@ -373,14 +371,14 @@ namespace eval ::aweb {
                     # of event we need to generate.
                     set first [string index $line 0]
                     if {[regexp -- {^-{4,}\s*$} $line]} {
-                        my receive BlockMarker $line $lineno
+                        my receive BlockMarker $line $infile $lineno
                     } elseif {[regexp -- {^<<([^>]+)>>=\s*$} $line]} {
-                        my receive ChunkMarker $line $lineno
+                        my receive ChunkMarker $line $infile $lineno
                     } elseif {![string is alnum -strict $first] ||\
                             [regexp -- {^[[:alpha:]]+::} $line]} {
-                        my receive CtrlLine $line $lineno
+                        my receive CtrlLine $line $infile $lineno
                     } else {
-                        my receive NewLine $line $lineno
+                        my receive NewLine $line $infile $lineno
                     }
                     incr lineno
                 }
@@ -390,8 +388,9 @@ namespace eval ::aweb {
             return -options $opts
         } finally {
             while {[$chanStack size] != 0} {
-                chan close [$chanStack pop]
+                chan close [lindex [$chanStack pop] 0]
             }
+            $chanStack destroy
         }
         log::debug \n[relformat [relvar set ChunkBlock] ChunkBlock]
         log::debug \n[relformat [relvar set Chunk] Chunk]
@@ -406,11 +405,10 @@ namespace eval ::aweb {
         }]
         log::debug \n[relformat $undefs undefs]
 
-        my variable infile
         relation foreach undef $undefs -ascending\
-                {ChunkLineNum ChunkOffset RefOffset} {
+                {FileName ChunkLineNum ChunkOffset RefOffset} {
             relation assign $undef
-            log::notice "$infile: line:\
+            log::notice "$FileName: line:\
                 [expr {$ChunkLineNum + $ChunkOffset + $RefOffset + 1}],\
                 reference to chunk, <<$RefToChunk>>, that does not exist"
         }
@@ -427,13 +425,14 @@ namespace eval ::aweb {
             relation extend ~ chk LineNo int {\
                 [tuple extract $chk BlockLineNum] +\
                 [tuple extract $chk Offset]} |
-            relation project ~ Name LineNo |
+            relation project ~ FileName Name LineNo |
             relation group ~ LineNos LineNo |
             relation extend ~ cp Lines list {
                 [relation list [tuple extract $cp LineNos]\
                     LineNo -ascending LineNo]} |
-            relation project ~ Name Lines |
-            relation rename ~ Name "Chunk Name" Lines "Defined On Line(s)"
+            relation project ~ FileName Name Lines |
+            relation rename ~ FileName File Name "Chunk Name"\
+                    Lines "Defined On Line(s)"
         }]
         chan puts $chan [relformat $chunks {} {{Chunk Name}}]
 
@@ -464,8 +463,8 @@ namespace eval ::aweb {
             relation extend ~ def "Defined on Line" int {\
                 [tuple extract $def BlockLineNum] +\
                 [tuple extract $def Offset]} |
-            relation project ~ Name "Defined on Line" |
-            relation rename ~ Name "Chunk Name"
+            relation project ~ FileName Name "Defined on Line" |
+            relation rename ~ FileName File Name "Chunk Name"
         }]
         chan puts $chan =======================================\n
         chan puts $chan "Chunks Defined but not Referenced"
