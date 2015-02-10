@@ -2,7 +2,7 @@
 # -- Tcl Module
 
 # @@ Meta Begin
-# Package rosea 1.0a4
+# Package rosea 1.0a5
 # Meta description Rosea is a data and execution architecture for
 # Meta description translating XUML models using Tcl as the implementation
 # Meta description language.
@@ -30,7 +30,7 @@ package require lambda
 
 # ACTIVESTATE TEAPOT-PKG BEGIN DECLARE
 
-package provide rosea 1.0a4
+package provide rosea 1.0a5
 
 # ACTIVESTATE TEAPOT-PKG END DECLARE
 # ACTIVESTATE TEAPOT-PKG END TM
@@ -107,7 +107,7 @@ namespace eval ::rosea {
     
     namespace ensemble create
 
-    variable version 1.0a4
+    variable version 1.0a5
 
     logger::initNamespace [namespace current]
 
@@ -2738,35 +2738,35 @@ namespace eval ::rosea {
                 ReferringCond true ReferringMult false
                 ReferencedCond true ReferencedMult false
         } {
-            Spec 1..n--1 NeedsAssociator false ReflexiveAllowed true
+            Spec 1..*--1 NeedsAssociator false ReflexiveAllowed true
                 ReferringCond false ReferringMult true
                 ReferencedCond false ReferencedMult false
         } {
-            Spec 0..n--1 NeedsAssociator false ReflexiveAllowed false
+            Spec 0..*--1 NeedsAssociator false ReflexiveAllowed false
                 ReferringCond true ReferringMult true
                 ReferencedCond false ReferencedMult false
         } {
-            Spec 1..n--0..1 NeedsAssociator false ReflexiveAllowed false
+            Spec 1..*--0..1 NeedsAssociator false ReflexiveAllowed false
                 ReferringCond false ReferringMult true
                 ReferencedCond true ReferencedMult false
         } {
-            Spec 0..n--0..1 NeedsAssociator false ReflexiveAllowed true
+            Spec 0..*--0..1 NeedsAssociator false ReflexiveAllowed true
                 ReferringCond true ReferringMult true
                 ReferencedCond true ReferencedMult false
         } {
-            Spec 1..n--1..n NeedsAssociator true ReflexiveAllowed true
+            Spec 1..*--1..* NeedsAssociator true ReflexiveAllowed true
                 ReferringCond false ReferringMult true
                 ReferencedCond false ReferencedMult true
         } {
-            Spec 0..n--1..n NeedsAssociator true ReflexiveAllowed false
+            Spec 0..*--1..* NeedsAssociator true ReflexiveAllowed false
                 ReferringCond true ReferringMult true
                 ReferencedCond false ReferencedMult true
         } {
-            Spec 1..n--0..n NeedsAssociator true ReflexiveAllowed false
+            Spec 1..*--0..* NeedsAssociator true ReflexiveAllowed false
                 ReferringCond false ReferringMult true
                 ReferencedCond true ReferencedMult true
         } {
-            Spec 0..n--0..n NeedsAssociator true ReflexiveAllowed true
+            Spec 0..*--0..* NeedsAssociator true ReflexiveAllowed true
                 ReferringCond true ReferringMult true
                 ReferencedCond true ReferencedMult true
         } {
