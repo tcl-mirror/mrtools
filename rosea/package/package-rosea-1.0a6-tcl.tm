@@ -2,7 +2,7 @@
 # -- Tcl Module
 
 # @@ Meta Begin
-# Package rosea 1.0a5
+# Package rosea 1.0a6
 # Meta description Rosea is a data and execution architecture for
 # Meta description translating XUML models using Tcl as the implementation
 # Meta description language.
@@ -30,7 +30,7 @@ package require lambda
 
 # ACTIVESTATE TEAPOT-PKG BEGIN DECLARE
 
-package provide rosea 1.0a5
+package provide rosea 1.0a6
 
 # ACTIVESTATE TEAPOT-PKG END DECLARE
 # ACTIVESTATE TEAPOT-PKG END TM
@@ -107,7 +107,7 @@ namespace eval ::rosea {
     
     namespace ensemble create
 
-    variable version 1.0a5
+    variable version 1.0a6
 
     logger::initNamespace [namespace current]
 
@@ -218,8 +218,9 @@ namespace eval ::rosea {
             MultipleAssigner MultipleAssigner\
             PolymorphicEvent PolymorphicEvent
     
-        set genDomain [relation restrictwith $Domain {
-                [string match $pattern $Domain]}]
+        set genDomain [relation restrict $Domain dom {
+            [string match $pattern [tuple extract $dom Name]]
+        }]
         relation foreach domain $genDomain {
             set domainName [relation extract $domain Name]
             relvar updateone Config::Domain dtup [list Name $domainName] {
@@ -404,7 +405,8 @@ namespace eval ::rosea {
             variable hasSMQuery
             variable statesQuery
             
-            set classes [relation semijoin $domain $DomainElement $Class]
+            set classes [relation semijoin $domain $DomainElement -using {Name Domain}\
+                    $Class -using {Domain Domain Element Name}]
             relation foreach class $classes {
                 set className ${domns}::[relation extract $class Name]
                 namespace eval $className {
@@ -512,9 +514,9 @@ namespace eval ::rosea {
                     -parameters instref\
                     -map [dict merge $opmap $sysmap]
             }
-            set rships [relation semijoin $domain $DomainElement $Relationship]
+            set rships [relation semijoin $domain $DomainElement -using {Name Domain}\
+                    $Relationship -using {Domain Domain Element Name}]
             
-            set rships [relation semijoin $domain $DomainElement $Relationship]
             set sassocs [relation semijoin $rships $Association\
                     $SimpleAssociation]
             set refing [relation semijoin $sassocs $SimpleReferringClass\
@@ -1133,6 +1135,10 @@ namespace eval ::rosea {
             ARG_ERROR           {attribute updates must be name / value pairs, got "%s"}
             ID_UPDATE           {cannot update identifying attributes, "%s"}
             UNKNOWN_ATTRIBUTE   {unknown attribute, "%s"}
+            WITH_ATTR_USAGE {wrong arguments, should be,\
+                    "withAttribute attrvarpair1 ?attrvarpair2 ...? body"}
+            ATTR_VAR_SPEC   {attribute / variable argument must be a one or two element\
+                    list, got "%s"}
             INVALID_TIME    {invalid time value, "%s"}
             SINGLE_OR_EMPTY_REF_REQUIRED {single valued or nil reference required, %d found}
             SINGLE_REF_REQUIRED     {single valued reference required, %d found}
@@ -1545,38 +1551,80 @@ namespace eval ::rosea {
                 [list ::ral relation restrictwith $insts $expr]]
         }
         proc updateAttribute {instref args} {
-            if {[llength $args] % 2 != 0} {
-                tailcall DeclError ARG_ERROR $args
+        if {[llength $args] % 2 != 0} {
+            tailcall DeclError ARG_ERROR $args
+        }
+        
+        lassign $instref relvar insts
+        if {[relation cardinality $insts] != 1} {
+            tailcall MUST_BE_SINGULAR $relvar [relation cardinality $insts]
+        }
+        set idattrs [list]
+        foreach identifier [relvar identifiers $relvar] {
+            ::struct::set add idattrs $identifier
+        }
+        set idupdates [::struct::set intersect $idattrs $args]
+        if {![::struct::set empty $idupdates]} {
+            tailcall DeclError ID_UPDATE [join $idupdates {, }]
+        }
+        set extcmd [list relation extend $insts exttuple]
+        set heading [relation heading [relvar set $relvar]]
+        foreach {attr value} $args {
+            if {![dict exists $heading $attr]} {
+                tailcall DeclError UNKNOWN_ATTRIBUTE $attr
             }
+            lappend extcmd $attr [dict get $heading $attr] \"$value\"
+        }
+        relvar updateper $relvar [eval $extcmd]
+        return
+        }
+        proc withAttribute {instref args} {
+        if {[llength $args] < 2} {
+            tailcall DeclError WITH_ATTR_USAGE
+        }
         
-            lassign $instref relvar insts
+        lassign $instref relvar insts
+        if {[relation cardinality $insts] != 1} {
+            tailcall MUST_BE_SINGULAR $relvar [relation cardinality $insts]
+        }
         
-            set identifiers [relvar identifiers $relvar]
-            if {[llength $identifiers] > 1} {
-                set idrelations [list]
-                foreach identifier $identifiers {
-                    lappend idrelations [relation fromlist $identifier Name string]
-                }
-                set idattrs [relation union {*}$idrelations]
+        set body [lindex $args end]
+        set attrspecs [lrange $args 0 end-1]
+        set attrnames [list]
+        set varnames [list]
+        foreach attrspec $attrspecs {
+            set speclen [llength $attrspec]
+            if {$speclen == 1} {
+                lappend attrnames [lindex $attrspec 0]
+                lappend varnames [lindex $attrspec 0]
+            } elseif {$speclen == 2} {
+                lappend attrnames [lindex $attrspec 0]
+                lappend varnames [lindex $attrspec 1]
             } else {
-                set idattrs [relation fromlist [lindex $identifiers 0] Name string]
+                tailcall DeclError ATTR_VAR_SPEC $attrspec
             }
-            set updateattrs [relation fromlist [dict keys $args] Name string]
-            set idupdates [relation intersect $idattrs $updateattrs]
-            
-            if {[relation isnotempty $idupdates]} {
-                tailcall DeclError ID_UPDATE [relation list $idupdates Name]
+        }
+        set idattrs [list]
+        foreach identifier [relvar identifiers $relvar] {
+            ::struct::set add idattrs $identifier
+        }
+        set idupdates [::struct::set intersect $idattrs $attrnames]
+        if {![::struct::set empty $idupdates]} {
+            tailcall DeclError ID_UPDATE [join $idupdates {, }]
+        }
+        uplevel 1 [list ral relation assign [deRef $instref] {*}$attrspecs]
+        uplevel 1 $body
+        set extcmd [list relation extend $insts exttuple]
+        set heading [relation heading [relvar set $relvar]]
+        foreach attr $attrnames var $varnames {
+            if {[uplevel 1 [list info exists $var]]} {
+                upvar 1 $var varvalue
+                lappend extcmd $attr [dict get $heading $attr] \"$varvalue\"
             }
-            set extcmd [list relation extend $insts exttuple]
-            set heading [relation heading [relvar set $relvar]]
-            foreach {attr value} $args {
-                if {![dict exists $heading $attr]} {
-                    tailcall DeclError UNKNOWN_ATTRIBUTE $attr
-                }
-                lappend extcmd $attr [dict get $heading $attr] \"$value\"
-            }
-            relvar updateper $relvar [eval $extcmd]
-            return
+        }
+        relvar updateper $relvar [eval $extcmd]
+        
+        return
         }
         proc readAttribute {ref args} {
             # We insist upon a singular reference for reading attributes.  Multiple
@@ -1588,6 +1636,16 @@ namespace eval ::rosea {
         
             return [expr {[llength $args] == 0 ? {} :\
                 [relation extract [deRef $ref {*}$args] {*}$args]}] ; # <1>
+        }
+        proc assignAttribute {ref args} {
+            # We must insist upon a singular references, since assigning to scalar
+            # variables from a relation value doesn't make a lot of sense.
+            if {![isRefSingular $ref]} {
+                tailcall DeclError SINGLE_REF_REQUIRED [refMultiplicity $dstref]
+            }
+        
+            uplevel 1 [list ral relation assign [deRef $ref] {*}$args] ; # <1>
+            return
         }
         proc delete {args} {
             foreach instref $args {
