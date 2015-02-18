@@ -2,7 +2,7 @@
 # -- Tcl Module
 
 # @@ Meta Begin
-# Package rosea 1.0a6
+# Package rosea 1.0a7
 # Meta description Rosea is a data and execution architecture for
 # Meta description translating XUML models using Tcl as the implementation
 # Meta description language.
@@ -30,7 +30,7 @@ package require lambda
 
 # ACTIVESTATE TEAPOT-PKG BEGIN DECLARE
 
-package provide rosea 1.0a6
+package provide rosea 1.0a7
 
 # ACTIVESTATE TEAPOT-PKG END DECLARE
 # ACTIVESTATE TEAPOT-PKG END TM
@@ -107,7 +107,7 @@ namespace eval ::rosea {
     
     namespace ensemble create
 
-    variable version 1.0a6
+    variable version 1.0a7
 
     logger::initNamespace [namespace current]
 
@@ -992,7 +992,10 @@ namespace eval ::rosea {
         }
     }
     proc tunnel {instref op args} {
-        tailcall [lindex $instref 0]::Instance $instref $op {*}$args
+        relvar eval {
+            set result [[lindex $instref 0]::Instance $instref $op {*}$args]
+        }
+        return $result
     }
     proc trace {subcmd args} {
         switch -exact -- $subcmd {
@@ -1579,52 +1582,52 @@ namespace eval ::rosea {
         return
         }
         proc withAttribute {instref args} {
-        if {[llength $args] < 2} {
-            tailcall DeclError WITH_ATTR_USAGE
-        }
-        
-        lassign $instref relvar insts
-        if {[relation cardinality $insts] != 1} {
-            tailcall MUST_BE_SINGULAR $relvar [relation cardinality $insts]
-        }
-        
-        set body [lindex $args end]
-        set attrspecs [lrange $args 0 end-1]
-        set attrnames [list]
-        set varnames [list]
-        foreach attrspec $attrspecs {
-            set speclen [llength $attrspec]
-            if {$speclen == 1} {
-                lappend attrnames [lindex $attrspec 0]
-                lappend varnames [lindex $attrspec 0]
-            } elseif {$speclen == 2} {
-                lappend attrnames [lindex $attrspec 0]
-                lappend varnames [lindex $attrspec 1]
-            } else {
-                tailcall DeclError ATTR_VAR_SPEC $attrspec
+            if {[llength $args] < 2} {
+                tailcall DeclError WITH_ATTR_USAGE
             }
-        }
-        set idattrs [list]
-        foreach identifier [relvar identifiers $relvar] {
-            ::struct::set add idattrs $identifier
-        }
-        set idupdates [::struct::set intersect $idattrs $attrnames]
-        if {![::struct::set empty $idupdates]} {
-            tailcall DeclError ID_UPDATE [join $idupdates {, }]
-        }
-        uplevel 1 [list ral relation assign [deRef $instref] {*}$attrspecs]
-        uplevel 1 $body
-        set extcmd [list relation extend $insts exttuple]
-        set heading [relation heading [relvar set $relvar]]
-        foreach attr $attrnames var $varnames {
-            if {[uplevel 1 [list info exists $var]]} {
-                upvar 1 $var varvalue
-                lappend extcmd $attr [dict get $heading $attr] \"$varvalue\"
+            
+            lassign $instref relvar insts
+            if {[relation cardinality $insts] != 1} {
+                tailcall MUST_BE_SINGULAR $relvar [relation cardinality $insts]
             }
-        }
-        relvar updateper $relvar [eval $extcmd]
+            
+            set body [lindex $args end]
+            set attrspecs [lrange $args 0 end-1]
+            set attrnames [list]
+            set varnames [list]
+            foreach attrspec $attrspecs {
+                set speclen [llength $attrspec]
+                if {$speclen == 1} {
+                    lappend attrnames [lindex $attrspec 0]
+                    lappend varnames [lindex $attrspec 0]
+                } elseif {$speclen == 2} {
+                    lappend attrnames [lindex $attrspec 0]
+                    lappend varnames [lindex $attrspec 1]
+                } else {
+                    tailcall DeclError ATTR_VAR_SPEC $attrspec
+                }
+            }
+            set idattrs [list]
+            foreach identifier [relvar identifiers $relvar] {
+                ::struct::set add idattrs $identifier
+            }
+            set idupdates [::struct::set intersect $idattrs $attrnames]
+            if {![::struct::set empty $idupdates]} {
+                tailcall DeclError ID_UPDATE [join $idupdates {, }]
+            }
+            uplevel 1 [list ral relation assign [deRef $instref] {*}$attrspecs]
+            uplevel 1 $body
+            set extcmd [list relation extend $insts exttuple]
+            set heading [relation heading [relvar set $relvar]]
+            foreach attr $attrnames var $varnames {
+                if {[uplevel 1 [list info exists $var]]} {
+                    upvar 1 $var varvalue
+                    lappend extcmd $attr [dict get $heading $attr] \"$varvalue\"
+                }
+            }
+            relvar updateper $relvar [eval $extcmd]
         
-        return
+            return
         }
         proc readAttribute {ref args} {
             # We insist upon a singular reference for reading attributes.  Multiple
