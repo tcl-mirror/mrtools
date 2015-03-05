@@ -2,7 +2,7 @@
 # -- Tcl Module
 
 # @@ Meta Begin
-# Package rosea 1.0a7
+# Package rosea 1.0b1
 # Meta description Rosea is a data and execution architecture for
 # Meta description translating XUML models using Tcl as the implementation
 # Meta description language.
@@ -30,7 +30,7 @@ package require lambda
 
 # ACTIVESTATE TEAPOT-PKG BEGIN DECLARE
 
-package provide rosea 1.0a7
+package provide rosea 1.0b1
 
 # ACTIVESTATE TEAPOT-PKG END DECLARE
 # ACTIVESTATE TEAPOT-PKG END TM
@@ -107,7 +107,7 @@ namespace eval ::rosea {
     
     namespace ensemble create
 
-    variable version 1.0a7
+    variable version 1.0b1
 
     logger::initNamespace [namespace current]
 
@@ -1148,7 +1148,7 @@ namespace eval ::rosea {
             EVENT_IN_FLIGHT     {event, "%s", sent to "%s", which does not exist}
             CANT_HAPPEN_EVENT   {can't happen transition, %s - %s -> %s ==> %s -> CH}
             CONFIG_ERRORS     {encountered %d configuration script errors}
-            EMPTY_NAME      {the empty string is not a value name for a %s}
+            EMPTY_NAME      {the empty string is not a valid name for a %s}
             DUP_ELEMENT_NAME    {a class, relationship or domain operation named, "%s",\
                                 already exists}
             RESERVED_NAME {names beginning with two underscore characters are reserved,\
@@ -1634,7 +1634,7 @@ namespace eval ::rosea {
             # references can be handled by dereferences and using TclRAL "relation"
             # commands.
             if {![isRefSingular $ref]} {
-                tailcall DeclError SINGLE_REF_REQUIRED [refMultiplicity $dstref]
+                tailcall DeclError SINGLE_REF_REQUIRED [refMultiplicity $ref]
             }
         
             return [expr {[llength $args] == 0 ? {} :\
@@ -1644,7 +1644,7 @@ namespace eval ::rosea {
             # We must insist upon a singular references, since assigning to scalar
             # variables from a relation value doesn't make a lot of sense.
             if {![isRefSingular $ref]} {
-                tailcall DeclError SINGLE_REF_REQUIRED [refMultiplicity $dstref]
+                tailcall DeclError SINGLE_REF_REQUIRED [refMultiplicity $ref]
             }
         
             uplevel 1 [list ral relation assign [deRef $ref] {*}$args] ; # <1>
@@ -1912,8 +1912,6 @@ namespace eval ::rosea {
             return $associnsts
         }
         proc migrate {rname instref subclass args} {
-            # HERE !! remove this singular requirement, it is not necessary.
-            # We should be able to migrate multiple subclass instances.
             if {![isRefSingular $instref]} {
                 tailcall DeclError SINGLE_REF_REQUIRED [refMultiplicity $instref]
             }
@@ -1926,7 +1924,6 @@ namespace eval ::rosea {
             if {[relation isempty $link]} {
                 tailcall DeclError NO_SUBCLASS $rname $relvar
             }
-            #puts [relformat $link link]
         
             # Traverse the relationship to the superclass. We need to get the values of
             # the referenced attributes to use in creating the new subclass instance.
@@ -1940,7 +1937,6 @@ namespace eval ::rosea {
             if {[relation isempty $sublink]} {
                 tailcall DeclError NO_SUBCLASS $rname $subclass
             }
-            #puts [relformat $sublink sublink]
         
             # Using the same relation extend strategy, we compute a dictionary of the
             # attribute names / values as they must appear in the subclass we are about
