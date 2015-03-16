@@ -2,7 +2,7 @@
 # -- Tcl Module
 
 # @@ Meta Begin
-# Package rosea 1.0b1
+# Package rosea 1.0b2
 # Meta description Rosea is a data and execution architecture for
 # Meta description translating XUML models using Tcl as the implementation
 # Meta description language.
@@ -30,7 +30,7 @@ package require lambda
 
 # ACTIVESTATE TEAPOT-PKG BEGIN DECLARE
 
-package provide rosea 1.0b1
+package provide rosea 1.0b2
 
 # ACTIVESTATE TEAPOT-PKG END DECLARE
 # ACTIVESTATE TEAPOT-PKG END TM
@@ -107,7 +107,7 @@ namespace eval ::rosea {
     
     namespace ensemble create
 
-    variable version 1.0b1
+    variable version 1.0b2
 
     logger::initNamespace [namespace current]
 
@@ -1085,7 +1085,7 @@ namespace eval ::rosea {
                 if {[llength $args] == 0} {
                     DeclError NO_SAVEFILE
                 }
-                storeToSQLite [lindex $args 0] [relvar names ::rosea::Trace::*]
+                ral storeToSQLite [lindex $args 0] ::rosea::Trace::*
             }
             default {
                 DeclError BAD_TRACEOP $op
@@ -1554,32 +1554,32 @@ namespace eval ::rosea {
                 [list ::ral relation restrictwith $insts $expr]]
         }
         proc updateAttribute {instref args} {
-        if {[llength $args] % 2 != 0} {
-            tailcall DeclError ARG_ERROR $args
-        }
-        
-        lassign $instref relvar insts
-        if {[relation cardinality $insts] != 1} {
-            tailcall MUST_BE_SINGULAR $relvar [relation cardinality $insts]
-        }
-        set idattrs [list]
-        foreach identifier [relvar identifiers $relvar] {
-            ::struct::set add idattrs $identifier
-        }
-        set idupdates [::struct::set intersect $idattrs $args]
-        if {![::struct::set empty $idupdates]} {
-            tailcall DeclError ID_UPDATE [join $idupdates {, }]
-        }
-        set extcmd [list relation extend $insts exttuple]
-        set heading [relation heading [relvar set $relvar]]
-        foreach {attr value} $args {
-            if {![dict exists $heading $attr]} {
-                tailcall DeclError UNKNOWN_ATTRIBUTE $attr
+            if {[llength $args] % 2 != 0} {
+                tailcall DeclError ARG_ERROR $args
             }
-            lappend extcmd $attr [dict get $heading $attr] \"$value\"
-        }
-        relvar updateper $relvar [eval $extcmd]
-        return
+            
+            lassign $instref relvar insts
+            if {[relation cardinality $insts] != 1} {
+                tailcall MUST_BE_SINGULAR $relvar [relation cardinality $insts]
+            }
+            set idattrs [list]
+            foreach identifier [relvar identifiers $relvar] {
+                ::struct::set add idattrs $identifier
+            }
+            set idupdates [::struct::set intersect $idattrs $args]
+            if {![::struct::set empty $idupdates]} {
+                tailcall DeclError ID_UPDATE [join $idupdates {, }]
+            }
+            set extcmd [list relation extend $insts exttuple]
+            set heading [relation heading [relvar set $relvar]]
+            foreach {attr value} $args {
+                if {![dict exists $heading $attr]} {
+                    tailcall DeclError UNKNOWN_ATTRIBUTE $attr
+                }
+                lappend extcmd $attr [dict get $heading $attr] \"$value\"
+            }
+            relvar updateper $relvar [eval $extcmd]
+            return
         }
         proc withAttribute {instref args} {
             if {[llength $args] < 2} {
