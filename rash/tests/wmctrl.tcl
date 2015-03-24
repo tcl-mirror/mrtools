@@ -316,7 +316,7 @@ rosea configure {
     }
 }
 
-rosea generate ::wmctrl wmctrl
+rosea generate {} wmctrl
 
 rosea populate {
     domain wmctrl {
