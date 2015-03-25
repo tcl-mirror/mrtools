@@ -71,7 +71,7 @@ namespace eval ::rosea {
     
     namespace ensemble create
 
-    variable version 1.0b2
+    variable version 1.0b3
 
     logger::initNamespace [namespace current]
 
@@ -136,7 +136,8 @@ namespace eval ::rosea {
                 set prefix [uplevel 1 {namespace current}]::$prefix
             }
             set prefix [string trimright $prefix :]
-            namespace eval $prefix {} ; # <1>
+        } elseif {$prefix eq "::"} {
+            set prefix {} ; # <1>
         }
         namespace upvar Config\
             Domain Domain\
