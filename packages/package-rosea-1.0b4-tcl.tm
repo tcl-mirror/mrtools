@@ -2,7 +2,7 @@
 # -- Tcl Module
 
 # @@ Meta Begin
-# Package rosea 1.0b3
+# Package rosea 1.0b4
 # Meta description Rosea is a data and execution architecture for
 # Meta description translating XUML models using Tcl as the implementation
 # Meta description language.
@@ -30,7 +30,7 @@ package require lambda
 
 # ACTIVESTATE TEAPOT-PKG BEGIN DECLARE
 
-package provide rosea 1.0b3
+package provide rosea 1.0b4
 
 # ACTIVESTATE TEAPOT-PKG END DECLARE
 # ACTIVESTATE TEAPOT-PKG END TM
@@ -107,7 +107,7 @@ namespace eval ::rosea {
     
     namespace ensemble create
 
-    variable version 1.0b3
+    variable version 1.0b4
 
     logger::initNamespace [namespace current]
 
@@ -166,7 +166,7 @@ namespace eval ::rosea {
             ::chan close $f
         }
     }
-    proc generate {{prefix {}} {pattern *}} {
+    proc generate {{pattern *} {prefix {}}} {
         if {$prefix ne {}} {
             if {[string range $prefix 0 1] ne "::"} {
                 set prefix [uplevel 1 {namespace current}]::$prefix

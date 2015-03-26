@@ -71,7 +71,7 @@ namespace eval ::rosea {
     
     namespace ensemble create
 
-    variable version 1.0b3
+    variable version 1.0b4
 
     logger::initNamespace [namespace current]
 
@@ -130,7 +130,7 @@ namespace eval ::rosea {
             ::chan close $f
         }
     }
-    proc generate {{prefix {}} {pattern *}} {
+    proc generate {{pattern *} {prefix {}}} {
         if {$prefix ne {}} {
             if {[string range $prefix 0 1] ne "::"} {
                 set prefix [uplevel 1 {namespace current}]::$prefix
