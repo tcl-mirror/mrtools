@@ -808,7 +808,7 @@ rosea configure {
     }
 }
 
-rosea generate ::decima ui
+rosea generate ui ::decima
 
 namespace eval ::decima::ui {
     ral relvar eval {
