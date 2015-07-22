@@ -2,7 +2,7 @@
 # -- Tcl Module
 
 # @@ Meta Begin
-# Package rosea 1.0b5
+# Package rosea 1.0b6
 # Meta description Rosea is a data and execution architecture for
 # Meta description translating XUML models using Tcl as the implementation
 # Meta description language.
@@ -30,7 +30,7 @@ package require lambda
 
 # ACTIVESTATE TEAPOT-PKG BEGIN DECLARE
 
-package provide rosea 1.0b5
+package provide rosea 1.0b6
 
 # ACTIVESTATE TEAPOT-PKG END DECLARE
 # ACTIVESTATE TEAPOT-PKG END TM
@@ -107,7 +107,7 @@ namespace eval ::rosea {
     
     namespace ensemble create
 
-    variable version 1.0b5
+    variable version 1.0b6
 
     logger::initNamespace [namespace current]
 
@@ -487,7 +487,7 @@ namespace eval ::rosea {
                 set alltrans [pipe {
                     relation join $states $events |
                     relation rename ~ Name State
-                }]
+                }] ; # <1>
                 set statetrans [relation semijoin $domain $StateTransition\
                     -using {Name Domain}]
                 set nontrans [pipe {
@@ -4261,7 +4261,6 @@ namespace eval ::rosea {
                 set domns ${DomainLoc}::${DomainName}
                 set relvar ${domns}::$class
                 set insts [relvar insert $relvar {*}$body]
-                #puts [relformat $insts $relvar]
             
                 # Now we have to deal with any state model that might be present.  We have
                 # to set up the initial state properly if such a thing exists for this

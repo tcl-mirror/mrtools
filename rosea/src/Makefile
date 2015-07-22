@@ -18,6 +18,8 @@ vpath %.html $(DOCDIR)
 vpath %.test $(TESTDIR)
 vpath %.uxf $(IMAGEDIR)
 
+VERSION=1.0b6
+
 DOCSRC 	=\
 	rosea.aweb\
 	$(NULL)
@@ -99,6 +101,8 @@ ATANGLEOPTS =\
 	$(NULL)
 
 DBLATEX_PARAMS =\
+	bibliography.numbered=0\
+	index.numbered=0\
 	doc.publisher.show=0\
 	doc.lot.show=figure,table\
 	toc.section.depth=3\
@@ -129,9 +133,9 @@ ASCIIDOC_OPTS =\
 	$(patsubst %,--attribute=%,$(ASCIIDOC_ATTRS))\
 	$(NULL)
 
-.PHONY : all doc code tests runtests example clean
+.PHONY : all doc code tests runtests example clean package
 
-all : doc code tests example manual
+all : doc code tests example manual package
 
 doc : $(PDF)
 
@@ -142,6 +146,11 @@ tests : code $(TESTS)
 example : $(TCLSRC) runwm.tcl
 
 manual : $(MANDOC)
+
+package : ../../packages/package-rosea-$(VERSION)-tcl.tm
+
+../../packages/package-rosea-$(VERSION)-tcl.tm : $(TCLSRC)
+	teapot-pkg generate --output ../../packages .
 
 runtests : tests
 	cd $(TESTDIR) ; tclsh $(TESTS) -verbose bet -level info

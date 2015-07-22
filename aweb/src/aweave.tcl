@@ -56,6 +56,10 @@ package require logger
 set iswrapped [expr {[lindex [file system [info script]] 0] ne "native"}]
 if {$iswrapped} {
     set top [file join $::starkit::topdir lib application]
+    if {$::tcl_platform(os) eq "Linux"} {
+        lappend ::auto_path [file join $::starkit::topdir lib\
+            P-[::platform::identify]]
+    }
 } else {
     set top [file dirname [info script]]
 }
@@ -70,7 +74,7 @@ namespace eval ::aweave {
     namespace import ::ral::*
     namespace import ::ralutil::*
 
-    variable version 1.3
+    variable version 1.4
 
     variable optlist {
         {version {Print version and license, then exit}}
@@ -141,7 +145,7 @@ proc ::aweave::versionInfo {} {
     variable version
     puts "aweave: version: $version"
     puts {
-This software is copyrighted 2013 by G. Andrew Mangogna.
+This software is copyrighted 2013-2015 by G. Andrew Mangogna.
 The following terms apply to all files associated with the software unless
 explicitly disclaimed in individual files.
 
