@@ -11,6 +11,7 @@
 
 DOCDIR	= ../doc
 TESTDIR = ../tests
+PKGDIR	= ../../packages
 IMAGEDIR = ./images
 
 vpath %.pdf $(DOCDIR)
@@ -18,7 +19,7 @@ vpath %.html $(DOCDIR)
 vpath %.test $(TESTDIR)
 vpath %.uxf $(IMAGEDIR)
 
-VERSION=1.0b6
+VERSION=1.0b7
 
 DOCSRC 	=\
 	rosea.aweb\
@@ -147,10 +148,10 @@ example : $(TCLSRC) runwm.tcl
 
 manual : $(MANDOC)
 
-package : ../../packages/package-rosea-$(VERSION)-tcl.tm
+package : $(PKGDIR)/package-rosea-$(VERSION)-tcl.tm
 
-../../packages/package-rosea-$(VERSION)-tcl.tm : $(TCLSRC)
-	teapot-pkg generate --output ../../packages .
+$(PKGDIR)/package-rosea-$(VERSION)-tcl.tm : $(TCLSRC) teapot.txt
+	teapot-pkg generate --output $(PKGDIR) .
 
 runtests : tests
 	cd $(TESTDIR) ; tclsh $(TESTS) -verbose bet -level info

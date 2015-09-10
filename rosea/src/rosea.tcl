@@ -65,13 +65,15 @@ namespace eval ::rosea {
     
     namespace export populateFromFile
     
+    namespace export save
+    
     namespace export tunnel
     
     namespace export trace
     
     namespace ensemble create
 
-    variable version 1.0b6
+    variable version 1.0b7
 
     logger::initNamespace [namespace current]
 
@@ -312,106 +314,102 @@ namespace eval ::rosea {
                 namespace import ::ral::tuple
                 namespace import ::ral::relformat
                 namespace import ::ralutil::pipe
-            }
-            namespace eval $domns namespace path ::rosea::InstCmds
-            
-            set archns ${domns}::__Arch
-            namespace eval ${archns} {
-                ral relvar create RefLink {
+                ral relvar create __Arch_RefLink {
                     Relationship    string
                     ReferringClass  string
                     ReferencedClass string
                     ReferringAttrs  {Relation
                             {ReferringAttribute string ReferencedAttribute string}}
                 } Relationship
-                ral relvar create AssocRef {
+                ral relvar create __Arch_AssocRef {
                     Relationship    string
                     AssocClass      string
                     References      {Relation\
                         {Participant string Role string ReferringAttrs {Relation\
                             {ReferringAttribute string ReferencedAttribute string}}}}
                 } Relationship
-                ral relvar create SuperLink {
+                ral relvar create __Arch_SuperLink {
                     Relationship    string
                     SuperClass      string
                 } Relationship
                 
-                ral relvar create SubLink {
+                ral relvar create __Arch_SubLink {
                     Relationship    string
                     SubClass        string
                     ReferringAttrs  {Relation\
                         {ReferringAttribute string ReferencedAttribute string}}
                 } {Relationship SubClass}
                 
-                ral relvar association R5\
-                    SubLink Relationship +\
-                    SuperLink Relationship 1
-                ral relvar create Link {
+                ral relvar association __Arch_R5\
+                    __Arch_SubLink Relationship +\
+                    __Arch_SuperLink Relationship 1
+                ral relvar create __Arch_Link {
                     Name            string
                     SrcClass        string
                 } {Name SrcClass}
-                ral relvar create AssociationLink {
+                ral relvar create __Arch_AssociationLink {
                     Name            string
                     SrcClass        string
                     DstClass        string
                     Attrs           list
                     PrevSrcClass    string
                 } {Name SrcClass}
-                ral relvar association R4\
-                    AssociationLink {Name PrevSrcClass} ?\
-                    AssociationLink {Name SrcClass} ?
-                ral relvar create PartitionLink {
+                ral relvar association __Arch_R4\
+                    __Arch_AssociationLink {Name PrevSrcClass} ?\
+                    __Arch_AssociationLink {Name SrcClass} ?
+                ral relvar create __Arch_PartitionLink {
                     Name            string
                     SrcClass        string
                 } {Name SrcClass}
-                ral relvar partition R3 Link {Name SrcClass}\
-                    AssociationLink {Name SrcClass}\
-                    PartitionLink {Name SrcClass}
-                ral relvar create PartitionDst {
+                ral relvar partition __Arch_R3 __Arch_Link {Name SrcClass}\
+                    __Arch_AssociationLink {Name SrcClass}\
+                    __Arch_PartitionLink {Name SrcClass}
+                ral relvar create __Arch_PartitionDst {
                     Name            string
                     SrcClass        string
                     DstClass        string
                     Attrs           list
                 } {Name SrcClass DstClass}
-                ral relvar association R2\
-                    PartitionDst {Name SrcClass} +\
-                    PartitionLink {Name SrcClass} 1
-                ral relvar create State {
+                ral relvar association __Arch_R2\
+                    __Arch_PartitionDst {Name SrcClass} +\
+                    __Arch_PartitionLink {Name SrcClass} 1
+                ral relvar create __Arch_State {
                     Class string
                     State string
                 } {Class State}
-                ral relvar create Event {
+                ral relvar create __Arch_Event {
                     Class string
                     Event string
                 } {Class Event}
-                ral relvar create Transition {
+                ral relvar create __Arch_Transition {
                     Class string
                     State string
                     Event string
                     NewState string
                 } {Class State Event}
-                ral relvar correlation R1 Transition\
-                    {Class State} + State {Class State}\
-                    {Class Event} + Event {Class Event}
-                ral relvar create InitialState {
+                ral relvar correlation __Arch_R1 __Arch_Transition\
+                    {Class State} + __Arch_State {Class State}\
+                    {Class Event} + __Arch_Event {Class Event}
+                ral relvar create __Arch_InitialState {
                     Class string
                     State string
                 } Class
-                ral relvar association R6\
-                    InitialState {Class State} ?\
-                    State {Class State} 1
-                ral relvar create TerminalState {
+                ral relvar association __Arch_R6\
+                    __Arch_InitialState {Class State} ?\
+                    __Arch_State {Class State} 1
+                ral relvar create __Arch_TerminalState {
                     Class string
                     State string
                 } {Class State}
-                ral relvar association R7\
-                    TerminalState {Class State} *\
-                    State {Class State} 1
-                ral relvar create PolymorphicEvent {
+                ral relvar association __Arch_R7\
+                    __Arch_TerminalState {Class State} *\
+                    __Arch_State {Class State} 1
+                ral relvar create __Arch_PolymorphicEvent {
                     Class           string
                     Event           string
                 } {Class Event}
             }
+            namespace eval $domns namespace path ::rosea::InstCmds
             set domops [relation semijoin $domain $DomainOperation -using {Name Domain}]
             relation foreach domop $domops {
                 relation assign $domop\
@@ -427,16 +425,16 @@ namespace eval ::rosea {
                 -using {Name Domain}]
             
             relvar eval {
-                relvar set ${archns}::InitialState [pipe {
+                relvar set ${domns}::__Arch_InitialState [pipe {
                     relation project $statemodels Model InitialState |
                     relation rename ~ Model Class InitialState State
                 }]
                 set states [relation semijoin $domain $StatePlace -using {Name Domain}]
-                relvar set ${archns}::State [pipe {
+                relvar set ${domns}::__Arch_State [pipe {
                     relation project $states Model Name |
                     relation rename ~ Model Class Name State
                 }]
-                relvar set ${archns}::TerminalState [pipe {
+                relvar set ${domns}::__Arch_TerminalState [pipe {
                     relation semijoin $domain $State -using {Name Domain} |
                     relation restrict ~ termtuple {[tuple extract $termtuple IsFinal]} |
                     relation project ~ Model Name |
@@ -444,7 +442,7 @@ namespace eval ::rosea {
                 }]
                 set events [relation semijoin $domain $EffectiveEvent\
                     -using {Name Domain}]
-                relvar set ${archns}::Event [pipe {
+                relvar set ${domns}::__Arch_Event [pipe {
                     relation project $events Model Event |
                     relation rename ~ Model Class
                 }]
@@ -466,12 +464,12 @@ namespace eval ::rosea {
                     relation update ~ dttup {[tuple extract $dttup State] eq "@"} {
                         tuple update $dttup NewState CH}
                 }]
-                relvar set ${archns}::Transition [pipe {
+                relvar set ${domns}::__Arch_Transition [pipe {
                     relation union $statetrans $nontrans $deftrans |
                     relation eliminate ~ Domain |
                     relation rename ~ Model Class
                 }]
-                relvar set ${archns}::PolymorphicEvent [pipe {
+                relvar set ${domns}::__Arch_PolymorphicEvent [pipe {
                     relation semijoin $domain $DeferredEvent\
                         -using {Name Domain} |
                     relation project ~ Model Event |
@@ -616,7 +614,7 @@ namespace eval ::rosea {
                         tuple update $lnk Name ~[tuple extract $lnk Name]}
                 } {} |%] ; # <1>
                 
-                relvar union ${archns}::Link $flink $blink
+                relvar union ${domns}::__Arch_Link $flink $blink
                 set flink [pipe {
                     relation project $references Relationship ReferringClass\
                             ReferencedClass ForwAttrs |
@@ -634,8 +632,8 @@ namespace eval ::rosea {
                         tuple update $lnk Name ~[tuple extract $lnk Name]}
                 } {} |%]
                 
-                relvar union ${archns}::AssociationLink $flink $blink
-                relvar union ${archns}::RefLink [relation project $references\
+                relvar union ${domns}::__Arch_AssociationLink $flink $blink
+                relvar union ${domns}::__Arch_RefLink [relation project $references\
                     Relationship ReferringClass ReferencedClass ReferringAttrs]
             }
             relation foreach reference $references {
@@ -719,7 +717,7 @@ namespace eval ::rosea {
                     relation update % lnk {1} {
                         tuple update $lnk Name ~[tuple extract $lnk Name]}
                 } {} |%]
-                relvar union ${archns}::Link $aforw $arev $sforw $trev
+                relvar union ${domns}::__Arch_Link $aforw $arev $sforw $trev
                 set sforw [pipe {
                     relation project $sources Relationship ReferringClass ReferencedClass\
                         RevAttrs |
@@ -761,8 +759,8 @@ namespace eval ::rosea {
                     relation update % lnk {1} {
                         tuple update $lnk Name ~[tuple extract $lnk Name]}
                 } {} |%]
-                relvar union ${archns}::AssociationLink $sforw $trev $aforw $arev
-                relvar union ${archns}::AssocRef [pipe {
+                relvar union ${domns}::__Arch_AssociationLink $sforw $trev $aforw $arev
+                relvar union ${domns}::__Arch_AssocRef [pipe {
                     relation project $assocrefs Relationship ReferringClass\
                         ReferencedClass ReferencedRole ReferringAttrs |
                     relation rename ~ ReferringClass AssocClass ReferencedClass Participant\
@@ -829,16 +827,16 @@ namespace eval ::rosea {
                         tuple update $lnk Name ~[tuple extract $lnk Name]}
                 } {} |%]
                 
-                relvar union ${archns}::Link $sublinks $superlinks
-                relvar union ${archns}::AssociationLink [pipe {
+                relvar union ${domns}::__Arch_Link $sublinks $superlinks
+                relvar union ${domns}::__Arch_AssociationLink [pipe {
                     relation project $subrefs Relationship ReferringClass ReferencedClass\
                             ForwAttrs |
                     relation rename ~ Relationship Name ReferringClass SrcClass\
                             ReferencedClass DstClass ForwAttrs Attrs |
                     relation extend ~ al PrevSrcClass string {{}}
                 }]
-                relvar union ${archns}::PartitionLink $superlinks
-                relvar union ${archns}::PartitionDst [pipe {
+                relvar union ${domns}::__Arch_PartitionLink $superlinks
+                relvar union ${domns}::__Arch_PartitionDst [pipe {
                     relation project $subrefs Relationship ReferencedClass\
                             ReferringClass RevAttrs |
                     relation rename % Relationship Name ReferencedClass SrcClass\
@@ -846,11 +844,11 @@ namespace eval ::rosea {
                     relation update % lnk {1} {
                         tuple update $lnk Name ~[tuple extract $lnk Name]}
                 } {} |%]
-                relvar union ${archns}::SuperLink [pipe {
+                relvar union ${domns}::__Arch_SuperLink [pipe {
                     relation project $subrefs Relationship ReferencedClass |
                     relation rename ~ ReferencedClass SuperClass
                 }]
-                relvar union ${archns}::SubLink [pipe {
+                relvar union ${domns}::__Arch_SubLink [pipe {
                     relation project $subrefs Relationship ReferringClass ReferringAttrs |
                     relation rename ~ ReferringClass SubClass
                 }]
@@ -964,6 +962,46 @@ namespace eval ::rosea {
         } finally {
             ::chan close $f
         }
+    }
+    proc save {args} {
+        set savecmd ::ral::serializeToFile
+        set asynccmd {}
+    
+        set options $args
+        while {1} {
+            if {[string index [lindex $options 0] 0] eq "-"} {
+                set options [lassign $options option]
+                switch -exact -- $option {
+                    -sqlite {
+                        set savecmd ::ral::storeToSQLite
+                    }
+                    -tclral {
+                        set savecmd ::ral::serialize
+                    }
+                    -async {
+                        set options [lassign $options asynccmd]
+                    }
+                    default {
+                        tailcall DeclError UNKNOWN_OPTION save $option
+                    }
+                }
+            } else {
+                break
+            }
+        }
+    
+        if {[llength $options] == 2} {
+            lassign $options domain file
+        } else {
+            tailcall DeclError SAVE_ARG_ERROR $args
+        }
+    
+        set script "try \{$savecmd $file ${domain}*\}" ; # <1>
+        if {$asynccmd ne {}} {
+            append script " finally \{$asynccmd $domain $file\}"
+        }
+    
+        after idle [list ::apply [list {} $script]] ; # <2>
     }
     proc tunnel {instref op args} {
         relvar eval {
@@ -1146,6 +1184,9 @@ namespace eval ::rosea {
             PSEUDO_STATE    {the transition action, "%s", is not valid as %s}
             EXPECTED_PSEUDO_STATE    {expected CH or IG, got "%s"}
             ARG_MISMATCH      {number of population values must be a multiple of %d, got %d}
+            SAVE_ARG_ERROR  {wrong number of arguments: expected:\
+                    "save ?-sqlite | -tclral? ?-async <cmdprefix>?\
+                    <domain> <filename>", got: "%s"}
             UNKNOWN_TRACE_CMD   {unknown trace subcomand, "%s"}
             BAD_TRACEOP     {unknown trace operation, "%s"}
             NO_SAVEFILE     {no save file name provided}
@@ -1167,7 +1208,7 @@ namespace eval ::rosea {
                 [tuple get [relation tuple [lindex $ref 1]]]
         }
         proc CreateInInitialState {domns class value} {
-            set initstate [relvar restrictone ${domns}::__Arch::InitialState\
+            set initstate [relvar restrictone ${domns}::__Arch_InitialState\
                 Class $class]
             if {[relation isnotempty $initstate]} {
                 CreateStateInstance $domns $class [relation extract $initstate State]\
@@ -1176,7 +1217,7 @@ namespace eval ::rosea {
             return
         }
         proc CreateInInitialStateFromRef {domns class ref} {
-            set initstate [relvar restrictone ${domns}::__Arch::InitialState\
+            set initstate [relvar restrictone ${domns}::__Arch_InitialState\
                 Class $class]
             if {[relation isnotempty $initstate]} {
                 CreateStateInstanceFromRef $domns $class\
@@ -1342,7 +1383,7 @@ namespace eval ::rosea {
                 tailcall DeclError ARG_FORMAT $args
             }
             SplitRelvarName $relvar domain class
-            set initstate [relvar restrictone ${domain}::__Arch::State\
+            set initstate [relvar restrictone ${domain}::__Arch_State\
                 Class $class State $state]
             if {[relation isempty $initstate]} { # <1>
                 tailcall DeclError UNKNOWN_STATE $state $relvar
@@ -1353,7 +1394,7 @@ namespace eval ::rosea {
         }
         proc createasync {relvar event eventparams args} {
             SplitRelvarName $relvar domain class
-            set knownevent [relvar restrictone ${domain}::__Arch::Event\
+            set knownevent [relvar restrictone ${domain}::__Arch_Event\
                 Class $class Event $event]
             if {[relation isempty $knownevent]} { # <1>
                 tailcall DeclError UNKNOWN_EVENT $event $class
@@ -1435,18 +1476,18 @@ namespace eval ::rosea {
             
             # This procedure queries the architectural data about relationship linkage,
             # so we bring the relvar variables into scope.
-            namespace upvar ${domain}::__Arch\
-                    Link Link\
-                    AssociationLink AssociationLink\
-                    PartitionLink PartitionLink\
-                    PartitionDst PartitionDst
+            namespace upvar ${domain}\
+                    __Arch_Link Link\
+                    __Arch_AssociationLink AssociationLink\
+                    __Arch_PartitionLink PartitionLink\
+                    __Arch_PartitionDst PartitionDst
             variable relatedQuery ; # <1>
             # We start by dereferencing the instance reference.
             set related [deRef $instref]
             foreach linkage $args {
                 lassign $linkage lname dst ; # split out the linkage spec
                 
-                set link [relvar restrictone ${domain}::__Arch::Link\
+                set link [relvar restrictone ${domain}::__Arch_Link\
                         Name $lname SrcClass $class]
                 if {[ral relation isempty $link]} {
                     tailcall DeclError UNKNOWN_LINKAGE $lname $class
@@ -1479,7 +1520,7 @@ namespace eval ::rosea {
                         set related [eval $relatedQuery]
                     }
                 } else {
-                    set partdst [relvar restrictone ${domain}::__Arch::PartitionDst\
+                    set partdst [relvar restrictone ${domain}::__Arch_PartitionDst\
                         Name $lname SrcClass $class DstClass $dst]
                     if {[relation isempty $partdst]} {
                         tailcall DeclError PATH_ERROR $lname $class $DstClass $dst
@@ -1689,9 +1730,7 @@ namespace eval ::rosea {
             if {$domain1 ne $domain2} {
                 tailcall DeclError NO_CROSS_DOMAIN $domain1 $domain2
             }
-            set archns ${domain1}::__Arch
-            
-            set reflink [relvar restrictone ${archns}::RefLink Relationship $rname]
+            set reflink [relvar restrictone ${domain1}::__Arch_RefLink Relationship $rname]
             if {[relation isempty $reflink]} {
                 tailcall DeclError UNKNOWN_RELATIONSHIP $rname
             }
@@ -1742,9 +1781,8 @@ namespace eval ::rosea {
             if {$domain1 ne $domain2} {
                 tailcall DeclError NO_CROSS_DOMAIN $domain1 $domain2
             }
-            set archns ${domain1}::__Arch
-            
-            set assocref [relvar restrictone ${archns}::AssocRef Relationship $rname]
+            set assocref [relvar restrictone ${domain1}::__Arch_AssocRef\
+                    Relationship $rname]
             if {[relation isempty $assocref]} {
                 tailcall DeclError UNKNOWN_RELATIONSHIP $rname
             }
@@ -1797,9 +1835,8 @@ namespace eval ::rosea {
             lassign $instref relvar inst
             SplitRelvarName $relvar domain class
         
-            set archns ${domain}::__Arch
-        
-            set reflink [relvar restrictone ${archns}::RefLink Relationship $rname]
+            set reflink [relvar restrictone ${domain}::__Arch_RefLink\
+                    Relationship $rname]
             if {[relation isempty $reflink]} {
                 tailcall DeclError UNKNOWN_RELATIONSHIP $rname
             }
@@ -1836,9 +1873,8 @@ namespace eval ::rosea {
             lassign $instref relvar insts
             SplitRelvarName $relvar domain class
         
-            set archns ${domain}::__Arch
-        
-            set assocref [relvar restrictone ${archns}::AssocRef Relationship $rname]
+            set assocref [relvar restrictone ${domain}::__Arch_AssocRef\
+                    Relationship $rname]
             if {[relation isempty $assocref]} {
                 tailcall DeclError UNKNOWN_RELATIONSHIP $rname
             }
@@ -1877,9 +1913,8 @@ namespace eval ::rosea {
             }
             lassign $instref relvar inst
             SplitRelvarName $relvar domns class
-            set archns ${domns}::__Arch
         
-            set link [relvar restrictone ${archns}::AssociationLink Name $rname\
+            set link [relvar restrictone ${domns}::__Arch_AssociationLink Name $rname\
                     SrcClass $class]
             if {[relation isempty $link]} {
                 tailcall DeclError NO_SUBCLASS $rname $relvar
@@ -1892,8 +1927,8 @@ namespace eval ::rosea {
                 relation semijoin $inst ~ -using [relation extract $link Attrs]
             }]
         
-            set sublink [relvar restrictone ${archns}::SubLink Relationship $rname\
-                    SubClass $subclass]
+            set sublink [relvar restrictone ${domns}::__Arch_SubLink\
+                    Relationship $rname SubClass $subclass]
             if {[relation isempty $sublink]} {
                 tailcall DeclError NO_SUBCLASS $rname $subclass
             }
@@ -1999,7 +2034,7 @@ namespace eval ::rosea {
         variable toc_queue [list]
         variable event_queue [list]
         pipe {
-            relvar restrictone ${archns}::Transition\
+            relvar restrictone ${domain}::__Arch_Transition\
                 Class $class State $currstate Event $event |
             relation extract ~ NewState
         } transitionQuery
@@ -2013,14 +2048,14 @@ namespace eval ::rosea {
         } RefId {SrcInstRef Event DstInstRef} TimerId
         variable DelayedSignalId 0
         pipe {
-            relvar set ${archns}::PartitionDst |
+            relvar set ${domain}::__Arch_PartitionDst |
             relation restrictwith ~ {$SrcClass eq $dstclass} |
             relation group ~ DstLinks DstClass Attrs
         } polymapQuery
         proc SignalEvent {srcref dstset event arglist} {
             lassign $dstset relvar insts
             SplitRelvarName $relvar domain class
-            if {[relation isempty [relvar restrictone ${domain}::__Arch::Event\
+            if {[relation isempty [relvar restrictone ${domain}::__Arch_Event\
                     Class $class Event $event]]} {
                 tailcall DeclError UNKNOWN_EVENT $event $class
             }
@@ -2085,7 +2120,6 @@ namespace eval ::rosea {
                 tailcall DeclError EVENT_IN_FLIGHT [dict get $eventInfo event] $ref
             }
             set currstate [relation extract $state __State]
-            set archns ${domain}::__Arch
             set event [dict get $eventInfo event]
             variable transitionQuery
             set newState [eval $transitionQuery]
@@ -2104,7 +2138,7 @@ namespace eval ::rosea {
                         ${relvar}::__Activity::$newState $dstref\
                                 {*}[dict get $eventInfo params] ; # <1>
                     } finally {
-                        set term [relvar restrictone ${archns}::TerminalState\
+                        set term [relvar restrictone ${domain}::__Arch_TerminalState\
                                 Class $class State $newState]
                         if {[relation isnotempty $term]} {
                             relvar deleteone $relvar {*}$idattrs
@@ -2138,7 +2172,7 @@ namespace eval ::rosea {
         proc SignalDelayedEvent {time srcref dstset event arglist} {
             lassign $dstset relvar insts
             SplitRelvarName $relvar domain class
-            if {[relation isempty [relvar restrictone ${domain}::__Arch::Event\
+            if {[relation isempty [relvar restrictone ${domain}::__Arch_Event\
                     Class $class Event $event]]} {
                 tailcall DeclError UNKNOWN_EVENT $event $class
             }
@@ -2203,8 +2237,7 @@ namespace eval ::rosea {
         proc MapPolymorphicEvent {frwdcmd srcref dstrefs event arglist} {
             lassign $dstrefs dstrelvar dstinsts
             SplitRelvarName $dstrelvar domain dstclass
-            set archns ${domain}::__Arch
-            set polyevent [relvar restrictone ${archns}::PolymorphicEvent\
+            set polyevent [relvar restrictone ${domain}::__Arch_PolymorphicEvent\
                 Class $dstclass Event $event]
             if {[relation isempty $polyevent]} {
                 return false
@@ -3135,6 +3168,13 @@ namespace eval ::rosea {
                                 refers to, \"$ReferencedAttribute\", in class,\
                                 \"$ReferencedClass\", but the class, attribute or\
                                 relationship does not exist}
+        } {
+            Relationship        R13
+            RefClass            AttributeReference
+            RefType             refnone
+            Format              {in domain, \"$Domain\", the attribute,\
+                                \"$ReferringAttribute\", in class, \"$ReferringClass\",\
+                                does not exist, but is used as a referential attribute}
         } {
             Relationship        R41
             RefClass            ClassRole
