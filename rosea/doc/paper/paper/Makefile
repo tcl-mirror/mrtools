@@ -5,7 +5,7 @@ DIAGRAMS =\
 	$(NULL)
 
 IMAGES =\
-	$(patsubst %.uxf,%.eps,$(DIAGRAMS))\
+	$(patsubst %.uxf,%.pdf,$(DIAGRAMS))\
 	$(NULL)
 
 all : confpaper.pdf
@@ -15,16 +15,26 @@ confpaper.pdf : confpaper.me $(IMAGES)
 spell : confpaper.me
 	aspell --mode=nroff check confpaper.me
 
+# Using groff with the PDF driver so we can force the
+# embedding of fonts (-P -e), per the Tcl conference request.
 %.pdf : %.me
-	pdfroff -spt -dpaper=Letter -me -mpdfmark -f H --no-toc-relocation $< > $@
+	groff -Tpdf -spt -me -mpdfmark -f H -P -e $< > $@
 
-%.eps : %.uxf
-	umlet -action=convert -format=eps\
-		-filename=$< -output=$(basename $@)
+# Need to process the output of umlet through pdftk to get it
+# to load properly. Probably a gropdf issue parsing the
+# PDF produced by umlet.
+PDFOPTS	=\
+	-dEPSCrop\
+	$(NULL)
+%.pdf : %.uxf
+	umlet -action=convert -format=eps -filename=$< -output=$(basename $@)
+	ps2pdf $(PDFOPTS) $(basename $@).eps
+	$(RM) $(basename $@).eps
 
 CLEANFILES =\
-	*.pdf\
+	confpaper.pdf\
 	$(IMAGES)\
+	*.bak\
 	$(NULL)
 
 clean :
