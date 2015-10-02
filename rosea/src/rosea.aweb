@@ -7638,6 +7638,15 @@ relvar create DefaultValue {
 relvar association R6\
     DefaultValue {Domain Class Attribute} ?\
     Attribute {Domain Class Name} 1
+relvar create ValueCheck {
+    Domain      string
+    Class       string
+    Attribute   string
+    Expression  string
+} {Domain Class Attribute}
+relvar association R17\
+    ValueCheck {Domain Class Attribute} ?\
+    Attribute {Domain Class Name} 1
 relvar create AttributeReference {
     Domain              string
     ReferringClass      string
@@ -7815,6 +7824,12 @@ the +attribute+ command specifies the attributes of the class.
     +-default+ _value_:::
         Specifies a default value that will be supplied if an instance
         is created and no value is provided for the attribute.
+    +-check+ _expr_:::
+        Check that values of the attribute satisfy _expr_. _Expr_ must
+        be suitable for the `::expr` command and may reference variables
+        that are the same name as the attributes of the class.
+        Checks are made on a tuple-by-tuple basis during any insert or
+        update operation for the class instance.
     +-id+ _number_:::
         Specifies that the attribute is part of the identifier given by
         _number_.
@@ -7851,6 +7866,14 @@ by [arg number].
 All classes must have at least one identifier.
 Classes may have multiple identifiers and each is given a separate number.
 Typically, [arg number] is a small integer such as 1, 2 or 3.
+
+[opt_def [option -check] [arg expr]]
+Check that values of the attribute satisfy [arg expr].
+[arg Expr] must
+be suitable for the [cmd ::expr] command and may reference variables
+that are the same name as the attributes of the class.
+Checks are made on a tuple-by-tuple basis during any insert or
+update operation for the class instance.
 
 [list_end]
 [para]
@@ -7971,6 +7994,14 @@ proc attribute {name type args} {
                     Class       $ClassName\
                     Attribute   $name\
                     Number      $value\
+                ]
+            }
+            -check {
+                relvar insert ::rosea::Config::ValueCheck [list\
+                    Domain      $DomainName\
+                    Class       $ClassName\
+                    Attribute   $name\
+                    Expression  $value\
                 ]
             }
             default {
@@ -8543,10 +8574,12 @@ NS_QUALIFIERS   {name, "%s", contains namespace qualifiers}
 As for class based operations,
 we define here the instance based operations provided by the system.
 These are the same operations discussed above.
-Foreach class,
-an ensemble command names +instop+ is created and all the instance
+For each class,
+an ensemble command named, +instop+, is created and all the instance
 operations, both system supplied and user supplied, are made part of that
 ensemble.
+
+Below we have the data for the system supplied instance operations.
 
 [source,tcl]
 ----
@@ -8700,6 +8733,9 @@ added as the first argument
 and can be invoked using the [cmd instop] instance command.
 ----
 ///////
+
+[float]
+===== Implementation
 
 (((rosea,Config,instop)))
 [source,tcl]
@@ -12671,6 +12707,7 @@ namespace upvar Config\
     Class Class\
     Attribute Attribute\
     DefaultValue DefaultValue\
+    ValueCheck ValueCheck\
     Identifier Identifier\
     IdentifyingAttribute IdentifyingAttribute\
     Relationship Relationship\
@@ -13192,8 +13229,14 @@ relation foreach id [eval $idQuery] -ascending Number {
 
 relvar create $className $heading {*}$idset
 
+# <1>
+<<generate: setup value checks>>
 <<generate: setup default values>>
 ----
+<1> Order is important here. Since we will be using relvar tracing
+to implement value checks and default values,
+we want to the default value trace to execute first.
+In TclRAL, relvar traces are executed most recent trace done first.
 
 [float]
 ===== Tests
@@ -13299,6 +13342,7 @@ precedence over any defaults.
 If the defaults are missing from what is inserted, then the merge
 will put them into place.
 
+(((rosea,Helpers,DefValueTrace)))
 [source,tcl]
 ----
 <<helper commands>>=
@@ -13401,6 +13445,215 @@ test generate-1.3 {
     set ref [::foo::X create x1 red y1 truck x2 bar x3 40]
     rosea tunnel $ref readAttribute x2 x3
 } -result {bar 40}
+----
+
+[float]
+====  Setup Value Checks
+
+Attributes may have a value check expression associated with them.
+This allows an easy tuple-by-tuple check on attribute values and
+is useful when an attribute can only assume a subset of values
+of its data type.
+For example,
+we might have an `int` attribute but would like to insure
+that it always is in the range of 10 to 20.
+
+Like default values,
+value checks are implemented using relvar tracing.
+We just want the trace to fail if the supplied expression is false.
+We follow the same pattern that we used for default values.
+We will establish a helper command that does the expression evaluation.
+If the expression fails, then an error is thrown.
+Otherwise the input tuple is returned unmodified.
+
+(((rosea,Helpers,CheckValueTrace)))
+[source,tcl]
+----
+<<helper commands>>=
+proc CheckValueTrace {attrchecks op relvar args} {
+    if {$op eq "insert"} {
+        set tuple [lindex $args 0]
+        EvalAttrCheck $attrchecks $tuple
+        return $tuple
+    } elseif {$op eq "update"} {
+        set tuple [lindex $args 1]
+        EvalAttrCheck $attrchecks $tuple
+        return $tuple
+    } elseif {$op eq "set"} {
+        set relvalue [lindex $args 0]
+        relation foreach inst $relvalue {
+            set tuple [relation tuple $inst]
+            EvalAttrCheck $attrchecks $tuple
+        }
+        return $relvalue
+    } else {
+        tailcall DeclError RELVAR_TRACE_OP $op
+    }
+}
+----
+
+We factor all the real work into another helper procedure.
+
+(((rosea,Helpers,EvalAttrCheck)))
+[source,tcl]
+----
+<<helper commands>>=
+proc EvalAttrCheck {attrchecks tuple} {
+    dict for {attrname checkexpr} $attrchecks {
+        tuple assign $tuple
+        set result [expr $checkexpr]
+        if {!$result} {
+            tailcall DeclError ATTR_CHECK_FAILED $attrname [tuple get $tuple]\
+                $checkexpr $result
+        }
+    }
+}
+----
+
+(((error code,RELVAR_TRACE_OP)))
+(((error code,ATTR_CHECK_FAILED)))
+[source,tcl]
+----
+<<error code formats>>=
+RELVAR_TRACE_OP     {unexpected relvar trace operation, "%s"}
+ATTR_CHECK_FAILED   {check for attribute, "%s", failed:\
+                    instance value was, "%s": "%s" evaluated to "%s"}
+----
+
+The query for obtaining those attributes which have a check expression
+is very similar to that for default values.
+
+[source,tcl]
+----
+<<rosea data>>=
+pipe {
+    relation semijoin $class $Attribute -using {Domain Domain Name Class} |
+    relation join ~ $ValueCheck -using {Domain Domain Class Class Name Attribute}
+} checkValuesQuery
+
+<<class query variables>>=
+variable checkValuesQuery
+----
+
+And finally we set up the relvar trace for the checks.
+Note that the expressions to be run are passed in a dictionary
+along with the attribute name.
+This gives us all the information we need to construct a reasonable
+error message if the check fails and allows us to combine all the
+attribute check expression evaluation into a single trace callback.
+
+[source,tcl]
+----
+<<generate: setup value checks>>=
+set checkvalues [eval $checkValuesQuery]
+
+if {[relation isnotempty $checkvalues]} {
+    relvar trace add variable $className {insert update set} [list\
+        ::rosea::Helpers::CheckValueTrace\
+        [relation dict $checkvalues Name Expression]\
+    ]
+}
+----
+
+[float]
+===== Tests
+
+[source,tcl]
+----
+<<generate command tests>>=
+test generate-1.6 {
+    Generate domain relvars, check values on create
+} -setup {
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::foo
+} -body {
+    rosea configure {
+        domain foo {
+            class X {
+                attribute x1 string -id 1
+                attribute x2 int -check {$x2 > 1 && $x2 < 10}
+            }
+        }
+    }
+    rosea generate
+    set ref [::foo::X create x1 red x2 5]
+    rosea tunnel $ref readAttribute x2
+} -result {5}
+----
+
+[source,tcl]
+----
+<<generate command tests>>=
+test generate-1.7 {
+    Generate domain relvars, check values on update
+} -setup {
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::foo
+} -body {
+    rosea configure {
+        domain foo {
+            class X {
+                attribute x1 string -id 1
+                attribute x2 int -check {$x2 > 1 && $x2 < 10}
+            }
+        }
+    }
+    rosea generate
+    set ref [::foo::X create x1 red x2 5]
+    rosea tunnel $ref updateAttribute x2 7
+    rosea tunnel $ref readAttribute x2
+} -result {7}
+----
+
+[source,tcl]
+----
+<<generate command tests>>=
+test generate-1.8 {
+    Generate domain relvars, value check fails
+} -setup {
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::foo
+} -body {
+    rosea configure {
+        domain foo {
+            class X {
+                attribute x1 string -id 1
+                attribute x2 int -check {$x2 > 1 && $x2 < 10}
+            }
+        }
+    }
+    rosea generate
+    set ref [::foo::X create x1 red x2 5]
+    rosea tunnel $ref updateAttribute x2 17
+} -result {check for attribute, "x2", failed: instance value was, "x1 red x2 17": "$x2 > 1 && $x2 < 10" evaluated to "0"}\
+    -returnCodes error
+----
+
+[source,tcl]
+----
+<<generate command tests>>=
+test generate-1.9 {
+    Generate domain relvars, default value and a check expression
+} -setup {
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::foo
+} -body {
+    rosea configure {
+        domain foo {
+            class X {
+                attribute x1 string -id 1
+                attribute x2 int -default 5 -check {$x2 > 1 && $x2 < 10}
+            }
+        }
+    }
+    rosea generate
+    set ref [::foo::X create x1 red]
+    rosea tunnel $ref readAttribute x2
+} -result {5}
 ----
 
 [float]
@@ -13560,6 +13813,7 @@ The procedure below obtains the system supplied operations,
 filters out those that meet the criteria for a state model and then
 joins to select the desired type, either instance or class based.
 
+(((rosea,Helpers,QuerySystemOperations)))
 [source,tcl]
 ----
 <<helper commands>>=
@@ -13581,6 +13835,7 @@ the name of the class itself.
 The return value is a dictionary that we will use in creating the
 ensemble command.
 
+(((rosea,Helpers,QuerySystemClassOperations)))
 [source,tcl]
 ----
 <<helper commands>>=
@@ -13601,6 +13856,7 @@ For instance based operations,
 the instance reference is supplied by the caller and
 so we can just return the dictionary we find.
 
+(((rosea,Helpers,QuerySystemInstanceOperations)))
 [source,tcl]
 ----
 <<helper commands>>=
@@ -13911,6 +14167,7 @@ list alternately.
 The +Interleave+ procedure used above creates a list by alternating
 elements from two lists.
 
+(((rosea,Helpers,Interleave)))
 [source,tcl]
 ----
 <<helper commands>>=
@@ -14087,6 +14344,8 @@ The configuration data holds the conditionality and multiplicity of the
 associations as booleans.
 We need to translate that into the regular expression like syntax
 that TclRAL uses.
+
+(((rosea,Helpers,MapCondMultToConstraint)))
 [source,tcl]
 ----
 <<helper commands>>=
@@ -18602,13 +18861,13 @@ will be used in the processing.
 ----
 <<WC attributes>>=
 attribute CycleType string -id 1
-attribute WashWaterTemp string
-attribute RinseWaterTemp string
+attribute WashWaterTemp string -check {$WashWaterTemp in {Hot Warm Cold}}
+attribute RinseWaterTemp string -check {$RinseWaterTemp in {Hot Warm Cold}}
 attribute WashDuration int
 attribute RinseDuration int
 attribute SpinDuration int
-attribute AgitationSpeed string
-attribute SpinSpeed string
+attribute AgitationSpeed string -check {$AgitationSpeed in {Low Medium High}}
+attribute SpinSpeed string -check {$SpinSpeed in {Low Medium High}}
 ----
 
 ==== Clothes Tub Class
@@ -18677,7 +18936,7 @@ attribute again.
 [source,tcl]
 ----
 <<WV attributes>>=
-attribute ValveID string -id 1
+attribute ValveID string -id 1 -check {$ValveID in {Hot Cold Drain}}
 attribute MachineID string -id 1
 ----
 
@@ -18720,7 +18979,7 @@ The class diagram graphic shows the two identifying attributes.
 [source,tcl]
 ----
 <<MTR attributes>>=
-attribute MotorID string -id 1
+attribute MotorID string -id 1 -check {$MotorID in {Pump Agitator Spin}}
 attribute MachineID string -id 1
 ----
 
@@ -20064,7 +20323,7 @@ namespace eval ::rosea {
     <<rosea exports>>
     namespace ensemble create
 
-    variable version 1.0b7
+    variable version 1.0
 
     logger::initNamespace [namespace current]
 
@@ -20088,7 +20347,7 @@ We also provide a root chunk to extract a package index file.
 [source,tcl]
 ----
 <<pkgIndex.tcl>>=
-package ifneeded rosea 1.0b7 [list source [file join $dir rosea.tcl]]
+package ifneeded rosea 1.0 [list source [file join $dir rosea.tcl]]
 ----
 
 === Unit Tests
@@ -20199,14 +20458,14 @@ rosea populate {
 [source,tcl]
 ----
 <<rosea.man>>=
-[manpage_begin rosea n 1.0b7]
+[manpage_begin rosea n 1.0]
 [comment {
 <<copyright info>>
 }]
 [moddesc "XUML Data and Execution Architecture"]
 [titledesc "Relation Oriented Software Execution Architecture"]
 [copyright "2014-2015 by G. Andrew Mangogna"]
-[require rosea [opt 1.0b7]]
+[require rosea [opt 1.0]]
 [description]
 <<manual description>>
 [section "Package Commands"]

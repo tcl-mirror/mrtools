@@ -2,7 +2,7 @@
 # -- Tcl Module
 
 # @@ Meta Begin
-# Package rosea 1.0b7
+# Package rosea 1.0
 # Meta description Rosea is a data and execution architecture for
 # Meta description translating XUML models using Tcl as the implementation
 # Meta description language.
@@ -30,7 +30,7 @@ package require lambda
 
 # ACTIVESTATE TEAPOT-PKG BEGIN DECLARE
 
-package provide rosea 1.0b7
+package provide rosea 1.0
 
 # ACTIVESTATE TEAPOT-PKG END DECLARE
 # ACTIVESTATE TEAPOT-PKG END TM
@@ -109,7 +109,7 @@ namespace eval ::rosea {
     
     namespace ensemble create
 
-    variable version 1.0b7
+    variable version 1.0
 
     logger::initNamespace [namespace current]
 
@@ -134,6 +134,11 @@ namespace eval ::rosea {
         relation semijoin $class $Attribute -using {Domain Domain Name Class} |
         relation join ~ $DefaultValue -using {Domain Domain Class Class Name Attribute}
     } defaultValuesQuery
+    
+    pipe {
+        relation semijoin $class $Attribute -using {Domain Domain Name Class} |
+        relation join ~ $ValueCheck -using {Domain Domain Class Class Name Attribute}
+    } checkValuesQuery
     
     pipe {
         relation semijoin $class $StateModel -using {Domain Domain Name Model} |
@@ -297,6 +302,7 @@ namespace eval ::rosea {
             Class Class\
             Attribute Attribute\
             DefaultValue DefaultValue\
+            ValueCheck ValueCheck\
             Identifier Identifier\
             IdentifyingAttribute IdentifyingAttribute\
             Relationship Relationship\
@@ -515,6 +521,7 @@ namespace eval ::rosea {
             variable headingQuery
             variable idQuery
             variable defaultValuesQuery
+            variable checkValuesQuery
             variable hasSMQuery
             variable statesQuery
             
@@ -539,6 +546,15 @@ namespace eval ::rosea {
                 
                 relvar create $className $heading {*}$idset
                 
+                # <1>
+                set checkvalues [eval $checkValuesQuery]
+                
+                if {[relation isnotempty $checkvalues]} {
+                    relvar trace add variable $className {insert update set} [list\
+                        ::rosea::Helpers::CheckValueTrace\
+                        [relation dict $checkvalues Name Expression]\
+                    ]
+                }
                 set defaultvalues [eval $defaultValuesQuery]
                 
                 if {[relation isnotempty $defaultvalues]} {
@@ -1219,6 +1235,9 @@ namespace eval ::rosea {
                     got "%s"}
             PSEUDO_STATE    {the transition action, "%s", is not valid as %s}
             EXPECTED_PSEUDO_STATE    {expected CH or IG, got "%s"}
+            RELVAR_TRACE_OP     {unexpected relvar trace operation, "%s"}
+            ATTR_CHECK_FAILED   {check for attribute, "%s", failed:\
+                                instance value was, "%s": "%s" evaluated to "%s"}
             ARG_MISMATCH      {number of population values must be a multiple of %d, got %d}
             SAVE_ARG_ERROR  {wrong number of arguments: expected:\
                     "save ?-sqlite | -tclral? ?-async <cmdprefix>?\
@@ -1348,6 +1367,36 @@ namespace eval ::rosea {
             tuple create\
                 [dict merge $defheading [tuple heading $tuple]]\
                 [dict merge $defvalues [tuple get $tuple]]
+        }
+        proc CheckValueTrace {attrchecks op relvar args} {
+            if {$op eq "insert"} {
+                set tuple [lindex $args 0]
+                EvalAttrCheck $attrchecks $tuple
+                return $tuple
+            } elseif {$op eq "update"} {
+                set tuple [lindex $args 1]
+                EvalAttrCheck $attrchecks $tuple
+                return $tuple
+            } elseif {$op eq "set"} {
+                set relvalue [lindex $args 0]
+                relation foreach inst $relvalue {
+                    set tuple [relation tuple $inst]
+                    EvalAttrCheck $attrchecks $tuple
+                }
+                return $relvalue
+            } else {
+                tailcall DeclError RELVAR_TRACE_OP $op
+            }
+        }
+        proc EvalAttrCheck {attrchecks tuple} {
+            dict for {attrname checkexpr} $attrchecks {
+                tuple assign $tuple
+                set result [expr $checkexpr]
+                if {!$result} {
+                    tailcall DeclError ATTR_CHECK_FAILED $attrname [tuple get $tuple]\
+                        $checkexpr $result
+                }
+            }
         }
         proc QuerySystemOperations {which requiresSM} {
             return [pipe {
@@ -2394,6 +2443,15 @@ namespace eval ::rosea {
         } {Domain Class Attribute}
         relvar association R6\
             DefaultValue {Domain Class Attribute} ?\
+            Attribute {Domain Class Name} 1
+        relvar create ValueCheck {
+            Domain      string
+            Class       string
+            Attribute   string
+            Expression  string
+        } {Domain Class Attribute}
+        relvar association R17\
+            ValueCheck {Domain Class Attribute} ?\
             Attribute {Domain Class Name} 1
         relvar create AttributeReference {
             Domain              string
@@ -3821,6 +3879,14 @@ namespace eval ::rosea {
                                     Class       $ClassName\
                                     Attribute   $name\
                                     Number      $value\
+                                ]
+                            }
+                            -check {
+                                relvar insert ::rosea::Config::ValueCheck [list\
+                                    Domain      $DomainName\
+                                    Class       $ClassName\
+                                    Attribute   $name\
+                                    Expression  $value\
                                 ]
                             }
                             default {
