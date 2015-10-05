@@ -12,12 +12,15 @@
 
 DOCDIR	= ../doc
 TESTDIR = ../tests
+PKGDIR	= ../../packages
 IMAGEDIR = ./images
 
 vpath %.pdf $(DOCDIR)
 vpath %.html $(DOCDIR)
 vpath %.test $(TESTDIR)
 vpath %.uxf $(IMAGEDIR)
+
+VERSION=1.0a2
 
 DOCSRC 	=\
 	rash.aweb\
@@ -95,9 +98,9 @@ ASCIIDOC_OPTS =\
 	$(patsubst %,--attribute=%,$(ASCIIDOC_ATTRS))\
 	$(NULL)
 
-.PHONY : all doc code tests runtests clean
+.PHONY : all doc code tests manual package runtests clean
 
-all : doc code tests manual
+all : doc code tests manual package
 
 doc : $(PDF)
 
@@ -106,6 +109,11 @@ code : $(TCLSRC) pkgIndex.tcl
 tests : code $(TESTS)
 
 manual : $(MANDOC)
+
+package : $(PKGDIR)/package-rosea-$(VERSION)-tcl.tm
+
+$(PKGDIR)/package-rosea-$(VERSION)-tcl.tm : $(TCLSRC) teapot.txt
+	teapot-pkg generate --output $(PKGDIR) .
 
 runtests : tests
 	cd $(TESTDIR) ; tclsh $(TESTS) -verbose bet -level info
