@@ -2,7 +2,7 @@
 # -- Tcl Module
 
 # @@ Meta Begin
-# Package rosea 1.0
+# Package rosea 1.1
 # Meta description Rosea is a data and execution architecture for
 # Meta description translating XUML models using Tcl as the implementation
 # Meta description language.
@@ -30,7 +30,7 @@ package require lambda
 
 # ACTIVESTATE TEAPOT-PKG BEGIN DECLARE
 
-package provide rosea 1.0
+package provide rosea 1.1
 
 # ACTIVESTATE TEAPOT-PKG END DECLARE
 # ACTIVESTATE TEAPOT-PKG END TM
@@ -109,7 +109,7 @@ namespace eval ::rosea {
     
     namespace ensemble create
 
-    variable version 1.0
+    variable version 1.1
 
     logger::initNamespace [namespace current]
 
@@ -1184,6 +1184,7 @@ namespace eval ::rosea {
                             got "%s" and "%s"}
             UNKNOWN_STATE   {unknown state, "%s", for class, "%s"}
             UNKNOWN_EVENT   {unknown event, "%s", for class, "%s"}
+            NO_CREATION_EVENTS   {class, "%s", has no defined creation events}
             NO_CROSS_DOMAIN         {cannot link instances across domains,\
                                         got "%s" and "%s"}
             UNKNOWN_RELATIONSHIP    {unknown relationship, "%s"}
@@ -1209,6 +1210,8 @@ namespace eval ::rosea {
             INVALID_TIME    {invalid time value, "%s"}
             SINGLE_OR_EMPTY_REF_REQUIRED {single valued or nil reference required, %d found}
             SINGLE_REF_REQUIRED     {single valued reference required, %d found}
+            ASYNC_CREATION_FAILED     {asynchronous creation of an instance of class, "%s",\
+                with attributes, "%s", failed: %s}
             EVENT_IN_FLIGHT     {event, "%s", sent to "%s", which does not exist}
             CANT_HAPPEN_EVENT   {can't happen transition, %s - %s -> %s ==> %s -> CH}
             CONFIG_ERRORS     {encountered %d configuration script errors}
@@ -1479,15 +1482,31 @@ namespace eval ::rosea {
         }
         proc createasync {relvar event eventparams args} {
             SplitRelvarName $relvar domain class
-            set knownevent [relvar restrictone ${domain}::__Arch_Event\
-                Class $class Event $event]
-            if {[relation isempty $knownevent]} { # <1>
+        
+            if {[relation isempty [relvar restrictone ${domain}::__Arch_Event\
+                    Class $class Event $event]]} {
                 tailcall DeclError UNKNOWN_EVENT $event $class
             }
-            set instref [createin $relvar @ {*}$args] ; # <2>
-            ::rosea::Trace::TraceCreation [SelfInstRef 1] $event $instref
-            ::rosea::InstCmds::signal $instref $event {*}$eventparams
-            return $instref
+            if {[relation isempty [relvar restrictone ${domain}::__Arch_State\
+                    Class $class State @]]} {
+                tailcall DeclError NO_CREATION_EVENTS $class
+            }
+            set srcref [SelfInstRef]
+            set eventInfo [dict create\
+                type creation\
+                src $srcref\
+                dstClass $relvar\
+                dstAttrs $args\
+                event $event\
+                params $eventparams\
+            ]
+            if {[::rosea::InstCmds::isRefEqual $srcref [nilInstRef]]} {
+                lappend ::rosea::Dispatch::toc_queue $eventInfo
+            } else {
+                lappend ::rosea::Dispatch::event_queue $eventInfo
+            }
+            ::after 0 ::rosea::Dispatch::DispatchEvent
+            return
         }
         proc update {relvar relvalue} {
             tailcall ToRef $relvar [relvar updateper $relvar $relvalue]
@@ -2147,6 +2166,7 @@ namespace eval ::rosea {
         
             set callback [namespace code DispatchEvent]
             set eventInfo [dict create\
+                type ordinary\
                 src $srcref\
                 event $event\
                 params $arglist\
@@ -2194,6 +2214,22 @@ namespace eval ::rosea {
                 relvar transaction begin ; # <2>
             } else {
                 return
+            }
+            if {[dict get $eventInfo type] eq "creation"} {
+                try {
+                    set dstref [::rosea::ClassCmds::createin\
+                            [dict get $eventInfo dstClass] @\
+                            {*}[dict get $eventInfo dstAttrs]] ; # <1>
+                } on error {result} {
+                    if {[llength $event_queue] == 0} {
+                        relvar transaction end
+                    }
+                    tailcall DeclError ASYNC_CREATION_FAILED [dict get $eventInfo dstClass]\
+                        [dict get $eventInfo dstAttrs] $result
+                }
+                dict set eventInfo dst $dstref ; # <2>
+                ::rosea::Trace::TraceCreation [dict get $eventInfo src]\
+                    [dict get $eventInfo event] $dstref
             }
             set dstref [dict get $eventInfo dst]
             lassign $dstref relvar ref
@@ -2265,6 +2301,7 @@ namespace eval ::rosea {
             variable DelayedSignalId
             set eventInfo [dict create\
                 id [incr DelayedSignalId]\
+                type ordinary\
                 src $srcref\
                 event $event\
                 params $arglist\

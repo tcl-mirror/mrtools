@@ -283,7 +283,7 @@ http://repos.modelrealization.com/cgi-bin/fossil/tcl-cm3[+STSA+] and
 its companion
 http://repos.modelrealization.com/cgi-bin/fossil/tcl-cm3[+pycca+].
 
-The core Tcl capability that best suits TclRAL is the namespace ensemble.
+The core Tcl capability that best suits `rosea` is the namespace ensemble.
 Namespace ensembles allow for creating object-oriented-like commands.
 It does not support any traditional object oriented concepts of inheritance but
 then XUML does not use those concepts.
@@ -2252,7 +2252,10 @@ the instance is placed in an initial state
 but no state activity is executed as part of the creation.
 
 By contrast,
-asynchronous creation signals an event to a newly created instance
+asynchronous creation happens when an event is dispatched.
+A new class instance is created and
+placed in a pseudo-initial state.
+The event is dispatched immediately to the newly created instance
 to cause a transition and, necessarily, have a state activity executed.
 These events are sometimes referred to as _creation_ events.
 
@@ -2260,7 +2263,7 @@ These events are sometimes referred to as _creation_ events.
 _class_ +createasync+ _event_ _eventparams_ _attr1_ _value1_ _attr2_ _value2_ ...
 
 +event+::
-    The name of the event to send to the newly created instance.
+    The name of the event to signal to the newly created instance.
 +eventparams+::
     A list of event parameters that are to be sent along with the event.
     If the event does not carry any parameters, then this argument must
@@ -2270,11 +2273,9 @@ _class_ +createasync+ _event_ _eventparams_ _attr1_ _value1_ _attr2_ _value2_ ..
 +valueN+::
     The corresponding value to be given to the attribute.
 
-The command returns an instance reference to the newly created instance.
-Note however, that the event transition will *not* have occurred.
-When creating an instance,
-it is necessary to give each attribute a value,
-unless a default value was defined for the attribute.
+The command returns the empty string.
+Note that the instance is not created nor does any transition occur
+until the creation event is dispatched.
 *****
 
 ///////
@@ -2283,18 +2284,9 @@ unless a default value was defined for the attribute.
 [call [arg class] [cmd createasync] [arg event] [arg eventparams]\
     [arg "attr1 value1 attr2 value2 ..."]]
 
-The [cmd createasync] command creates an instance of [arg class]
-and places the newly created instance into a pseudo-initial state.
-Then [arg event] along with the event parameters given by
-[arg eventparams] is signaled to the newly created instance.
-[arg Eventparams] is interpreted as a list of parameter values that
-must match the parameter signature of the state into which [arg event]
-causes a transition.
-It is an error to invoke [cmd createasync] if [arg class] does not have
-an associated state machine or if [arg class] does not have a
-transition specified to originate from the pseudo-initial state
-of "@".
-
+The [cmd createasync] command signals a creation event for [arg class]
+When dispatched,
+a new instance of [arg class] is created.
 The attributes of the class will be set
 according to the attribute names / value pairs given as arguments.
 All attributes must be given a value unless a particular attribute
@@ -2303,9 +2295,18 @@ In that case,
 the attribute need not be included in the arguments and its default
 value will be used instead.
 
-The command returns a reference to the newly created instance.
-Note however, that the event transition will [emph not] have occurred
-on the newly created instance.
+After creating the class instance,
+[arg event] along with the event parameters given by
+[arg eventparams] is dispatched to the newly created instance.
+[arg Eventparams] is interpreted as a list of parameter values that
+must match the parameter signature of the state into which [arg event]
+causes a transition.
+It is an error to invoke [cmd createasync] if [arg class] does not have
+an associated state machine or if [arg class] does not have a
+transition specified to originate from the pseudo-initial state
+of "@".
+
+The command returns the empty string.
 
 [example {
 set r [Reactor createasync Process {300 20} VesselId A270]
@@ -2315,34 +2316,245 @@ set r [Reactor createasync Process {300 20} VesselId A270]
 
 [float]
 ===== Implementation
+The implementation of `createasync` resembles that of signaling and
+ordinary event.
+
 (((rosea,ClassCmds,createasync)))
 [source,tcl]
 ----
 <<class commands>>=
 proc createasync {relvar event eventparams args} {
     SplitRelvarName $relvar domain class
-    set knownevent [relvar restrictone ${domain}::__Arch_Event\
-        Class $class Event $event]
-    if {[relation isempty $knownevent]} { # <1>
-        tailcall DeclError UNKNOWN_EVENT $event $class
-    }
-    set instref [createin $relvar @ {*}$args] ; # <2>
-    ::rosea::Trace::TraceCreation [SelfInstRef 1] $event $instref
-    ::rosea::InstCmds::signal $instref $event {*}$eventparams
-    return $instref
+
+    <<createasync: validate event>>
+    <<createasync: validate pseudo initial state>>
+    <<createasync: construct event information>>
+    <<createasync: queue event>>
+    return
 }
 ----
-<1> We must make sure that the event is one to which the instance responds.
-<2> The ``@'' state is a special initial pseudo-state from which the
-creation event causes a transition.
 
-(((error code,UNKNOWN_STATE)))
+We want to do some validation before puting an event on the event queue
+in an effort to detect errors as early as we can.
+So, we insist that the creation event be one of the events defined
+for the class state model.
+
+[source,tcl]
+----
+<<createasync: validate event>>=
+if {[relation isempty [relvar restrictone ${domain}::__Arch_Event\
+        Class $class Event $event]]} {
+    tailcall DeclError UNKNOWN_EVENT $event $class
+}
+----
+
+(((error code,UNKNOWN_EVENT)))
 [source,tcl]
 ----
 <<error code formats>>=
 UNKNOWN_EVENT   {unknown event, "%s", for class, "%s"}
 ----
 
+It is also necessary that the state model be defined as having
+as transition from the pseudo initial state.
+You can't send a creation event to just any state model.
+The pseudo-initial state is named `@` and so that must be one of the
+defined states for the class.
+
+[source,tcl]
+----
+<<createasync: validate pseudo initial state>>=
+if {[relation isempty [relvar restrictone ${domain}::__Arch_State\
+        Class $class State @]]} {
+    tailcall DeclError NO_CREATION_EVENTS $class
+}
+----
+
+(((error code,NO_CREATION_EVENTS)))
+[source,tcl]
+----
+<<error code formats>>=
+NO_CREATION_EVENTS   {class, "%s", has no defined creation events}
+----
+
+Now we just construct the event information.
+There is a `type` member of the event dictionary to indicate that
+this is a creation event and has to be processed slightly differently.
+
+[source,tcl]
+----
+<<createasync: construct event information>>=
+set srcref [SelfInstRef]
+set eventInfo [dict create\
+    type creation\
+    src $srcref\
+    dstClass $relvar\
+    dstAttrs $args\
+    event $event\
+    params $eventparams\
+]
+----
+
+For a creation event,
+we need to know the class where the new instance will be created and
+the attribute values for the class.
+
+Finally,
+we determine if the creation event will start a thread of control or not.
+This depends upon whether or not we are sending the event from a state
+activity.
+
+[source,tcl]
+----
+<<createasync: queue event>>=
+if {[::rosea::InstCmds::isRefEqual $srcref [nilInstRef]]} {
+    lappend ::rosea::Dispatch::toc_queue $eventInfo
+} else {
+    lappend ::rosea::Dispatch::event_queue $eventInfo
+}
+::after 0 ::rosea::Dispatch::DispatchEvent
+----
+
+[float]
+===== Tests
+[source,tcl]
+----
+<<class command tests>>=
+test createasync-1.0 {
+    Signal a creation event
+} -setup {
+    rosea configure {
+        domain foo {
+            class A {
+                attribute A_Id string -id 1
+                attribute A_Attr string
+
+                statemodel {
+                    transition @ - New -> Initialize
+
+                    state Initialize {bid battr} {
+                        B create B_Id $bid B_Attr $battr\
+                            A_Id [readAttribute $self A_Id]
+                        ::rosea::test::syncToTest $bid
+                    }
+                }
+            }
+            class B {
+                attribute B_Id string -id 1
+                attribute B_Attr string
+                attribute A_Id string
+                reference R1 A -link A_Id
+            }
+
+            association R1 B 1--1 A
+
+            operation newA {} {
+                A createasync New {5 foo} A_Id 17 A_Attr bar
+            }
+        }
+    }
+
+    rosea generate
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::foo
+} -body {
+    ::foo newA
+    waitForSync
+} -result {5}
+----
+
+[source,tcl]
+----
+<<class command tests>>=
+test createasync-1.1 {
+    Signal a creation event to class without pseudo initial state
+} -setup {
+    rosea configure {
+        domain foo {
+            class A {
+                attribute A_Id string -id 1
+                attribute A_Attr string
+
+                statemodel {
+                    transition Initialize - New -> Initialize
+
+                    state Initialize {bid battr} {
+                        B create B_Id $bid B_Attr $battr\
+                            A_Id [readAttribute $self A_Id]
+                    }
+                }
+            }
+            class B {
+                attribute B_Id string -id 1
+                attribute B_Attr string
+                attribute A_Id string
+                reference R1 A -link A_Id
+            }
+
+            association R1 B 1--1 A
+
+            operation newA {} {
+                A createasync New {5 foo} A_Id 17 A_Attr bar
+            }
+        }
+    }
+
+    rosea generate
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::foo
+} -body {
+    ::foo newA
+} -result {class, "A", has no defined creation events} -returnCodes error
+----
+
+[source,tcl]
+----
+<<class command tests>>=
+test createasync-1.2 {
+    Signal a creation event, instance creation fails.
+} -setup {
+    rosea configure {
+        domain foo {
+            class A {
+                attribute A_Id string -id 1
+                attribute A_Attr string
+
+                statemodel {
+                    transition @ - New -> Initialize
+
+                    state Initialize {bid battr} {
+                        B create B_Id $bid B_Attr $battr\
+                            A_Id [readAttribute $self A_Id]
+                        ::rosea::test::syncToTest $bid
+                    }
+                }
+            }
+            class B {
+                attribute B_Id string -id 1
+                attribute B_Attr string
+                attribute A_Id string
+                reference R1 A -link A_Id
+            }
+
+            association R1 B 1--1 A
+
+            operation newA {} {
+                A createasync New {5 foo} A_Id 17
+            }
+        }
+    }
+
+    rosea generate
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::foo
+} -body {
+    ::foo newA
+    waitForSync 500
+} -result {TIMEOUT}
+----
 ==== Updating Class Values
 
 It is often more convenient to perform operations on a set of
@@ -5733,6 +5945,7 @@ proc SignalEvent {srcref dstset event arglist} {
 
     set callback [namespace code DispatchEvent]
     set eventInfo [dict create\
+        type ordinary\
         src $srcref\
         event $event\
         params $arglist\
@@ -5902,6 +6115,7 @@ event to be ignored or treated as an error.
 <<dispatch commands>>=
 proc DispatchEvent {} {
     <<DispatchEvent: select event>>
+    <<DispatchEvent: handle creation events>>
     <<DispatchEvent: get current state>>
     <<DispatchEvent: determine new state>>
     <<DispatchEvent: execute state action>>
@@ -5935,8 +6149,48 @@ if {[llength $event_queue] != 0} {
     return
 }
 ----
-<1> Note the use of the +K+ trick here and immediately below.
+<1> Note the use of the `K` trick here and below.
 <2> Each time we start a new thread of control, we begin a transaction.
+
+The event dictionary has a `type` key that determines if the event
+is just an ordinary event or is a creation event.
+For a creation event we must actually create an class instance before we
+dispatch the event to it.
+
+[source,tcl]
+----
+<<DispatchEvent: handle creation events>>=
+if {[dict get $eventInfo type] eq "creation"} {
+    try {
+        set dstref [::rosea::ClassCmds::createin\
+                [dict get $eventInfo dstClass] @\
+                {*}[dict get $eventInfo dstAttrs]] ; # <1>
+    } on error {result} {
+        if {[llength $event_queue] == 0} {
+            relvar transaction end
+        }
+        tailcall DeclError ASYNC_CREATION_FAILED [dict get $eventInfo dstClass]\
+            [dict get $eventInfo dstAttrs] $result
+    }
+    dict set eventInfo dst $dstref ; # <2>
+    ::rosea::Trace::TraceCreation [dict get $eventInfo src]\
+        [dict get $eventInfo event] $dstref
+}
+----
+<1> Here is where the new instance is created in the pseudo-initial, `@`,
+state.
+<2> Note that we are just setting the `dst` dictionary key so that now
+all the members are in place to look just like an ordinary event.
+The rest of the code simply ignores the dictionary members that it is not
+concerned with.
+
+(((error code,ASYNC_CREATION_FAILED)))
+[source,tcl]
+----
+<<error code formats>>=
+ASYNC_CREATION_FAILED     {asynchronous creation of an instance of class, "%s",\
+    with attributes, "%s", failed: %s}
+----
 
 Each class that has a state model also has an additional relvar that is used to
 hold the value of the current state for the instances of the class.
@@ -6083,7 +6337,7 @@ proc TransitionError {src event dst currstate} {
 }
 ----
 
-(((error code,EVENT_IN_FLIGHT)))
+(((error code,CANT_HAPPEN_EVENT)))
 [source,tcl]
 ----
 <<error code formats>>=
@@ -6312,6 +6566,7 @@ proc SignalDelayedEvent {time srcref dstset event arglist} {
     variable DelayedSignalId
     set eventInfo [dict create\
         id [incr DelayedSignalId]\
+        type ordinary\
         src $srcref\
         event $event\
         params $arglist\
@@ -20323,7 +20578,7 @@ namespace eval ::rosea {
     <<rosea exports>>
     namespace ensemble create
 
-    variable version 1.0
+    variable version 1.1
 
     logger::initNamespace [namespace current]
 
@@ -20347,7 +20602,7 @@ We also provide a root chunk to extract a package index file.
 [source,tcl]
 ----
 <<pkgIndex.tcl>>=
-package ifneeded rosea 1.0 [list source [file join $dir rosea.tcl]]
+package ifneeded rosea 1.1 [list source [file join $dir rosea.tcl]]
 ----
 
 === Unit Tests
@@ -20458,7 +20713,7 @@ rosea populate {
 [source,tcl]
 ----
 <<rosea.man>>=
-[manpage_begin rosea n 1.0]
+[manpage_begin rosea n 1.1]
 [comment {
 <<copyright info>>
 }]
