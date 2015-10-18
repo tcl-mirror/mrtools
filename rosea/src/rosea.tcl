@@ -73,14 +73,15 @@ namespace eval ::rosea {
     
     namespace ensemble create
 
-    variable version 1.1
+    variable version 1.2
 
     logger::initNamespace [namespace current]
 
-    namespace import ::ral::relation
-    namespace import ::ral::tuple
-    namespace import ::ral::relformat
-    namespace import ::ralutil::pipe
+    namespace import\
+        ::ral::relation\
+        ::ral::tuple\
+        ::ral::relformat\
+        ::ralutil::pipe
     namespace import ::ral::relvar
     pipe {
         relation semijoin $class $Attribute -using {Domain Domain Name Class} |
@@ -316,10 +317,11 @@ namespace eval ::rosea {
             
             set domns ${prefix}::$domainName
             namespace eval $domns {
-                namespace import ::ral::relation
-                namespace import ::ral::tuple
-                namespace import ::ral::relformat
-                namespace import ::ralutil::pipe
+                namespace import\
+                    ::ral::relation\
+                    ::ral::tuple\
+                    ::ral::relformat\
+                    ::ralutil::pipe
                 ral relvar create __Arch_RefLink {
                     Relationship    string
                     ReferringClass  string
@@ -494,10 +496,11 @@ namespace eval ::rosea {
             relation foreach class $classes {
                 set className ${domns}::[relation extract $class Name]
                 namespace eval $className {
-                    namespace import ::ral::relation
-                    namespace import ::ral::tuple
-                    namespace import ::ral::relformat
-                    namespace import ::ralutil::pipe
+                    namespace import\
+                        ::ral::relation\
+                        ::ral::tuple\
+                        ::ral::relformat\
+                        ::ralutil::pipe
                 }
                 namespace eval $className [list namespace path\
                         [list ::rosea::InstCmds $domns]]
@@ -540,10 +543,11 @@ namespace eval ::rosea {
                         $instheading $instid
                     set actns ${className}::__Activity
                     namespace eval $actns {
-                        namespace import ::ral::relation
-                        namespace import ::ral::tuple
-                        namespace import ::ral::relformat
-                        namespace import ::ralutil::pipe
+                        namespace import\
+                            ::ral::relation\
+                            ::ral::tuple\
+                            ::ral::relformat\
+                            ::ralutil::pipe
                     }
                     namespace eval $actns [list\
                         namespace path [list\
@@ -902,10 +906,11 @@ namespace eval ::rosea {
                 set asgnns\
                     ${domns}::[relation extract $assigner Relationship]::__Activity
                 namespace eval $asgnns {
-                    namespace import ::ral::relation
-                    namespace import ::ral::tuple
-                    namespace import ::ral::relformat
-                    namespace import ::ralutil::pipe
+                    namespace import\
+                        ::ral::relation\
+                        ::ral::tuple\
+                        ::ral::relformat\
+                        ::ralutil::pipe
                 }
                 namespace eval $asgnns [list\
                     namespace path [list\
@@ -1137,10 +1142,11 @@ namespace eval ::rosea {
         return [string trimright $result]
     }
     namespace eval Helpers {
-        namespace import ::ral::relation
-        namespace import ::ral::tuple
-        namespace import ::ral::relformat
-        namespace import ::ralutil::pipe
+        namespace import\
+            ::ral::relation\
+            ::ral::tuple\
+            ::ral::relformat\
+            ::ralutil::pipe
         namespace import ::ral::relvar
         variable errFormats
         set errFormats [dict create {*}{
@@ -1405,10 +1411,11 @@ namespace eval ::rosea {
         }
     }
     namespace eval ClassCmds {
-        namespace import ::ral::relation
-        namespace import ::ral::tuple
-        namespace import ::ral::relformat
-        namespace import ::ralutil::pipe
+        namespace import\
+            ::ral::relation\
+            ::ral::tuple\
+            ::ral::relformat\
+            ::ralutil::pipe
         namespace import ::ral::relvar
         namespace path [namespace parent]::Helpers ; # <1>
         proc findAll {relvar} {
@@ -1477,10 +1484,11 @@ namespace eval ::rosea {
         }
     }
     namespace eval InstCmds {
-        namespace import ::ral::relation
-        namespace import ::ral::tuple
-        namespace import ::ral::relformat
-        namespace import ::ralutil::pipe
+        namespace import\
+            ::ral::relation\
+            ::ral::tuple\
+            ::ral::relformat\
+            ::ralutil::pipe
         namespace path [namespace parent]::Helpers
         pipe {
             relvar set ${domain}::$DstClass |
@@ -1520,13 +1528,13 @@ namespace eval ::rosea {
             }
             return [list $relvar1 [relation $op $inst1 $inst2]]
         }
-        proc refUnion {op instref1 instref2} {
+        proc refUnion {instref1 instref2} {
             tailcall RefSetCommand union $instref1 $instref2
         }
-        proc refIntersect {op instref1 instref2} {
+        proc refIntersect {instref1 instref2} {
             tailcall RefSetCommand intersect $instref1 $instref2
         }
-        proc refMinus {op instref1 instref2} {
+        proc refMinus {instref1 instref2} {
             tailcall RefSetCommand minus $instref1 $instref2
         }
         proc forAllRefs {varname instref body} {
@@ -1779,10 +1787,11 @@ namespace eval ::rosea {
         }
     }
     namespace eval RelCmds {
-        namespace import ::ral::relation
-        namespace import ::ral::tuple
-        namespace import ::ral::relformat
-        namespace import ::ralutil::pipe
+        namespace import\
+            ::ral::relation\
+            ::ral::tuple\
+            ::ral::relformat\
+            ::ralutil::pipe
         namespace import ::ral::relvar
         namespace path [list\
             [namespace parent]::Helpers\
@@ -2090,10 +2099,11 @@ namespace eval ::rosea {
         }
     }
     namespace eval Dispatch {
-        namespace import ::ral::relation
-        namespace import ::ral::tuple
-        namespace import ::ral::relformat
-        namespace import ::ralutil::pipe
+        namespace import\
+            ::ral::relation\
+            ::ral::tuple\
+            ::ral::relformat\
+            ::ralutil::pipe
         namespace import ::ral::relvar
         namespace path [list\
             [namespace parent]::Helpers\
@@ -2185,8 +2195,10 @@ namespace eval ::rosea {
                             [dict get $eventInfo dstClass] @\
                             {*}[dict get $eventInfo dstAttrs]] ; # <1>
                 } on error {result} {
-                    if {[llength $event_queue] == 0} {
-                        relvar transaction end
+                    catch {
+                        if {[llength $event_queue] == 0} {
+                            relvar transaction end
+                        }
                     }
                     tailcall DeclError ASYNC_CREATION_FAILED [dict get $eventInfo dstClass]\
                         [dict get $eventInfo dstAttrs] $result
@@ -2222,6 +2234,8 @@ namespace eval ::rosea {
                     try {
                         ${relvar}::__Activity::$newState $dstref\
                                 {*}[dict get $eventInfo params] ; # <1>
+                    } on error {result opts} {
+                        return -options $opts $result
                     } finally {
                         set term [relvar restrictone ${domain}::__Arch_TerminalState\
                                 Class $class State $newState]
@@ -2231,10 +2245,17 @@ namespace eval ::rosea {
                         }
                     }
                 }
-            } finally {
-                if {[llength $event_queue] == 0} {
-                    relvar transaction end
-                }
+            } on error {result opts} {
+                catch {
+                    if {[llength $event_queue] == 0} {
+                        relvar transaction end
+                    }
+                } ; # <1>
+                return -options $opts $result
+            }
+            
+            if {[llength $event_queue] == 0} {
+                relvar transaction end
             }
             return
         }
@@ -2354,10 +2375,11 @@ namespace eval ::rosea {
     namespace eval Config {
         logger::initNamespace [namespace current]
     
-        namespace import ::ral::relation
-        namespace import ::ral::tuple
-        namespace import ::ral::relformat
-        namespace import ::ralutil::pipe
+        namespace import\
+            ::ral::relation\
+            ::ral::tuple\
+            ::ral::relformat\
+            ::ralutil::pipe
         namespace import ::ral::relvar
         namespace path [namespace parent]::Helpers
         variable evalLambda {{body} {
@@ -3453,10 +3475,11 @@ namespace eval ::rosea {
         namespace eval DomainDef {
             logger::initNamespace [namespace current]
         
-            namespace import ::ral::relation
-            namespace import ::ral::tuple
-            namespace import ::ral::relformat
-            namespace import ::ralutil::pipe
+            namespace import\
+                ::ral::relation\
+                ::ral::tuple\
+                ::ral::relformat\
+                ::ralutil::pipe
             namespace import ::ral::relvar
             namespace import ::rosea::Config::ConfigEvaluate
             namespace import ::rosea::Helpers::DeclError
@@ -3830,10 +3853,11 @@ namespace eval ::rosea {
             namespace eval ClassDef {
                 logger::initNamespace [namespace current]
             
-                namespace import ::ral::relation
-                namespace import ::ral::tuple
-                namespace import ::ral::relformat
-                namespace import ::ralutil::pipe
+                namespace import\
+                    ::ral::relation\
+                    ::ral::tuple\
+                    ::ral::relformat\
+                    ::ralutil::pipe
                 namespace import ::ral::relvar
                 namespace import ::rosea::Config::ConfigEvaluate
                 namespace import ::rosea::Helpers::DeclError
@@ -4052,10 +4076,11 @@ namespace eval ::rosea {
                 namespace eval StateModelDef {
                     logger::initNamespace [namespace current]
                 
-                    namespace import ::ral::relation
-                    namespace import ::ral::tuple
-                    namespace import ::ral::relformat
-                    namespace import ::ralutil::pipe
+                    namespace import\
+                        ::ral::relation\
+                        ::ral::tuple\
+                        ::ral::relformat\
+                        ::ralutil::pipe
                     namespace import ::ral::relvar
                     namespace import ::rosea::Config::ConfigEvaluate
                     namespace import ::rosea::Helpers::DeclError
@@ -4171,10 +4196,11 @@ namespace eval ::rosea {
             namespace eval AssignerDef {
                 logger::initNamespace [namespace current]
             
-                namespace import ::ral::relation
-                namespace import ::ral::tuple
-                namespace import ::ral::relformat
-                namespace import ::ralutil::pipe
+                namespace import\
+                    ::ral::relation\
+                    ::ral::tuple\
+                    ::ral::relformat\
+                    ::ralutil::pipe
                 namespace import ::ral::relvar
                 namespace import ::rosea::Config::ConfigEvaluate
                 namespace import ::rosea::Helpers::DeclError
@@ -4296,10 +4322,11 @@ namespace eval ::rosea {
     namespace eval Populate {
         logger::initNamespace [namespace current]
     
-        namespace import ::ral::relation
-        namespace import ::ral::tuple
-        namespace import ::ral::relformat
-        namespace import ::ralutil::pipe
+        namespace import\
+            ::ral::relation\
+            ::ral::tuple\
+            ::ral::relformat\
+            ::ralutil::pipe
         namespace import ::ral::relvar
         namespace import ::rosea::Config::ConfigEvaluate
         namespace import ::rosea::Helpers::DeclError
@@ -4325,10 +4352,11 @@ namespace eval ::rosea {
         namespace eval DomainPop {
             logger::initNamespace [namespace current]
         
-            namespace import ::ral::relation
-            namespace import ::ral::tuple
-            namespace import ::ral::relformat
-            namespace import ::ralutil::pipe
+            namespace import\
+                ::ral::relation\
+                ::ral::tuple\
+                ::ral::relformat\
+                ::ralutil::pipe
             namespace import ::ral::relvar
             namespace path ::rosea::Helpers
             proc class {class heading args} {
@@ -4421,10 +4449,11 @@ namespace eval ::rosea {
     namespace eval Trace {
         logger::initNamespace [namespace current]
     
-        namespace import ::ral::relation
-        namespace import ::ral::tuple
-        namespace import ::ral::relformat
-        namespace import ::ralutil::pipe
+        namespace import\
+            ::ral::relation\
+            ::ral::tuple\
+            ::ral::relformat\
+            ::ralutil::pipe
         namespace import ::ral::relvar
         namespace path [list\
             [namespace parent]::Helpers\

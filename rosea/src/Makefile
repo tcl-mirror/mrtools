@@ -19,7 +19,7 @@ vpath %.html $(DOCDIR)
 vpath %.test $(TESTDIR)
 vpath %.uxf $(IMAGEDIR)
 
-VERSION=1.1
+VERSION=1.2
 
 DOCSRC 	=\
 	rosea.aweb\

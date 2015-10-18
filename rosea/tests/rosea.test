@@ -67,10 +67,11 @@ namespace eval ::rosea::test {
     namespace import ::tcltest::*
     ::logger::initNamespace [namespace current]
 
-    namespace import ::ral::relation
-    namespace import ::ral::tuple
-    namespace import ::ral::relformat
-    namespace import ::ralutil::pipe
+    namespace import\
+        ::ral::relation\
+        ::ral::tuple\
+        ::ral::relformat\
+        ::ralutil::pipe
     namespace import ::ral::relvar
 
     proc refMatch {expected actual} {
@@ -84,6 +85,27 @@ namespace eval ::rosea::test {
         return [::ral::relation is $expected == $actual]
     }
     customMatch relation [namespace current]::relationMatch
+    proc syncToTest {{value {}}} {
+        set [namespace current]::testDone $value
+    }
+    
+    proc waitForSync {{timeout 1000}} {
+        set varname [namespace current]::testDone
+        set tid [::after $timeout set $varname TIMEOUT] ; # <1>
+        vwait $varname
+        after cancel $tid
+        set $varname
+    }
+    proc waitForBGError {{timeout 1000}} {
+        set bg [interp bgerror {}] ; # <1>
+        interp bgerror {} [lambda@ [namespace current] {result opts} {
+            syncToTest [dict get $opts -errorcode]
+        }]
+    
+        set err [waitForSync $timeout]
+        interp bgerror {} $bg
+        return $err
+    }
     proc setupDomain {name} {
         set domns [namespace current]::$name
         namespace eval ${domns} {
@@ -280,17 +302,6 @@ namespace eval ::rosea::test {
         }
         return $result
     }
-    proc syncToTest {{value {}}} {
-        set [namespace current]::testDone $value
-    }
-    
-    proc waitForSync {{timeout 1000}} {
-        set varname [namespace current]::testDone
-        set tid [::after $timeout set $varname TIMEOUT]
-        vwait $varname
-        after cancel $tid
-        set $varname
-    }
     proc turnOnTraceLog {} {
         variable prevloglevel
     
@@ -365,6 +376,54 @@ namespace eval ::rosea::test {
         set ref [list [namespace current]::A {{Attr1 int} {{Attr1 40}}}]
         rosea::InstCmds::deRef $ref Attr3
     } -result {{Attr1 int Attr3 string} {{Attr1 40 Attr3 zub}}} -match relation
+    test refUnion-1.0 {
+        Compute the union of two instance references
+    } -setup {
+        relvar create A {
+            A_ID   int
+            A_Attr   string
+        } A_ID
+        set A_value [relation create {A_ID int} {A_ID 20}]
+        set aref [::rosea::Helpers::ToRef [namespace current]::A $A_value]
+        set B_value [relation create {A_ID int} {A_ID 30}]
+        set bref [::rosea::Helpers::ToRef [namespace current]::A $B_value]
+    } -cleanup {
+        relvar unset A
+    } -body {
+        ::rosea::InstCmds::refUnion $aref $bref
+    } -result {::rosea::test::A {{A_ID int} {{A_ID 20} {A_ID 30}}}} -match ref
+    test refIntersect-1.0 {
+        Compute the intersection of two instance references
+    } -setup {
+        relvar create A {
+            A_ID   int
+            A_Attr   string
+        } A_ID
+        set A_value [relation create {A_ID int} {A_ID 20} {A_ID 30}]
+        set aref [::rosea::Helpers::ToRef [namespace current]::A $A_value]
+        set B_value [relation create {A_ID int} {A_ID 30} {A_ID 40}]
+        set bref [::rosea::Helpers::ToRef [namespace current]::A $B_value]
+    } -cleanup {
+        relvar unset A
+    } -body {
+        ::rosea::InstCmds::refIntersect $aref $bref
+    } -result {::rosea::test::A {{A_ID int} {{A_ID 30}}}} -match ref
+    test refMinus-1.0 {
+        Compute the difference of two instance references
+    } -setup {
+        relvar create A {
+            A_ID   int
+            A_Attr   string
+        } A_ID
+        set A_value [relation create {A_ID int} {A_ID 20} {A_ID 30}]
+        set aref [::rosea::Helpers::ToRef [namespace current]::A $A_value]
+        set B_value [relation create {A_ID int} {A_ID 30} {A_ID 40}]
+        set bref [::rosea::Helpers::ToRef [namespace current]::A $B_value]
+    } -cleanup {
+        relvar unset A
+    } -body {
+        ::rosea::InstCmds::refMinus $aref $bref
+    } -result {::rosea::test::A {{A_ID int} {{A_ID 20}}}} -match ref
     test findById-1.0 {
         Find tuple by value of the identifier
     } -setup {
@@ -562,8 +621,8 @@ namespace eval ::rosea::test {
         removeDomain ::foo
     } -body {
         ::foo newA
-        waitForSync 500
-    } -result {TIMEOUT}
+        lindex [waitForBGError] 1
+    } -result {ASYNC_CREATION_FAILED}
     test update-1.0 {
         Update a set of attribute values
     } -setup {
@@ -969,6 +1028,51 @@ namespace eval ::rosea::test {
         vwait ::done
         set ::done
     } -result {::rosea::test::foo::c1 {{A1 int} {{A1 5}}}} -match ref
+    test DispatchEvent-1.1 {
+        Dispatch an event with the wrong arguments
+    } -setup {
+        setupDomain foo
+        addClass foo c1 {A1 int A2 string} A1
+        relvar eval {
+            addState foo Class c1 State s1
+            addState foo Class c1 State s2
+            addEvent foo Class c1 Event e1
+            addInitialState foo Class c1 State s1
+            addTransition foo Class c1 State s1 Event e1 NewState s2
+            addTransition foo Class c1 State s2 Event e1 NewState s1
+        }
+        proc [namespace current]::foo::c1::__Activity::s2 {self} {
+        }
+    } -cleanup {
+        cleanupDomain foo
+    } -body {
+        set ref [rosea::ClassCmds::create [namespace current]::foo::c1 A1 5 A2 baz]
+        rosea::InstCmds::signal $ref e1 baz
+        lindex [waitForBGError] 1
+    } -result {WRONGARGS}
+    test DispatchEvent-1.2 {
+        Dispatch an event with error in the activity
+    } -setup {
+        setupDomain foo
+        addClass foo c1 {A1 int A2 string} A1
+        relvar eval {
+            addState foo Class c1 State s1
+            addState foo Class c1 State s2
+            addEvent foo Class c1 Event e1
+            addInitialState foo Class c1 State s1
+            addTransition foo Class c1 State s1 Event e1 NewState s2
+            addTransition foo Class c1 State s2 Event e1 NewState s1
+        }
+        proc [namespace current]::foo::c1::__Activity::s2 {self} {
+            throw BAD {bad activity}
+        }
+    } -cleanup {
+        cleanupDomain foo
+    } -body {
+        set ref [rosea::ClassCmds::create [namespace current]::foo::c1 A1 5 A2 baz]
+        rosea::InstCmds::signal $ref e1
+        waitForBGError
+    } -result {BAD}
     test DispatchDelayedEvent-1.0 {
         Dispatch a delayed event and execute a state action
     } -setup {
