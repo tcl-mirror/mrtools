@@ -73,7 +73,7 @@ namespace eval ::rosea {
     
     namespace ensemble create
 
-    variable version 1.2
+    variable version 1.2.1
 
     logger::initNamespace [namespace current]
 
@@ -1905,8 +1905,10 @@ namespace eval ::rosea {
                     lappend assoctuples [dict merge $args $refto1 $refto2] ; # <2>
                 }
             }
-            return [ToRef ${domain1}::$assocClass\
+            set ref [ToRef ${domain1}::$assocClass\
                     [relvar insert ${domain1}::$assocClass {*}$assoctuples]]
+                CreateInInitialStateFromRef $domain1 $assocClass $ref
+            return $ref
         }
         proc unlinkSimple {rname instref} {
             lassign $instref relvar inst
@@ -1962,9 +1964,7 @@ namespace eval ::rosea {
         
             # If we are given instances to the associator class, then there is no
             # more work to do.
-            if {$class eq $associator} {
-                set associnsts [deRef $instref]
-            } else {
+            if {$class ne $associator} {
                 # Otherwise, we have to find the associator class instances ourselves.
                 set part [relation restrictwith $references {$Participant eq $class}]
                 set partcard [relation cardinality $part]
@@ -1975,14 +1975,24 @@ namespace eval ::rosea {
                 } else {
                     # find associative class instances
                     set navdir [expr {[relation extract $part Role] eq "source" ?\
-                        $relationship : ~$relationship}]
-                    set associnsts [deRef [::rosea::InstCmds::findRelated $instref\
-                        [list $navdir [namespace tail $associator]]]]
+                        "$relationship" : "~$relationship"}]
+                    set instref [::rosea::InstCmds::findRelated $instref\
+                        [list $navdir [namespace tail $associator]]]
+                    lassign $instref relvar insts
+                    SplitRelvarName $relvar domain class
                 }
             }
-            # Just remove the associator tuples that are the relationship links.
-            relvar minus ${domain}::$associator $associnsts
-            return $associnsts
+            relation foreach inst $insts {
+                relvar deleteone ${domain}::$class {*}[tuple get [relation tuple $inst]]
+            }
+            set states [relvar names ${domain}::__${class}__STATEINST]
+            if {$states ne {}} {
+                relation foreach inst $insts {
+                    relvar deleteone ${domain}::__${class}__STATEINST\
+                        {*}[tuple get [relation tuple $inst]]
+                }
+            }
+            return $instref
         }
         proc migrate {rname instref subclass args} {
             if {![isRefSingular $instref]} {
