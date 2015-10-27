@@ -123,7 +123,7 @@ you may wish to skip over the test cases although they do provide
 interesting examples in the small of how `rosea` constructs are used.
 
 For those readers wishing a quick look at what `rosea` provides,
-the example in Chapter 10 is a good starting point.
+the example in Chapter 11 is a good starting point.
 The example shows a complete, albeit simple, model translated
 into `rosea`.
 The resulting translation is a runnable Tcl script and the output
@@ -132,6 +132,10 @@ of running the example is shown.
 For those readers who will attempt a model translation using `rosea`,
 understanding the domain configuration language in Chapter 5 is
 an essential starting point.
+The details of how executable model concepts are realized in a
+relational algebraic manner are discussed in Chapter 3 and this
+chapter has important information needed to understand how class
+instances are referred to.
 Once the static aspects of the domain, _i.e._ the class definitions and
 the state model definitions, have been translated,
 it is then time to understand the package procedures in
@@ -514,12 +518,14 @@ of a domain are mapped into a Tcl namespace and onto other Tcl
 language concepts.
 
 In this section, we discuss the layout of the `rosea` package itself.
-There are two major pieces of the package.
+There are three major pieces of the package.
 
 . Procedures to handle common XUML semantics.
 These procedures form the interface invoked by domain activities to
 implement XUML semantics.
-. A configuration language to compute the architectural data structures and
+. A configuration language to describe the facets of a domain such
+as its classes, relationships, state models and processing.
+. A code generator to compute the architectural data structures and
 layout the domain as we described above.
 
 [[namespace-organization,namespace organization]]
@@ -2313,36 +2319,57 @@ the state of the instance.
 [source,tcl]
 ----
 <<helper commands>>=
-proc CreateStateInstance {domns class state value} {
+proc CreateStateInstance {domns class state idattrs} {
     tailcall relvar insert ${domns}::__${class}__STATEINST\
-            [concat $value [list __State $state]]
+            [concat $idattrs [list __State $state]]
 }
 ----
+
+In `CreateStateInstance`, the `idattrs` parameter is a list
+of attribute name / value pairs for the identifier for `class`.
+The current state of a class instance that has a state machine defined for
+it is kept in a separate relvar.
+That relvar has a heading of the identifying attributes plus the
+`__State` attribute that holds the current state of the instance.
+
+We also have a procedure that creates an state instance tuple for the
+default initial state.
+
+(((rosea,Helpers,CreateInInitialState)))
+[source,tcl]
+----
+<<helper commands>>=
+proc CreateInInitialState {domns class idattrs} {
+    set initstate [relvar restrictone ${domns}::__Arch_InitialState\
+        Class $class]
+    if {[relation isnotempty $initstate]} {
+        CreateStateInstance $domns $class [relation extract $initstate State]\
+            $idattrs
+    }
+    return
+}
+----
+
+It is also useful to create the state instance tuples from a corresponding
+instance reference.
 
 (((rosea,Helpers,CreateStateInstanceFromRef)))
 [source,tcl]
 ----
 <<helper commands>>=
 proc CreateStateInstanceFromRef {domns class state ref} {
-    tailcall CreateStateInstance $domns $class $state\
-        [tuple get [relation tuple [lindex $ref 1]]]
-}
-----
-
-(((rosea,Helpers,CreateInInitialState)))
-[source,tcl]
-----
-<<helper commands>>=
-proc CreateInInitialState {domns class value} {
-    set initstate [relvar restrictone ${domns}::__Arch_InitialState\
-        Class $class]
-    if {[relation isnotempty $initstate]} {
-        CreateStateInstance $domns $class [relation extract $initstate State]\
-            $value
+    relation foreach inst [lindex $ref 1] { # <1>
+        CreateStateInstance $domns $class $state\
+            [tuple get [relation tuple $inst]]
     }
     return
 }
 ----
+<1> We iterate across the reference because we may be creating
+multiple state instance tuples.
+
+It is also convenient to have a procedure to look up the default initial
+state when dealing with instance references.
 
 (((rosea,Helpers,CreateInInitialStateFromRef)))
 [source,tcl]
@@ -3377,8 +3404,73 @@ relvar and return an instance reference to the new created instances.
 <<linkAssoc: create assoc class instances>>=
 set ref [ToRef ${domain1}::$assocClass\
         [relvar insert ${domain1}::$assocClass {*}$assoctuples]]
-    CreateInInitialStateFromRef $domain1 $assocClass $ref
+    CreateInInitialStateFromRef $domain1 $assocClass $ref ; # <1>
 return $ref
+----
+<1> Note that there is no way to create an associative class that
+has a state model in anything but the default initial state when
+using the `link` command.
+Although technically acceptable to create an associative class instance
+in an arbitrary state, it is a very rare need.
+If this situation arises,
+the programmer will have to do the creation using
+`createin` and arrange the referential attribute values properly
+to implement the link.
+
+[float]
+===== Tests
+[source,tcl]
+----
+<<class command tests>>=
+test linkAssoc-1.0 {
+    Create associative links.
+} -setup {
+    rosea configure {
+        domain assoc {
+            class Dog {
+                attribute Name string -id 1
+                attribute Breed string
+            }
+            class Owner {
+                attribute Name string -id 1
+                attribute Age int
+            }
+            class Ownership {
+                attribute DogName string -id 1
+                attribute OwnerName string -id 1
+                reference R1 Owner -link {OwnerName Name}
+                reference R1 Dog -link {DogName Name}
+
+                statemodel {
+                    state Owning {} {
+                        puts "Own dog [readAttribute $self DogName]"
+                    }
+                    transition Owning - Sold -> Disposed
+
+                    state Disposed {} {
+                        puts "No longer own dog [readAttribute $self DogName]"
+                    }
+                }
+            }
+
+            association R1 Owner 0..*--0..* Dog -associator Ownership
+        }
+    }
+    rosea generate
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::assoc
+} -body {
+    set d1 [assoc::Dog create Name Fluffy Breed Poodle]
+    set d2 [assoc::Dog create Name Tiger Breed Mut]
+    set dogs [rosea::InstCmds::refUnion $d1 $d2]
+    set owners [assoc::Owner create Name Fred Age 32]
+    set a [assoc::R1 link $dogs $owners]
+    testConditions\
+        {[rosea::InstCmds::refMultiplicity $a] == 2}\
+        {[relation cardinality [relvar set ::assoc::__Ownership__STATEINST]]\
+            == 2}
+} -result {1}
 ----
 
 ==== Unlinking Simple Associations
@@ -3513,7 +3605,8 @@ proc unlinkAssoc {rname instref} {
         } elseif {$partcard > 1} {
             tailcall DeclError AMBIGUOUS_UNLINK $rname $relvar ; # <1>
         } else {
-            # find associative class instances
+            # Find associative class instances.  We have to determine the
+            # direction of the relationship traversal.
             set navdir [expr {[relation extract $part Role] eq "source" ?\
                 "$relationship" : "~$relationship"}]
             set instref [::rosea::InstCmds::findRelated $instref\
@@ -3522,14 +3615,22 @@ proc unlinkAssoc {rname instref} {
             SplitRelvarName $relvar domain class
         }
     }
-    relation foreach inst $insts {
-        relvar deleteone ${domain}::$class {*}[tuple get [relation tuple $inst]]
+
+    # We are going to delete tuples from the relvar that holds the class
+    # instances.
+    set delrelvars [list ${domain}::$class]
+    # If the associative class also has a state model, then we need to also
+    # delete the state instance tuples.
+    if {[relvar exists ${domain}::__${class}__STATEINST]} {
+        lappend delrelvars ${domain}::__${class}__STATEINST
     }
-    set states [relvar names ${domain}::__${class}__STATEINST]
-    if {$states ne {}} {
-        relation foreach inst $insts {
-            relvar deleteone ${domain}::__${class}__STATEINST\
-                {*}[tuple get [relation tuple $inst]]
+
+    # Now, we iterate across the associative class instances and delete all the
+    # tuples in class relvar and, if necessary, the state instances.
+    relation foreach inst $insts {
+        set idattrs [tuple get [relation tuple $inst]]
+        foreach rv $delrelvars {
+            relvar deleteone $rv {*}$idattrs
         }
     }
     return $instref
@@ -3547,6 +3648,63 @@ the caller must navigate to the associator class before invoking
 ----
 <<error code formats>>=
 AMBIGUOUS_UNLINK         {"%s" is reflexive and linking via "%s" is ambiguous}
+----
+
+[float]
+===== Tests
+[source,tcl]
+----
+<<class command tests>>=
+test unlinkAssoc-1.0 {
+    Destroy associative links.
+} -setup {
+    rosea configure {
+        domain assoc {
+            class Dog {
+                attribute Name string -id 1
+                attribute Breed string
+            }
+            class Owner {
+                attribute Name string -id 1
+                attribute Age int
+            }
+            class Ownership {
+                attribute DogName string -id 1
+                attribute OwnerName string -id 1
+                reference R1 Owner -link {OwnerName Name}
+                reference R1 Dog -link {DogName Name}
+
+                statemodel {
+                    state Owning {} {
+                        puts "Own dog [readAttribute $self DogName]"
+                    }
+                    transition Owning - Sold -> Disposed
+
+                    state Disposed {} {
+                        puts "No longer own dog [readAttribute $self DogName]"
+                    }
+                }
+            }
+
+            association R1 Owner 0..*--0..* Dog -associator Ownership
+        }
+    }
+    rosea generate
+
+    set owner [assoc::Owner create Name Fred Age 32]
+    assoc::R1 link $owner [assoc::Dog create Name Fluffy Breed Poodle]
+    assoc::R1 link $owner [assoc::Dog create Name Tiger Breed Mut]
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::assoc
+} -body {
+    set dogs [assoc::Dog findAll]
+    assoc::R1 unlink $dogs
+    testConditions\
+        {[relation cardinality [relvar set ::assoc::Ownership]] == 0}\
+        {[relation cardinality [relvar set ::assoc::__Ownership__STATEINST]]\
+            == 0}
+} -result {1}
 ----
 
 ==== Migrating Subclasss In Generalizations
@@ -17401,7 +17559,7 @@ test save-1.0 {
 
 [source,tcl]
 ----
-#<<save command tests>>=
+<<save command tests>>=
 test save-2.0 {
     Serialize a domain using SQLite
 } -setup {
@@ -20761,7 +20919,7 @@ namespace eval ::rosea {
     <<rosea exports>>
     namespace ensemble create
 
-    variable version 1.2.1
+    variable version 1.3
 
     logger::initNamespace [namespace current]
 
@@ -20785,7 +20943,7 @@ We also provide a root chunk to extract a package index file.
 [source,tcl]
 ----
 <<pkgIndex.tcl>>=
-package ifneeded rosea 1.2.1 [list source [file join $dir rosea.tcl]]
+package ifneeded rosea 1.3 [list source [file join $dir rosea.tcl]]
 ----
 
 === Unit Tests
@@ -20896,7 +21054,7 @@ rosea populate {
 [source,tcl]
 ----
 <<rosea.man>>=
-[manpage_begin rosea n 1.2.1]
+[manpage_begin rosea n 1.3]
 [comment {
 <<copyright info>>
 }]

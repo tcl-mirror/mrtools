@@ -2,7 +2,7 @@
 # -- Tcl Module
 
 # @@ Meta Begin
-# Package rosea 1.2
+# Package rosea 1.3
 # Meta description Rosea is a data and execution architecture for
 # Meta description translating XUML models using Tcl as the implementation
 # Meta description language.
@@ -30,7 +30,7 @@ package require lambda
 
 # ACTIVESTATE TEAPOT-PKG BEGIN DECLARE
 
-package provide rosea 1.2
+package provide rosea 1.3
 
 # ACTIVESTATE TEAPOT-PKG END DECLARE
 # ACTIVESTATE TEAPOT-PKG END TM
@@ -109,7 +109,7 @@ namespace eval ::rosea {
     
     namespace ensemble create
 
-    variable version 1.2
+    variable version 1.3
 
     logger::initNamespace [namespace current]
 
@@ -1263,20 +1263,23 @@ namespace eval ::rosea {
         proc nilInstRef {} {
             return {{} {{} {}}}
         }
-        proc CreateStateInstance {domns class state value} {
+        proc CreateStateInstance {domns class state idattrs} {
             tailcall relvar insert ${domns}::__${class}__STATEINST\
-                    [concat $value [list __State $state]]
+                    [concat $idattrs [list __State $state]]
         }
-        proc CreateStateInstanceFromRef {domns class state ref} {
-            tailcall CreateStateInstance $domns $class $state\
-                [tuple get [relation tuple [lindex $ref 1]]]
-        }
-        proc CreateInInitialState {domns class value} {
+        proc CreateInInitialState {domns class idattrs} {
             set initstate [relvar restrictone ${domns}::__Arch_InitialState\
                 Class $class]
             if {[relation isnotempty $initstate]} {
                 CreateStateInstance $domns $class [relation extract $initstate State]\
-                    $value
+                    $idattrs
+            }
+            return
+        }
+        proc CreateStateInstanceFromRef {domns class state ref} {
+            relation foreach inst [lindex $ref 1] { # <1>
+                CreateStateInstance $domns $class $state\
+                    [tuple get [relation tuple $inst]]
             }
             return
         }
@@ -1941,8 +1944,10 @@ namespace eval ::rosea {
                     lappend assoctuples [dict merge $args $refto1 $refto2] ; # <2>
                 }
             }
-            return [ToRef ${domain1}::$assocClass\
+            set ref [ToRef ${domain1}::$assocClass\
                     [relvar insert ${domain1}::$assocClass {*}$assoctuples]]
+                CreateInInitialStateFromRef $domain1 $assocClass $ref ; # <1>
+            return $ref
         }
         proc unlinkSimple {rname instref} {
             lassign $instref relvar inst
@@ -1998,9 +2003,7 @@ namespace eval ::rosea {
         
             # If we are given instances to the associator class, then there is no
             # more work to do.
-            if {$class eq $associator} {
-                set associnsts [deRef $instref]
-            } else {
+            if {$class ne $associator} {
                 # Otherwise, we have to find the associator class instances ourselves.
                 set part [relation restrictwith $references {$Participant eq $class}]
                 set partcard [relation cardinality $part]
@@ -2009,16 +2012,35 @@ namespace eval ::rosea {
                 } elseif {$partcard > 1} {
                     tailcall DeclError AMBIGUOUS_UNLINK $rname $relvar ; # <1>
                 } else {
-                    # find associative class instances
+                    # Find associative class instances.  We have to determine the
+                    # direction of the relationship traversal.
                     set navdir [expr {[relation extract $part Role] eq "source" ?\
-                        $relationship : ~$relationship}]
-                    set associnsts [deRef [::rosea::InstCmds::findRelated $instref\
-                        [list $navdir [namespace tail $associator]]]]
+                        "$relationship" : "~$relationship"}]
+                    set instref [::rosea::InstCmds::findRelated $instref\
+                        [list $navdir [namespace tail $associator]]]
+                    lassign $instref relvar insts
+                    SplitRelvarName $relvar domain class
                 }
             }
-            # Just remove the associator tuples that are the relationship links.
-            relvar minus ${domain}::$associator $associnsts
-            return $associnsts
+        
+            # We are going to delete tuples from the relvar that holds the class
+            # instances.
+            set delrelvars [list ${domain}::$class]
+            # If the associative class also has a state model, then we need to also
+            # delete the state instance tuples.
+            if {[relvar exists ${domain}::__${class}__STATEINST]} {
+                lappend delrelvars ${domain}::__${class}__STATEINST
+            }
+        
+            # Now, we iterate across the associative class instances and delete all the
+            # tuples in class relvar and, if necessary, the state instances.
+            relation foreach inst $insts {
+                set idattrs [tuple get [relation tuple $inst]]
+                foreach rv $delrelvars {
+                    relvar deleteone $rv {*}$idattrs
+                }
+            }
+            return $instref
         }
         proc migrate {rname instref subclass args} {
             if {![isRefSingular $instref]} {
