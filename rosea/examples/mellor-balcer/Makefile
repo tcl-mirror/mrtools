@@ -3,7 +3,7 @@
 # PROJECT:
 #	Tools
 # MODULE:
-# 	rash
+# 	Mellor/Balcer Example
 #
 # ABSTRACT:
 #
@@ -21,12 +21,32 @@ PDF 	=\
 ROOTS	=\
 	simplebookstore.tcl\
 	sbs_population.tcl\
+	$(NULL)
+
+TESTS	=\
 	scenario1.tcl\
+	scenario2.tcl\
+	$(NULL)
+
+LOGS	=\
+     	$(patsubst %.tcl,%.log,$(TESTS))\
+	$(NULL)
+
+DIAGS	=\
+     	$(patsubst %.tcl,%.diag,$(TESTS))\
+	$(NULL)
+
+PDFDIAGS =\
+     	$(patsubst %.diag,%.pdf,$(DIAGS))\
 	$(NULL)
 
 CLEANFILES =\
 	$(PDF)\
 	$(ROOTS)\
+	$(TESTS)\
+	$(LOGS)\
+	$(DIAGS)\
+	$(PDFDIAGS)\
 	$(NULL)
 
 A2XOPTS =\
@@ -75,13 +95,13 @@ doc : $(PDF)
 
 code : $(ROOTS)
 
-runtests : $(ROOTS)
-	tclsh scenario1.tcl -verbose bet -level info
+runtests : $(ROOTS) $(TESTS)
+	for test in $(TESTS) ; do tclsh $$test ; done
 
 clean :
 	$(RM) $(CLEANFILES)
 
-$(PDF) : $(DOCSRC) $(EXTRAS)
+$(PDF) : $(DOCSRC) $(EXTRAS) $(LOGS) $(PDFDIAGS)
 
 simplebookstore.tcl : $(DOCSRC)
 	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
@@ -92,6 +112,15 @@ sbs_population.tcl : $(DOCSRC)
 scenario1.tcl : $(DOCSRC)
 	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
 
+scenario2.tcl : $(DOCSRC)
+	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
+
+%.log : %.tcl $(ROOTS)
+	tclsh $<
+
+%.diag : %.tcl $(ROOTS)
+	tclsh $<
+
 %.pdf : %.aweb
 	a2x $(A2XOPTS) --doctype=article  --format=pdf\
 	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) $<
@@ -99,6 +128,9 @@ scenario1.tcl : $(DOCSRC)
 
 %.tcl : %.aweb
 	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
+
+%.pdf : %.diag
+	seqdiag --antialias -T pdf -o $@ $<
 
 #
 # vim :set sw=8 ts=8 sts=8 noexpandtab:
