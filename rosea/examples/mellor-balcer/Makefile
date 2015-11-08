@@ -24,16 +24,22 @@ ROOTS	=\
 	$(NULL)
 
 TESTS	=\
-	scenario1.tcl\
-	scenario2.tcl\
+	testscenario.tcl\
+	$(NULL)
+
+SCENARIOS =\
+	scenario1\
+	scenario2\
+	scenario3\
+	scenario4\
 	$(NULL)
 
 LOGS	=\
-     	$(patsubst %.tcl,%.log,$(TESTS))\
+     	$(patsubst %,%.log,$(SCENARIOS))\
 	$(NULL)
 
 DIAGS	=\
-     	$(patsubst %.tcl,%.diag,$(TESTS))\
+     	$(patsubst %,%.diag,$(SCENARIOS))\
 	$(NULL)
 
 PDFDIAGS =\
@@ -109,16 +115,10 @@ simplebookstore.tcl : $(DOCSRC)
 sbs_population.tcl : $(DOCSRC)
 	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
 
-scenario1.tcl : $(DOCSRC)
+testscenario.tcl : $(DOCSRC) code
 	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
 
-scenario2.tcl : $(DOCSRC)
-	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
-
-%.log : %.tcl $(ROOTS)
-	tclsh $<
-
-%.diag : %.tcl $(ROOTS)
+$(LOGS) $(DIAGS) : testscenario.tcl
 	tclsh $<
 
 %.pdf : %.aweb

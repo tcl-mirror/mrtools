@@ -1147,7 +1147,10 @@ class CreditCardCharge {
     attribute cardExpirationDate string
     attribute dateChargeMade string -default {}
     attribute chargeAmount int
-    attribute approvalCode string -default {}
+    attribute approvalCode string -default pending -check {$approvalCode in
+            {approved overLimit noAccount connectionFailed
+            accountDataMismatch expired pending}
+        }
 
     attribute attemptOrderID string -default {}
     reference R7 Order -link {attemptOrderID orderID}
@@ -1170,6 +1173,14 @@ association R7 CreditCardCharge 0..*--1 Order
 association R8 CreditCardCharge 0..1--0..1 Order ; #<1>
 ----
 <1> This looks like an error in the model.
+The `R7` relationship is tracking attempts to pay for an order
+by a credit card charge.
+The `R8` relationship is tracking when an attempt actually results
+in a purchase.
+It has to be conditional on the Order side because an order must
+be able to exist before it is paid for.
+The relationship is rather weak and we will see other problems
+in the state activities for the `CreditCardCharge` class.
 
 (((Ordering,State Model,Credit Card Charge)))
 [source,tcl]
@@ -1178,7 +1189,7 @@ association R8 CreditCardCharge 0..1--0..1 Order ; #<1>
 transition @ - makeCharge -> RequestingChargeApproval
 
 state RequestingChargeApproval {order} {
-    R7 link $self $order
+    R7 link $self $order ; # <1>
     updateAttribute $self dateChargeMade [clock format [clock seconds]]
 
     withAttribute $self accountNumber billingAddress cardholderName\
@@ -1197,27 +1208,49 @@ state RequestingChargeApproval {order} {
 transition RequestingChargeApproval - chargeProcessed -> ProcessingCompleted
 transition RequestingChargeApproval - chargeProcessingNotCompleted ->\
     DeclineForTimeout
+----
+<1> The action language in this state and all the other states for
+this class keep refering to relationship, `R8`.
+Clearly, `R7` is the one that is intended.
 
+[source,tcl]
+----
+<<Credit Card Charge State Model>>=
 state ProcessingCompleted {resultCode} {
+    set order [findRelated $self R7] ; # <1>
+    canceldelayed $self $order chargeProcessingNotCompleted ; # <2>
+
     updateAttribute $self approvalCode $resultCode
-    set order [findRelated $self R7]
-    canceldelayed $self $order chargeProcessingNotCompleted
-    R8 link $self $order
     if {$resultCode eq "approved"} {
+        R8 link $self $order ; # <3>
         signal $order paymentApproved
     } else {
         signal $order paymentDeclined
     }
 }
+----
+<1> Here again we need to use `R7`.
+<2> To be tidy, we cancel the delayed event that times out the processing
+of the credit card charge.
+Otherwise it is necessary to ignore that event in this state.
+<3> Upon approval of the charge we can then link `R8` to establish
+the charge that actually paid for the order.
 
+[source,tcl]
+----
+<<Credit Card Charge State Model>>=
 state DeclineForTimeout {} {
     updateAttribute $self approvalCode connectionFailed
-    set order [findRelated $self R7]
+    set order [findRelated $self R7] ; # <1>
     signal $order paymentDeclined
 }
 ----
+<1> And the final substitution of `R7` for what was orginally `R8` in the
+model.
 
 == Shipping Subsystem [[shippingsubsytem,Shipping Subsystem]]
+
+The Shipping subsystem consists of the following classes.
 
 [source,tcl]
 ----
@@ -1240,7 +1273,7 @@ state DeclineForTimeout {} {
 <<Shipment Class Definition>>=
 class Shipment {
     attribute shipmentID string -id 1
-    attribute shippingCompany string -default {}
+    attribute shippingCompany string -default {} ; # <1>
     reference R21 ShippingCompany -link {shippingCompany companyName}
     attribute trackingNumber string -default {}
 
@@ -1268,6 +1301,21 @@ class Shipment {
     <<Shipment Operations>>
 }
 ----
+<1> The model shows the `shippingCompany` and `trackingNumber` attributes
+form a secondary identifier.
+This is problematic because `shippingCompany` is a referential
+attribute that realizes `R21`.
+Below we discuss the problems of the `R21` and in the end make it
+conditional on the `ShippingCompany` side.
+Because of that change, we don't really want to make the `shippingCompany`
+attribute part of an identifier as it will change depending upon
+when the `R21` relationship is established.
+A better approach would be to factor `R21` as a class based association
+where `shippingCompany` and `trackingNumber` could be proper identifying
+attributes.
+However, we are loath to add classes to the model during translation and
+so take the easier approach of removing the attributes as an identifer.
+
 
 (((Shipping,Relationships,R21)))
 (((Shipping,Relationships,R24)))
@@ -1294,6 +1342,11 @@ Consequently, the easiest thing to do is to weaken the relationship
 to make it conditional on the ShippingCompany side to await the
 final company and tracking number assignment.
 
+There are a number of minor issues that have to be resolved in the
+state activities for the `Shipment` class.
+Pay particular attention to the callouts when comparing the
+translated Tcl code to the action language source.
+
 (((Shipping,State Model,Shipment)))
 [source,tcl]
 ----
@@ -1303,18 +1356,50 @@ transition @ - requestShipment -> PreparingShipment
 state PreparingShipment {order} {
     R6 link $self $order
 
-    set warehouse [Warehouse chooseWarehouse [readAttribute $order orderID]]
+    set warehouse [Warehouse chooseWarehouse [readAttribute $order orderID]] ; # <1>
     R24 link $self $warehouse
 
-    set items [findRelated $order R10 {R4 ProductSelection}] ; #<1>
+    set items [findRelated $order R10 {R4 ProductSelection}] ; #<2>
     R9 link $items $self
 
-    signal $warehouse shipmentReadyToPack ; #<2>
+    signal $warehouse shipmentReadyToPack ; #<3>
 }
 transition PreparingShipment - packed -> PackedandAwaitingTrackingNumber
 transition PreparingShipment - trackingNumberAssigned ->\
     NumberAssignedandWaitingtobePacked
+----
+<1> This state model is rather vague about how `R24` is established.
+The relationship is unconditional on the `Warehouse` side so we must
+establish it in this activity.
+We have punted here and invoke a class based operation of the
+`Warehouse` passing the `orderID`.
+Presumably that procedure has some policy in it to select a warehouse
+based on the contents of the `Order` given by the `orderID`.
+We will see in the <<warehouseclass>> how the choice of a `Warehouse` is
+resolved (hint, for our purposes very, very simply).
+<2> The model doesn't seem to establish R9 with the Shipment.
+We do so here assuming no items are shipped initially.
+Presumably the Shipping Clerk will have to update the quantity
+shipped as the items are packed.
+<3> This event should be going to the Warehouse.
+The model graphic ships it off to an external entity,
+yet the event name appears on the Warehouse state diagram and it is
+the Warehouse class that assigns Shipping Clerks for packing.
 
+Note that the state activity for the `Packed and Awaiting Tracking Number`
+and the `Packed` states are the same.
+We have factored that into an instance based operation,
+`updatePackingInfo`.
+The same is true of the `Number Assigned and Waiting to be Packed` and
+`Number Assigned` states which is factored into the
+`updateTrackingInfo` instance operation.
+The purpose of these states seems to be to allow shipment packing
+by the shipping clerk and tracking number assignment by the shipping
+company to happen in either order.
+
+[source,tcl]
+----
+<<Shipment State Model>>=
 state PackedandAwaitingTrackingNumber {clerkID} {
     instop $self updatePackingInfo $clerkID
 }
@@ -1336,26 +1421,11 @@ state Packed {clerkID} {
     instop $self updatePackingInfo $clerkID
 }
 transition Packed - pickedUp -> InTransittoCustomer
-
-state InTransittoCustomer {} {
-    updateAttribute $self timePickedUp [clock format [clock seconds]]
-}
-transition InTransittoCustomer - deliveryConfirmed -> Delivered
-
-state Delivered {timeDelivered} {
-    updateAttribute $self timeDelivered [clock format [clock seconds]]
-    set order [findRelated $self R6]
-    signal $order orderDelivered
-}
 ----
-<1> The model doesn't seem to establish R9 with the Shipment.
-We do so here assuming no items are shipped initially.
-Presumably the Shipping Clerk will have to update the quantity
-shipped as the items are packed.
-<2> This event should be going to the Warehouse.
-The model graphic ships it off to an external entity,
-yet the event name appears on the Warehouse state diagram and it is
-the Warehouse class that assigns Shipping Clerks for packing.
+
+Here are the factored instance based operations.
+The translation from action language to Tcl follows our usual pattern.
+The only thing we have done here is to place duplicated code into one place.
 
 [source,tcl]
 ----
@@ -1370,10 +1440,29 @@ instop updatePackingInfo {clerkID} {
     updateAttribute $self timePrepared [clock format [clock seconds]]
 
     set clerk [ShippingClerk findById clerkID $clerkID]
-    R22 link $self $clerk
+    set wc [findRelated $clerk R27]
+    R22 link $self $wc
 
     EE_ShippingCompany::shipmentReadyForPickup\
         [readAttribute $self shipmentID]
+}
+----
+
+Once we are packed and tracked,
+the last two states track the delivery of the shipment.
+
+[source,tcl]
+----
+<<Shipment State Model>>=
+state InTransittoCustomer {} {
+    updateAttribute $self timePickedUp [clock format [clock seconds]]
+}
+transition InTransittoCustomer - deliveryConfirmed -> Delivered
+
+state Delivered {timeDelivered} {
+    updateAttribute $self timeDelivered $timeDelivered
+    set order [findRelated $self R6]
+    signal $order orderDelivered
 }
 ----
 
@@ -1407,25 +1496,102 @@ class Warehouse {
         <<Warehouse State Model>>
     }
 
-    classop chooseWarehouse {orderID} {
-        return [pipe {
-            relation tag [set [namespace current]] Order\
-                    -ascending warehouseName |
-            relation restrictwith ~ {$Order == 0} |
-            relation eliminate ~ Order |
-            ::rosea::Helpers::ToRef [namespace current] ~
-        }]
-    }
+    <<Warehouse Class Operations>>
 }
 ----
+
+As discussed above,
+we created a class based operation to choose which `Warehouse`
+would be used to ship an order.
+Presumably, there is a policy about such choices.
+Such policies can be quite complicated, involving inventory,
+distances and other costs.
+Here, we do the simplest thing we can and simply choose the
+`Warehouse` that is first alphabetically.
+
+[source,tcl]
+----
+<<Warehouse Class Operations>>=
+classop chooseWarehouse {orderID} {
+    return [pipe {
+        set [namespace current] |
+        relation tag ~ __Tag -ascending warehouseName |
+        relation restrictwith ~ {$__Tag == 0} |
+        ::rosea::Helpers::ToRef [namespace current] ~
+    }] ; # <1>
+}
+----
+<1> We've seen the `pipe` command used before.
+It just takes a sequence of commands and arranges the result of one
+to be an argument of the next.
+So let's focus on what the four commands do and how that ends up
+choosing the `Warehouse` that is first alphabetically.
+. The `set` command returns the value of a variable.
+In this case it is the variable that holds `Warehouse` relation.
+We know that since `rosea` arranges each class to have its own namespace
+and creates a relation variable by the same name to hold the instances.
+. The `relation tag` command adds an attribute, in this case named `__Tag`,
+which takes on sequential values, starting at 0, in the requested order.
+The order requested here is by ascending values of the `warehouseName`
+attribute.
+. The `relation restrictwith` selects all tuples in the tagged relation
+where the `__Tag` attribute is 0.
+This will necessarily be only a single tuple and that will be the tuple
+whose `warehouseName` attribute is alphabetically first.
+. Finally, the `ToRef` command creates an instance reference from a
+class relvar name and a relation value.
+The net effect is that we have obtained an instance reference to the
+`Warehouse` instance that is first alphabetically.
+This may seem like a lot of kerfuffle just to select an instance of a class,
+but remember in relational algebra there is no notion of an indexing
+operation and all selections must be made on the basis of attribute values.
+This is just a situation where a relational view results in a bit more verbage.
+In other situations a relational algebraic expression can result in
+much less verbage.
+Note, we do not have to know anything about the `Warehouse` instances
+to perform this selection.
+
+The state model for the `Warehouse` is actually an assigner that
+assigns `ShippingClerks` to pack and ship `Shipments`.
 
 (((Shipping,State Model,Warehouse)))
 [source,tcl]
 ----
 <<Warehouse State Model>>=
-initialstate WaitingforaShipment
-defaulttrans IG
+initialstate WaitingforaShipment ; # <1>
+defaulttrans IG ; # <2>
+----
+<1> Just to be explicit, we state the initial state of the state model.
+<2> For assigners, we want requests for shipment and free clerk notifications
+to be able to arrive at any time.
+So we will ignore any that arrive when we are dealing with other matters.
+Notice that each state searches for shipments and clerks in the state
+that is needed.
+This is a common assigner idom.
 
+One other translation issue arises.
+`Rosea` does not provide an equivalent of the action language construct,
+`select any`.
+Much as we did above for choosing a warehouse,
+we need be able simply to limit a query to a single arbitrary instance.
+It is not a hard procedure to write so we do it here.
+
+[source,tcl]
+----
+<<Translation Utilities>>=
+proc ::rosea::InstCmds::limitRef {instref {count 1}} {
+    lassign $instref relvar insts
+    return [pipe {
+        relation tag $insts __Tag |
+        relation restrictwith ~ {$__Tag >= 0 && $__Tag < $count} |
+        ToRef $relvar ~
+    }]
+}
+----
+
+[source,tcl]
+----
+<<Warehouse State Model>>=
 state WaitingforaShipment {} {
     set readyShipment [findRelatedWhere $self ~R24 {$waitingToBePacked}]
     if {[isNotEmptyRef $readyShipment]} {
@@ -1446,8 +1612,12 @@ transition WaitingforaFreeClerk - clerkFree -> AssigningClerktoShipment
 
 state AssigningClerktoShipment {} {
     set readyShipment [findRelatedWhere $self ~R24 {$waitingToBePacked}]
+    set readyShipment [limitRef $readyShipment]
+
     set freeClerk [findRelatedWhere $self {~R25 {~R27 ShippingClerk}}\
         {$awaitingAssignment}]
+    set freeClerk [limitRef $freeClerk]
+
     R23 link $readyShipment $freeClerk
     updateAttribute $readyShipment waitingToBePacked false
     updateAttribute $freeClerk awaitingAssignment false
@@ -1468,12 +1638,14 @@ transition AssigningClerktoShipment - clerkAssignedToShipment ->\
 class WarehouseClerk {
     attribute clerkID string -id 1
     attribute clerkName string
-    attribute goOffDutyAtEndOfJob boolean -default false
+    attribute goOffDutyAtEndOfJob boolean -default false ; # <1>
 
     attribute warehouseName string
     reference R25 Warehouse -link warehouseName
 }
 ----
+<1> This attribute is not in the model graphic, but it is mentioned
+in an errata and in the state model for `ShippingClerk`.
 
 (((Shipping,Relationships,RR)))
 [source,tcl]
@@ -1511,6 +1683,34 @@ class ShippingClerk {
 association R23 ShippingClerk 0..1--0..1 Shipment
 ----
 
+The state model for `ShippingClerk` also has a number of minor
+issues that need to be resolved.
+The state activities refer to `R7` and `R8`.
+These are not correct and should be `R23` and `R25`.
+Also we are not given any state activity for a number of states.
+We presume these are states driven by the activity of a real
+shipping clerk as he/she selects, packs and labels the shipment.
+
+For our purposes it is sufficient to simply drive the state transition
+along with some self generated events.
+We will put some time delay in the events to try to simulate the time
+take to accomplish the tasks in the physical world.
+It is easy enough to capture this strategy in a procedure.
+
+[source,tcl]
+----
+<<Translation Helpers>>=
+proc ::bookstore::ShippingClerk::randomdelaysignal {instref event {max 10}} {
+    delaysignal [expr {int(rand() * $max) * 100}] $instref $event
+}
+----
+
+This procedure will generate a delayed event at a pseudo-random time
+between 0 and `max` tenths of a second.
+We use it below to drive the `ShippingClerk` state model through the
+states that were not completely specified in the model graphic.
+
+
 (((Shipping,State Model,Shipping Clerk)))
 [source,tcl]
 ----
@@ -1528,39 +1728,137 @@ transition WaitingforaJob - offDuty -> OffDuty
 state SelectingBooks {} {
     EE_ShippingClerk::shipmentReadyToPack\
         [readAttribute $self shipmentID]
+
+    randomdelaysignal $self booksSelected
 }
 transition SelectingBooks - booksSelected -> PackingBox
 
 state PackingBox {} {
-    generate $self boxPacked
+    randomdelaysignal $self boxPacked
 }
 transition PackingBox - boxPacked -> SealingBox
+----
 
+The `SealingBox` state gives us the opportunity to update
+the quantity of items that was actually shipped.
+This seems to be missing from the model, but presumably this is
+updated by the shipping clerk as the box is packed since at that time
+he/she would know if the requested quantity of an item was in stock and
+able to be shipped.
+Below we take the optimistic attitude that we have infinite stock and
+always ship the requested quantity of each item.
+
+[source,tcl]
+----
+<<Shipping Clerk State Model>>=
 state SealingBox {} {
-    generate $self boxSealed
+    ShipmentItem update [pipe {
+        findRelated $self R23 {R9 ShipmentItem} |
+        deRef ~ |
+        relation join ~ $::bookstore::ProductSelection |
+        relation project ~ shipmentID productID cartID quantity |
+        relation rename ~ quantity quantityShipped
+    }] ; # <1>
+
+    randomdelaysignal $self boxSealed
 }
 transition SealingBox - boxSealed -> AttachingShippingLabel
+----
+<1> There are several way in which we could accomplish updating
+`quantityShipped` attribute of the `ShippmentItems` instances.
+One way would be to traverse `R23` and `R9` to obtain a set of `ShipmentItem`
+instance references and then iterate across them, continuing along `R9`
+to obtain the corresponding `ProductSelection` instance.
+Then we could read the `quantity` attribute and use its value to update
+the `quantityShipped` value.
+Alternatively, we can avoid all the iterative stuff and do this in a
+much more relational fashion.
+Relational algebra eliminates virtually all the explicit iteration in
+state activities since relation values are sets and the algebra operates on
+the entire value at one time.
+In this case we want to use the `update` command to change non-identifying
+attributes to new values.
+This command is supplied by `rosea` specifically for these kinds of
+situations.
+To use `ShipmentItem update` we need a relation value that has
+a heading consisting of the identifier of `ShipmentItem` and with any
+additional attributes we wish to modify, in this case `quantityShipped`.
+The five commands in the `pipe` compute the needed relation value.
+. `findRelated` traverse `R23` and `R9` ending at `ShipmentItem`, the
+associative class.
+. `deRef` dereferences the instance reference into a relation value so
+that we can now operate on it with the next three commands.
+. `relation join` performs a join on the `ProductSelection` instances
+and yields a new relation value that contains tuples
+where the `productID` and `cartID`
+attribute values match those in the `ShipmentItem` value.
+This will give a relation value with a `quantity` attribute which properly
+corresponds to the instances of `ShippmentItem`.
+. We can now begin to shape the heading of the joined value to match what
+we need.
+We need the `shipmentID`, `productID` and `cartID` attributes to identify
+an instance of `ShipmentItem` and the `quantity` attribute is what we want
+to magically turn into the `quantityShipped` attribute.
+. The magic is provided by using `relation rename` to rename the
+`quantity` attribute to be `quantityShipped`.
+The heading of the resulting relation value is now just what we need to
+update into the `ShipmentItem` instances.
 
+The relational approach to performing the update of the `quantityShipped`
+attributes will certainly seem strained and confusing if you are not
+familiar with the algebraic operators.
+If you have had some experience programming in SQL,
+it might not seem that different, although the approach to computing
+results in SQL and TclRAL are quite different.
+In the end,
+the update is a single statement that clearly shows we are
+updating the `ShipmentItem` instances with something, even if that something
+takes several steps to compute.
+Sadly,
+most action languages take an imperative and iterative approach to these
+types of computations.
+It is relatively easy to deduce how to obtain any required iteration when
+the computation is formulated relationally.
+The opposite is not true.
+For comparison we state the iterative approach below.
+
+[source,tcl]
+----
+set items [findRelated $self R23 {R9 ShipmentItem}]
+forAllRefs item $items {
+    set selection [findRelated $item R9]
+    updateAttribute $item quantityShipped [readAttribute $selection quantity]
+} ; # <1>
+----
+<1> `Rosea` does provide a means to iterate across a set of instance references.
+It is not that iteration is bad or unnecessary.
+It is simply that it is often overused when _set at a time_ operations
+are readily available.
+
+[source,tcl]
+----
+<<Shipping Clerk State Model>>=
 state AttachingShippingLabel {} {
-    generate $self shippingLabelAttached
+    randomdelaysignal $self shippingLabelAttached
 }
 transition AttachingShippingLabel - shippingLabelAttached ->\
     DeliveringBoxtoLoadingDock
 
 state DeliveringBoxtoLoadingDock {} {
-    generate $self boxAtLoadingDoc
+    randomdelaysignal $self boxAtLoadingDoc
 }
 transition DeliveringBoxtoLoadingDock - boxAtLoadingDoc -> CompletingJob
 
 state CompletingJob {} {
     set currentShipment [findRelated $self R23]
     signal $currentShipment packed [readAttribute $self clerkID]
-    R23 unlink $self $currentShipment
-    if {[readAttribute $self goOffDutyAtEndOfJob]} {
+    R23 unlink $currentShipment
+    set wc [findRelated $self R27]
+    if {[readAttribute $wc goOffDutyAtEndOfJob]} {
         signal $self offDuty
     } else {
         updateAttribute $self awaitingAssignment true
-        set myWarehouse [findRelated $self R27 R25]
+        set myWarehouse [findRelated $wc R25]
         signal $myWarehouse clerkFree
     }
 }
@@ -1569,8 +1867,13 @@ transition CompletingJob - offDuty -> OffDuty
 
 state OffDuty {} {
     R27 migrate $self OffDutyClerk
-}
+} ; # <1>
 ----
+<1> Note that we do *not* define the `OffDuty` state as `terminal`
+despite the model graphic containing a terminal transition.
+This is because the `ShippingClerk` instance will not exist after
+the migration to an `OffDutyClerk` and so we don't want the run
+time architecture to attempt to delete what no longer exists anyway.
 
 === Stock Clerk Class [[stockclerkclass,Stock Clerk]]
 
@@ -1624,6 +1927,49 @@ association R9 Shipment 0..*--1..* ProductSelection -associator ShipmentItem
 
 == Product Specification Subsystem Population [[productspecificationsubsystempopulation,Product Specification Subsystem Population]]
 
+At this point we have completed the translation of the model.
+When the above code is assembled together and submitted to `rosea` it
+results in a set of procedures and data structures that represent
+the actions of the domain.
+`Rosea` provides a run time component to map model level actions,
+_e.g._ navigating relationships to find related instances,
+onto Tcl language constructs to implement the intent of the model.
+
+However, we are not done yet.
+First we must population the domain with instances.
+Although many of the classes create their instances at run time,
+most of the Product Specification subsystem must be populated
+with instances in order to have anything to buy at our online store.
+In the next sections,
+we will supply values for those classes that are not created at run time.
+
+Note that populating a domain before running it is, in general, a necessary
+task and one that is frequently overlooked.
+Depending on the quanity of data,
+population can be a large undertaking.
+It is easy to forget about the population step as we are involved
+in working out the domain and obtaining its translation.
+Also remember in real development,
+you may need several domain populations to support testing and integration.
+This is particularly true if the domain contains a lot of data.
+Workflow and timing may dictate that a separate group of people are
+doing the population for the delivered system and the development team
+will need to supply their own population for testing and integrating.
+Also, testing and integration concerns will probably drive the
+values selected for some attributes as this may drive the code path
+in some of the state activities.
+Finally,
+testing that randomizes, in a controlled and repeatable way, the values
+of attributes can often find bugs that human composed values miss.
+The idea is that randomized attribute values will drive the domain's execution
+into broader areas of its state space more effectively than narrowly composed
+values made up by humans.
+
+The population given below is quite minimal and is intended only to
+demonstrate the translation.
+Every class is populated with something and, as you will see,
+many of the attribute values are nonsense.
+
 [source,tcl]
 ----
 <<Product Specification Population>>=
@@ -1645,17 +1991,45 @@ association R9 Shipment 0..*--1..* ProductSelection -associator ShipmentItem
 <<Computer Software Population>>
 ----
 
+`Rosea` provides support to populate a domain.
+One of the advantages of the relational approach is that
+a domain can be populated by pure data values alone.
+It is not necessary to execution any action language equivalent
+code to create instances.
+This even includes relating instances across relationships.
+Since we supply referential attributes,
+simply setting referential attributes to the values that correspond
+to the identifying attributes of the related instance is sufficient.
+So below, although we are obviously execution commands in Tcl,
+we are simply supplying values to attributes.
+If we fail to supply correct ones,
+then the population command will fail with error messages that
+indicate the problem.
+
+The basic command to populate a class provides two approaches
+to specify values.
+One is better suited to specifying constant values
+and the other better suited when attribute values are held in
+ordinary variables.
+We will see both used.
+
 === Product Population [[productpopulation,Product Population]]
 
 (((Product Specification,Population,Product)))
 [source,tcl]
 ----
 <<Product Population>>=
-set producttag 100
+set producttag 100 ; # <1>
 set eumlid 780201
 set recid 7789930
 set wordid 938763
+----
+<1> We start with some basic ordinary Tcl variables that will be used
+to hold counters and attribute values that are used in several places.
 
+[source,tcl]
+----
+<<Product Population>>=
 class Product {
     productID
     productName
@@ -1699,8 +2073,13 @@ class Product {
     true\
     [set swid [incr categorytag]]\
     2\
-    666
+    666 ; # <1>
 ----
+<1> This is an example of populating using the form of the commands
+that is most convenient when variables are involved.
+The first argument is a list of the attributes which sets the order
+in which they appear in the subsequent arguments.
+There is a bit of Tcl syntax here that might be unfamiliar.
 
 === Publisher Population [[publisherpopulation,Publisher Population]]
 
@@ -1732,8 +2111,12 @@ class Publisher {
     {Microsoft, Inc.}
     {Seattle, WA}
     www.microsoft.com
-}
+} ; # <1>
 ----
+<1> Here we see the form of population that is most convenient for constant
+values.
+Fewer backslashes are required and whitespace is less significant.
+Again, Tcl syntax rules apply.
 
 === Author Population [[authorpopulation,Author Population]]
 
@@ -1745,14 +2128,15 @@ class Author {
     name
     website
     email
-}\
-    {Stephen J. Mellor}\
-    stephenmellor.com\
-    stephen@stephenmellor.com\
-\
-    {Marc J. Balcer}\
-    marcbalcer.com\
+} {
+    {Stephen J. Mellor}
+    stephenmellor.com
+    stephen@stephenmellor.com
+
+    {Marc J. Balcer}
+    marcbalcer.com
     marc@marcbalcer.com
+}
 ----
 
 === Authorship Population [[authorshippopulation,Authorship Population]]
@@ -2127,6 +2511,42 @@ class OffDutyClerk {
 
 == External Entities [[externalentities,External Entities]]
 
+At this point we have translated and populated the domain.
+However, we are not quite yet ready to run it.
+The last step is to deal with the explicit external entities that
+crop up in the translation.
+
+In this translation that amounts to writing stub procedures for the
+external entities that are mentioned in the model.
+When stubbing external entities,
+two situations arise:
+. The external entity action is synchronous and can return its result
+immediately.
+. The external entity action is asynchronous and we must arrange for some
+further action, usually signaling an event, to occur in order to
+simulate the external entity properly.
+
+How much of a simulation of the external entities is required to drive
+the domain execution is a matter that usually requires some introspection
+in the the model.
+Many are quite simple as we have in this domain.
+Others may be quite complex and difficult to simulate.
+This is one of the reasons why it is often better to integrate domains
+_from the bottom up_ to avoid needing to create complicated external
+entity stubs.
+As it turns out, integrating from the bottom up also has the added advantage
+of always having something that runs.
+This usually makes project managers happy.
+
+Our strategy for external entities is to define a set of namespaces in
+the domain namespace to hold the required procedures.
+All of these namespaces will start with `EE_` and that should avoid any
+naming conflicts.
+
+All the procedures start by printing out their invocation sequence,
+_i.e._ the Tcl idom `info level 0` provides that information.
+For most of the external entity procedures that is all we strive to do.
+
 [source,tcl]
 ----
 <<External Entity Stubs>>=
@@ -2138,10 +2558,19 @@ namespace eval ::bookstore::EE_CreditCardCompany {
         set chargeRef\
             [::bookstore::CreditCardCharge findById chargeID $chargeID]
         after 100 [list rosea tunnel $chargeRef\
-                signal chargeProcessed approved]
+                signal chargeProcessed approved] ; # <1>
     }
 }
+----
+<1> Here we must simulate some behavior.
+We take the simplest approach and approve all charges 100 ms after they
+are requested.
+This approach *will not* drive the execution of `CreditCardCharge` instances
+to all their possible states.
 
+[source,tcl]
+----
+<<External Entity Stubs>>=
 namespace eval ::bookstore::EE_OnLineCustomer {
     proc chargeDeclined {email} {
         puts [info level 0]
@@ -2155,43 +2584,102 @@ namespace eval ::bookstore::EE_OnLineCustomer {
 }
 ----
 
+The interaction with the Shipping Company external entity also requires
+more simulation to drive the domain to where we want it to go.
+In this case we want to signal an event to assign a tracking number.
+Later we need to report that we have picked up the package.
+Finally, we need to report the package delivery.
+
+[source,tcl]
+----
+<<External Entity Stubs>>=
+namespace eval ::bookstore::EE_ShippingCompany {
+    proc shipmentReadyForPickup {shipmentID} {
+        puts [info level 0]
+
+        set shipmentRef [::bookstore::Shipment findById shipmentID $shipmentID]
+        rosea tunnel $shipmentRef signal trackingNumberAssigned\
+            FedEx 130047332
+
+        after 200 [list rosea tunnel $shipmentRef signal pickedUp]
+        after 400 [list ::bookstore::EE_ShippingCompany::reportDelivery\
+                $shipmentID]
+    }
+
+    # We use a separate procedure, rather than directly tunneling the event, so
+    # we can get a better value for delivery time event parameter.
+    proc reportDelivery {shipmentID} {
+        puts [info level 0]
+
+        set shipmentRef [::bookstore::Shipment findById shipmentID $shipmentID]
+        rosea tunnel $shipmentRef signal deliveryConfirmed\
+                [clock format [clock seconds]]
+    }
+}
+----
+
+[source,tcl]
+----
+<<External Entity Stubs>>=
+namespace eval ::bookstore::EE_ShippingClerk {
+    proc shipmentReadyToPack {shipmentID} {
+        puts [info level 0]
+    }
+}
+----
+
 == Execution Scenarios [[executionscenarios,Execution Scenarios]]
 
-[source,tcl]
-----
-<<Common Execution Setup>>=
-package require rosea
-<<Common Execution Utilities>>
+Finally, we are ready to run the translated domain.
+We will construct a single test file that contains a set of
+execution scenarios.
+We have chosen to do it this way so that we can use the state of the
+domain created by one scenario as the starting point for the next one.
+This will prevent us from having the start afresh and drive the domain
+to some state just to get into position to start a run.
+Real world testing would probably take another approach.
 
-rosea configureFromFile simplebookstore.tcl
-rosea generate
-rosea populateFromFile sbs_population.tcl
+For each execution scenario,
+we will record the state machine event dispatch traces.
+Those traces will then be presented as text and as a UML sequence diagram.
+It is important to remember that the sequence diagrams are programmatically
+generated and show the flow of events that happened during actual execution.
 
-<<External Entity Stubs>>
+Tcl has direct support in its core for event driven programming.
+It has the concept of an event loop
+and to have state machine events dispatched we must _enter the event loop_.
+Normally,
+a domain would enter the event loop immediately after initialization and
+would probably _run forever_ or until it explicitly exited based on some
+condition.
+What we want to do is enter the event loop and run until some state
+activity is completed.
+Then we wish to take event dispatch traces and manage other aspects of the
+flow of our execution scenario.
+We will create some convenience procedures to make the effort a bit less
+tedious.
 
-rosea trace control on
-----
+Our stategy for being able to synchronize to the execution of state
+activities depends upon two factors.
 
-[source,tcl]
-----
-<<Common Execution Takedown>>=
-rosea trace control off
-----
+. `Rosea` converts state activity code into ordinary Tcl procedures.
+. Tcl provides the means to trace the execution of a procedure.
+
+Using this along with a timer to insure that we don't wait forever
+if something goes wrong,
+we can generate a procedure that will allow us to block until
+either a given state activity is executed or we time out.
 
 [source,tcl]
 ----
 <<Common Execution Utilities>>=
-proc ::syncToStop {cmd code result op} {
-    set ::done 1
-}
-
 proc ::syncToStateActivity {class state {timeout 3000}} {
-    set activityproc ::bookstore::${class}::__Activity::${state}
+    set activityproc ::bookstore::${class}::__Activity::${state} ; # <1>
 
-    trace add execution $activityproc leave syncToStop
+    trace add execution $activityproc leave syncToStop ; # <2>
 
     set totimer [after $timeout set ::done TIMEOUT]
-    vwait ::done
+    vwait ::done ; # <3>
     after cancel $totimer
     trace remove execution $activityproc leave syncToStop
 
@@ -2200,7 +2688,151 @@ proc ::syncToStateActivity {class state {timeout 3000}} {
     }
     return $::done
 }
+----
+<1> Here we have to have internal knowledge of the naming conventions
+`rosea` uses when it converts state activities into Tcl procedures.
+Well, we just have to know!
+<2> This command tells Tcl to invoke the `syncToStop` command when
+execution leaves the activity procedure.
+<3> Enter the event loop waiting for the `::done` variable to be written.
+That will happen either when `syncToStop` is executed or when the
+timeout script is executed.
 
+Tcl arranges the execution trace callback to have a number of interesting
+arguments about the context of the trace.
+We don't use any of them and directly write to the global `::done` variable.
+
+[source,tcl]
+----
+<<Common Execution Utilities>>=
+proc ::syncToStop {cmd code result op} {
+    set ::done 1
+}
+----
+
+Finally,
+we can show the code for running the execution scenarios.
+
+[source,tcl]
+----
+<<testscenario.tcl>>=
+<<copyright info>>
+
+package require rosea
+
+<<Common Execution Utilities>>
+
+rosea configureFromFile simplebookstore.tcl ; # <1>
+rosea generate ; # <2>
+rosea populateFromFile sbs_population.tcl
+
+<<External Entity Stubs>>
+<<Translation Helpers>>
+
+rosea trace control on
+
+<<scenario1>>
+<<scenario2>>
+<<scenario3>>
+<<scenario4>>
+
+rosea trace control off
+----
+<1> These three commands build the domain from our description,
+generate the run time data and install the population.
+After they run, the domain is ready to receive events.
+<2> Because our domain was named `bookstore` and we did not specify
+a namespace where it was to be located,
+the domain will be placed in the `::bookstore` namespace.
+
+=== Scenario 1 [[scenario1,Scenario 1]]
+
+Our first scenario is very simple.
+We want to create a shopping cart and then decide to change our mind
+and zero out our selection.
+In order create a shopping cart we must supply a product ID and a quantity.
+To obtain the product ID,
+we will look up a book by name and then extract the productID from the
+instance.
+In this case,
+we look up the name of the Executable UML book, which our
+bookstore conveniently stocks.
+
+[source,tcl]
+----
+<<scenario1>>=
+set exumlref [bookstore::Product findWhere\
+        {[string match {Executable*} $productName]}]
+set id [rosea tunnel $exumlref readAttribute productID] ; # <1>
+----
+<1> The `rosea tunnel` command allows us to bridge into the domain
+to perform implicit operations on the internals.
+Yes, this breaks encapsulation, but in a very controlled manner
+and is essential for bridging domains together.
+Testing is just another form of bridging and one that usually
+exercises the implicit abilities of the software architecture.
+
+We have to manufacture an ID for the cart.
+Any old number will do.
+We'll just keep one around in the `carttag` variable.
+
+[source,tcl]
+----
+<<scenario1>>=
+set cartID [incr carttag]
+bookstore::ShoppingCart createasync\
+    startCart [list $id 1]\
+    cartID $cartID totalValue 0 ; # <1>
+----
+<1> Signal a creation event, passing the productID and quantity as
+event parameters and supplying the other `ShoppingCart` attributes.
+
+Since the instance creation is asynchronous,
+we must wait until that event is dispatched.
+Consulting the state diagram,
+we can see that we need to wait until the `AddingSelectiontoOrder`
+state is executed.
+
+[source,tcl]
+----
+<<scenario1>>=
+syncToStateActivity ShoppingCart AddingSelectiontoOrder
+----
+
+Now we will effectively cancel the order by changing the
+quantity associated with the product selection to 0.
+
+[source,tcl]
+----
+<<scenario1>>=
+set selection [bookstore::ProductSelection findById\
+        cartID $cartID productID $id]
+rosea::tunnel $selection signal changeQuantity 0
+----
+
+After signaling the event, we must await for it to execute.
+
+[source,tcl]
+----
+<<scenario1>>=
+syncToStateActivity ShoppingCart CancelingEntireOrder
+----
+
+Finally,
+we want to record the event dispatch traces.
+
+[source,tcl]
+----
+<<scenario1>>=
+logTraces scenario1
+----
+
+The procedure to record the event dispatch traces obtains both
+the text representation as well as the graphical representation.
+
+[source,tcl]
+----
+<<Common Execution Utilities>>=
 proc ::logTraces {filenamebase} {
     set logchan [::open $filenamebase.log w]
     try {
@@ -2208,65 +2840,106 @@ proc ::logTraces {filenamebase} {
     } finally {
         ::chan close $logchan
     }
-    rosea trace diagram all $filenamebase.diag
+    rosea trace diagram all $filenamebase.diag ; # <1>
+    rosea trace control clear ; # <2>
 }
 ----
+<1> This command outputs a file suitable for use with the `seqdiag` program
+that does the actual sequence diagram graphical drawing.
+<2> Clear out the traces in preparation for the next scenario.
 
-=== Scenario 1  [[scenario1,Scenario 1]]
-
-[source,tcl]
-----
-<<scenario1.tcl>>=
-<<copyright info>>
-<<Common Execution Setup>>
-
-set exumlref [bookstore::Product findWhere {[string match {Ex*} $productName]}]
-set id [rosea::InstCmds::readAttribute $exumlref productID]
-bookstore::ShoppingCart createasync startCart [list $id 1]\
-    cartID [incr carttag] totalValue 0
-syncToStateActivity ShoppingCart AddingSelectiontoOrder
-
-set selection [bookstore::ProductSelection findById\
-        cartID $carttag productID $id]
-rosea::tunnel $selection signal changeQuantity 0
-syncToStateActivity ShoppingCart CancelingEntireOrder
-
-logTraces scenario1
-<<Common Execution Takedown>>
-----
+Below are the event dispatch traces in text log form.
+The traces are timestamped and the time difference from the previous
+trace is given.
+For creation events,
+the details of the instance reference of the new created instance are given.
+For ordinary transitions,
+the source of the event, the event and its arguments and the target of
+the event are given.
+After the `==>` mark, the transition from current state to new state is shown.
+You can follow along with the model graphic to see the transitions that
+happened.
 
 [literal]
-.State Machine Traces For Scenario 1
+.State Machine Trace Log For Scenario 1
 --
 include::scenario1.log[]
 --
+
+Below is the same trace information in a graphical form of a UML
+sequence diagram.
+Time flow is from top to bottom.
+The events that originate from the `EXTERNAL` class are those that come
+from outside of the domain.
+Otherwise,
+the net flow of events as they were dispatched during execution is shown.
 
 image::scenario1.pdf[title="Scenario 1 Sequence Diagram"]
 
 === Scenario 2  [[scenario2,Scenario 2]]
 
+For the second scenario,
+we will start a new cart and add some products to it.
+We will also change the quantity of one of the products.
+Finally, we will check out and purchase the order.
+
+We start by generating a new cart ID.
+
 [source,tcl]
 ----
-<<scenario2.tcl>>=
-<<copyright info>>
-<<Common Execution Setup>>
+<<scenario2>>=
+set cartID [incr carttag]
+----
 
-set cartid [incr carttag]
+We create the new shopping cart, waiting for the creation
+event to be dispatched.
 
-set ref [bookstore::Product findWhere {
-    [string match {Executable*} $productName]}]
-set id [rosea::InstCmds::readAttribute $ref productID]
-bookstore::ShoppingCart createasync startCart [list $id 1]\
-    cartID $cartid totalValue 0
+[source,tcl]
+----
+<<scenario2>>=
+bookstore::ShoppingCart createasync\
+    startCart [list $id 1]\
+    cartID $cartID totalValue 0
+
 syncToStateActivity ShoppingCart AddingSelectiontoOrder
+----
 
-set ref [bookstore::Product findWhere {
-    [string match {Carnival*} $productName]}]
-set id [rosea::InstCmds::readAttribute $ref productID]
-set cartRef [bookstore::ShoppingCart findById cartID $cartid]
+We change our minds and decide we really need three copies of the
+Executable UML book.
+
+[source,tcl]
+----
+<<scenario2>>=
+set selection [bookstore::ProductSelection findById\
+        cartID $cartID productID $id]
+rosea::tunnel $selection signal changeQuantity 3
+
+syncToStateActivity ProductSelection ChangingQuantity
+----
+
+We also decide to buy some music.
+We must look up the product ID and then add the selection to the cart.
+
+[source,tcl]
+----
+<<scenario2>>=
+set musicRef [bookstore::Product findWhere\
+        {[string match {Carnival*} $productName]}]
+set id [rosea tunnel $musicRef readAttribute productID]
+
+set cartRef [bookstore::ShoppingCart findById cartID $cartID]
 rosea::tunnel $cartRef signal addSelection $id 2
 syncToStateActivity ShoppingCart AddingSelectiontoOrder
+----
 
+Finally, we checkout.
+Since we stubbed out all credit cards to be approved,
+we will know the order will progress to the `Being Packed and Shipped`
+state.
+
+[source,tcl]
+----
+<<scenario2>>=
 rosea::tunnel $cartRef signal checkOut\
         {5555 6666 7777 8888}\
         {100 E Main St., Anywhere, CO 88888}\
@@ -2277,11 +2950,13 @@ rosea::tunnel $cartRef signal checkOut\
         {222-555-1212}\
         {100 E Main St., Anywhere, CO 88888}
 
-syncToStateActivity ShippingClerk SelectingBooks
+syncToStateActivity Order BeingPackedandShipped
 
 logTraces scenario2
-<<Common Execution Takedown>>
 ----
+
+Again we show the text of the event dispatch traces as well as the
+sequence diagram.
 
 [literal]
 .State Machine Traces For Scenario 2
@@ -2290,6 +2965,50 @@ include::scenario2.log[]
 --
 
 image::scenario2.pdf[title="Scenario 2 Sequence Diagram"]
+
+=== Scenario 3 [[scenario3,Scenario 3]]
+
+For our third scenario, we will let the events unwind in the
+Shipping subsystem and see how the shipment is packed and made
+ready for shipment.
+
+[source,tcl]
+----
+<<scenario3>>=
+syncToStateActivity ShippingClerk CompletingJob 10000
+
+logTraces scenario3
+----
+
+[literal]
+.State Machine Traces For Scenario 3
+--
+include::scenario3.log[]
+--
+
+image::scenario3.pdf[title="Scenario 3 Sequence Diagram"]
+
+=== Scenario 4 [[scenario4,Scenario 4]]
+
+For scenario 4,
+we continue to let the events unwind until we see that the
+shipment was delivered.
+
+[source,tcl]
+----
+<<scenario4>>=
+syncToStateActivity Shipment Delivered 10000
+
+logTraces scenario4
+----
+
+[literal]
+.State Machine Traces For Scenario 4
+--
+include::scenario4.log[]
+--
+
+image::scenario4.pdf[title="Scenario 4 Sequence Diagram"]
 
 == Code Organization [[codeorganization,Code Organization]]
 
@@ -2357,6 +3076,8 @@ Each _root chunk_ is described in a section below.
 package require Tcl 8.6
 package require rosea
 package require uuid
+
+<<Translation Utilities>>
 
 domain bookstore {
     <<Product Specification Subsystem>>
