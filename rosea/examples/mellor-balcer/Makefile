@@ -115,16 +115,15 @@ simplebookstore.tcl : $(DOCSRC)
 sbs_population.tcl : $(DOCSRC)
 	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
 
-testscenario.tcl : $(DOCSRC) code
+testscenario.tcl : $(DOCSRC)
 	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
 
-$(LOGS) $(DIAGS) : testscenario.tcl
+$(LOGS) $(DIAGS) : testscenario.tcl $(ROOTS)
 	tclsh $<
 
 %.pdf : %.aweb
 	a2x $(A2XOPTS) --doctype=article  --format=pdf\
 	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) $<
-	$(RM) *__[0-9].pdf
 
 %.tcl : %.aweb
 	atangle $(ATANGLEOPTS) -root $@ -output $@ $<

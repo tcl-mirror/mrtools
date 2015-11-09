@@ -73,7 +73,7 @@ namespace eval ::rosea {
     
     namespace ensemble create
 
-    variable version 1.3
+    variable version 1.4
 
     logger::initNamespace [namespace current]
 
@@ -1518,6 +1518,14 @@ namespace eval ::rosea {
         proc isRefSingular {instref} {
             expr {[refMultiplicity $instref] == 1}
         }
+        proc limitRef {instref {count 1}} {
+            lassign $instref relvar insts
+            return [pipe {
+                relation tag $insts __Tag |
+                relation restrictwith ~ {$__Tag >= 0 && $__Tag < $count} |
+                ToRef $relvar ~
+            }]
+        }
         proc isRefEqual {instref1 instref2} {
             lassign $instref1 relvar1 inst1
             lassign $instref2 relvar2 inst2
@@ -2721,6 +2729,10 @@ namespace eval ::rosea {
                 Command             ::rosea::InstCmds::isRefSingular
                 RequiresStateModel  false
             } {
+                Name                limitRef
+                Command             ::rosea::InstCmds::limitRef
+                RequiresStateModel  false
+            } {
                 Name                isRefEqual
                 Command             ::rosea::InstCmds::isRefEqual
                 RequiresStateModel  false
@@ -2762,6 +2774,8 @@ namespace eval ::rosea {
                 Name    refMultiplicity
             } {
                 Name    isRefSingular
+            } {
+                Name    limitRef
             } {
                 Name    isRefEqual
             } {
