@@ -41,8 +41,7 @@
 # terms specified in this license.
 
 package require Tcl 8.6
-package require rosea 1.4
-package require uuid
+package require rosea 1.5
 
 domain bookstore {
     class Product {
@@ -54,7 +53,7 @@ domain bookstore {
         attribute website string
         attribute currentlyAvailable boolean
     
-        attribute categoryID string ; # <1>
+        attribute categoryID int ; # <1>
         reference R15 ProductCategory -link categoryID
     
         attribute groupCode string ; # <2>
@@ -111,7 +110,7 @@ domain bookstore {
         attribute productID string -id 1 ; # <1>
         reference R11 Product -link productID
     
-        attribute recordingID string -id 2 ; # <2>
+        attribute recordingID int -id 2 ; # <2>
         attribute formatID string -id 2
         reference R16 Recording -link recordingID
         reference R16 RecordingFormat -link formatID
@@ -133,46 +132,46 @@ domain bookstore {
     association R20 SoftwareProduct 1..*--1 ComputerSoftware
     class SpecialOrderProduct {
         attribute specialOrderInstructions string
-        attribute daysToDeliver int
+        attribute daysToDeliver int -check {$daysToDeliver >= 0}
     
         attribute productID string -id 1
         reference R12 Product -link productID
     }
     class StockedProduct {
-        attribute quantityOnHand int
-        attribute reorderThreshold int
-        attribute reorderIncrement int
+        attribute quantityOnHand int -check {$quantityOnHand >= 0}
+        attribute reorderThreshold int -check {$reorderThreshold >= 0}
+        attribute reorderIncrement int -check {$reorderIncrement >= 0}
         attribute reorderInstructions string
     
         attribute productID string -id 1
         reference R12 Product -link productID
     }
     class ProductCategory {
-        attribute categoryID string -id 1
+        attribute categoryID int -id 1 -system 100
         attribute categoryName string
     
-        attribute parentCategoryID string
+        attribute parentCategoryID int
         reference R14 ProductCategory -link {parentCategoryID categoryID}
     }
     association R14 ProductCategory 0..*--0..1 ProductCategory
     class Recording {
-        attribute recordingID string -id 1 ; # <1>
+        attribute recordingID int -id 1 -system 1 ; # <1>
         attribute title string
     }
     class Artist {
-        attribute artistID string -id 1
+        attribute artistID int -id 1 -system 1
         attribute artistName string
     }
     class PerformanceCredit {
         attribute role string -default {}
     
-        attribute recordingID string -id 1
-        attribute artistID string -id 1
+        attribute recordingID int -id 1
+        attribute artistID int -id 1
         reference R17 Recording -link recordingID
         reference R17 Artist -link artistID
     
-        attribute prevRecordingID string
-        attribute prevArtistID string
+        attribute prevRecordingID int
+        attribute prevArtistID int
         reference R18 PerformanceCredit\
             -link {prevRecordingID recordingID}\
             -link {prevArtistID artistID}
@@ -200,14 +199,14 @@ domain bookstore {
         attribute purchasesMade int -default 0 ; # <1>
     }
     class Order {
-        attribute orderID string -id 1
+        attribute orderID int -id 1 -system 100
         attribute dateOrderPlaced string -default {}
         attribute totalValue int
         attribute recipient string
         attribute deliveryAddress string
         attribute contactPhone string
     
-        attribute cartID string -default {} ; # <1>
+        attribute cartID int -default {} ; # <1>
         reference R10 ShoppingCart -link cartID
     
         attribute email string -default {} ; # <2>
@@ -249,7 +248,6 @@ domain bookstore {
             state SubmittingCharge {accountNumber billingAddress cardExpirationDate
                     cardholderName} {
                 CreditCardCharge createasync makeCharge [list $self]\
-                    chargeID [uuid::uuid generate]\
                     accountNumber $accountNumber\
                     cardholderName $cardholderName\
                     billingAddress $billingAddress\
@@ -273,7 +271,6 @@ domain bookstore {
             
                 assignAttribute $self recipient deliveryAddress contactPhone
                 Shipment createasync requestShipment [list $self]\
-                    shipmentID [uuid::uuid generate]\
                     recipient $recipient\
                     deliveryAddress $deliveryAddress\
                     contactPhone $contactPhone
@@ -289,12 +286,13 @@ domain bookstore {
     association R10 Order 0..1--1 ShoppingCart
     association R5 Order 1..*--0..1 Customer ; # <1>
     class ProductSelection {
-        attribute quantity int -default 0
-        attribute unitPriceOfSelection int -default 0
-        attribute selectionValue int -default 0
+        attribute quantity int -default 0 -check {$quantity >= 0}
+        attribute unitPriceOfSelection int -default 0\
+                -check {$unitPriceOfSelection >= 0}
+        attribute selectionValue int -default 0 -check {$selectionValue >= 0}
     
         attribute productID string -id 1 -default {} ; # <1>
-        attribute cartID string -id 1 -default {}
+        attribute cartID int -id 1 -default 0
         reference R4 Product -link productID
         reference R4 ShoppingCart -link cartID
     
@@ -341,8 +339,8 @@ domain bookstore {
     }
     association R4 ShoppingCart 0..*--1..* Product -associator ProductSelection
     class ShoppingCart {
-        attribute cartID string -id 1
-        attribute totalValue int
+        attribute cartID int -id 1 -system 1
+        attribute totalValue int -default 0 -check {$totalValue >= 0}
     
         statemodel {
             transition @ - startCart -> NewOrder
@@ -381,7 +379,6 @@ domain bookstore {
                 Order createasync checkOut [list $self $accountNumber\
                     $billingAddress $cardExpirationDate $cardholderName\
                     $customerEmail]\
-                    orderID [uuid::uuid generate]\
                     totalValue [readAttribute $self totalValue]\
                     recipient $customerName\
                     deliveryAddress $shippingAddress\
@@ -398,7 +395,7 @@ domain bookstore {
         } ; # <1>
     }
     class CreditCardCharge {
-        attribute chargeID string -id 1
+        attribute chargeID int -id 1 -system 100
         attribute accountNumber string
         attribute cardholderName string
         attribute billingAddress string
@@ -410,10 +407,10 @@ domain bookstore {
                 accountDataMismatch expired pending}
             }
     
-        attribute attemptOrderID string -default {}
+        attribute attemptOrderID int -default {}
         reference R7 Order -link {attemptOrderID orderID}
     
-        attribute paidOrderID string -default {}
+        attribute paidOrderID int -default {}
         reference R8 Order -link {paidOrderID orderID}
     
         statemodel {
@@ -461,7 +458,7 @@ domain bookstore {
     association R7 CreditCardCharge 0..*--1 Order
     association R8 CreditCardCharge 0..1--0..1 Order ; #<1>
     class Shipment {
-        attribute shipmentID string -id 1
+        attribute shipmentID int -id 1 -system 200
         attribute shippingCompany string -default {} ; # <1>
         reference R21 ShippingCompany -link {shippingCompany companyName}
         attribute trackingNumber string -default {}
@@ -480,7 +477,7 @@ domain bookstore {
         attribute clerkID string -default {}
         reference R22 WarehouseClerk -link clerkID
     
-        attribute orderID string -default {}
+        attribute orderID int -default 0
         reference R6 Order -link orderID
     
         statemodel {
@@ -625,7 +622,7 @@ domain bookstore {
     
         attribute awaitingAssignment boolean -default true
     
-        attribute shipmentID string -default {}
+        attribute shipmentID int -default 0
         reference R23 Shipment -link shipmentID
     
         statemodel {
@@ -708,13 +705,13 @@ domain bookstore {
         reference R27 WarehouseClerk -link clerkID
     }
     class ShipmentItem {
-        attribute quantityShipped int -default 0
+        attribute quantityShipped int -default 0 -check {$quantityShipped >= 0}
     
-        attribute shipmentID string -id 1
+        attribute shipmentID int -id 1
         reference R9 Shipment -link shipmentID
     
         attribute productID string -id 1
-        attribute cartID string -id 1
+        attribute cartID int -id 1
         reference R9 ProductSelection -link productID -link cartID
     }
     association R9 Shipment 0..*--1..* ProductSelection -associator ShipmentItem

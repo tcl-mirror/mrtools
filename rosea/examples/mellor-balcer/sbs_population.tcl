@@ -41,8 +41,7 @@
 # terms specified in this license.
 
 domain bookstore {
-    set producttag 100 ; # <1>
-    set eumlid 780201
+    set eumlid 780201 ; # <1>
     set recid 7789930
     set wordid 938763
     class Product {

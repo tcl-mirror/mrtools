@@ -40,7 +40,7 @@
 # permission to use and distribute the software in accordance with the
 # terms specified in this license.
 
-package require rosea 1.4
+package require rosea 1.5
 
 proc ::syncToStateActivity {class state {timeout 3000}} {
     set activityproc ::bookstore::${class}::__Activity::${state} ; # <1>
