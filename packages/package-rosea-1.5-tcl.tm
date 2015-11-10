@@ -2,7 +2,7 @@
 # -- Tcl Module
 
 # @@ Meta Begin
-# Package rosea 1.4
+# Package rosea 1.5
 # Meta description Rosea is a data and execution architecture for
 # Meta description translating XUML models using Tcl as the implementation
 # Meta description language.
@@ -30,7 +30,7 @@ package require lambda
 
 # ACTIVESTATE TEAPOT-PKG BEGIN DECLARE
 
-package provide rosea 1.4
+package provide rosea 1.5
 
 # ACTIVESTATE TEAPOT-PKG END DECLARE
 # ACTIVESTATE TEAPOT-PKG END TM
@@ -109,7 +109,7 @@ namespace eval ::rosea {
     
     namespace ensemble create
 
-    variable version 1.4
+    variable version 1.5
 
     logger::initNamespace [namespace current]
 
@@ -133,8 +133,18 @@ namespace eval ::rosea {
     
     pipe {
         relation semijoin $class $Attribute -using {Domain Domain Name Class} |
-        relation join ~ $DefaultValue -using {Domain Domain Class Class Name Attribute}
+        relation join ~ $UserSuppliedValue -using {Domain Domain Class Class Name Attribute}
     } defaultValuesQuery
+    
+    pipe {
+        relation semijoin $class $Attribute -using {Domain Domain Name Class} |
+        relation join ~ $SystemSuppliedValue -using {Domain Domain Class Class Name Attribute}
+    } suppliedValuesQuery
+    
+    pipe {
+        relation semijoin $class $Attribute -using {Domain Domain Name Class} |
+        relation join ~ $GeneratedValue -using {Domain Domain Class Class Name Attribute}
+    } generatedValuesQuery
     
     pipe {
         relation semijoin $class $Attribute -using {Domain Domain Name Class} |
@@ -303,6 +313,9 @@ namespace eval ::rosea {
             Class Class\
             Attribute Attribute\
             DefaultValue DefaultValue\
+            UserSuppliedValue UserSuppliedValue\
+            SystemSuppliedValue SystemSuppliedValue\
+            GeneratedValue GeneratedValue\
             ValueCheck ValueCheck\
             Identifier Identifier\
             IdentifyingAttribute IdentifyingAttribute\
@@ -523,6 +536,8 @@ namespace eval ::rosea {
             variable headingQuery
             variable idQuery
             variable defaultValuesQuery
+            variable suppliedValuesQuery
+            variable generatedValuesQuery
             variable checkValuesQuery
             variable hasSMQuery
             variable statesQuery
@@ -562,9 +577,32 @@ namespace eval ::rosea {
                 
                 if {[relation isnotempty $defaultvalues]} {
                     relvar trace add variable $className insert [list\
-                        ::rosea::Helpers::DefValueTrace\
+                        ::rosea::Helpers::UserDefaultTrace\
                         [relation dict $defaultvalues Name Type]\
                         [relation dict $defaultvalues Name Value]\
+                    ]
+                }
+                set supplied [eval $suppliedValuesQuery]
+                
+                if {[relation isnotempty $supplied]} {
+                    pipe {
+                        relation extend $supplied stup ClassName string {
+                            [string cat [tuple extract $stup Class] , [tuple extract $stup Name]]
+                        } |
+                        relation array ~ ${domns}::__Arch_SuppliedDefault ClassName StartValue 
+                    } ; # <1>
+                    relvar trace add variable $className insert [list\
+                        ::rosea::Helpers::SupplyDefaultTrace\
+                        [relation dict $supplied Name Type]\
+                    ]
+                }
+                set generatecmds [eval $generatedValuesQuery]
+                
+                if {[relation isnotempty $generatecmds]} {
+                    relvar trace add variable $className insert [list\
+                        ::rosea::Helpers::GenerateDefaultTrace\
+                        [relation dict $generatecmds Name Type]\
+                        [relation dict $generatecmds Name Cmd]\
                     ]
                 }
                 set hasStateModel [eval $hasSMQuery]
@@ -1225,8 +1263,9 @@ namespace eval ::rosea {
             DUP_ELEMENT_NAME    {a class, relationship or domain operation named, "%s",\
                                 already exists}
             RESERVED_NAME {names beginning with two underscore characters are reserved,\
-                    "%s"}
-                
+                    "%s" cannot be used as a name in this context}
+            INT_TYPE_REQUIRED   {attribute must be of "int" type, got "%s"}
+            INT_VALUE_REQUIRED  {an integer value is required, got "%s"}
             ARG_FORMAT      {options and values must come in pairs, got "%s"}
             UNKNOWN_OPTION  {unknown %s command option, "%s"}
             DUP_OP_NAME     {operation call, "%s", already exists}
@@ -1375,10 +1414,32 @@ namespace eval ::rosea {
                 }
             }
         }
-        proc DefValueTrace {defheading defvalues op relvar tuple} {
+        proc UserDefaultTrace {defheading defvalues op relvar tuple} {
             tuple create\
                 [dict merge $defheading [tuple heading $tuple]]\
                 [dict merge $defvalues [tuple get $tuple]]
+        }
+        proc SupplyDefaultTrace {defheading op relvar tuple} {
+            set attrs [tuple attributes $tuple] ; # <1>
+            SplitRelvarName $relvar domain class ; # <2>
+            foreach {attrname attrtype} $defheading {
+                if {$attrname ni $attrs} {
+                    set value [set ${domain}::__Arch_SuppliedDefault($class,$attrname)] ; # <3>
+                    incr ${domain}::__Arch_SuppliedDefault($class,$attrname)
+                    set tuple [tuple extend $tuple $attrname $attrtype $value] ; # <4>
+                }
+            }
+            return $tuple
+        }
+        proc GenerateDefaultTrace {defheading defcmds op relvar tuple} {
+            set attrs [tuple attributes $tuple]
+            foreach {attrname attrtype} $defheading {
+                if {$attrname ni $attrs} {
+                    set value [eval [dict get $defcmds $attrname]]
+                    set tuple [tuple extend $tuple $attrname $attrtype $value]
+                }
+            }
+            return $tuple
         }
         proc CheckValueTrace {attrchecks op relvar args} {
             if {$op eq "insert"} {
@@ -2528,11 +2589,32 @@ namespace eval ::rosea {
             Domain      string
             Class       string
             Attribute   string
-            Value       string
         } {Domain Class Attribute}
         relvar association R6\
             DefaultValue {Domain Class Attribute} ?\
             Attribute {Domain Class Name} 1
+        relvar create UserSuppliedValue {
+            Domain      string
+            Class       string
+            Attribute   string
+            Value       string
+        } {Domain Class Attribute}
+        relvar create SystemSuppliedValue {
+            Domain      string
+            Class       string
+            Attribute   string
+            StartValue  int
+        } {Domain Class Attribute}
+        relvar create GeneratedValue {
+            Domain      string
+            Class       string
+            Attribute   string
+            Cmd         string
+        } {Domain Class Attribute}
+        relvar partition R18 DefaultValue {Domain Class Attribute}\
+            UserSuppliedValue {Domain Class Attribute}\
+            SystemSuppliedValue {Domain Class Attribute}\
+            GeneratedValue {Domain Class Attribute}
         relvar create ValueCheck {
             Domain      string
             Class       string
@@ -3962,7 +4044,44 @@ namespace eval ::rosea {
                                     Domain      $DomainName\
                                     Class       $ClassName\
                                     Attribute   $name\
+                                ]
+                                relvar insert ::rosea::Config::UserSuppliedValue [list\
+                                    Domain      $DomainName\
+                                    Class       $ClassName\
+                                    Attribute   $name\
                                     Value       $value\
+                                ]
+                            }
+                            -system {
+                                if {$type ne "int"} {
+                                    tailcall DeclError INT_TYPE_REQUIRED $type
+                                }
+                                if {![string is integer -strict $value]} {
+                                    tailcall DeclError INT_VALUE_REQUIRED $value
+                                }
+                                relvar insert ::rosea::Config::DefaultValue [list\
+                                    Domain      $DomainName\
+                                    Class       $ClassName\
+                                    Attribute   $name\
+                                ]
+                                relvar insert ::rosea::Config::SystemSuppliedValue [list\
+                                    Domain      $DomainName\
+                                    Class       $ClassName\
+                                    Attribute   $name\
+                                    StartValue  $value\
+                                ]
+                            }
+                            -generate {
+                                relvar insert ::rosea::Config::DefaultValue [list\
+                                    Domain      $DomainName\
+                                    Class       $ClassName\
+                                    Attribute   $name\
+                                ]
+                                relvar insert ::rosea::Config::GeneratedValue [list\
+                                    Domain      $DomainName\
+                                    Class       $ClassName\
+                                    Attribute   $name\
+                                    Cmd         $value\
                                 ]
                             }
                             -id {

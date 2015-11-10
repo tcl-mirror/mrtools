@@ -8292,11 +8292,32 @@ relvar create DefaultValue {
     Domain      string
     Class       string
     Attribute   string
-    Value       string
 } {Domain Class Attribute}
 relvar association R6\
     DefaultValue {Domain Class Attribute} ?\
     Attribute {Domain Class Name} 1
+relvar create UserSuppliedValue {
+    Domain      string
+    Class       string
+    Attribute   string
+    Value       string
+} {Domain Class Attribute}
+relvar create SystemSuppliedValue {
+    Domain      string
+    Class       string
+    Attribute   string
+    StartValue  int
+} {Domain Class Attribute}
+relvar create GeneratedValue {
+    Domain      string
+    Class       string
+    Attribute   string
+    Cmd         string
+} {Domain Class Attribute}
+relvar partition R18 DefaultValue {Domain Class Attribute}\
+    UserSuppliedValue {Domain Class Attribute}\
+    SystemSuppliedValue {Domain Class Attribute}\
+    GeneratedValue {Domain Class Attribute}
 relvar create ValueCheck {
     Domain      string
     Class       string
@@ -8483,6 +8504,14 @@ the +attribute+ command specifies the attributes of the class.
     +-default+ _value_:::
         Specifies a default value that will be supplied if an instance
         is created and no value is provided for the attribute.
+    +-system+ _startvalue_:::
+        Specifies that the system will generate a sequential integer
+        value if no value is provided for the attribute.
+        Supplied integers will start at _startvalue_ and increment by one
+        each time a default value is supplied.
+    +-generate+ _cmd_:::
+        Specifies that the default value for the attribute will be the
+        return value of _cmd_.
     +-check+ _expr_:::
         Check that values of the attribute satisfy _expr_. _Expr_ must
         be suitable for the `::expr` command and may reference variables
@@ -8518,6 +8547,18 @@ value for the attribute.
 When class instances are created,
 if no value for the attribute is given,
 then the attribute is given the default [arg value].
+
+[opt_def [option -system] [arg start]]
+The [option -system] option designates the attribute to have a
+system supplied value by default.
+System supplied values are sequential integers that begin at the
+given [arg start] value and increment each time an instanced is created.
+
+[opt_def [option -generate] [arg cmd]]
+The [option -generate] options designates the attribute to have a
+generated value by default.
+The [arg cmd] is evaluated and its return value is used as
+the default value of the attribute.
 
 [opt_def [option -id] [arg number]]
 The [option -id] specifies that the attribute is part of the identifier given
@@ -8639,7 +8680,44 @@ proc attribute {name type args} {
                     Domain      $DomainName\
                     Class       $ClassName\
                     Attribute   $name\
+                ]
+                relvar insert ::rosea::Config::UserSuppliedValue [list\
+                    Domain      $DomainName\
+                    Class       $ClassName\
+                    Attribute   $name\
                     Value       $value\
+                ]
+            }
+            -system {
+                if {$type ne "int"} {
+                    tailcall DeclError INT_TYPE_REQUIRED $type
+                }
+                if {![string is integer -strict $value]} {
+                    tailcall DeclError INT_VALUE_REQUIRED $value
+                }
+                relvar insert ::rosea::Config::DefaultValue [list\
+                    Domain      $DomainName\
+                    Class       $ClassName\
+                    Attribute   $name\
+                ]
+                relvar insert ::rosea::Config::SystemSuppliedValue [list\
+                    Domain      $DomainName\
+                    Class       $ClassName\
+                    Attribute   $name\
+                    StartValue  $value\
+                ]
+            }
+            -generate {
+                relvar insert ::rosea::Config::DefaultValue [list\
+                    Domain      $DomainName\
+                    Class       $ClassName\
+                    Attribute   $name\
+                ]
+                relvar insert ::rosea::Config::GeneratedValue [list\
+                    Domain      $DomainName\
+                    Class       $ClassName\
+                    Attribute   $name\
+                    Cmd         $value\
                 ]
             }
             -id {
@@ -8676,12 +8754,15 @@ The `uinsert` command performs an insert with union semantics, _i.e._
 duplicates are simply ignored.
 
 (((error code,RESERVED_NAME)))
+(((error code,INT_TYPE_REQUIRED)))
+(((error code,INT_VALUE_REQUIRED)))
 [source,tcl]
 ----
 <<error code formats>>=
 RESERVED_NAME {names beginning with two underscore characters are reserved,\
-        "%s"}
-    
+        "%s" cannot be used as a name in this context}
+INT_TYPE_REQUIRED   {attribute must be of "int" type, got "%s"}
+INT_VALUE_REQUIRED  {an integer value is required, got "%s"}
 ----
 
 [float]
@@ -13372,6 +13453,9 @@ namespace upvar Config\
     Class Class\
     Attribute Attribute\
     DefaultValue DefaultValue\
+    UserSuppliedValue UserSuppliedValue\
+    SystemSuppliedValue SystemSuppliedValue\
+    GeneratedValue GeneratedValue\
     ValueCheck ValueCheck\
     Identifier Identifier\
     IdentifyingAttribute IdentifyingAttribute\
@@ -13975,13 +14059,23 @@ test generate-1.1 {
 [float]
 ====  Setup Default Values
 
+We support the concept of a default value and allow that value to be
+specified in one of three (mutually exclusive) ways.
+
+. The user may supply a constant default value.
+. The system will generate an sequential integer value.
+. The user may supply a command, the result of which is the default attribute
+value.
+
 We will support the concept of a default attribute value by
 creating a relvar trace that is triggered when a tuple is inserted
 into the class relvar.
 Relvars support tracing in a manner analogous to Tcl variable tracing.
 
-First, let's examine the command that will be invoked as the trace.
-This command, +DefValueTrace+, is shown below.
+First, let's examine the command that will be invoked when a user
+supplied default value is requested.
+
+This command, +UserDefaultTrace+, is shown below.
 The _op_, _relvar_ and _tuple_ arguments are added by the relvar tracing
 mechanism and are not interesting to us for this usage.
 The _defheading_ and _defvalues_ arguments are part of the command
@@ -14007,11 +14101,11 @@ precedence over any defaults.
 If the defaults are missing from what is inserted, then the merge
 will put them into place.
 
-(((rosea,Helpers,DefValueTrace)))
+(((rosea,Helpers,UserDefaultTrace)))
 [source,tcl]
 ----
 <<helper commands>>=
-proc DefValueTrace {defheading defvalues op relvar tuple} {
+proc UserDefaultTrace {defheading defvalues op relvar tuple} {
     tuple create\
         [dict merge $defheading [tuple heading $tuple]]\
         [dict merge $defvalues [tuple get $tuple]]
@@ -14031,7 +14125,7 @@ have defined default values.
 <<rosea data>>=
 pipe {
     relation semijoin $class $Attribute -using {Domain Domain Name Class} |
-    relation join ~ $DefaultValue -using {Domain Domain Class Class Name Attribute}
+    relation join ~ $UserSuppliedValue -using {Domain Domain Class Class Name Attribute}
 } defaultValuesQuery
 
 <<class query variables>>=
@@ -14041,7 +14135,7 @@ variable defaultValuesQuery
 We test to make sure that we need to add a trace at all.
 The +relation dict+ command takes the default values relation and
 extracts the needed columns and returns just the form we need
-to create the command prefix using the +DefValueTrace+ command.
+to create the command prefix using the +UserDefaultTrace+ command.
 
 [source,tcl]
 ----
@@ -14050,9 +14144,155 @@ set defaultvalues [eval $defaultValuesQuery]
 
 if {[relation isnotempty $defaultvalues]} {
     relvar trace add variable $className insert [list\
-        ::rosea::Helpers::DefValueTrace\
+        ::rosea::Helpers::UserDefaultTrace\
         [relation dict $defaultvalues Name Type]\
         [relation dict $defaultvalues Name Value]\
+    ]
+}
+----
+
+We follow the same general pattern that we established for constant
+default values for the other two ways that default values can be
+generated.
+The trace function for system supplied default values is given below.
+It is a bit more complicated because if the value of the attribute
+is already supplied, then we do not want to increment the counter
+associated with the attribute.
+This is not a big deal,
+but there is an expectation that the counter does not appear
+the adjust itself needlessly.
+We would expect under most circumstances that attributes with a
+system supplied attribute value would always use the default value.
+
+Another problem for system supplied default values is that
+we will have to store the current value of the sequence.
+Ideally, we would like to store that in a architectural relvar.
+But, that is not possible since TclRAL will no allow relvar
+operations from within a tracefootnote:[such operations would risk
+messing up the ongoing transaction.].
+So we resort to storing the information in an array.
+That decision does have consequences.
+By storing the sequences in an array,
+that information is not saved as part of serializing a domain.
+
+(((rosea,Helpers,SupplyDefaultTrace)))
+[source,tcl]
+----
+<<helper commands>>=
+proc SupplyDefaultTrace {defheading op relvar tuple} {
+    set attrs [tuple attributes $tuple] ; # <1>
+    SplitRelvarName $relvar domain class ; # <2>
+    foreach {attrname attrtype} $defheading {
+        if {$attrname ni $attrs} {
+            set value [set ${domain}::__Arch_SuppliedDefault($class,$attrname)] ; # <3>
+            incr ${domain}::__Arch_SuppliedDefault($class,$attrname)
+            set tuple [tuple extend $tuple $attrname $attrtype $value] ; # <4>
+        }
+    }
+    return $tuple
+}
+----
+<1> We get the attributes of the tuple that is being inserted.
+This can be used to test whether the defaulted attribute has had a value
+supplied already.
+<2> We need the domain namespace and class name to access the
+next default value.
+<3> Since we are constructing the name of the array that holds the
+next value in the sequence, it is easiest to obtain the value in the
+array element using the `set` command.
+<4> Extending the tuple with the supplied default value.
+
+The query to obtain those attributes that are to have system supplied
+values is similar to what we say for defaulted values.
+
+[source,tcl]
+----
+<<rosea data>>=
+pipe {
+    relation semijoin $class $Attribute -using {Domain Domain Name Class} |
+    relation join ~ $SystemSuppliedValue -using {Domain Domain Class Class Name Attribute}
+} suppliedValuesQuery
+
+<<class query variables>>=
+variable suppliedValuesQuery
+----
+
+We have the additional complication of initializing the array
+that holds the sequence values from the starting values specified during
+the domain configuration.
+Otherwise,
+the logic here is similar to that for defaulted values.
+
+[source,tcl]
+----
+<<generate: setup default values>>=
+set supplied [eval $suppliedValuesQuery]
+
+if {[relation isnotempty $supplied]} {
+    pipe {
+        relation extend $supplied stup ClassName string {
+            [string cat [tuple extract $stup Class] , [tuple extract $stup Name]]
+        } |
+        relation array ~ ${domns}::__Arch_SuppliedDefault ClassName StartValue 
+    } ; # <1>
+    relvar trace add variable $className insert [list\
+        ::rosea::Helpers::SupplyDefaultTrace\
+        [relation dict $supplied Name Type]\
+    ]
+}
+----
+<1> We want to use `relation array` to create the array,
+but it can only use a single attribute as the array index.
+No matter, we just construct that attribute by extending the orignal
+relation value with a new attribute that has the array index value
+we want.
+
+The third type of default value is generated by invoking a command.
+Again, the approach is very similar to what we have already seen.
+
+(((rosea,Helpers,GenerateDefaultTrace)))
+[source,tcl]
+----
+<<helper commands>>=
+proc GenerateDefaultTrace {defheading defcmds op relvar tuple} {
+    set attrs [tuple attributes $tuple]
+    foreach {attrname attrtype} $defheading {
+        if {$attrname ni $attrs} {
+            set value [eval [dict get $defcmds $attrname]]
+            set tuple [tuple extend $tuple $attrname $attrtype $value]
+        }
+    }
+    return $tuple
+}
+----
+
+Again,
+the query for generated default values follows the same pattern.
+
+[source,tcl]
+----
+<<rosea data>>=
+pipe {
+    relation semijoin $class $Attribute -using {Domain Domain Name Class} |
+    relation join ~ $GeneratedValue -using {Domain Domain Class Class Name Attribute}
+} generatedValuesQuery
+
+<<class query variables>>=
+variable generatedValuesQuery
+----
+
+And the trace is installed if the above query comes back not empty.
+
+[source,tcl]
+----
+<<generate: setup default values>>=
+set generatecmds [eval $generatedValuesQuery]
+
+if {[relation isnotempty $generatecmds]} {
+    relvar trace add variable $className insert [list\
+        ::rosea::Helpers::GenerateDefaultTrace\
+        [relation dict $generatecmds Name Type]\
+        [relation dict $generatecmds Name Cmd]\
     ]
 }
 ----
@@ -14110,6 +14350,87 @@ test generate-1.3 {
     set ref [::foo::X create x1 red y1 truck x2 bar x3 40]
     rosea tunnel $ref readAttribute x2 x3
 } -result {bar 40}
+----
+
+[source,tcl]
+----
+<<generate command tests>>=
+test generate-1.4.1 {
+    Generate domain relvars, system supplied value
+} -setup {
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::foo
+} -body {
+    rosea configure {
+        domain foo {
+            class X {
+                attribute x1 string -id 1
+                attribute y1 int -id 1 -system 100
+                attribute x2 string -default foo
+                attribute x3 int -default 20
+            }
+        }
+    }
+    rosea generate
+    set ref [::foo::X create x1 red]
+    rosea tunnel $ref readAttribute y1
+} -result {100}
+----
+
+[source,tcl]
+----
+<<generate command tests>>=
+test generate-1.4.2 {
+    Generate domain relvars, system supplied value, override default
+} -setup {
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::foo
+} -body {
+    rosea configure {
+        domain foo {
+            class X {
+                attribute x1 string -id 1
+                attribute y1 int -id 1 -system 100
+                attribute x2 string -default foo
+                attribute x3 int -default 20
+            }
+        }
+    }
+    rosea generate
+    ::foo::X create x1 red
+    # We are supplying the value of "y1".
+    ::foo::X create x1 red y1 200
+    # Since we supplied y1 last time, we expect the next y1 value to be 101
+    set ref [::foo::X create x1 red]
+    rosea tunnel $ref readAttribute y1
+} -result {101}
+----
+
+[source,tcl]
+----
+<<generate command tests>>=
+test generate-1.5 {
+    Generate domain relvars, generated default value
+} -setup {
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::foo
+} -body {
+    rosea configure {
+        domain foo {
+            class X {
+                attribute x1 string -id 1
+                attribute y1 string -id 1
+                attribute x2 string -generate {uuid::uuid generate}
+            }
+        }
+    }
+    rosea generate
+    set ref [::foo::X create x1 red y1 truck]
+    rosea tunnel $ref readAttribute x2
+} -result {[[:xdigit:]-]{36}} -match regexp
 ----
 
 [float]
@@ -14576,7 +14897,7 @@ namespace ensemble create\
 [source,tcl]
 ----
 <<generate command tests>>=
-test generate-1.4 {
+test generate-1.10 {
     generate class based operations
 } -setup {
 } -cleanup {
@@ -14641,7 +14962,7 @@ namespace ensemble create\
 [source,tcl]
 ----
 <<generate command tests>>=
-test generate-1.5 {
+test generate-1.11 {
     generate instance based operations
 } -setup {
 } -cleanup {
@@ -20972,7 +21293,7 @@ namespace eval ::rosea {
     <<rosea exports>>
     namespace ensemble create
 
-    variable version 1.4
+    variable version 1.5
 
     logger::initNamespace [namespace current]
 
@@ -20996,7 +21317,7 @@ We also provide a root chunk to extract a package index file.
 [source,tcl]
 ----
 <<pkgIndex.tcl>>=
-package ifneeded rosea 1.4 [list source [file join $dir rosea.tcl]]
+package ifneeded rosea 1.5 [list source [file join $dir rosea.tcl]]
 ----
 
 === Unit Tests
@@ -21009,6 +21330,7 @@ package ifneeded rosea 1.4 [list source [file join $dir rosea.tcl]]
 package require Tcl 8.6
 package require cmdline
 package require logger
+package require uuid
 
 <<required packages>>
 
@@ -21107,7 +21429,7 @@ rosea populate {
 [source,tcl]
 ----
 <<rosea.man>>=
-[manpage_begin rosea n 1.4]
+[manpage_begin rosea n 1.5]
 [comment {
 <<copyright info>>
 }]
