@@ -73,7 +73,7 @@ namespace eval ::rosea {
     
     namespace ensemble create
 
-    variable version 1.5
+    variable version 1.5.1
 
     logger::initNamespace [namespace current]
 
@@ -2767,8 +2767,16 @@ namespace eval ::rosea {
                 Command             ::rosea::InstCmds::updateAttribute
                 RequiresStateModel  false
             } {
+                Name                withAttribute
+                Command             ::rosea::InstCmds::withAttribute
+                RequiresStateModel  false
+            } {
                 Name                readAttribute
                 Command             ::rosea::InstCmds::readAttribute
+                RequiresStateModel  false
+            } {
+                Name                assignAttribute
+                Command             ::rosea::InstCmds::assignAttribute
                 RequiresStateModel  false
             } {
                 Name                delete
@@ -2790,6 +2798,10 @@ namespace eval ::rosea {
                 Name                delayremaining
                 Command             ::rosea::InstCmds::delayremaining
                 RequiresStateModel  true
+            } {
+                Name                instop
+                Command             ::rosea::InstCmds::instop
+                RequiresStateModel  false
             } {
                 Name                deRef
                 Command             ::rosea::InstCmds::deRef
@@ -2835,7 +2847,11 @@ namespace eval ::rosea {
             } {
                 Name    updateAttribute
             } {
+                Name    withAttribute
+            } {
                 Name    readAttribute
+            } {
+                Name    assignAttribute
             } {
                 Name    delete
             } {
@@ -2846,6 +2862,8 @@ namespace eval ::rosea {
                 Name    canceldelayed
             } {
                 Name    delayremaining
+            } {
+                Name    instop
             } {
                 Name    deRef
             } {
