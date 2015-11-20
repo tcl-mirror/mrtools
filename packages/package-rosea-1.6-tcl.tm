@@ -2,7 +2,7 @@
 # -- Tcl Module
 
 # @@ Meta Begin
-# Package rosea 1.5.1
+# Package rosea 1.6
 # Meta description Rosea is a data and execution architecture for
 # Meta description translating XUML models using Tcl as the implementation
 # Meta description language.
@@ -30,7 +30,7 @@ package require lambda
 
 # ACTIVESTATE TEAPOT-PKG BEGIN DECLARE
 
-package provide rosea 1.5.1
+package provide rosea 1.6
 
 # ACTIVESTATE TEAPOT-PKG END DECLARE
 # ACTIVESTATE TEAPOT-PKG END TM
@@ -103,13 +103,17 @@ namespace eval ::rosea {
     
     namespace export save
     
+    namespace export restore
+    
+    namespace export info
+    
     namespace export tunnel
     
     namespace export trace
     
     namespace ensemble create
 
-    variable version 1.5.1
+    variable version 1.6
 
     logger::initNamespace [namespace current]
 
@@ -1071,7 +1075,7 @@ namespace eval ::rosea {
                         set savecmd ::ral::storeToSQLite
                     }
                     -tclral {
-                        set savecmd ::ral::serialize
+                        set savecmd ::ral::serializeToFile
                     }
                     -async {
                         set options [lassign $options asynccmd]
@@ -1087,16 +1091,108 @@ namespace eval ::rosea {
     
         if {[llength $options] == 2} {
             lassign $options domain file
+            if {[string range $domain 0 1] ne "::"} { # <1>
+                set domrel [relvar restrictone ::rosea::Config::Domain Name $domain]
+                if {[relation isempty $domrel]} {
+                    tailcall DeclError UNKNOWN_DOMAIN $domain
+                }
+                set domain [string cat [relation extract $domrel Location]\
+                        :: $domain]
+            }
         } else {
             tailcall DeclError SAVE_ARG_ERROR $args
         }
     
-        set script "try \{$savecmd $file ${domain}*\}" ; # <1>
+        set script "try \{$savecmd $file ${domain}::\\\[A-Za-z0-9\\\]*\}" ; # <2>
         if {$asynccmd ne {}} {
             append script " finally \{$asynccmd $domain $file\}"
         }
     
-        after idle [list ::apply [list {} $script]] ; # <2>
+        after idle [list ::apply [list {} $script]] ; # <3>
+    }
+    proc restore {args} {
+        set restorecmd ::ral::mergeFromFile
+    
+        set options $args
+        while {1} {
+            if {[string index [lindex $options 0] 0] eq "-"} {
+                set options [lassign $options option]
+                switch -exact -- $option {
+                    -sqlite {
+                        set restorecmd ::ral::mergeFromSQLite
+                    }
+                    -tclral {
+                        set restorecmd ::ral::mergeFromFile
+                    }
+                    default {
+                        tailcall DeclError UNKNOWN_OPTION restore $option
+                    }
+                }
+            } else {
+                break
+            }
+        }
+    
+        if {[llength $options] == 2} {
+            lassign $options domain file
+            if {[string range $domain 0 1] ne "::"} {
+                set domrel [relvar restrictone ::rosea::Config::Domain Name $domain]
+                if {[relation isempty $domrel]} {
+                    tailcall DeclError UNKNOWN_DOMAIN $domain
+                }
+                set domain [string cat [relation extract $domrel Location]\
+                        :: $domain]
+            }
+        } else {
+            tailcall DeclError RESTORE_ARG_ERROR $args
+        }
+    
+        eval [list $restorecmd $file $domain]
+    
+        # Determine the values for the system supplied defaults.  We examine all
+        # the classes that have such attributes and find the maximum value of the
+        # attribute.  This can then be placed in the array that is used when new
+        # default values are generated.
+        set domainname [namespace tail $domain]
+        set supplied [pipe {
+            relvar set ::rosea::Config::SystemSuppliedValue |
+            relation restrictwith ~ {$Domain eq $domainname}
+        }]
+    
+        relation foreach sup $supplied {
+            relation assign $sup
+            set classtups [relvar set ${domain}::$Class]
+            if {[relation isempty $classtups]} {
+                set maxvalue $StartValue
+            } else {
+                set maxvalue [pipe {
+                    relation summarizeby $classtups {} cv\
+                        MaxValue int {rmax($cv, $Attribute)} |
+                    relation extract ~ MaxValue
+                }]
+            }
+            set ${domain}::__Arch_SuppliedDefault($Class,$Attribute)\
+                [expr {$maxvalue + 1}]
+        }
+        return
+    }
+    proc info {args} {
+        set args [lassign $args subcmd]
+    
+        switch -exact -- $subcmd {
+            domain {
+                Info::domain $args
+            }
+            class {
+                Info::class $args
+            }
+            statemodel {
+                Info::statemodel $args
+            }
+            default {
+                tailcall DeclError UNKNOWN_INFO_CMD $subcmd
+            }
+        }
     }
     proc tunnel {instref op args} {
         relvar eval {
@@ -1286,10 +1382,15 @@ namespace eval ::rosea {
             RELVAR_TRACE_OP     {unexpected relvar trace operation, "%s"}
             ATTR_CHECK_FAILED   {check for attribute, "%s", failed:\
                                 instance value was, "%s": "%s" evaluated to "%s"}
+            UNKNOWN_DOMAIN  {unknown domain, "%s"}
             ARG_MISMATCH      {number of population values must be a multiple of %d, got %d}
             SAVE_ARG_ERROR  {wrong number of arguments: expected:\
                     "save ?-sqlite | -tclral? ?-async <cmdprefix>?\
                     <domain> <filename>", got: "%s"}
+            RESTORE_ARG_ERROR  {wrong number of arguments: expected:\
+                    "restore ?-sqlite | -tclral?  <domain> <filename>", got: "%s"}
+            UNKNOWN_INFO_CMD  {unknown info request, "%s"}
+            UNKNOWN_CLASS  {unknown class, "%s", in domain, "%s"}
             UNKNOWN_TRACE_CMD   {unknown trace subcomand, "%s"}
             BAD_TRACEOP     {unknown trace operation, "%s"}
             NO_SAVEFILE     {no save file name provided}
@@ -4655,9 +4756,157 @@ namespace eval ::rosea {
             }
         }
     }
+    namespace eval Info {
+        namespace import\
+            ::ral::relation\
+            ::ral::tuple\
+            ::ral::relformat\
+            ::ralutil::pipe
+        namespace import ::ral::relvar
+        namespace import ::rosea::Helpers::DeclError
+        proc domain {arglist} {
+            set arglist [lassign $arglist subcmd domainname]
+            set dominst [relvar restrictone ::rosea::Config::Domain Name $domainname]
+            if {[relation isempty $dominst]} {
+                tailcall DeclError UNKNOWN_DOMAIN $domainname
+            }
+        
+            switch -exact -- $subcmd {
+                classes {
+                    return [pipe {
+                        relvar set ::rosea::Config::Class |
+                        relation semijoin $dominst ~ -using {Name Domain} |
+                        relation list ~ Name
+                    }]
+                }
+                relationships {
+                    return [pipe {
+                        relvar set ::rosea::Config::Relationship |
+                        relation semijoin $dominst ~ -using {Name Domain} |
+                        relation list ~ Name
+                    }]
+                }
+                operations {
+                    return [FormatOpsInfo [pipe {
+                        relvar set ::rosea::Config::DomainOperation |
+                        relation semijoin $dominst ~ -using {Name Domain} |
+                        relation project ~ Name Parameters Body
+                    }]]
+                }
+                default {
+                    tailcall DeclError UNKNOWN_INFO_CMD $subcmd
+                }
+            }
+        }
+        proc FormatOpsInfo {ops} {
+            set result [list]
+            relation foreach op $ops {
+                relation assign $op
+                lappend result $Name $Parameters $Body
+            }
+            return $result
+        }
+        proc class {arglist} {
+            set arglist [lassign $arglist subcmd domainname classname]
+            set dominst [relvar restrictone ::rosea::Config::Domain Name $domainname]
+            if {[relation isempty $dominst]} {
+                tailcall DeclError UNKNOWN_DOMAIN $domainname
+            }
+        
+            set classinst [pipe {
+                relvar set ::rosea::Config::Class |
+                relation semijoin $dominst ~ -using {Name Domain} |
+                relation restrictwith ~ {$Name eq $classname}
+            }]
+            if {[relation isempty $classinst]} {
+                tailcall DeclError UNKNOWN_CLASS $classname $domainname
+            }
+        
+            switch -exact -- $subcmd {
+                attributes {
+                    return [pipe {
+                        relvar set ::rosea::Config::Attribute |
+                        relation semijoin $classinst ~ -using {Domain Domain Name Class} |
+                        relation dict ~ Name Type
+                    }]
+                }
+                classops {
+                    return [FormatOpsInfo [pipe {
+                        relvar set ::rosea::Config::UserClassOperation |
+                        relation semijoin $classinst ~ -using {Domain Domain Name Class} |
+                        relation project ~ Name Parameters Body
+                    }]]
+                }
+                instops {
+                    return [FormatOpsInfo [pipe {
+                        relvar set ::rosea::Config::UserInstanceOperation |
+                        relation semijoin $classinst ~ -using {Domain Domain Name Class} |
+                        relation project ~ Name Parameters Body
+                    }]]
+                }
+                default {
+                    tailcall DeclError UNKNOWN_INFO_CMD $subcmd
+                }
+            }
+        }
+        proc statemodel {arglist} {
+            set arglist [lassign $arglist subcmd domainname classname statename]
+            set dominst [relvar restrictone ::rosea::Config::Domain Name $domainname]
+            if {[relation isempty $dominst]} {
+                tailcall DeclError UNKNOWN_DOMAIN $domainname
+            }
+            set domns [string cat [relation extract $dominst Location] :: $domainname]
+        
+            set classinst [pipe {
+                relvar set ::rosea::Config::Class |
+                relation semijoin $dominst ~ -using {Name Domain} |
+                relation restrictwith ~ {$Name eq $classname}
+            }]
+            if {[relation isempty $classinst]} {
+                tailcall DeclError UNKNOWN_CLASS $classname $domainname
+            }
+        
+            switch -exact -- $subcmd {
+                states {
+                    set states [pipe {
+                        relvar set ::rosea::Config::State |
+                        relation restrictwith ~\
+                            {$Domain eq $domainname && $Model eq $classname} |
+                        relation project ~ Name Parameters Action
+                    }]
+                    set result [list]
+                    relation foreach state $states {
+                        relation assign $state
+                        lappend result $Name $Parameters $Action
+                    }
+                    return $result
+                }
+                events {
+                    return [pipe {
+                        relvar set ::rosea::Config::EffectiveEvent |
+                        relation restrictwith ~\
+                            {$Domain eq $domainname && $Model eq $classname} |
+                        relation list ~ Event
+                    }]
+                }
+                transitions {
+                    return [pipe {
+                        relvar set ${domns}::__Arch_Transition |
+                        relation restrictwith ~ {$Class eq $classname} |
+                        relation eliminate ~ Class |
+                        relation group ~ Transition Event NewState |
+                        relation extend ~ trtup TranCol dict {
+                            [relation dict [tuple extract $trtup Transition] Event NewState]} |
+                        relation dict ~ State TranCol
+                    }] ; # <1>
+                }
+                activityproc {
+                    return ${domns}::${classname}::__Activity::${statename}
+                }
+            }
+        }
+    }
     namespace eval Trace {
-        logger::initNamespace [namespace current]
-    
         namespace import\
             ::ral::relation\
             ::ral::tuple\

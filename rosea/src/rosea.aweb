@@ -77,16 +77,16 @@ used to define the initial instance population for a domain.
 The initial instance population set the values of objects that are
 exist when the program starts running.
 
-Chapter 8 discusses a bridging technique directly supported by `rosea`.
+Chapter 8 discusses how the data of a domain may be saved and
+used to populate the domain for a later run.
+
+Chapter 9 describes the procedures that may be used for introspection
+and querying the contents of a domain.
+
+Chapter 10 discusses a bridging technique directly supported by `rosea`.
 This technique allows the domain encapsulation to be broken in a
 controlled manner allowing external actions to be realized as an
 instance operation.
-
-Chapter 9 discusses how the data of a domain may be saved and
-used to populate the domain for a later run.
-
-Chapter 10 describes the procedures that may be used for introspection
-and querying the contents of a domain.
 
 Chapter 11 describes the very important feature of tracing state machine
 event dispatch.
@@ -1728,7 +1728,7 @@ _i.e._ we go forward along +R1+ but stop at +A+.
 Conversely,
 we can navigate from +Y+ to +A+ along +~R1 A+.
 
-== Package Procedures
+== Package Procedures [[packageprocedures,Package Procedures]]
 
 In this section we begin showing all the procedures associated
 with the +rosea+ run time code.
@@ -17032,6 +17032,12 @@ the domain data moves from one valid set of values to another as implied by the
 class attributes and relationships and enforced by the underlying relvar
 constraints.
 
+Although it is usually necessary to establish an initial instance population,
+the `population` command can be executed at any time.
+This can be useful in certain bridging operations where several class
+instances need to be created as a transaction in order to satisfy
+referential integrity constraints.
+
 A significant benefit of using TclRAL relvars as the basis of the
 data architecture is the instance population of the domain can be
 established purely in data by specifying attribute values alone.
@@ -17912,7 +17918,7 @@ proc save {args} {
         tailcall DeclError SAVE_ARG_ERROR $args
     }
 
-    set script "try \{$savecmd $file ${domain}*\}" ; # <2>
+    set script "try \{$savecmd $file ${domain}::\\\[A-Za-z0-9\\\]*\}" ; # <2>
     if {$asynccmd ne {}} {
         append script " finally \{$asynccmd $domain $file\}"
     }
@@ -17921,9 +17927,15 @@ proc save {args} {
 }
 ----
 <1> Qualify the domain namespace by its generated location if necessary.
-<2> Note that we append an asterisk to the domain name to make all
-the relvars of the domain match for the benefit of the `serialize` and
-`storeToSQLite` commands.
+<2> Note that we append a namespace separator and
+enough of a match pattern to get the class data but *not* the architectural
+relvars.
+Since we will merge the class data onto a generated domain, we don't want
+to confuse things with the run time data.
+Note also the _quoting hell_ that requires the escape characters around
+the string pattern.
+The script is parsed twice, once upon assignment to the variable and once
+when run as part of the `after` callback.
 <3> Using a lamda procedure is a very clean way to deal with
 scripts built on the fly.
 
@@ -18338,10 +18350,18 @@ test restore-2.0 {
 Tcl provides excellent introspection facilities and there is a long
 standing tradition of Tcl extensions to do likewise.
 In this section we show the `rosea info` command which implements
-introspection on a configured domain.
+introspection on a configured and generated domain.
 It is very difficult to provide access to all the information about a domain.
 Here we have chosen the most important and useful pieces of the data
 that is stored about a domain.
+
+One purpose of the introspection procedures is to hide the data schema
+for the configuration data and provide a set of canned queries on that data.
+The results of the queries are handed back in conventional core Tcl data
+structures.
+This being Tcl,
+nothing is really hidden and advanced applications may find it necessary
+to resort to direct queries on the configuration data as documented here.
 
 *****
 `rosea info` _subcommand_ _arg1_ _arg2_ _..._
@@ -18842,19 +18862,15 @@ proc statemodel {arglist} {
             }]
         }
         transitions {
-            set trans [pipe {
+            return [pipe {
                 relvar set ${domns}::__Arch_Transition |
                 relation restrictwith ~ {$Class eq $classname} |
                 relation eliminate ~ Class |
-                relation group ~ Transition Event NewState
-            }]
-            set result [dict create]
-            relation foreach tran $trans {
-                relation assign $tran
-                dict set result $State\
-                    [relation dict $Transition Event NewState]
-            }
-            return $result
+                relation group ~ Transition Event NewState |
+                relation extend ~ trtup TranCol dict {
+                    [relation dict [tuple extract $trtup Transition] Event NewState]} |
+                relation dict ~ State TranCol
+            }] ; # <1>
         }
         activityproc {
             return ${domns}::${classname}::__Activity::${statename}
@@ -18862,6 +18878,28 @@ proc statemodel {arglist} {
     }
 }
 ----
+<1> This query is tricky enough to deserve more explanation.
+We are trying to build a nested dictionary out of the transition table.
+The transition table can be seen as a matrix whose rows are state names
+and whose columns are event names.
+Note that this is a rather advanced relational algebraic expression and
+some practice is required to construct these types of expressions.
+Indeed, the one shown here took several tries to get into this precise form.
+. We start with the `__Arch_Transition` relation since it is fully filled
+out and is the transition data structure used by the run time.
+. Get all the transition associated with the requested class.
+. We no longer need the `Class` attribute since those values are now all the
+same.  This leaves us with a relation with three attributes in the heading,
+`State`, `Event` and `NewState`.
+. Grouping the `Event` and `NewState` attributes gives us a relation
+with a relation valued attribute, namely `TransCol`. That relation valued
+attribute will have all the events and new states for a given state.
+. Since we are trying to get a nested dictionary, we want to convert
+the contents of the `TransCol` attribute into a dictionary. By extending
+the original relation, we can save that dictionary as an attribute.
+. Finally, we make a dictionary out of the relation. The keys are
+state names and the values are the dictionary we constructed from
+the grouped relation value attribute.
 
 [float]
 ===== Tests
@@ -18974,7 +19012,7 @@ albeit in a very controlled fashion.
 Consider, for example, the problem of interfacing Tk events into
 a `rosea` domain.
 It is frequently the case that a Tk event needs to be signaled as
-a state machine event to a particular object.
+a state machine event to a particular class instance.
 To accomplish this, there must be a small piece of _bridge code_ that
 is used to map the Tk event semantics onto the object semantics.
 The bridge code may be simple enought to be the script bound to the
@@ -18991,14 +19029,34 @@ In Tk, events are associated with windows.
 In Rosea, state machine events are signaled to class instances.
 So the bridge code will have to map windows to instances in some manner.
 This can be done in a variety of ways,
-but one choice is to map the window name to an identifier of an instance and
-use the `findById` operation on a class to obtain a reference to the
-instance.
+but one choice is to map the window name (which is unique) to an identifier of
+an instance and use the `findById` operation on a class to obtain a reference
+to the instance.
 We then want to execute the `signal` operation on that instance and
 have that event appear to be signaled from outside of the domain,
 _i.e._ we want to transform a Tk event into state machine event that starts
 a new thread of control.
 The `tunnel` command provides this capability.
+
+In particular,
+users should *not* violate encapsulation by executing from within a state
+activity,
+a Tk widget command like:
+
+........
+.runbutton configure -command [namespace code [list instop $self signal Run]]
+........
+
+This has the effect on injecting code into the namespace of a state activity
+and should not be used as it can, under certain corner cases,
+confuse the determination of the source of an event.
+
+One can directly bridge a Tk widget event to a state machine event
+by configuring the widget call back within a state activity.
+
+........
+.runbutton configure -command [::rosea tunnel $self signal Run]
+........
 
 *****
 +rosea tunnel+ _instref_ _operation_ _?arg1 arg2 ...?_
@@ -19007,7 +19065,7 @@ The `tunnel` command provides this capability.
     An instance reference of the instance to which the _operation_
     will be directed.
 `operation`::
-    The name of an operation to be applied to the _instref_.
+    The name of an instance operation to be applied to the _instref_.
 `arg1 arg2 ...`::
     The arguments of the _operation_.
 
@@ -19016,6 +19074,15 @@ instance from outside of the domain's implemenation.
 The operation will be run as a transaction on the domain and will
 start a new thread of control.
 *****
+
+Note also that `tunnel` only provides access to instance based operations.
+Classes are always directly accessible as ensemble commands
+within the domain namespace.
+Executing class commands directly, does not occur in an transaction,
+so complicated interactions would need to be placed in a domain operation.
+Also note that instance creation situations that require multiple
+class instances to be created within a transaction (so as to satisfy
+referential integrity) can be accomplished with the `populate` command.
 
 ///////
 ----
@@ -19055,29 +19122,6 @@ However, by providing a point of invocation that is outside of the
 domain,
 we will insure that any generated signals do not appear as if they
 came from inside the domain.
-
-In particular,
-users should *not* violate encapsulation by executing from within a state
-activity,
-a Tk widget command like:
-
-........
-.runbutton configure -command [namespace code [list instop $self signal Run]]
-........
-
-This has the effect on injecting code into the namespace of a state activity
-and should not be used as it can, under certain corner cases,
-confuse the determination of the source of an event.
-
-The better way directly to bridge a Tk widget event to a state machine event is:
-
-........
-.runbutton configure -command [::rosea tunnel $self signal Run]
-........
-
-The `tunnel` command can be viewed as a convenience procedure
-to break domain encapsulation in a controlled manner without
-having to code a clumsy invocation of `::rosea::InstCmds::instop` directly.
 
 (((rosea,ensemble,tunnel)))
 [source,tcl]
@@ -19121,8 +19165,8 @@ That is, after all, what we are trying to achieve with a state model.
 The fact that the path of code execution does not easily correspond to the
 sequence of the code statements is objectionable enough to some that they avoid
 a state model based approach.
-Others try to cast state behavior into more sequential appearing
-code by using other techniques such as coroutines.
+Some programmers try to cast state behavior into more sequential appearing
+code by using other techniques such as switch statements or coroutines.
 All of these considerations lead to the conclusion that
 capturing a chronological trace of the event dispatch of
 a state machine based applications is indispensable to understanding and
@@ -19662,6 +19706,7 @@ enabled,
 inserting the trace data to the appropriate relvars
 and logging the trace instance.
 
+(((rosea,Trace,TraceCreation)))
 [source,tcl]
 ----
 <<trace commands>>=
@@ -19679,6 +19724,7 @@ proc TraceCreation {source event target} {
 }
 ----
 
+(((rosea,Trace,TracePolymorphic)))
 [source,tcl]
 ----
 <<trace commands>>=
@@ -19698,6 +19744,7 @@ proc TracePolymorphic {source event target super link} {
 }
 ----
 
+(((rosea,Trace,TraceTransition)))
 [source,tcl]
 ----
 <<trace commands>>=
@@ -19721,6 +19768,7 @@ proc TraceTransition {source event target curr new params} {
 Code to number the trace and insert it into the +Trace+ relvar is
 factored to a separate procedure.
 
+(((rosea,Trace,NewTrace)))
 [source,tcl]
 ----
 <<trace commands>>=
@@ -19741,6 +19789,7 @@ of trace data into the data store also logs the trace.
 Trace logging first checks the state of the logging and then
 formats an appropriate string for the log.
 
+(((rosea,Trace,LogTrace)))
 [source,tcl]
 ----
 <<trace commands>>=
@@ -20039,8 +20088,7 @@ This join is done in such a way that three new relation valued attributes
 are created and, given the disjoint union implied by the partition
 constraint, only one of the new attributes will contain any tuples.
 
-(((proc,TracesToRecords)))
-
+(((proc,Trace,TracesToRecords)))
 [source,tcl]
 ----
 <<trace commands>>=
@@ -20176,7 +20224,7 @@ proc DecodeClassTraces {args} {
 ----
 
 [float]
-===== Decode Class Traces Tests
+===== Tests
 
 [source,tcl]
 ----
@@ -20357,7 +20405,7 @@ proc formatTraces {tracerecs} {
 ----
 
 [float]
-===== Format Traces Tests
+===== Tests
 
 [source,tcl]
 ----
@@ -20412,8 +20460,7 @@ test formatTraces-1.0 {
 An individual trace record may be formatted with the +FormatTraceRec+
 procedure.
 
-(((proc,FormatTraceRec)))
-
+(((proc,Trace,FormatTraceRec)))
 [source,tcl]
 ----
 <<trace commands>>=
@@ -20450,6 +20497,7 @@ proc FormatTraceRec {rec} {
 }
 ----
 
+(((rosea,Trace,FormatInstRef)))
 [source,tcl]
 ----
 <<trace commands>>=
@@ -20472,8 +20520,7 @@ BAD_TRACETYPE   {unknown trace type, "%s"}
 
 ==== Format Time Stamp
 
-(((proc,FormatTimeStamp)))
-
+(((proc,Trace,FormatTimeStamp)))
 [source,tcl]
 ----
 <<trace commands>>=
@@ -20490,8 +20537,7 @@ proc FormatTimestamp {time} {
 
 ==== Format Time As Seconds
 
-(((proc,FormatTimeAsSec)))
-
+(((proc,Trace,FormatTimeAsSec)))
 [source,tcl]
 ----
 <<trace commands>>=
@@ -20519,8 +20565,7 @@ We present several procedures in this group.
 
 ==== Diagram Traces
 
-(((proc,DiagTraces)))
-
+(((proc,Trace,DiagTraces)))
 [source,tcl]
 ----
 <<trace commands>>=
@@ -21219,13 +21264,13 @@ In the translations below,
 we duplicate the action language from the state and write the translation to
 Tcl code immediately following.
 In most cases,
-the translation is one statement to another.
+the translation maps one action language statement to one Tcl command.
 
 The model level actions performed by the state activities,
 such as access to attribute values, navigating the class diagram
 or signaling events
-is accomplished by invoking the procedures that we discussed as part
-of the `rosea` package.
+is accomplished by invoking the procedures that we discussed in the
+<<packageprocedures>> section.
 
 ==== Washing Machine State Activities
 
@@ -21247,7 +21292,7 @@ In delivered code, we might be more succinct.
 // %States images/wm-states.uxf WashingMachine
 
 // %Action WashingMachine Stopped
-.Stopped Activity
+.Stopped Activity Action Language
 ----
 # Stop spinning -- wash complete
 select one ct related by self->R1[CT]
@@ -21292,8 +21337,9 @@ to return exactly one instance.
 Any operation in the domain that would perturb that state of affairs
 is rejected as violating the referential integrity of the
 class diagram.
-Consequently, no test of the multiplicity of the returned reference is
-necessary as it would be strictly redundant.
+Consequently,
+no test of the multiplicity of the returned reference is necessary as the
+system is already making that test and so it would be strictly redundant.
 In general,
 traversing unconditional relationships never requires a test to determine if
 we obtained an instance reference and traversing a conditional relationship
@@ -21305,7 +21351,7 @@ to be conditional processing associated with traversing the relationship.
 '''
 
 // %Action WashingMachine "Filling To Wash"
-.Filling To Wash Activity
+.Filling To Wash Activity Action Language
 ----
 # Fill the tub with wash water.
 select one wc related by self->R4[WC]
@@ -21325,7 +21371,7 @@ signal $ct Fill [readAttribute $wc WashWaterTemp]
 '''
 
 // %Action WashingMachine Washing
-.Washing Activity
+.Washing Activity Action Language
 ----
 # Agitate the tub to wash.
 select one ct related by self->R1[CT]
@@ -21353,7 +21399,7 @@ delaysignal [expr {[readAttribute $wc WashDuration] * 1000}] $self Done ; # <1>
 ----
 <1> We are implicitly assuming the units of WashDuration are seconds.
 In truth, the units are minutes, but we are not patient enough
-to wait that long for a run of the example to finish.
+to wait that long for the example to execute.
 
 The delayed signal is accomplished by using the `delaysignal` procedure.
 Notice that the event is self directed, albeit delayed by the washing
@@ -21366,7 +21412,7 @@ been washing long enough.
 '''
 
 // %Action WashingMachine "Draining Wash"
-.Draining Wash Activity
+.Draining Wash Activity Action Language
 ----
 # Stop washing and drain
 # the dirty wash water.
@@ -21385,7 +21431,7 @@ signal $ct Drain
 '''
 
 // %Action WashingMachine "Filling To Rinse"
-.Filling To Rinse Activity
+.Filling To Rinse Activity Action Language
 ----
 # Fill the tub with rinse water.
 select one wc related by self->R4[WC]
@@ -21405,7 +21451,7 @@ signal $ct Fill [readAttribute $wc RinseWaterTemp]
 '''
 
 // %Action WashingMachine Rinsing
-.Rinsing Activity
+.Rinsing Activity Action Language
 ----
 # Agitate the tub to rinse.
 select one ct related by self->R1[CT]
@@ -21427,7 +21473,7 @@ delaysignal [expr {[readAttribute $wc RinseDuration] * 1000}] $self Done
 '''
 
 // %Action WashingMachine "Draining Rinse"
-.Draining Rinse Activity
+.Draining Rinse Activity Action Language
 ----
 # Stop rinsing and drain
 # the rinse water.
@@ -21446,7 +21492,7 @@ signal $ct Drain
 '''
 
 // %Action WashingMachine Spinning
-.Spinning Activity
+.Spinning Activity Action Language
 ----
 # Spin out excess water.
 select one ct related by self->R1[CT]
@@ -21472,7 +21518,7 @@ The other state model in our example is for the Clothes Tub class
 // %States images/ct-states.uxf ClothesTub
 
 // %Action ClothesTub Empty
-.Empty Activity
+.Empty Activity Action Language
 ----
 # Stop the pump
 select one mtr related by self->R2[MTR]
@@ -21510,7 +21556,7 @@ signal $wm Empty
 '''
 
 // %Action ClothesTub Filling
-.Filling Activity
+.Filling Activity Action Language
 ----
 # Enable the sensor
 select one wls related by self->R5[WLS]
@@ -21557,7 +21603,7 @@ if {$temp eq "Hot"} {
 '''
 
 // %Action ClothesTub Full
-.Full Activity
+.Full Activity Action Language
 ----
 # Disable the sensor
 select one wls related by self->R5[WLS]
@@ -21590,7 +21636,7 @@ signal $wm Full
 '''
 
 // %Action ClothesTub Agitating
-.Agitating Activity
+.Agitating Activity Action Language
 ----
 # Start the agitator motor
 select one mtr related by self->R2[MTR]
@@ -21609,7 +21655,7 @@ instop $mtr Start
 '''
 
 // %Action ClothesTub Emptying
-.Emptying Activity
+.Emptying Activity Action Language
 ----
 # Stop the motor
 select one mtr related by self->R2[MTR]
@@ -21648,7 +21694,7 @@ instop $wls Enable
 '''
 
 // %Action ClothesTub Spinning
-.Spinning Activity
+.Spinning Activity Action Language
 ----
 # Open the drain valve
 select one wv related by self->R2[WV]
@@ -21681,7 +21727,7 @@ instop $mtr Start
 '''
 
 // %Action ClothesTub "Stopping Spin"
-.Stopping Spin Activity
+.Stopping Spin Activity Action Language
 ----
 # Stop the motor
 select one mtr related by self->R2[MTR]
@@ -21843,7 +21889,7 @@ the *Start* event will kick things off.
 ----
 <<wmctrl operations>>=
 operation startWasher {washer} {
-    set wm [WashingMachine findWhere {$MachineID eq $washer}]
+    set wm [WashingMachine findById MachineID $washer]
     if {[isEmptyRef $wm]} {
         error "unknown washer, \"$washer\""
     }
@@ -21869,12 +21915,12 @@ The implementation of the +selectCycle+ domain operation does just that.
 ----
 <<wmctrl operations>>=
 operation selectCycle {washer cycle} {
-    set wm [WashingMachine findWhere {$MachineID eq $washer}]
+    set wm [WashingMachine findById MachineID $washer]
     if {[isEmptyRef $wm]} {
         error "unknown washer, \"$washer\""
     }
 
-    set wc [WashingCycle findWhere {$CycleType eq $cycle}]
+    set wc [WashingCycle findById CycleType $cycle]
     if {[isEmptyRef $wc]} {
         error "unknown cycle, \"$cycle\""
     }
@@ -22066,9 +22112,7 @@ We also update our notion of the current status of the sensor.
 ----
 <<external operation stubs>>=
     proc trigger {machine value} {
-        set ct [::wmctrl::ClothesTub findWhere {
-            $MachineID eq $machine
-        }]
+        set ct [::wmctrl::ClothesTub findById MachineID $machine]
         rosea tunnel $ct signal $value
         relvar updateone SensorState sstate [list MachineID $machine] {
             tuple update $sstate State $value
@@ -22081,8 +22125,8 @@ We also update our notion of the current status of the sensor.
 
 Before we can start the example running,
 we have to figure out how we are going to stop it.
-Recall that to dispatch state machine events we must enter the
-Tcl event loop.
+Recall that to dispatch state machine events we must
+*enter the Tcl event loop*.
 We will use the +vwait+ command to do that.
 But we need some way to break out of the event loop
 so that we can look at the results of the run.
@@ -22116,8 +22160,12 @@ proc syncToStop {cmd code result op} {
 
 trace add execution\
     [rosea info statemodel activityproc wmctrl ClothesTub StoppingSpin]\
-    leave syncToStop
+    leave syncToStop ; # <1>
 ----
+<1> We get the name of the Tcl proc that is the activity for the state
+by using the `info` command.
+Here we request `syncToStop` be executed when we leave the state activity
+procedure.
 
 Finally, yes truly finally,
 we are in a position to drive the domain operations to select a cycle and
@@ -22148,6 +22196,13 @@ rosea trace control save wmctrl-trace.sqlite ; # <3>
 ----
 <1> Enter the Tcl event loop.
 State machine events will then be dispatched and the washer will operate.
+At some time,
+the `StoppingSpin` state activity completes,
+that causes `syncToStop` to be invoked,
+`syncToStop` writes to the `::done` variable and that will cause the
+`vwait` command to return.
+It's really not as complicated as it appears: it is just a literal
+application of the execution rules.
 <2> Draw a sequence diagram of the example run.
 This will allow us to compare the textual log with a graphic containing
 the same information.

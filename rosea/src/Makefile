@@ -19,7 +19,7 @@ vpath %.html $(DOCDIR)
 vpath %.test $(TESTDIR)
 vpath %.uxf $(IMAGEDIR)
 
-VERSION=1.5.1
+VERSION=1.6
 
 DOCSRC 	=\
 	rosea.aweb\
@@ -218,6 +218,12 @@ $(MANSRC) : $(DOCSRC)
 
 $(MANDOC) : $(MANSRC)
 	dtplite -o $@ html $<
+
+builddoc :
+	a2x $(A2XOPTS) --doctype=book  --format=pdf\
+	    --destination-dir=$(DOCDIR)\
+	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) rosea.aweb
+
 #
 # vim :set sw=8 ts=8 sts=8 noexpandtab:
 #
