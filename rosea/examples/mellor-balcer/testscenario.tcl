@@ -43,7 +43,8 @@
 package require rosea 1.5
 
 proc ::syncToStateActivity {class state {timeout 3000}} {
-    set activityproc ::bookstore::${class}::__Activity::${state} ; # <1>
+    set activityproc\
+        [rosea info statemodel activityproc bookstore $class $state] ; # <1>
 
     trace add execution $activityproc leave syncToStop ; # <2>
 
