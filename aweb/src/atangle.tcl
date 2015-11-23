@@ -238,13 +238,14 @@ terms specified in this license.
                     <<$chunk>>"
         }
         relation foreach part $parts -ascending {BlockLineNum Offset} {
+            # log::debug "\n[relformat $part "Chunk Parts"]"
             relation assign $part Content BlockLineNum Offset
             set refs [pipe {
                 relvar set ChunkRef |
                 relation semijoin $part ~\
-                    -using {BlockLineNum ChunkLineNum Offset ChunkOffset}
+                    -using {FileName FileName BlockLineNum ChunkLineNum Offset ChunkOffset}
             }]
-            #log::debug "\n[relformat $refs "Refs in $chunk"]"
+            # log::debug "\n[relformat $refs "Refs in $chunk"]"
             set linectrl [my LineDirective [expr {$BlockLineNum + $Offset +1}]]
             if {$linectrl ne {}} {
                 lappend gathered $linectrl
