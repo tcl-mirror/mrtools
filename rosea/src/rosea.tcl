@@ -77,7 +77,7 @@ namespace eval ::rosea {
     
     namespace ensemble create
 
-    variable version 1.6
+    variable version 1.6.1
 
     logger::initNamespace [namespace current]
 
@@ -581,7 +581,7 @@ namespace eval ::rosea {
                         lappend instheading $attr [dict get $heading $attr] ; # <1>
                     }
                     lappend instheading __State string
-                    relvar create ${domns}::__[relation extract $class Name]__STATEINST\
+                    relvar create ${domns}::[relation extract $class Name]__STATEINST\
                         $instheading $instid
                     set actns ${className}::__Activity
                     namespace eval $actns {
@@ -978,7 +978,7 @@ namespace eval ::rosea {
                     [relation semijoin $domain $SingleAssigner\
                     -using {Name Domain}] {
                 relation assign $sassigner {Relationship relationship}
-                relvar create ${domns}::__${relationship}__STATEINST {
+                relvar create ${domns}::${relationship}__STATEINST {
                     Id      int
                     __State string
                 } Id
@@ -988,7 +988,7 @@ namespace eval ::rosea {
                     [relation semijoin $domain $MultipleAssigner\
                     -using {Name Domain}] {
                 relation assign $massigner {Relationship relationship}
-                set assignvar ${domns}::__${relationship}__STATEINST
+                set assignvar ${domns}::${relationship}__STATEINST
             
                 set idattrs [pipe {
                     relation semijoin $massigner $Identifier\
@@ -1320,6 +1320,8 @@ namespace eval ::rosea {
             CANT_HAPPEN_EVENT   {can't happen transition, %s - %s -> %s ==> %s -> CH}
             CONFIG_ERRORS     {encountered %d configuration script errors}
             EMPTY_NAME      {the empty string is not a valid name for a %s}
+            BAD_CLASS_NAME      {class names must be begin with an alphanumeric\
+                                character, got: "%s"}
             DUP_ELEMENT_NAME    {a class, relationship or domain operation named, "%s",\
                                 already exists}
             RESERVED_NAME {names beginning with two underscore characters are reserved,\
@@ -1368,7 +1370,7 @@ namespace eval ::rosea {
             return {{} {{} {}}}
         }
         proc CreateStateInstance {domns class state idattrs} {
-            tailcall relvar insert ${domns}::__${class}__STATEINST\
+            tailcall relvar insert ${domns}::${class}__STATEINST\
                     [concat $idattrs [list __State $state]]
         }
         proc CreateInInitialState {domns class idattrs} {
@@ -1906,7 +1908,7 @@ namespace eval ::rosea {
                 relvar minus $relvar [deRef $instref]
         
                 SplitRelvarName $relvar domain class
-                set instrelvar ${domain}::__${class}__STATEINST
+                set instrelvar ${domain}::${class}__STATEINST
                 if {[relvar exists $instrelvar]} {
                     relvar minus $instrelvar [relation semijoin $insts\
                         [relvar set $instrelvar]]
@@ -2162,8 +2164,8 @@ namespace eval ::rosea {
             set delrelvars [list ${domain}::$class]
             # If the associative class also has a state model, then we need to also
             # delete the state instance tuples.
-            if {[relvar exists ${domain}::__${class}__STATEINST]} {
-                lappend delrelvars ${domain}::__${class}__STATEINST
+            if {[relvar exists ${domain}::${class}__STATEINST]} {
+                lappend delrelvars ${domain}::${class}__STATEINST
             }
         
             # Now, we iterate across the associative class instances and delete all the
@@ -2226,7 +2228,7 @@ namespace eval ::rosea {
         }
         proc signalAssigner {rname event args} {
             SplitRelvarName $rname domain relationship
-            set assignrelvar ${domain}::__${relationship}__STATEINST
+            set assignrelvar ${domain}::${relationship}__STATEINST
             if {![relvar exists $assignrelvar]} {
                 tailcall DeclError NO_ASSIGNER $rname
             }
@@ -2242,7 +2244,7 @@ namespace eval ::rosea {
         }
         proc signalMultiAssigner {rname idvalues event args} {
             SplitRelvarName $rname domain relationship
-            set assignrelvar ${domain}::__${relationship}__STATEINST
+            set assignrelvar ${domain}::${relationship}__STATEINST
             if {![relvar exists $assignrelvar]} {
                 tailcall DeclError NO_ASSIGNER $rname
             }
@@ -2279,7 +2281,7 @@ namespace eval ::rosea {
                 tailcall DeclError ARG_FORMAT $args
             }
             SplitRelvarName $rname domain relationship
-            set assignrelvar ${domain}::__${relationship}__STATEINST
+            set assignrelvar ${domain}::${relationship}__STATEINST
             if {![relvar exists $assignrelvar]} {
                 tailcall DeclError NO_ASSIGNER $rname
             }
@@ -2403,7 +2405,7 @@ namespace eval ::rosea {
             lassign $dstref relvar ref
             SplitRelvarName $relvar domain class
             
-            set instrelvar ${domain}::__${class}__STATEINST
+            set instrelvar ${domain}::${class}__STATEINST
             set state [relation semijoin $ref [relvar set $instrelvar]]
             if {[relation isempty $state]} {
                 tailcall DeclError EVENT_IN_FLIGHT [dict get $eventInfo event] $ref
@@ -3725,8 +3727,8 @@ namespace eval ::rosea {
                 namespace upvar ClassDef ClassName ClassName
                 set ClassName $name
             
-                if {$name eq {}} {
-                    tailcall DeclError EMPTY_NAME class
+                if {![regexp {\A[[:alnum:]].*} $name]} {
+                    tailcall DeclError BAD_CLASS_NAME $name
                 }
                 try {
                     relvar insert ::rosea::Config::DomainElement [list\
@@ -4697,7 +4699,7 @@ namespace eval ::rosea {
                     DomainName DomainName\
                     DomainLoc DomainLoc
                 set domns ${DomainLoc}::${DomainName}
-                set relvar ${domns}::__${rname}__STATEINST
+                set relvar ${domns}::${rname}__STATEINST
                 set idattrs [lindex [relvar identifiers $relvar] 0]
                 if {![struct::set equal $heading $idattrs]} {
                     tailcall DeclError NO_IDENTIFIER $heading $idattrs
