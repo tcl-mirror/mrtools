@@ -1,0 +1,408 @@
+// vim:set syntax=asciidoc:
+
+= Configuring a Domain
+
+[partintro]
+--
+In this part of the book we show a domain specific language (DSL)
+that is used to describe a domain to `micca`.
+The DSL is actually a Tcl script that is read by the Tcl interpreter.
+The code that reads the DSL arranges for the script to be executed in
+a context where command names resolve procedures that capture the
+data in the DSL commands.
+--
+
+== Introduction
+
+The structure of the data that is populated by the configuration
+scripts is rather complicated itself.
+There are many rules as to what is allowed or not allowed
+when configuring the characteristics of a domain.
+It is important that these rules be enforced to insure that the
+generated domain is correct.
+To accomplish that we will formulate a model of the domain rules.
+Such models-of-models are usually called _meta-models_.
+An unfortunate consequence of using a meta-model is that they tend
+to be rather abstract and it is easy to confuse the rules associated
+with building models with the rules associated with some particular
+application domain.
+We will strive to make the distinction clear.
+To further confound the situation,
+we will implement the meta-models as a set of TclRAL relvars and
+relvar constraints.
+This means we are putting TclRAL commands to two distinct uses:
+first as a basis for the data architecture of the generated domains
+and second as the basis for accumulating the domain definition
+during configuration.
+Again, we will strive to make the distinction clear.
+
+== Defining a Domain
+
+As we described above,
+the domain configuration commands will take the data in their
+arguments and store it away.
+After we have finished all the configuration scripts,
+then the +generate+ command is used to layout the data structures
+and namespace as needed.
+
+When configuring a domain,
+we will evaluate the configuration script in the +DomainDef+ child namespace.
+That namespace will define commands for all the components of the
+domain.
+We will use a similar arrangement for other nested aspects of
+domain definitions.
+
+=== Domain
+
+*****
++domain+ _name_ _body_
+
++name+::
+    The name of the domain. A domain name must be a non-empty string.
++body+::
+    A Tcl script containing invocation of the domain definition commands
+    to specify the details of the domain configuration.
+*****
+
+[float]
+==== Implementation
+
+(((micca,Config,domain)))
+[source,tcl]
+----
+<<config commands>>=
+proc domain {name body} {
+    namespace upvar DomainDef DomainName DomainName ; # <1>
+    set DomainName $name
+
+    try {
+        if {![regexp {\A[[:alpha:]]\w+} $name} {
+            tailcall DeclError BAD_NAME $name domain
+        }
+        relvar uinsert ::micca::Config::Domain [list Name $name] ; # <2>
+
+        relvar eval { # <3>
+            ConfigEvaluate [namespace current]::DomainDef $body
+
+            # At this point we have the definition of the domain and enough
+            # information to tie together the class references and
+            # the association definitions.
+            <<domain: bind association references>>
+
+            # We must also compute how polymorphic events are inherited
+            # down generalization hierarchies.
+            <<domain: propagate polymorphic events>>
+        }
+    } on error {result} {
+        ::micca::Config::HandleConfigError $result
+    }
+}
+----
+<1> We place the domain name into the child namespace where the context
+implies that all the components defined are to be part of this domain.
+<2> We allow the +domain+ command to be invoked more than once.
+Domains are open ended definitions and the +uinsert+ command will not
+throw an error upon a duplicate.
+<3> Evaluating the script must be done as a +relvar+ transaction
+as we will need to defer the constraint checking until all the domain
+components have been defined.
+
+(((error code,EMPTY_NAME)))
+[source,tcl]
+----
+<<error code formats>>=
+BAD_NAME      {"%s" is not a valid name for a %s}
+----
+
+[float]
+==== Tests
+
+[source,tcl]
+----
+<<config command tests>>=
+test configure-1.0 {
+    Define domain
+} -setup {
+} -cleanup {
+    cleanupConfigData
+} -body {
+    micca configure {
+        domain foo {
+            # A domain may be empty of components.
+        }
+    }
+    relation extract [relvar set ::micca::Config::Domain] Name
+} -result {foo}
+----
+
+== Config Namespace Layout
+
+The +::micca::Config+ namespace has a relatively more complex layout
+than we have seen before.
+The reason for this is that we want to create a set of child namespaces
+that mirror the nesting of the configuration language statements.
+At the top level,
+the +domain+ command is used to define each domain.
+The +domain+ command accepts a script body that then defines the
+components of the domain.
+That script will be evaluated in a namespace where the commands that
+define the domain components, _e.g._ +class+ and relationship commands,
+resolve appropriately.
+This lets us put commands for the body specifying a particular component into a
+namespace which prevents any problems of accidentally invoking commands that
+are inappropriate for that context.
+
+We layout the +::micca::Config+ namespace as shown below.
+
+[source,tcl]
+----
+<<configuration commands namespace>>=
+namespace eval Config {
+    logger::initNamespace [namespace current]
+
+    <<tclral imports>>
+    namespace import ::ral::relvar
+    namespace path [namespace parent]::Helpers
+    <<config data>>
+    <<config commands>>
+    <<domain config namespace layout>>
+}
+----
+
+=== Evaluating Configuration Scripts
+
+You can evaluate the configuration script by simply gathering it together
+and passing it to the core +namespace eval+ command.
+Unfortunately,
+the first error that is encountered will terminate the evaluation.
+This is decidedly inconvenient as you would prefer to continue on and
+come up with a list of errors for the evaluation much like a
+conventional language compiler would do when compiling a source file.
+Discovering errors one at a time is tediously unproductive.
+
+Of course, it is possible to continue evaluating after an error but
+that requires a bit more code.
+We will also want to be able to evaluate scripts in different namespace
+contexts as we described above.
+We will accomplish all this by taking advantage of the core +::apply+ command
+and its ability to execute a lambda function in a given namespace.
+So given a script body and an namespace we can evaluate it as shown below.
+
+(((micca,Config,ConfigEvaluate)))
+[source,tcl]
+----
+<<config commands>>=
+namespace export ConfigEvaluate
+
+proc ConfigEvaluate {ns body} {
+    variable evalLambda
+    tailcall ::apply [concat $evalLambda [list $ns]] $body ; # <1>
+}
+----
+<1> The `concat` command treats its arguments as a list.
+On the off chance that the `ns` argument contains embedded whitespace,
+we need to insure that it is treated as a single element list.
+Hence the need to include the invocation of the `list` command.
+
+The lambda function that performs the command evaluation is given below.
+We hold the evaluation lambda as a piece of data.
+
+[source,tcl]
+----
+<<config data>>=
+variable evalLambda {{body} {
+    upvar #0 ::micca::Config::errcount errcount ; # <1>
+    upvar #0 ::micca::Config::configlineno configlineno
+    set lineno $configlineno
+    set command {}
+    foreach line [split $body \n] { # <2>
+        append command $line \n
+        incr lineno ; # <3>
+        if {[info complete $command]} {
+            try {
+                eval $command
+            } on error {result} {
+                log::error "line $configlineno: \"$result\""
+                incr errcount
+            }
+            set command {} ; # <4>
+            set configlineno $lineno
+        }
+    }
+    return $errcount
+}}
+----
+<1> We need to keep track of all the errors encountered and
+what line of the script we are currently dealing with.
+<2> We split the body along lines and then reassemble the lines
+into a complete command. The +info complete+ command tells us when
+we have something that has some chance of being a real command.
+<3> We need to keep track of where we are in the +body+.
+<4> After evaluating a command we begin to assemble another one and
+set our location counter to where that command starts.
+
+==== Configure
+
+One of our top level +micca+ commands is to configure a domain from
+a script.
+
+*****
++::micca configure+ _script_
+
++script+::
+    A Tcl script that is executed in an environment that will resolve
+    _domain configuration_ commands that may be used to define
+    the characteristics of a domain.
+*****
+
+[float]
+===== Implementation
+
+(((micca,ensemble,configure)))
+[source,tcl]
+----
+<<micca exports>>=
+namespace export configure
+
+<<micca commands>>=
+proc configure {script} {
+    namespace upvar Config errcount errcount configlineno configlineno
+    set errcount 0
+    set configlineno 1
+
+    ConfigEvaluate ::micca::Config $script
+
+    if {$errcount > 0} {
+        tailcall DeclError CONFIG_ERRORS $errcount
+    }
+    return $errcount
+}
+----
+
+(((error code,CONFIG_ERRORS)))
+[source,tcl]
+----
+<<error code formats>>=
+CONFIG_ERRORS     {encountered %d configuration script errors}
+----
+
+==== ConfigureFromChan
+
+It is often convenient to obtain the +configure+ script from an I/O channel.
+The +micca configureFromChan+ command supports reading the configure
+script directly from a channel.
+
+*****
++::micca configureFromChan+ _channel_
+
++channel+::
+    A Tcl channel handle that is readable.
+
+The `configureFromChan` command invokes `configure` on the script
+obtained by reading _channel_ until end of file is reached.
+*****
+
+[float]
+===== Implementation
+
+(((micca,ensemble,configureFromChan)))
+[source,tcl]
+----
+<<micca exports>>=
+namespace export configureFromChan
+
+<<micca commands>>=
+proc configureFromChan {chan} {
+    tailcall configure [::chan read -nonewline $chan]
+}
+----
+
+==== ConfigureFromFile
+
+It is often convenient to hold the +configure+ script in a file.
+The +micca configureFromFile+ command supports reading the configure
+script directly from a file.
+
+*****
++::micca configureFromFile+ _filename_
+
++filename+::
+    The name of a file containing a domain configuration script.
+
+The `configureFromFile` command invokes `configure` on the script
+obtained by reading the contents of the file named, _filename_.
+*****
+
+[float]
+===== Implementation
+
+(((micca,ensemble,configureFromFile)))
+[source,tcl]
+----
+<<micca exports>>=
+namespace export configureFromFile
+
+<<micca commands>>=
+proc configureFromFile {filename} {
+    set f [::open $filename r]
+    try {
+        configureFromChan $f
+    } finally {
+        ::chan close $f
+    }
+}
+----
+
+=== Helper Commands
+
+In this section we present a set of commands that factor common processing
+used in a number of areas.
+These commands are placed in a separate namespace
+which is imported into most of the other package namespaces.
+
+[source,tcl]
+----
+<<helper commands namespace>>=
+namespace eval Helpers {
+    <<helper data>>
+    <<helper commands>>
+}
+----
+
+==== DeclError
+
+All error notification in the package is consolidated in
+the +DeclError+ procedure.
+
+[float]
+===== Implementation
+
+The +DeclError+ procedure locates a format string based on the error code
+and applies its arguments to it.
+We use the +::throw+ command to raise the error to insure that we have
+consistent error code information for the package.
+
+(((rosea,Helpers,DeclError)))
+[source,tcl]
+----
+<<helper commands>>=
+namespace export DeclError
+
+proc DeclError {errcode args} {
+    variable errFormats
+    set errmsg [format [dict get $errFormats $errcode] {*}$args]
+    tailcall throw [list ROSEA $errcode {*}$args $errmsg] $errmsg
+}
+----
+
+The mapping of +errcode+ values to format strings is held as
+package data in the helper namespace of the package.
+
+[source,tcl]
+----
+<<helper data>>=
+variable errFormats
+set errFormats [dict create {*}{
+    <<error code formats>>
+}]
+----
