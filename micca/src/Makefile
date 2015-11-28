@@ -38,14 +38,14 @@ DIAGRAMS =\
 	$(NULL)
 
 LSDIAGRAMS =\
-	config-classes.uxf\
-	config-domain.uxf\
-	config-event.uxf\
-	config-population.uxf\
-	config-references.uxf\
-	config-relation.uxf\
-	config-statemodel.uxf\
-	config-transition.uxf\
+	platform-classes.uxf\
+	platform-domain.uxf\
+	platform-event.uxf\
+	platform-population.uxf\
+	platform-references.uxf\
+	platform-relation.uxf\
+	platform-statemodel.uxf\
+	platform-transition.uxf\
 	$(NULL)
 
 IMAGES =\
@@ -157,7 +157,7 @@ $(DOCDIR)/%.pdf : %.aweb
 %.test : %.aweb
 	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $(TESTDIR)/$@ $<
 
-$(IMAGEDIR)/config-%.pdf : config-%.uxf
+$(IMAGEDIR)/platform-%.pdf : platform-%.uxf
 	umlet -action=convert -format=pdf\
 		-filename=$< -output=$(basename $@)-cvt
 	pdftk $(basename $@)-cvt.pdf cat 1left output $@
