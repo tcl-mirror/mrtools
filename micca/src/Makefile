@@ -32,6 +32,7 @@ DOCPARTS=\
 	platform.txt\
 	preface.txt\
 	runtime.txt\
+	translation.txt\
 	$(NULL)
 
 DIAGRAMS =\
