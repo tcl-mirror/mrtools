@@ -27,7 +27,7 @@ a context where command names resolve to procedures that populate the
 
 == Configuration Operations
 
-We intend set up configuring a domain in `micca` as a domain operation.
+Configuring a domain in `micca` will happen as a domain operation.
 When we parse the various portions of a domain description,
 we will use namespaces to confine the script execution and to expose
 the appropriate commands to the configuration scripts.
@@ -339,8 +339,8 @@ proc domain {name body} {
 <1> We place the domain name into the child namespace where the context
 implies that all the components defined are to be part of this domain.
 <2> We allow the +domain+ command to be invoked more than once.
-Domains are open ended definitions and the +uinsert+ command will not
-throw an error upon a duplicate.
+Domains are open ended definitions so we test to make sure we do not
+attempt to create a duplicate domain.
 
 (((error code,EMPTY_NAME)))
 [source,tcl]
@@ -355,7 +355,7 @@ BAD_NAME      {"%s" is not a valid name for a %s}
 [source,tcl]
 ----
 <<config command tests>>=
-test configure-1.0 {
+test domain-1.0 {
     Define an empty domain
 } -setup {
 } -cleanup {
@@ -399,7 +399,7 @@ namespace eval DomainDef {
 }
 ----
 
-==== Class
+=== Class
 
 The class command is used to define classes and specify their characteristics.
 
@@ -414,9 +414,9 @@ The class command is used to define classes and specify their characteristics.
 *****
 
 [float]
-===== Implementation
+==== Implementation
 
-(((rosea,Config,class)))
+(((micca,Config,class)))
 [source,tcl]
 ----
 <<domain config commands>>=
@@ -430,7 +430,8 @@ proc class {name body} {
         tailcall DeclError DUP_ELEMENT_NAME $name
     }
     DomainElement create Domain $DomainName Name $name
-    Class create Domain $DomainName Name $name
+    Class create Domain $DomainName Name $name\
+        Number [GenNumber $DomainName Class [list $DomainName]]
     ValueElement create Domain $DomainName Name $name
 
     ConfigEvaluate [namespace current]::ClassDef $body
@@ -445,6 +446,302 @@ domain and class names to provide the context of the definition.
 ----
 <<error code formats>>=
 DUP_ELEMENT_NAME    {a class or relationship named, "%s", already exists}
+----
+
+=== Generalization
+
+Defining a generalization relationship is quite a bit simpler than
+the effort we just saw in defining associations.
+For generalizations,
+it is necessary to specify the superclass and the set of subclasses.
+
+*****
++generalization+ _name_ _?-union | -reference?_ _super_ _sub1_ _sub2_ _?...?_
+
++name+::
+    The name of the generalization. Conventionally, relationships names are of
+    the form *R<d>* where _<d>_ is one or more decimal digits but any non-empty
+    string can be used.
++super+::
+    The name of the class that serves as the superclass of the generalization.
++subN+::
+    The names of the classes that serve as the subclasses of the generalization.
+    You must have at least two subclasses to define a generalization.
+*****
+
+[float]
+==== Implementation
+
+(((micca,Config,generalization)))
+[source,tcl]
+----
+<<domain config commands>>=
+proc generalization {name args} {
+    if {$name eq {}} {
+        tailcall DeclError EMPTY_NAME generalization
+    }
+    if {[string index $name 0] eq "~"} {
+        tailcall DeclError TILDE_NAME $name
+    }
+
+    set type reference
+    while {1} {
+        set args [lassign $args arg]
+
+        if {$arg eq "-reference"} {
+            set type reference
+        } elseif {$arg eq "-union"} {
+            set type union
+        } elseif {$arg eq "--"} {
+            set args [lassign $args super]
+            break
+        } else {
+            set super $arg
+            break
+        }
+    }
+
+    if {[llength $args] < 2} {
+        tailcall DeclError TOO_FEW_SUBCLASSES [llength $args]
+    }
+
+    namespace upvar ::micca::@Config@::DomainDef DomainName DomainName
+
+    set reltuple [list\
+        Domain  $DomainName\
+        Name $name\
+    ]
+
+    set delem [DomainElement findById {*}$reltuple]
+    if {[isNotEmptyRef $delem]} {
+        tailcall DeclError DUP_ELEMENT_NAME $name
+    }
+
+    DomainElement create {*}$reltuple
+    Relationship create {*}$reltuple\
+        Number [GenNumber $DomainName Relationship [list $DomainName]]
+    Generalization create {*}$reltuple
+
+    set supertuple [list\
+        Domain          $DomainName\
+        Class           $super\
+        Relationship    $name\
+        Role            target\
+    ]
+    set subtuple [dict create\
+        Domain          $DomainName\
+        Relationship    $name\
+        Role            source\
+    ]
+
+    if {$type eq "reference"} {
+        ReferenceGeneralization create {*}$reltuple
+        ReferencedSuperclass create {*}$supertuple
+        foreach sub $args {
+            dict set subtuple Class $sub
+            ReferringSubclass create {*}$subtuple
+        }
+    } elseif {$type eq "union"} {
+        UnionGeneralization create {*}$reltuple
+        UnionSuperclass create {*}$supertuple
+        SubclassContainer create Domain $DomainName Class $super Name $name
+        ClassComponent create Domain $DomainName Class $super Name $name
+        foreach sub $args {
+            dict set subtuple Class $sub
+            UnionSubclass create {*}$subtuple
+        }
+    }
+    Superclass create {*}$supertuple
+    ClassRole create {*}$supertuple
+
+    foreach sub $args {
+        dict set subtuple Class $sub
+        Subclass create {*}$subtuple
+        ClassRole create {*}$subtuple
+    }
+
+    return
+}
+----
+
+(((error code,TOO_FEW_SUBCLASSES)))
+[source,tcl]
+----
+<<error code formats>>=
+TOO_FEW_SUBCLASSES  {at least 2 subclasses must be specified, got %d}
+----
+
+[float]
+==== Tests
+
+[source,tcl]
+----
+<<config command tests>>=
+test generalization-1.0 {
+    Define reference generalization
+} -setup {
+} -cleanup {
+} -body {
+    micca configure {
+        domain foo {
+            class super {
+                attribute sid int
+            }
+            class sub1 {
+                attribute sid int
+            }
+            class sub2 {
+                attribute sid int
+            }
+            generalization R1 -reference super sub1 sub2
+        }
+    }
+    log::debug [formatMiccaClass ReferenceGeneralization]
+    log::debug [formatMiccaClass ReferencedSuperclass]
+    log::debug [formatMiccaClass ReferringSubclass]
+    relation cardinality\
+        [lindex [micca::Generalization findById Domain foo Name R1] 1]
+} -result {1}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test generalization-2.0 {
+    Define union generalization
+} -setup {
+} -cleanup {
+} -body {
+    micca configure {
+        domain foo {
+            class usuper {
+                attribute sid int
+            }
+            class usub1 {
+                attribute sid int
+            }
+            class usub2 {
+                attribute sid int
+            }
+            generalization R2 -union usuper usub1 usub2
+        }
+    }
+    log::debug [formatMiccaClass UnionGeneralization]
+    log::debug [formatMiccaClass UnionSuperclass]
+    log::debug [formatMiccaClass UnionSubclass]
+    log::debug [formatMiccaClass ClassComponent]
+    relation cardinality\
+        [lindex [micca::Generalization findById Domain foo Name R2] 1]
+} -result {1}
+----
+
+=== Type Alias
+
+*****
++typealias+ _definition_ _name_
+
++definition+::
+    A ``C'' typename.
++name+::
+    The name of the type alias.
+*****
+
+[float]
+==== Implementation
+
+(((micca,Config,typealias)))
+[source,tcl]
+----
+<<domain config commands>>=
+proc typealias {typedef aliasname} {
+    namespace upvar ::micca::@Config@::DomainDef DomainName DomainName
+    TypeAlias create Domain $DomainName TypeName $aliasname\
+        TypeDefinition $typedef
+
+    return
+}
+----
+
+[float]
+==== Tests
+
+[source,tcl]
+----
+<<config command tests>>=
+test typealias-1.0 {
+    Define a type alias
+} -setup {
+} -cleanup {
+} -body {
+    micca configure {
+        domain foo {
+            typealias uint8 rawbyte
+        }
+    }
+    log::debug [formatMiccaClass TypeAlias]
+    readMiccaAttribute TypeAlias TypeDefinition Domain foo TypeName rawbyte
+} -result {uint8}
+----
+
+=== Domain Operation
+
+*****
++domainop+ _rettype_ _name_ _parameters_ _body_
+
++definition+::
+    A ``C'' typename.
++name+::
+    The name of the type alias.
+*****
+
+[float]
+==== Implementation
+
+(((micca,Config,typealias)))
+[source,tcl]
+----
+<<domain config commands>>=
+proc domainop {rettype name parameters body} {
+    namespace upvar ::micca::@Config@::DomainDef DomainName DomainName
+
+    DomainOperation create Domain $DomainName Name $name Body $body\
+        ReturnDataType $rettype
+    set paramtuple [dict create Domain $DomainName Operation $name]
+    dict for {paramname paramtype} $parameters {
+        dict set paramtuple Name $paramname
+        dict set paramtuple DataType $paramtype
+        dict set paramtuple Number\
+                [GenNumber $DomainName DomainOperationParameter\
+                [list $DomainName $name]]
+        DomainOperationParameter create {*}$paramtuple
+    }
+
+    return
+}
+----
+
+[float]
+==== Tests
+
+[source,tcl]
+----
+<<config command tests>>=
+test domainop-1.0 {
+    Define a domain operation
+} -setup {
+} -cleanup {
+} -body {
+    micca configure {
+        domain foo {
+            domainop void color {a int b {char *const}} {
+                printf("a = %d, b = %s", a, b) ;
+            }
+        }
+    }
+    log::debug [formatMiccaClass DomainOperation]
+    log::debug [formatMiccaClass DomainOperationParameter]
+    readMiccaAttribute DomainOperation ReturnDataType Domain foo Name color
+} -result {void}
 ----
 
 == Defining Classes Components
@@ -492,7 +789,7 @@ in the relvars to hold the attribute characteristics.
 [float]
 ==== Implementation
 
-(((rosea,Config,attribute)))
+(((micca,Config,attribute)))
 [source,tcl]
 ----
 <<class config commands>>=
@@ -555,8 +852,8 @@ INT_VALUE_REQUIRED  {an integer value is required, got "%s"}
 [source,tcl]
 ----
 <<config command tests>>=
-test configure-2.0 {
-    Define domain and classes
+test attribute-1.0 {
+    Define class with attributes
 } -setup {
 } -cleanup {
 } -body {
@@ -566,10 +863,144 @@ test configure-2.0 {
                 attribute a1 char
                 attribute a2 int -default 20
             }
+            class c2 {
+                attribute b1 uint8
+                attribute b2 float
+            }
         }
     }
-    relation cardinality [lindex [micca::Class findAll] 1]
-} -result {1}
+    relation cardinality [lindex\
+        [micca::Attribute findWhere {$Domain eq "foo" && $Class eq "c2"}] 1]
+} -result {2}
+----
+
+=== Class Operation
+
+*****
++classop+ _rettype_ _name_ _parameters_ _body_
+
+*****
+[float]
+==== Implementation
+
+(((micca,Config,attribute)))
+[source,tcl]
+----
+<<class config commands>>=
+proc classop {rettype name parameters body} {
+    DefineOperation false $rettype $name $parameters $body
+}
+----
+
+=== Instance Operation
+
+*****
++classop+ _rettype_ _name_ _parameters_ _body_
+
+*****
+[float]
+==== Implementation
+
+(((micca,Config,attribute)))
+[source,tcl]
+----
+<<class config commands>>=
+proc instop {rettype name parameters body} {
+    DefineOperation true $rettype $name $parameters $body
+}
+----
+
+=== Define Operation
+
+[float]
+==== Implementation
+
+(((micca,Config,DefineOperation)))
+[source,tcl]
+----
+<<class config commands>>=
+proc DefineOperation {isinst rettype name parameters body} {
+    namespace upvar ::micca::@Config@::DomainDef DomainName DomainName
+    namespace upvar ::micca::@Config@::DomainDef::ClassDef ClassName ClassName
+
+    Operation create Domain $DomainName Class $ClassName Name $name Body $body\
+        ReturnDataType $rettype IsInstance $isinst
+    set paramtuple [dict create Domain $DomainName Class $ClassName\
+            Operation $name]
+
+    if {$isinst} {
+        dict set paramtuple Name self
+        dict set paramtuple DataType "struct $ClassName *"
+        dict set paramtuple Number\
+                [GenNumber $DomainName OperationParameter\
+                [list $DomainName $ClassName $name]]
+        OperationParameter create {*}$paramtuple
+    }
+
+    dict for {paramname paramtype} $parameters {
+        dict set paramtuple Name $paramname
+        dict set paramtuple DataType $paramtype
+        dict set paramtuple Number\
+                [GenNumber $DomainName OperationParameter\
+                [list $DomainName $ClassName $name]]
+        OperationParameter create {*}$paramtuple
+    }
+
+    return
+}
+----
+
+[float]
+==== Tests
+
+[source,tcl]
+----
+<<config command tests>>=
+test classop-1.0 {
+    Define a class operation
+} -setup {
+} -cleanup {
+} -body {
+    micca configure {
+        domain foo {
+            class c4 {
+                attribute a1 int
+
+                classop float color {a char b {int *const}} {
+                    printf("a = %d, b = %s", a, b) ;
+                }
+            }
+        }
+    }
+    log::debug [formatMiccaClass Operation]
+    log::debug [formatMiccaClass OperationParameter]
+    readMiccaAttribute Operation ReturnDataType Domain foo Class c4 Name color
+} -result {float}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test instop-1.0 {
+    Define an instance operation
+} -setup {
+} -cleanup {
+} -body {
+    micca configure {
+        domain foo {
+            class c5 {
+                attribute a1 int
+
+                instop float color {a char b {int *const}} {
+                    printf("a = %d, b = %s", a, b) ;
+                }
+            }
+        }
+    }
+    log::debug [formatMiccaClass Operation]
+    log::debug [formatMiccaClass OperationParameter]
+    readMiccaAttribute Operation IsInstance Domain foo Class c5 Name color
+} -result {true}
 ----
 
 == Helper Commands
@@ -583,6 +1014,9 @@ which is imported into most of the other package namespaces.
 ----
 <<helper commands namespace>>=
 namespace eval Helpers {
+    <<tclral imports>>
+    namespace import ::ral::relvar
+    namespace path {::micca ::rosea::InstCmds}
     <<helper data>>
     <<helper commands>>
 }
@@ -601,7 +1035,7 @@ and applies its arguments to it.
 We use the +::throw+ command to raise the error to insure that we have
 consistent error code information for the package.
 
-(((rosea,Helpers,DeclError)))
+(((micca,Helpers,DeclError)))
 [source,tcl]
 ----
 <<helper commands>>=
@@ -624,4 +1058,71 @@ variable errFormats
 set errFormats [dict create {*}{
     <<error code formats>>
 }]
+----
+
+=== Generate Numbers
+
+There are a number of classes that have attributes that are
+zero based sequential numbers.
+We want a convenient way to generate these ordinal numbers.
+Many times we want the number to start at zero within a set of
+attributes.
+
+[float]
+==== Implementation
+
+[source,tcl]
+----
+<<helper data>>=
+relvar create SeqNumbers {
+    Domain string
+    ClassName string
+    Attrs list
+    Number int
+} {Domain ClassName Attrs}
+----
+
+[source,tcl]
+----
+<<helper commands>>=
+proc GenNumber {domain class args} {
+    set num [relvar restrictone SeqNumbers Domain $domain ClassName $class\
+        Attrs $args]
+    if {[relation isempty $num]} {
+        relvar insert SeqNumbers [list\
+            Domain $domain\
+            ClassName $class\
+            Attrs $args\
+            Number 0\
+        ]
+        return 0
+    } else {
+        set result [expr {[relation extract $num Number] + 1}]
+        relvar updateone SeqNumbers sn [list Domain $domain ClassName $class\
+            Attrs $args] {
+            tuple update $sn Number $result
+        }
+        return $result
+    }
+}
+----
+
+[source,tcl]
+----
+<<test utility commands>>=
+namespace export getMiccaClass
+proc getMiccaClass {class} {
+    return [deRef [$class findAll]]
+}
+
+namespace export formatMiccaClass
+proc formatMiccaClass {class} {
+    return \n[ral relformat [getMiccaClass $class] $class]
+}
+
+namespace export readMiccaAttribute
+proc readMiccaAttribute {class attr args} {
+    return [rosea tunnel [$class findById {*}$args] readAttribute $attr]
+}
+
 ----

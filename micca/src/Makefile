@@ -136,7 +136,7 @@ code : $(TCLSRC)
 tests : code $(TESTS)
 
 runtests : tests
-	cd $(TESTDIR) ; tclsh $(TESTS) -verbose bet -level info
+	cd $(TESTDIR) ; tclsh $(TESTS) -verbose bet -level debug
 
 clean :
 	$(RM) $(CLEANFILES)
