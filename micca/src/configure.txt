@@ -7,7 +7,7 @@
 In the last part of the book,
 we showed the platform specific model that `micca` uses.
 To translate a domain it is necessary to populate the platform
-specific model with the specific characteristics of the translated domain.
+specific model with the specific characteristics of the domain to be translated.
 Since the platform model is implemented in `rosea`,
 we could populate it using the `rosea populate` command.
 This would be a difficult and tedious way to populate the platform
@@ -23,11 +23,15 @@ We will use the Tcl interpreter to parse the DSL.
 The code that reads the DSL arranges for the script to be executed in
 a context where command names resolve to procedures that populate the
 `micca` platform specific model.
+
+In this part,
+we describe the commands that make up the DSL to populate the
+platform model.
 --
 
 == Configuration Operations
 
-Configuring a domain in `micca` will happen as a domain operation.
+Configuring a domain in `micca` happens as a domain operation.
 When we parse the various portions of a domain description,
 we will use namespaces to confine the script execution and to expose
 the appropriate commands to the configuration scripts.
@@ -56,7 +60,7 @@ a script.
 +script+::
     A Tcl script that is executed in an environment that will resolve
     _domain configuration_ commands that may be used to define
-    the characteristics of a domain.
+    the characteristics of a domain to be translated by `micca`.
 *****
 
 [float]
@@ -81,7 +85,7 @@ script directly from a channel.
 +::micca configureFromChan+ _channel_
 
 +channel+::
-    A Tcl channel handle that is readable.
+    A Tcl channel handle that has been opened for reading.
 
 The `configureFromChan` command invokes `configure` on the script
 obtained by reading _channel_ until end of file is reached.
@@ -134,8 +138,8 @@ operation configureFromFile {filename} {
 
 == Configuration Namespace Layout
 
-The +::micca::@Config@+ namespace holds all the procedures that
-perform the configuration of a `micca` domain.
+The +::micca::@Config@+ namespace holds all the procedures and data that
+correspond to the DSL to populate the platform model.
 We want to create a set of child namespaces
 that mirror the nesting of the configuration language statements.
 At the top level,
@@ -149,6 +153,8 @@ This lets us put commands for the body specifying a particular component into a
 namespace which prevents any problems of accidentally invoking commands that
 are inappropriate for that context.
 
+We will use this technique for other child namespaces that correspond to
+the nesting of DSL statements.
 We layout the +::micca::@Config@+ namespace as shown below.
 
 [source,tcl]
@@ -160,13 +166,18 @@ namespace eval @Config@ {
     <<tclral imports>>
     <<helper commands namespace>>
 
-    namespace path {::micca ::micca::@Config@::Helpers ::rosea::InstCmds}
+    namespace path {::micca ::micca::@Config@::Helpers ::rosea::InstCmds} ; # <1>
     <<config data>>
     <<config commands>>
 
     <<domain config namespace layout>>
 }
 ----
+<1> We are evaluating the configuration DSL outside of the
+main body of the `micca` domain, but we are trying to populate
+`micca` classes.
+We find it convenient to resolve commands through the main `micca` namespace
+as well as others that help things along.
 
 === Evaluating Configuration Scripts
 
@@ -301,6 +312,13 @@ domain definitions.
 +body+::
     A Tcl script containing invocation of the domain definition commands
     to specify the details of the domain configuration.
+
+The `domain` command defines a domain named, _name_, and evaluates
+_body_ in a context where commands in _body_ may be used to define
+the characteristics of a domain.
+A domain is an open ended and extensible definition.
+The `domain` command may be executed with the same named domain and the
+addition configuration information is simply added to it.
 *****
 
 [float]
@@ -311,12 +329,15 @@ domain definitions.
 ----
 <<config commands>>=
 proc domain {name body} {
+    if {$name eq {}} {
+        tailcall DeclError BAD_NAME $name domain
+    }
+
     namespace upvar DomainDef DomainName DomainName ; # <1>
     set DomainName $name
 
     try {
-        set domref [Domain findById Name $name] ; # <2>
-        if {[isEmptyRef $domref]} {
+        if {[isEmptyRef [Domain findById Name $name]]} {# <2>
             Domain create Name $name
         }
 
@@ -336,18 +357,43 @@ proc domain {name body} {
     }
 }
 ----
-<1> We place the domain name into the child namespace where the context
-implies that all the components defined are to be part of this domain.
+<1> We place the domain name into a variable in the child namespace where the
+context implies that all the components defined are to be part of this domain.
 <2> We allow the +domain+ command to be invoked more than once.
 Domains are open ended definitions so we test to make sure we do not
 attempt to create a duplicate domain.
 
-(((error code,EMPTY_NAME)))
+(((error code,BAD_NAME)))
 [source,tcl]
 ----
 <<error code formats>>=
 BAD_NAME      {"%s" is not a valid name for a %s}
 ----
+
+[[post-config-domain]]
+After evaluating the domain configuration script,
+it is necessary to perform some additional clean up and evaluation.
+For now,
+we will say that there are semantic evaluations and checks that can only
+be done after the entire domain configuration script has been processed.
+The reason for this lies mainly with the way the DSL script commands
+were defined to make them more convenient to use when translating an XUML model.
+
+One such action is to bind the association references to the proper
+class components.
+We discuss this process <<bind-association-references,later>>.
+
+Polymorphic events also must be dealt with after the domain configuration
+is in place.
+Again we will discuss this further below.
+// <<domain-propagate-polymorphic-events,below>>.
+
+Although we have said that domain configurations are cumulative,
+clearly the need to resolve association bindings and polymorphic event
+inheritance means that domain configurations cannot be split arbitrarily.
+You will need to be aware that certain divisions of domain configuration
+will end up separating information that is needed at the end of the
+configuration process.
 
 [float]
 ==== Tests
@@ -376,8 +422,6 @@ In this section we discuss the commands that are used to define
 the components of a domain.
 We define child namespaces for those domain component commands
 that have a nested structure.
-In this case,
-it is the +class+ command that requires additional configuration commands.
 
 We start with the namespace layout for the +DomainDef+ namespace.
 
@@ -398,7 +442,20 @@ namespace eval DomainDef {
 }
 ----
 
+We see that there are two child namespaces defined with `DomainDef`.
+These correspond to commands that have script bodies associated with them.
+
 === Interface
+
+*****
+`interface` _text_
+
+`text`::
+    Arbitrary text to be placed in the output interface file.
+
+The `interface` command adds the string of the _text_ argument to
+the interface file generated for the domain.
+*****
 
 [float]
 ==== Implementation
@@ -414,6 +471,21 @@ proc interface {text} {
 
 === Prologue
 
+*****
+`prologue` _text_
+
+`text`::
+    Arbitrary text to be placed in the output code file before any generated
+    code.
+
+The `prologue` command adds the string of the _text_ argument to
+the generated code file for the domain.
+The `prologue` command may be invoked multiple times and the value of
+all the _text_ arguments is concatenated in the order encountered.
+The accumulated prologue text is emitted into the generated code file
+before any `micca` generated code.
+*****
+
 [float]
 ==== Implementation
 
@@ -427,6 +499,21 @@ proc prologue {text} {
 ----
 
 === Epilogue
+
+*****
+`epilogue` _text_
+
+`text`::
+    Arbitrary text to be placed in the output code file after any generated
+    code.
+
+The `epilogue` command adds the string of the _text_ argument to
+the generated code file for the domain.
+The `epilogue` command may be invoked multiple times and the value of
+all the _text_ arguments is concatenated in the order encountered.
+The accumulated epilogue text is emitted into the generated code file
+after any `micca` generated code.
+*****
 
 [float]
 ==== Implementation
@@ -454,15 +541,18 @@ test domain-2.0 {
 } -body {
     micca configure {
         domain foo {
-            interface "#include <stdio.h>"
+            prologue "#include <stdio.h>"
         }
     }
     log::debug [formatMiccaClass Domain]
-    string trimright [readMiccaAttribute Domain Interface Name foo]
+    string trimright [readMiccaAttribute Domain Prologue Name foo]
 } -result {#include <stdio.h>}
 ----
 
 === Append To Domain Attribute
+
+The operations for the `interface`, `prologue` and `epilogue` commands
+can be factored into common code.
 
 [float]
 ==== Implementation
@@ -477,15 +567,20 @@ proc AppendToDomainAttribute {attr text} {
     set domref [Domain findById Name $DomainName]
     withAttribute $domref $attr {
         append $attr $text
-        if {[string index $Interface end] ne "\n"} {
-            append $attr \n
+        if {[string index [set $attr] end] ne "\n"} {
+            append $attr \n ; # <1>
         }
     }
     return
 }
 ----
+<1> We make sure that the text of these attributes ends in a newline.
+This will prevent any problems when the text is emitted into the generated
+header file.
 
 === Class
+
+// HERE
 
 The class command is used to define classes and specify their characteristics.
 
@@ -493,7 +588,8 @@ The class command is used to define classes and specify their characteristics.
 +class+ _name_ _script_
 
 +name+::
-    The name of the class. A class name must be a non-empty string.
+    The name of the class. A class name must be the form of a ``C''
+    identifier.
 +script+::
     A Tcl script containing invocation of the class definition commands
     to specify the details of the class configuration.
@@ -509,8 +605,7 @@ The class command is used to define classes and specify their characteristics.
 proc class {name body} {
     namespace upvar [namespace current] DomainName DomainName ; # <1>
 
-    set delem [DomainElement findById Domain $DomainName Name $name]
-    if {[isEmptyRef $delem]} {
+    if {[isEmptyRef [DomainElement findById Domain $DomainName Name $name]]} {# <2>
         DomainElement create Domain $DomainName Name $name
         Class create Domain $DomainName Name $name\
             Number [GenNumber $DomainName Class [list $DomainName]]
@@ -526,6 +621,10 @@ proc class {name body} {
 ----
 <1> Again we arrange for namespace variables to hold the current
 domain and class names to provide the context of the definition.
+<2> We allow the `class` command to be invoked multiple times with the
+same name.
+This makes extending class definitions (_e.g._ adding a state model to
+a class) much easier.
 
 ==== Association
 
@@ -1575,6 +1674,9 @@ relvar create Class_Reference {
 } {Domain Class Relationship Role}
 ----
 
+[[bind-association-references]]
+Here we describe the association references clean up.
+
 [source,tcl]
 ----
 <<domain: bind association references>>=
@@ -2265,7 +2367,7 @@ namespace eval StateModelDef {
 }
 ----
 
-==== Statemodel
+=== Statemodel
 
 *****
 +statemodel+ _body_
