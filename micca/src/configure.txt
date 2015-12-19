@@ -188,7 +188,7 @@ DSL code.
 [float]
 ==== Implementation
 
-(((micca,ensemble,configure)))
+(((micca,Config,miccaConfigure)))
 [source,tcl]
 ----
 <<config commands>>=
@@ -385,8 +385,8 @@ We discuss this process <<bind-relationship-references,later>>.
 
 Polymorphic events also must be dealt with after the domain configuration
 is in place.
-Again we will discuss this further below.
-// <<domain-propagate-polymorphic-events,below>>.
+Again we will discuss this further
+<<domain-propagate-polymorphic-events,below>>.
 
 Although we have said that domain configurations are cumulative,
 clearly the need to resolve association bindings and polymorphic event
@@ -557,7 +557,7 @@ can be factored into common code.
 [float]
 ==== Implementation
 
-(((micca,Config,AppendToDomainAttribute)))
+(((micca,Helpers,AppendToDomainAttribute)))
 [source,tcl]
 ----
 <<helper commands>>=
@@ -1460,7 +1460,6 @@ namespace eval ClassDef {
 
     <<tclral imports>>
     namespace import ::micca::@Config@::ConfigEvaluate
-    namespace import ::micca::@Config@::Helpers::DeclError
     namespace path {::micca ::micca::@Config@::Helpers ::rosea::InstCmds}
 
     <<class config commands>>
@@ -1874,6 +1873,7 @@ We structure the code in the same way as above,
 using a separate procedure for each possible case of navigating *R38*
 in the platform model.
 
+(((micca,Helpers,ResolveParticipantReference)))
 [source,tcl]
 ----
 <<helper commands>>=
@@ -1905,6 +1905,7 @@ Association Participant Class.
 A Simple Referring Class role always has a singular reference to its
 related instance.
 
+(((micca,Helpers,ResolveSimpleReferring)))
 [source,tcl]
 ----
 <<helper commands>>=
@@ -1935,6 +1936,7 @@ Hence it is necessary to test if we need to create the Association Reference
 instance as we may have been through this code path before when dealing
 with the other direction of the reflexive association.
 
+(((micca,Helpers,CreateDirectionalReference)))
 [source,tcl]
 ----
 <<helper commands>>=
@@ -1955,6 +1957,7 @@ For a Simple Referenced Class,
 it is possible to refer to multiple instances.
 This is where the choice of pointer storage comes into play.
 
+(((micca,Helpers,ResolveSimpleReferenced)))
 [source,tcl]
 ----
 <<helper commands>>=
@@ -1979,6 +1982,7 @@ In the end,
 we are creating pointer storage components to point from a source class
 to a target class.
 
+(((micca,Helpers,CreateAssociationReferences)))
 [source,tcl]
 ----
 <<helper commands>>=
@@ -2040,6 +2044,7 @@ and _vice versa_.
 We also have to find the Associator Class since that is the class
 to which the references will point.
 
+(((micca,Helpers,ResolveSource)))
 [source,tcl]
 ----
 <<helper commands>>=
@@ -2062,6 +2067,7 @@ The same reasoning applies to Target Classes.
 We find the multiplicity from the Source Class attributes and we need
 to know the Associator Class since that is where the references point.
 
+(((micca,Helpers,ResolveTarget)))
 [source,tcl]
 ----
 <<helper commands>>=
@@ -2352,6 +2358,7 @@ at code generation time.
 For a Referenced Superclass,
 we need only create a Subclass Reference instance.
 
+(((micca,Helpers,ResolveSuper)))
 [source,tcl]
 ----
 <<helper commands>>=
@@ -2375,6 +2382,7 @@ And similarly for a Referring Subclass,
 it needs a Superclass Reference instance to hold the pointer to the superclass
 instance.
 
+(((micca,Helpers,ResolveSub)))
 [source,tcl]
 ----
 <<helper commands>>=
@@ -2435,50 +2443,1045 @@ test reference-4.0 {
 } -result {1}
 ----
 
-=== Constructor
-
-*****
-+constructor+ _body_
-*****
+=== Polymorphic Events
 
 [float]
 ==== Implementation
 
-(((micca,Config,constructor)))
+(((micca,Config,polymorphic)))
 [source,tcl]
 ----
 <<class config commands>>=
-proc constructor {body} {
+proc polymorphic {name args} {
     namespace upvar ::micca::@Config@::DomainDef DomainName DomainName
     namespace upvar ::micca::@Config@::DomainDef::ClassDef ClassName ClassName
-    Constructor create\
-        Domain $DomainName\
-        Class $ClassName\
-        Body $body
+
+    set sigid [expr {[llength $args] != 0 ?\
+        [FindEventSignature $name $args] : {}}]
+
+    set eventtuple [list\
+        Domain  $DomainName\
+        Model   $ClassName\
+        Event   $name\
+    ]
+    Event create {*}$eventtuple SigID $sigid
+    DeferredEvent create {*}$eventtuple\
+        Number [GenNumber $DomainName DeferredEvent\
+            [list $DomainName $ClassName]]
+    PolymorphicEvent create {*}$eventtuple
+
+    return
 }
 ----
 
-=== Destructor
+==== Propagating Polymorphic Events
 
-*****
-+destructor+ _body_
-*****
+[[domain-propagate-polymorphic-events]]
+<<post-config-domain,Previously>>,
+we indicated that polymorphic event rules require that we perform
+some other processing once the configuration script for a domain
+has been executed.
+Now we are prepared to show that processing.
+It will be helpful to refer to the Event subsystem of the platform model
+above to follow the description.
+
+The `polymorphic` command above inserts the argument event names into the
+model classes simply as a deferred event that is polymorphic.
+We must resolve two issues.
+
+. For classes that are super classes for generalizations,
+we must have corresponding instances of *Deferral Path* for each of the
+generalization hierarchies.
+. For classes that are sub classes,
+they either consume the polymorphic event in a state model or
+it continues to be inherited by any sub classes further down the
+generalization hierarchy.
+
+To solve the first issue we know that
+relationship, *R86*, specifies how a polymorphic event may be propagated along
+multiple generalizations when it is signaled to a given superclass.
+After the configuration scripts have been executed,
+we will have all the *Superclass* instances and all the *Deferred Event*
+instances and can now make up the correlation between them.
+
+[source,tcl]
+----
+<<domain: propagate polymorphic events>>=
+# Create Deferral Path instances corresponding to polymorphic events
+
+set paths [pipe {
+    PolymorphicEvent findWhere {$Domain eq $name} |
+    findRelated ~ R81 |
+    deRef ~ Domain Model Event |
+    relation join ~ [deRef [Superclass findAll]]\
+        -using {Domain Domain Model Class}
+}]
+
+foreach path [relation body $paths] {
+    DeferralPath create {*}$path
+}
+----
+
+Starting with the *Polymorphic Event* class we can navigate *R81* to
+find the corresponding *Deferred Event* and the join to the *Superclass*.
+This gives the set of paths along which the polymorphic event must
+be propagated.
+
+To solve the second issue,
+we must walk the generalization hierarchy and determine if events
+are being consummed or inherited down the hierarchy.
+We want to start the walk only on the ultimate super classes,
+'i.e.' those super classes that are 'not' themselves the sub class of
+some other generalization.
+
+[source,tcl]
+----
+<<domain: propagate polymorphic events>>=
+set ultimates [pipe {
+    Subclass findAll |
+    deRef ~ |
+    relation semiminus ~ [deRef [Superclass findAll]]\
+        -using {Domain Domain Class Class} |
+    ::rosea::Helpers::ToRef ::micca::Superclass ~
+}]
+
+puts [relformat [deRef $ultimates] ultimates]
+
+forAllRefs super $ultimates {
+    PropagatePolyEvents $super
+}
+----
+
+So we find all *Superclass* instances that have no corresponding
+*Subclass* role and propagate any polymorphic events down the generalization
+hierarchy.
+
+The problem we are trying to solve in the propagation of polymorphic events
+arises from the way in which we attempt to minimize the amount
+of input from the user when specifying the events.
+Recall that the `polymorphic` command simply inserts instances into the
+*Polymorphic Event* class (and corresponding instances in *Deferred Event*
+and *Event* classes).
+Events found when defining a state model are simply created as instances of
+the *Local Event* class (and again the corresponding *Effective Event* and
+*Event* instances).
+At the end of the configuration process we can now deduce which events
+were inherited down the generalization hierarchy and which were truly
+local events.
+
+For sub classes that are leafs of generalization hierarchy,
+polymorphic events inherited from the super class are migrated to
+be *Mapped Events*.
+For sub classes that are intermediate in the hierarchy,
+polymorhphic events are migrated to instances of *Inherited Event*.
+Both *Inherited Event* and *Mapped Event* are types of *Non-Local Event*
+and *R85* insures that they affect only *Subclass* instances.
+
+The `PropagatePolyEvents` procedure below accomplishes this reclassification
+operation.
+By doing it this way,
+we do not have to burden the user with all the subtle characteristics
+of polymorphic events.
+We need only specify which events are polymorphic and which events
+cause a state model transition and then we can deduce the intent
+to inherit down the generalization hierarchy.
+
+The `PropagatePolyEvents` procedure takes a singular relation value
+that is from the *Superclass* relvar and tracks the polymorphic event
+inheritance down the hierarchy.
+
+[[propagate-polyevents,propagate polymorphic events]]
+(((rosea,Helpers,PropagatePolyEvents)))
+[source,tcl]
+----
+<<helper commands>>=
+proc PropagatePolyEvents {super} {
+    puts [relformat [deRef $super] super]
+    assignAttribute $super {Domain supDomain} {Class supClass}\
+        {Relationship supRelationship}
+
+    # find the deferred events from the superclass
+    set defrdevents [findRelated $super R86 R80]
+    puts [relformat [deRef $defrdevents] defrdevents]
+
+    # find sub classes
+    set subs [pipe {
+        ClassRole findWhere {$Domain eq $supDomain &&\
+            $Class ne $supClass && $Relationship eq $supRelationship} |
+        findRelated % {~R40 Subclass}
+    } {} |%]
+    puts [relformat [deRef $subs] subs]
+
+    forAllRefs sub $subs {
+        assignAttribute $sub {Domain subDomain} {Class subClass}\
+            {Relationship subRelationship} {Role subRole}
+        puts "handling subclass, $subClass"
+        set multigens [pipe {
+            ClassRole findWhere {$Domain eq $subDomain &&\
+                $Class eq $subClass && $Relationship ne $subRelationship} |
+            findRelated % {~R40 Superclass}
+        } {} |%]
+
+        forAllRefs defrdevent $defrdevents {
+            assignAttribute $defrdevent {Event event} {SigID sigid}
+            puts "handling event, $event"
+
+            set evt [Event findById Domain $subDomain Model $subClass\
+                    Event $event]
+            puts [relformat [deRef $evt] evt]
+            if {[isEmptyRef $evt]} {
+                # check if this is a leaf
+                if {[isEmptyRef $multigens]} {
+                    puts "at leaf, $event -> mapped event "
+                    # If we are at a leaf then this event was inherited
+                    # and not consumed
+                    Event create\
+                        Domain $subDomain\
+                        Model $subClass\
+                        Event $event\
+                        SigID $sigid
+                    TransitioningEvent create\
+                        Domain $subDomain\
+                        Model $subClass\
+                        Event $event\
+                        Number [GenNumber $subDomain TransitioningEvent\
+                            [list $subDomain $subClass]]
+                    MappedEvent create\
+                        Domain $subDomain\
+                        Model $subClass\
+                        Event $event\
+                        ParentModel $supClass
+                    Non-LocalEvent create\
+                        Domain $subDomain\
+                        Model $subClass\
+                        Event $event\
+                        Relationship $subRelationship\
+                        Role $subRole
+                    log::warn "inherited but not consumed"
+                } else {
+                    puts "non-leaf, $event -> deferred event"
+                    Event create\
+                        Domain $subDomain\
+                        Model $subClass\
+                        Event $event\
+                        SigID $sigid
+                    DeferredEvent create\
+                        Domain $subDomain\
+                        Model $subClass\
+                        Event $event\
+                        Number [GenNumber $subDomain DeferredEvent\
+                            [list $subDomain $subClass]]
+                    InheritedEvent create\
+                        Domain $subDomain\
+                        Model $subClass\
+                        Event $event
+                    Non-LocalEvent create\
+                        Domain $subDomain\
+                        Model $subClass\
+                        Event $event\
+                        Relationship $subRelationship\
+                        Role $subRole
+                    forAllRefs multigen $multigens {
+                        DeferralPath create\
+                            Domain $subDomain\
+                            Model $subClass\
+                            Event $event\
+                            Relationship [readAttribute $multigen Relationship]\
+                            Role target
+                    }
+                }
+            } else {
+                # The event could be a local event, inherited event
+                # or polymorphic event
+                # Check if we are a local event. If so,
+                # the event is migrated to be a mapped event
+                set local [findRelated $evt {~R80 TransitioningEvent}\
+                    {~R82 LocalEvent}]
+                if {[isNotEmptyRef $local]} {
+                    puts "local event, $event, migrate to mapped event"
+                    delete $local
+                    MappedEvent create\
+                        Domain $subDomain\
+                        Model $subClass\
+                        Event $event\
+                        ParentModel $supClass
+                    Non-LocalEvent create\
+                        Domain $subDomain\
+                        Model $subClass\
+                        Event $event\
+                        Relationship $subRelationship\
+                        Role $subRole
+                    # Need to check if this subclass has any further
+                    # generalizations. If so then consuming this event
+                    # means it is not available to the subclasses of
+                    # the other generalizations.
+                    if {[isNotEmptyRef $multigens]} {
+                        set nrefsubs [findRelated $multigens\
+                            {~R46 ReferencedSuperclass} R36 ~R37 R47]
+                        set nusubs [findRelated $multigens\
+                            {~R46 UnionSuperclass} R44 ~R45 R47]
+                        set nextsubs [pipe {
+                            refUnion $nrefsubs $nusubs |
+                            deRef ~ |
+                            relation list ~ Class
+                        }]
+                        puts "nextsubs = \"$nextsubs\""
+                        set nextevts [Event findWhere\
+                            {$Domain eq $subDomain && $Model in $nextsubs &&\
+                            $Event == $event}]
+                        if {[isNotEmptyRef $nextevts]} {
+                            puts [relformat [deRef $nextevts] nextevts]
+                            incr ::micca::@Config@::errorcount
+                            error "consumed deferred event masks\
+                                event in subclasses"
+                        }
+                    }
+                } else {
+                    # Check if it is inherited. In that case,
+                    # we need to migrate it to a mapped event if we are in
+                    # a leaf and otherwise it continues to inherit downward.
+                    set inherit [findRelated $evt {~R80 DeferredEvent}\
+                        {~R81 InheritedEvent}]
+                    if {[isNotEmptyRef $inherit]} {
+                        puts "inherited event, $event,\
+                            migrating to mapped event"
+                        if {[isEmptyRef $multigens]} {
+                            puts "at leaf, creating new mapped event"
+                            delete [findRelated $inherit R81]
+                            delete $inherit
+                            delete $evt
+                            Event create\
+                                Domain $subDomain\
+                                Model $subClass\
+                                Event $event\
+                                SigID $sigid
+                            TransitioningEvent create\
+                                Domain $subDomain\
+                                Model $subClass\
+                                Event $event\
+                                Number [GenNumber $subDomain TransitioningEvent\
+                                    [list $subDomain $subClass]]
+                            MappedEvent create\
+                                Domain $subDomain\
+                                Model $subClass\
+                                Event $event\
+                                ParentModel $supClass
+                        }
+                    } else {
+                        set poly [findRelated $evt {~R80 DeferredEvent}\
+                            {~R81 PolymorphicEvent}]
+                        if {[isEmptyRef $multigens] && [isNotEmptyRef $poly]} {
+                            error "poly event defined in a leaf"
+                        }
+                    }
+                }
+            }
+        }
+        forAllRefs multigen $multigens {
+            PropagatePolyEvents $multigen
+        }
+    }
+}
+----
+
+We can find the subclasses that particpate in a particular generalization
+by navigating *R36* and *R37*.
+
+[source,tcl]
+----
+<<PropagatePolyEvents: find sub classes>>=
+set refsubs [findRelated $super {~R46 ReferencedSuperclass} R36 ~R37 R47]
+set usubs [findRelated $super {~R46 UnionSuperclass} R44 ~R45 R47]
+set subs [refUnion $refsubs $usubs]
+----
+
+The instances of *Deferred Event* for the superclass have corresponding
+instances of either *Inherited Event* or *Mapped Event* for the subclass.
+We need to create those instances.
+Conveniently,
+we can accomplish that by navigating *R86* and then updating
+the *Model* attribute to be the name of the subclass.
+Since *R86* is an associative relationships, we have to traverse
+to the associator class and then on to the *Deferred Event* class.
+
+[source,tcl]
+----
+<<PropagatePolyEvents: determine deferred events>>=
+set defrdevents [findRelated $super R86]
+puts [relformat [deRef $defrdevents] defrdevents]
+----
+
+We need to know if a given subclass is a leaf subclass in the generalization
+hierarchy or if it is part of a multiple generalization arrangements.
+This tells us if we must consume any inherited events or if they will
+be allowed to be inherited further down the hierarchy.
+Subclasses that are part of a multiple generation will have
+instances of *Superclass* to show their role in that generalization.
+
+[source,tcl]
+----
+<<PropagatePolyEvents: find multiple generalization classes>>=
+set multigens [pipe {
+    Subclass findAll |
+    deRef ~ |
+    relation semijoin ~ [deRef [Superclass findAll]]\
+        -using {Domain Domain Class Class} |
+    ::rosea::Helpers::ToRef ::micca::Superclass ~
+}]
+puts [relformat [deRef $multigens] multigens]
+----
+
+In the case of a leaf subclass,
+all the events must be *Effective Event* instances since
+there must be a state model in the leaf subclass to consume any
+inherited polymorphic events.
+The events to which the state model responds are inherited ones
+and any newly introduced local ones.
+The inherited events that appear in `transition` statements
+will have been created as *Local Event* during the configuration script
+execution.
+So we want to subtract out any local events that are mapped to the
+leaf subclass by deferral from a superclass.
+The deferred events are then created as *Mapped Event* instances.
+
+[source,tcl]
+----
+<<PropagatePolyEvents: migrate for single generalization>>=
+# HERE!!
+# currently defrdevents is a relation value
+if 0 {
+relvar minus ::rosea::Config::LocalEvent $defrdevents
+relvar union ::rosea::Config::Event $defrdevents
+relvar union ::rosea::Config::EffectiveEvent $defrdevents
+relvar union ::rosea::Config::MappedEvent [relation extend\
+    $defrdevents metuple ParentModel string {$supername}]
+}
+----
+
+For the case where a subclass participates in a multiple generalization,
+the deferred events become instances of *Inherited Event*.
+
+[source,tcl]
+----
+<<PropagatePolyEvents: migrate for multiple generalization>>=
+if 0 {
+relvar union ::rosea::Config::Event $defrdevents
+relvar union ::rosea::Config::DeferredEvent $defrdevents
+relvar union ::rosea::Config::InheritedEvent $defrdevents
+}
+----
+
+Because we are creating new instances of *Deferred Event*,
+we must also add instances of *Deferral Path* so as to know
+which superclass is passing the polymorphic event along.
+
+[source,tcl]
+----
+<<PropagatePolyEvents: migrate for multiple generalization>>=
+if 0 {
+relvar union ::rosea::Config::DeferralPath [relation join\
+    $defrdevents $Superclass -using {Domain Domain Model Class}]
+}
+----
+
+In both cases,
+inherited polymorphic events, whether consumed or passed along,
+are a form of *Non-Local Event*.
+
+[source,tcl]
+----
+<<PropagatePolyEvents: add non-local events>>=
+if 0 {
+relvar union ::rosea::Config::NonLocalEvent [relation extend\
+    $defrdevents nletuple\
+    Relationship string {[relation extract $sub Relationship]}\
+    Role string {[relation extract $sub Role]}]
+}
+----
+
+For the multiple generalization subclasses,
+we recursively continue to propagate the polymorphic events.
+
+[source,tcl]
+----
+<<PropagatePolyEvents: continue propagation>>=
+if 0 {
+relation foreach multigen $multigens {
+    PropagatePolyEvents $multigen
+}
+}
+----
 
 [float]
-==== Implementation
+===== Tests
 
-(((micca,Config,destructor)))
 [source,tcl]
 ----
-<<class config commands>>=
-proc destructor {body} {
-    namespace upvar ::micca::@Config@::DomainDef DomainName DomainName
-    namespace upvar ::micca::@Config@::DomainDef::ClassDef ClassName ClassName
-    Destructor create\
-        Domain $DomainName\
-        Class $ClassName\
-        Body $body
-}
+<<config command tests>>=
+test polymorphic-1.0 {
+    Define polymorphic events
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain foo {
+            class S {
+                attribute id int
+                reference R1
+                polymorphic e1
+                polymorphic e2
+            }
+            class X {
+                attribute id int
+                reference R1
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                }
+            }
+            class Y {
+                attribute id int
+                reference R1
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                }
+            }
+            generalization R1 S X Y
+        }
+    }
+    log::debug [formatMiccaClass Non-LocalEvent]
+    log::debug [formatMiccaClass MappedEvent]
+    log::debug [formatMiccaClass LocalEvent]
+    log::debug [formatMiccaClass TransitioningEvent]
+    log::debug [formatMiccaClass DeferredEvent]
+    testConditions\
+        {[refMultiplicity [Non-LocalEvent findAll]] == 4}\
+        {[refMultiplicity [MappedEvent findAll]] == 4}\
+        {[refMultiplicity [LocalEvent findAll]] == 0}\
+} -result {1}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test polymorphic-1.1 {
+    Define polymorphic events -- inherit across one level
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain foo {
+            class S {
+                attribute id int
+                polymorphic e1
+                polymorphic e2
+            }
+            class X {
+                attribute id int
+                reference R1
+            }
+            class Y {
+                attribute id int
+                reference R1
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                }
+            }
+            generalization R1 S X Y
+
+            class A {
+                attribute id int
+                reference R2
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                }
+            }
+            class B {
+                attribute id int
+                reference R2
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                }
+            }
+            generalization R2 X A B
+        }
+    }
+    log::debug [formatMiccaClass TransitioningEvent]
+    log::debug [formatMiccaClass DeferredEvent]
+    testConditions\
+        {[refMultiplicity [Non-LocalEvent findAll]] == 8}\
+        {[refMultiplicity [InheritedEvent findAll]] == 2}\
+        {[refMultiplicity [MappedEvent findAll]] == 6}\
+        {[refMultiplicity [LocalEvent findAll]] == 0}\
+} -result {1}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test polymorphic-1.2 {
+    Define polymorphic events -- new event in leaf subclass
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain foo {
+            class S {
+                attribute id int
+
+                polymorphic e1
+                polymorphic e2
+            }
+            class X {
+                attribute id int
+                reference R1
+
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    state s2 {} {
+                        puts "in s2"
+                    }
+                    transition s1 - e1 -> s2
+                    transition s2 - e2 -> s1
+                    transition s2 - e3 -> s2 ; # New local event!
+                }
+            }
+            class Y {
+                attribute id int
+                reference R1
+
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    state s2 {} {
+                        puts "in s2"
+                    }
+                    transition s1 - e1 -> s2
+                    transition s2 - e2 -> s1
+                }
+            }
+            generalization R1 S X Y
+        }
+    }
+    log::debug [formatMiccaClass TransitioningEvent]
+    log::debug [formatMiccaClass DeferredEvent]
+    testConditions\
+        {[refMultiplicity [Non-LocalEvent findAll]] == 4}\
+        {[refMultiplicity [InheritedEvent findAll]] == 0}\
+        {[refMultiplicity [MappedEvent findAll]] == 4}\
+        {[refMultiplicity [LocalEvent findAll]] == 1}\
+} -result {1}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test polymorphic-1.3 {
+    Define polymorphic events -- inject polymorphic event mid-level
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain foo {
+            class S {
+                attribute id int
+                polymorphic e1
+                polymorphic e2
+            }
+            class X {
+                attribute id int
+                reference R1
+                polymorphic e3
+            }
+            class Y {
+                attribute id int
+                reference R1
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                }
+            }
+            generalization R1 S X Y
+
+            class A {
+                attribute id int
+                reference R2
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                }
+            }
+            class B {
+                attribute id int
+                reference R2
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                }
+            }
+            generalization R2 X A B
+        }
+    }
+    log::debug [formatMiccaClass TransitioningEvent]
+    log::debug [formatMiccaClass DeferredEvent]
+    testConditions\
+        {[refMultiplicity [Non-LocalEvent findAll]] == 10}\
+        {[refMultiplicity [InheritedEvent findAll]] == 2}\
+        {[refMultiplicity [MappedEvent findAll]] == 8}\
+        {[refMultiplicity [LocalEvent findAll]] == 0}\
+} -result {1}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test polymorphic-1.4 {
+    Define polymorphic events -- multiple hierarchies
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain foo {
+            class S {
+                attribute id int
+                polymorphic e1
+                polymorphic e2
+            }
+            class X {
+                attribute id int
+                reference R1
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                }
+            }
+            class Y {
+                attribute id int
+                reference R1
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                }
+            }
+            generalization R1 S X Y
+
+            class A {
+                attribute id int
+                reference R2
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                }
+            }
+            class B {
+                attribute id int
+                reference R2
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                }
+            }
+            generalization R2 S A B
+        }
+    }
+    log::debug [formatMiccaClass TransitioningEvent]
+    log::debug [formatMiccaClass DeferredEvent]
+    testConditions\
+        {[refMultiplicity [Non-LocalEvent findAll]] == 8}\
+        {[refMultiplicity [InheritedEvent findAll]] == 0}\
+        {[refMultiplicity [MappedEvent findAll]] == 8}\
+        {[refMultiplicity [LocalEvent findAll]] == 0}\
+} -result {1}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test polymorphic-1.5 {
+    Define polymorphic events -- common subclass
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain foo {
+            class S {
+                attribute id int
+                polymorphic e1
+                polymorphic e2
+            }
+            class X {
+                attribute id int
+                reference R1
+                reference R2
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                    transition s1 - e3 -> s1
+                }
+            }
+            class Y {
+                attribute id int
+                reference R1
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                }
+            }
+            generalization R1 S X Y
+
+            class Z {
+                attribute zid int
+                polymorphic e3
+            }
+            class A {
+                attribute zid int
+                reference R2
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                }
+            }
+            generalization R2 Z A X
+        }
+    }
+    log::debug [formatMiccaClass DeferralPath]
+    log::debug [formatMiccaClass TransitioningEvent]
+    log::debug [formatMiccaClass DeferredEvent]
+    testConditions\
+        {[refMultiplicity [Non-LocalEvent findAll]] == 6}\
+        {[refMultiplicity [InheritedEvent findAll]] == 0}\
+        {[refMultiplicity [MappedEvent findAll]] == 6}\
+        {[refMultiplicity [LocalEvent findAll]] == 0}\
+} -result {1}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test polymorphic-1.6 {
+    Define polymorphic events -- consume mid level event
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain foo {
+            class S {
+                attribute id int
+                polymorphic e1
+                polymorphic e2
+            }
+            class X {
+                attribute id int
+                reference R1
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                }
+            }
+            class Y {
+                attribute id int
+                reference R1
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                }
+            }
+            generalization R1 S X Y
+
+            class A {
+                attribute id int
+                reference R2
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e2 -> s1
+                }
+            }
+            class B {
+                attribute id int
+                reference R2
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e2 -> s1
+                }
+            }
+            generalization R2 X A B
+        }
+    }
+    log::debug [formatMiccaClass TransitioningEvent]
+    log::debug [formatMiccaClass DeferredEvent]
+    log::debug [formatMiccaClass Non-LocalEvent]
+    log::debug [formatMiccaClass InheritedEvent]
+    log::debug [formatMiccaClass MappedEvent]
+    log::debug [formatMiccaClass LocalEvent]
+    testConditions\
+        {[refMultiplicity [Non-LocalEvent findAll]] == 6}\
+        {[refMultiplicity [InheritedEvent findAll]] == 1}\
+        {[refMultiplicity [MappedEvent findAll]] == 5}\
+        {[refMultiplicity [LocalEvent findAll]] == 0}\
+} -result {1}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test polymorphic-1.7 {
+    Define polymorphic events -- compound generalization at mid level
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain foo {
+            class S {
+                attribute id int
+                polymorphic e1
+                polymorphic e2
+            }
+            class X {
+                attribute id int
+                reference R1
+                polymorphic e3
+            }
+            class Y {
+                attribute id int
+                reference R1
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                }
+            }
+            generalization R1 S X Y
+
+            class A {
+                attribute id int
+                reference R2
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                }
+            }
+            class B {
+                attribute id int
+                reference R2
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                }
+            }
+            generalization R2 X A B
+
+            class C {
+                attribute id int
+                reference R3
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                    transition s1 - e3 -> s1
+                }
+            }
+            class D {
+                attribute id int
+                reference R3
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                    transition s1 - e4 -> s1
+                }
+            }
+            generalization R3 X C D
+        }
+    }
+    log::debug [formatMiccaClass Non-LocalEvent]
+    log::debug [formatMiccaClass InheritedEvent]
+    log::debug [formatMiccaClass MappedEvent]
+    log::debug [formatMiccaClass LocalEvent]
+    log::debug [formatMiccaClass TransitioningEvent]
+    log::debug [formatMiccaClass DeferredEvent]
+    testConditions\
+        {[refMultiplicity [Non-LocalEvent findAll]] == 16}\
+        {[refMultiplicity [InheritedEvent findAll]] == 2}\
+        {[refMultiplicity [MappedEvent findAll]] == 14}\
+        {[refMultiplicity [LocalEvent findAll]] == 1}\
+} -result {1}
 ----
 
 === Class Operation
@@ -2611,6 +3614,52 @@ test instop-1.0 {
 } -result {true}
 ----
 
+=== Constructor
+
+*****
++constructor+ _body_
+*****
+
+[float]
+==== Implementation
+
+(((micca,Config,constructor)))
+[source,tcl]
+----
+<<class config commands>>=
+proc constructor {body} {
+    namespace upvar ::micca::@Config@::DomainDef DomainName DomainName
+    namespace upvar ::micca::@Config@::DomainDef::ClassDef ClassName ClassName
+    Constructor create\
+        Domain $DomainName\
+        Class $ClassName\
+        Body $body
+}
+----
+
+=== Destructor
+
+*****
++destructor+ _body_
+*****
+
+[float]
+==== Implementation
+
+(((micca,Config,destructor)))
+[source,tcl]
+----
+<<class config commands>>=
+proc destructor {body} {
+    namespace upvar ::micca::@Config@::DomainDef DomainName DomainName
+    namespace upvar ::micca::@Config@::DomainDef::ClassDef ClassName ClassName
+    Destructor create\
+        Domain $DomainName\
+        Class $ClassName\
+        Body $body
+}
+----
+
 == Defining Class State Models
 
 State models in XUML are used to specify the sequence of computations
@@ -2644,7 +3693,6 @@ namespace eval StateModelDef {
 
     <<tclral imports>>
     namespace import ::micca::@Config@::ConfigEvaluate
-    namespace import ::micca::@Config@::Helpers::DeclError
     namespace path {::micca ::micca::@Config@::Helpers ::rosea::InstCmds}
 
     <<state model config commands>>
@@ -2918,7 +3966,7 @@ proc FindActivitySignature {state params} {
 
 [source,tcl]
 ----
-<<state model config commands>>=
+<<helper commands>>=
 proc FindArgumentSignature {params} {
     if {[llength $params] == 0} {
         return
@@ -3011,7 +4059,7 @@ proc event {name args} {
 
 [source,tcl]
 ----
-<<state model config commands>>=
+<<helper commands>>=
 proc FindEventSignature {event params} {
     if {[dict size $params] == 0} {
         return
@@ -3420,6 +4468,7 @@ relvar create SeqNumbers {
 } {Domain ClassName Attrs}
 ----
 
+(((micca,Helpers,GenNumber)))
 [source,tcl]
 ----
 <<helper commands>>=
@@ -3445,6 +4494,7 @@ proc GenNumber {domain class args} {
 }
 ----
 
+(((micca,Helpers,CheckDuplicate)))
 [source,tcl]
 ----
 <<helper commands>>=
@@ -3465,22 +4515,19 @@ DUP_INSTANCE_NAME    {an element of class, "%s", already exists with\
         attributes, "%s"}
 ----
 
-[source,tcl]
-----
-<<helper commands>>=
-proc GetMiccaClass {class} {
-    return [deRef [$class findAll]]
-}
-----
-
 == Test Utility Commands
 
 [source,tcl]
 ----
 <<test utility commands>>=
+namespace export getMiccaClass
+proc getMiccaClass {class} {
+    return [deRef [$class findAll]]
+}
+
 namespace export formatMiccaClass
 proc formatMiccaClass {class} {
-    return \n[ral relformat [GetMiccaClass $class] $class]
+    return \n[ral relformat [getMiccaClass $class] $class]
 }
 
 namespace export readMiccaAttribute
@@ -3498,9 +4545,14 @@ proc cleanupDomain {} {
                 relvar set $var [relation empty [relvar set $var]]
             }
         }
+    }
 
-        relvar set ::micca::@Config@::Class_Reference\
-            [relation empty [relvar set ::micca::@Config@::Class_Reference]]
+    set config {
+        ::micca::@Config@::Class_Reference
+        ::micca::@Config@::Helpers::SeqNumbers
+    }
+    foreach var $config {
+        relvar set $var [relation empty [relvar set $var]]
     }
 }
 
