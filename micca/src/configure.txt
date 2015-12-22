@@ -478,6 +478,7 @@ namespace eval DomainDef {
 
     <<class config namespace layout>>
     <<assigner config namespace layout>>
+    <<population config namespace layout>>
 }
 ----
 
@@ -695,12 +696,19 @@ The +association+ command is used to define both simple and class based
 associations depending upon arguments.
 
 *****
-`association` _name_ _source_ _spec_ _target_ _?option value ...?_
+`association` _name_  _?option value ...?_ _source_ _spec_ _target_ ?_script_?
 
 `name`::
     The name of the association. Conventionally, relationships names are of the
     form *R<d>* where _<d>_ is one or more decimal digits but any
     non-empty string which does not start with a tilde (\~) can be used.
+`option value ...`::
+    Options to the `association` command are given as argument
+    option / value pairs:
+    Valid options and their values are:
+    `-associator` _class_:::
+    The `-associator` option defines the association to be
+    *class based* and specifies _class_ as the association class.
 `source`::
     The name of the class that defines the starting class for a forward
     traversal of the relationship.
@@ -735,21 +743,19 @@ associations depending upon arguments.
 `target`::
     The name of the class that defines the ending class for a forward
     traversal of the relationship.
-`option value ...`::
-    Options to the `association` command are given as argument
-    option / value pairs:
-    Valid options and their values are:
-    `-associator` _class_:::
-    The `-associator` option defines the association to be
-    *class based* and specifies _class_ as the association class.
+`script`::
+    An optional _script_ that is evaluated to define an assigner on the
+    association.
 
 The `association` command defines an association relationship between a
-_source_ class and a _target_class.
+_source_ class and a _target_class_.
 The forward direction of navigating the relationship is from _source_
 to _target_.
 The conditionality and multiplicity of the association is given by the
 _spec_ argument.
-A class bases association is indicated by the `-associator` option.
+A class based association is indicated by the `-associator` option.
+The association command may have an optional _script_ argument that is
+used to define an assigner on the association.
 *****
 
 In the command,
@@ -875,10 +881,7 @@ type of the association.
 [source,tcl]
 ----
 <<domain config commands>>=
-proc association {name source spec target args} {
-    if {[llength $args] % 2 != 0} {
-        tailcall DeclError ARG_FORMAT $args
-    }
+proc association {name args} {
     if {$name eq {}} {
         tailcall DeclError BAD_NAME association
     }
@@ -886,19 +889,31 @@ proc association {name source spec target args} {
         tailcall DeclError TILDE_NAME $name
     }
 
-    # Obtain references to the domain and class context.
-    namespace upvar ::micca::@Config@::DomainDef DomainName DomainName
-
-    if {[llength $args] > 2} {
+    if {[llength $args] < 3} {
         tailcall DeclError ASSOC_OPTIONS $args
-    } elseif {[llength $args] == 2} {
-        lassign $args option associator
-        if {$option ne "-associator"} {
-            tailcall DeclError UNKNOWN_OPTION association $option
-        }
-    } else {
-        set associator {}
     }
+
+    set associator {}
+    while {1} {
+        set arg [lindex $args 0]
+
+        if {$arg eq "-associator"} {
+            set associator [lindex $args 1]
+            set args [lrange $args 2 end]
+        } elseif {$arg eq "--"} {
+            break
+            set args [lrange $args 1 end]
+        } else {
+            break
+        }
+    }
+    if {[llength $args] < 3 || [llength $args] > 4} {
+        tailcall DeclError ASSOC_OPTIONS $args
+    }
+    lassign $args source spec target script
+
+    # Obtain references to the domain name
+    namespace upvar ::micca::@Config@::DomainDef DomainName DomainName
 
     <<association: check arguments>>
 
@@ -924,6 +939,17 @@ proc association {name source spec target args} {
         <<association: populate class based association>>
     }
 
+    if {$script ne {}} {
+        namespace upvar ::micca::@Config@::DomainDef::ClassDef\
+            ClassName ClassName
+        set ClassName $name
+
+        namespace upvar AssignerDef IdClassName IdClassName
+        set IdClassName {}
+
+        ConfigEvaluate [namespace current]::AssignerDef $script
+    }
+
     return
 }
 ----
@@ -935,8 +961,8 @@ proc association {name source spec target args} {
 <<error code formats>>=
 TILDE_NAME {names beginning with the tilde character are not allowed\
     in this context, "%s"}
-ASSOC_OPTIONS {association options error, expected "-associator <class>",\
-            got "%s"}
+ASSOC_OPTIONS {association options error, expected\
+    "?-associator <class>? source spec target ?script?", got "%s"}
 ----
 
 Here we use the data that we supplied above to make sure the
@@ -1146,7 +1172,7 @@ test association-2.0 {
             class f {
                 attribute a1 string
             }
-            association R11 f 1..*--1..* e -associator a
+            association R11 -associator a f 1..*--1..* e
         }
     }
     log::debug [formatMiccaClass AssociatorClass]
@@ -2236,7 +2262,7 @@ test reference-2.1 {
             }
             class a {}
 
-            association R1 c1 0..*--0..* c1 -associator a
+            association R1 -associator a c1 0..*--0..* c1
         }
     }
     log::debug [formatMiccaClass AssociationReference]
@@ -2343,7 +2369,7 @@ test reference-3.0 {
             class a {
             }
 
-            association R1 c1 0..*--1..* c2 -associator a
+            association R1 -associator a c1 0..*--1..* c2
         }
     }
     log::debug [formatMiccaClass AssociatorReference]
@@ -2384,7 +2410,7 @@ test reference-3.1 {
             class a {
             }
 
-            association R1 c1 0..*--1..* c2 -associator a
+            association R1 -associator a c1 0..*--1..* c2
         }
     }
     log::debug [formatMiccaClass AssociatorReference]
@@ -4810,6 +4836,431 @@ the instance is automatically deleted.
 proc terminal {args} {
     variable Terminals
     ::struct::set add Terminals $args
+    return
+}
+----
+
+== Defining Assigners
+
+The assigner concept is not frequently used in XUML models
+but is an essential concept in modeling competitive relationships.
+Some associations model competitive behavior such as allocating
+resources.
+For such situations,
+instances of the relationships must be created and deleted,
+'i.e.' linked and unlinked,
+according to some protocol and in some fashion that serializes
+the relationship lifecycle between competing classes.
+Lifecycle behavior of associations is accomplished in XUML models by
+associating a state model and having the state model
+activities insure the proper creation of relationship instances.
+Such state models are known as _assigners_.
+
+Note that we associate the assigner with the relationship.
+We do _not_ require factoring the relationships into a class based association
+and then attach the assigner to the associator class.
+In `micca`,
+the relationship may or may not be class based and if it is the associator class
+may or may not have a state model.
+The assigner state model is independent of any class and its state model.
+It is, after all, a state model to deal with the application semantics
+of forming and dissolving the relationship.
+
+Also note that only associative relationships may have an assigner.
+Assigners are not meaningful for generalization relationships given
+the disjoint union nature of a generalization.
+
+There is a further complication.
+Usually,
+there is a single state machine associated with the association assigner.
+However,
+some assigners have more complicated competitive protocols.
+In those cases the association may have multiple assigners
+that are partitioned by another class.
+The archetypal example is that of assigning department store clerks
+to customers.
+If any clerk can service any customer,
+then a single assigner is used to sequence properly the assignment of
+available clerks to waiting customers.
+If the store policy is that a customer can only be served by a clerk working in
+a particular department,
+then there will be as many assigners as there are departments and
+the identity of the department class serves to identify the assigner instances
+needed to insure that clerks, within the department, are not over allocated
+and that customers, visiting the department, are not over served by
+clerks from the wrong department.
+This is the essential concept behind a multiple assigner.
+
+Assigners and multi-assigners fall into the XUML semantics category of
+not that common but essential to express the proper execution semantics.
+As we will see,
+the specifications required for assigners is almost the same as that
+for ordinary class state models.
+
+Assigners are defined by any script specified as part of an
+`association` command.
+We will need to define a namespace in which the script can be evaluated.
+
+[source,tcl]
+----
+<<assigner config namespace layout>>=
+namespace eval AssignerDef {
+    logger::initNamespace [namespace current]
+
+    <<tclral imports>>
+    namespace import ::micca::@Config@::ConfigEvaluate
+    namespace path {::micca ::micca::@Config@::Helpers ::rosea::InstCmds}
+
+    <<assigner config commands>>
+}
+----
+
+=== Assigner State Model
+
+[float]
+==== Implementation
+
+(((micca,Config,statemodel)))
+[source,tcl]
+----
+<<assigner config commands>>=
+proc statemodel {body} {
+    namespace upvar ::micca::@Config@::DomainDef DomainName DomainName
+    namespace upvar ::micca::@Config@::DomainDef::ClassDef ClassName AssocName
+
+    namespace upvar ::micca::@Config@::DomainDef::ClassDef::StateModelDef\
+        InitialState InitialState\
+        DefaultTrans DefaultTrans\
+        Terminals Terminals
+
+    set InitialState {}
+    set DefaultTrans {}
+    set Terminals [list]
+
+    try {
+        ConfigEvaluate ::micca::@Config@::DomainDef::ClassDef::StateModelDef $body
+
+        if {$DefaultTrans eq {}} {
+            set DefaultTrans CH
+        }
+        StateModel create\
+            Domain          $DomainName\
+            Model           $AssocName\
+            InitialState    $InitialState\
+            DefaultTrans    $DefaultTrans
+
+        set assoctuple [list\
+            Domain          $DomainName\
+            Association     $AssocName
+        ]
+        AssignerStateModel create {*}$assoctuple
+
+        variable IdClassName
+        if {$IdClassName eq {}} {
+            SingleAssigner create {*}$assoctuple
+        } else {
+            MultipleAssigner create {*}$assoctuple Class $IdClassName
+            ValueElement create Domain $DomainName Name $AssocName
+        }
+
+        foreach terminal $Terminals {
+            set sref [State findWhere Domain $DomainName Model $ClassName\
+                    Name $terminal]
+            updateAttribute $sref IsFinal true
+        }
+    } on error {result opts} {
+        log::error $result
+        upvar #0 ::micca::@Config@::errcount errcount
+        incr errcount
+    }
+}
+----
+
+=== Identify By Class
+
+[float]
+==== Implementation
+
+[source,tcl]
+----
+<<assigner config commands>>=
+proc identifyby {class} {
+    variable IdClassName $class
+}
+----
+
+[float]
+==== Tests
+
+[source,tcl]
+----
+<<config command tests>>=
+test assigner-1.0 {
+    Define a single assigner
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain foo {
+            class clerk {
+                reference R1
+            }
+            class client {
+                reference R1
+            }
+            association R1 clerk 0..1--0..1 client {
+                statemodel {
+                    defaulttrans IG
+
+                    state waitingForClerk {} {
+                    }
+                    transition waitingForClerk - clerkReady -> waitingForClient
+
+                    state waitingForClient {} {
+                    }
+                    transition waitingForClient - clientReady -> assigningClerk
+
+                    state assigningClerk {} {
+                    }
+                    transition assigningClerk - clerkAssigned -> waitingForClerk
+                }
+            }
+        }
+    }
+    log::debug [formatMiccaClass AssignerStateModel]
+    log::debug [formatMiccaClass SingleAssigner]
+    log::debug [formatMiccaClass Event]
+    log::debug [formatMiccaClass State]
+    log::debug [formatMiccaClass StateTransition]
+    testConditions\
+        {[refMultiplicity [AssignerStateModel findAll]] == 1}\
+        {[refMultiplicity [SingleAssigner findAll]] == 1}
+} -result {1}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test assigner-1.1 {
+    Define a multiple assigner
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain foo {
+            class clerk {
+                reference R1
+                reference R2
+            }
+            class client {
+                reference R1
+            }
+            association R1 clerk 0..1--0..1 client {
+                identifyby department
+                statemodel {
+                    defaulttrans IG
+
+                    state waitingForClerk {} {
+                    }
+                    transition waitingForClerk - clerkReady -> waitingForClient
+
+                    state waitingForClient {} {
+                    }
+                    transition waitingForClient - clientReady -> assigningClerk
+
+                    state assigningClerk {} {
+                    }
+                    transition assigningClerk - clerkAssigned -> waitingForClerk
+                }
+            }
+            class department {
+                reference R2
+            }
+            association R2 department 1..*--1 clerk
+        }
+    }
+    log::debug [formatMiccaClass AssignerStateModel]
+    log::debug [formatMiccaClass MultipleAssigner]
+    log::debug [formatMiccaClass Event]
+    log::debug [formatMiccaClass State]
+    log::debug [formatMiccaClass StateTransition]
+    testConditions\
+        {[refMultiplicity [AssignerStateModel findAll]] == 1}\
+        {[refMultiplicity [MultipleAssigner findAll]] == 1}
+} -result {1}
+----
+
+== Populating a Domain
+
+[source,tcl]
+----
+<<population config namespace layout>>=
+namespace eval PopDef {
+    logger::initNamespace [namespace current]
+
+    <<tclral imports>>
+    namespace import ::micca::@Config@::ConfigEvaluate
+    namespace path {::micca ::micca::@Config@::Helpers ::rosea::InstCmds}
+
+    <<population config commands>>
+
+    <<class instance config namespace layout>>
+}
+----
+
+=== Population
+
+[float]
+==== Implementation
+
+[source,tcl]
+----
+<<domain config commands>>=
+proc population {name script} {
+    if {$name eq {}} {
+        tailcall DeclError BAD_NAME $name population
+    }
+
+    namespace upvar [namespace current] DomainName DomainName
+    namespace upvar PopDef PopulationName PopulationName
+    set PopulationName $name
+
+    if {[isEmptyRef [Population findById Domain $DomainName Name $name]]} {
+        Population create Domain $DomainName Name $name
+    }
+
+    ConfigEvaluate [namespace current]::PopDef $script
+}
+----
+
+=== Populating a Class
+
+[source,tcl]
+----
+<<class instance config namespace layout>>=
+namespace eval ClassInstDef {
+    logger::initNamespace [namespace current]
+
+    <<tclral imports>>
+    namespace import ::micca::@Config@::ConfigEvaluate
+    namespace path {::micca ::micca::@Config@::Helpers ::rosea::InstCmds}
+
+    <<class instance commands>>
+}
+----
+
+[float]
+==== Implementation
+
+[source,tcl]
+----
+<<population config commands>>=
+proc class {name script} {
+    if {$name eq {}} {
+        tailcall DeclError BAD_NAME $name class
+    }
+
+    upvar #0 ::micca::@Config@::DomainDef::DomainName DomainName
+    variable PopulationName
+
+    namespace upvar ClassInstDef Element Element Allocation Allocation\
+        IsConstant IsConstant
+    set ClassName $name
+    set Allocation {}
+    set IsConstant {}
+
+    ConfigEvaluate ClassInstDef $script
+
+    if {[isEmptyRef [ElementPopulation findById Population $PopulationName\
+            Domain $DomainName Element $name]]} {
+        if {$Allocation eq {}} {
+            set Allocation 0
+        }
+        if {$IsConstant eq {}} {
+            set IsConstant false
+        }
+        ElementPopulation create Population $PopulationName\
+            Domain $DomainName Element $name
+        ClassPopulation create Population $PopulationName\
+            Domain $DomainName Class $name Allocation $Allocation\
+            IsConstant $IsConstant
+    }
+}
+----
+
+=== Allocating Space
+
+[float]
+==== Implementation
+
+[source,tcl]
+----
+<<class instance commands>>=
+proc allocate {size} {
+    variable Allocation
+    if {$Allocation ne {}} {
+        variable Element
+        log::warn "allocation size for class, \"$Element\",\
+            is already set to $Allocation: ignoring second attempt"
+    } else {
+        set Allocation $size
+    }
+}
+----
+
+=== Constant Class Population
+
+[float]
+==== Implementation
+
+[source,tcl]
+----
+<<class instance commands>>=
+proc constant {} {
+    variable IsConstant
+    if {$IsConstant ne {}} {
+        variable Element
+        log::warn "constant property for class, \"$Element\",\
+            is already set to $IsConstant: ignoring second attempt"
+    } else {
+        set IsConstant true
+    }
+}
+----
+
+=== Setting Instance Values
+
+[float]
+==== Implementation
+
+[source,tcl]
+----
+<<class instance commands>>=
+proc instance {name args} {
+    if {[llength $args] % 2 != 0} {
+        tailcall DeclError ARG_FORMAT $args
+    }
+
+    upvar #0 ::micca::@Config@::DomainDef::DomainName DomainName
+    upvar #0 [namespace parent]::PopulationName PopulationName
+    variable ClassName
+
+    set insttuple [list\
+        Population $PopulationName\
+        Domain $DomainName\
+        Class $ClassName\
+        Instance $name\
+    ]
+    ClassInstance create {*}$insttuple\
+        Number [GenNumber $DomainName ClassInstance\
+            [list $PopulationName $DomainName $ClassName]]
+    dict for {compname value} $args {
+        ClassComponentValue create {*}$insttuple\
+            Component $compname Value $value
+    }
+
     return
 }
 ----
