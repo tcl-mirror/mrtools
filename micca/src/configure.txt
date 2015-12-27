@@ -177,6 +177,7 @@ namespace eval @Config@ {
     <<config commands>>
 
     <<domain config namespace layout>>
+    <<population config namespace layout>>
 }
 ----
 <1> We are evaluating the configuration DSL inside a child namespace of
@@ -204,7 +205,14 @@ proc miccaConfigure {script} {
     variable configlineno
     set configlineno 1
 
-    ConfigEvaluate ::micca::@Config@ $script
+    try {
+        ral relvar eval {
+            ConfigEvaluate [namespace current] $script
+        }
+    } on error {result} {
+        # puts $::errorInfo
+        HandleConfigError $result
+    }
 
     if {$errcount > 0} {
         tailcall DeclError CONFIG_ERRORS $errcount
@@ -323,9 +331,6 @@ domain definitions.
 The `domain` command defines a domain named, _name_, and evaluates
 _body_ in a context where commands in _body_ may be used to define
 the characteristics of a domain.
-A domain is an open ended and extensible definition.
-The `domain` command may be executed with the same named domain and the
-addition configuration information is simply added to it.
 *****
 
 [float]
@@ -343,33 +348,26 @@ proc domain {name body} {
     namespace upvar DomainDef DomainName DomainName ; # <1>
     set DomainName $name
 
-    try {
-        if {[isEmptyRef [Domain findById Name $name]]} {# <2>
-            Domain create Name $name
-        }
+    CheckDuplicate Domain Name $name ; # <2>
+    Domain create Name $name
 
-        ConfigEvaluate [namespace current]::DomainDef $body
+    ConfigEvaluate [namespace current]::DomainDef $body
 
-        # At this point we have the definition of the domain and enough
-        # information to tie together the class references and
-        # the association definitions.
-        <<domain: bind relationship references>>
+    # At this point we have the definition of the domain and enough
+    # information to tie together the class references and
+    # the association definitions.
+    <<domain: bind relationship references>>
 
-        # We must also compute how polymorphic events are inherited
-        # down generalization hierarchies.
-        <<domain: propagate polymorphic events>>
-    } on error {result opts} {
-        puts $::errorInfo
-        # ::micca::@Config@::HandleConfigError $result
-        return -options $opts $result
-    }
+    # We must also compute how polymorphic events are inherited
+    # down generalization hierarchies.
+    <<domain: propagate polymorphic events>>
 }
 ----
 <1> We place the domain name into a variable in the child namespace where the
 context implies that all the components defined are to be part of this domain.
-<2> We allow the +domain+ command to be invoked more than once.
-Domains are open ended definitions so we test to make sure we do not
-attempt to create a duplicate domain.
+<2> We do not allow the +domain+ command to be invoked more than once.
+To configure a domain properly we need to be able to see its entire
+definition at once.
 
 (((error code,BAD_NAME)))
 [source,tcl]
@@ -441,27 +439,6 @@ test domain-1.1 {
 } -result {encountered 1 configuration script errors} -returnCodes error
 ----
 
-[source,tcl]
-----
-<<config command tests>>=
-test domain-1.2 {
-    split domain, but still empty
-} -setup {
-} -cleanup {
-    cleanupDomain
-} -body {
-    micca configure {
-        domain foo {
-            # A domain may be empty of components.
-        }
-        domain foo {
-            # A domain may be empty of components.
-        }
-    }
-    refMultiplicity [Domain findAll]
-} -result {1}
-----
-
 == Defining Domain Components
 
 In this section we discuss the commands that are used to define
@@ -487,7 +464,6 @@ namespace eval DomainDef {
     # Child namespaces for domain commands with additional structure
     <<class config namespace layout>>
     <<assigner config namespace layout>>
-    <<population config namespace layout>>
 }
 ----
 
@@ -524,7 +500,8 @@ the interface file generated for the domain.
 ----
 <<domain config commands>>=
 proc interface {text} {
-    AppendToDomainAttribute Interface $text
+    variable DomainName
+    AppendToDomainAttribute $DomainName Interface $text
 }
 ----
 
@@ -557,7 +534,8 @@ before any `micca` generated code.
 ----
 <<domain config commands>>=
 proc prologue {text} {
-    AppendToDomainAttribute Prologue $text
+    variable DomainName
+    AppendToDomainAttribute $DomainName Prologue $text
 }
 ----
 
@@ -591,7 +569,8 @@ after any `micca` generated code.
 ----
 <<domain config commands>>=
 proc epilogue {text} {
-    AppendToDomainAttribute Epilogue $text
+    variable DomainName
+    AppendToDomainAttribute $DomainName Epilogue $text
 }
 ----
 
@@ -629,10 +608,8 @@ can be factored into common code.
 [source,tcl]
 ----
 <<helper commands>>=
-proc AppendToDomainAttribute {attrname text} {
-    upvar #0 ::micca::@Config@::DomainDef::DomainName DomainName
-
-    set domref [Domain findById Name $DomainName]
+proc AppendToDomainAttribute {domainname attrname text} {
+    set domref [Domain findById Name $domainname]
     withAttribute $domref $attrname {
         set value [set $attrname]
         if {$value ne {} && [string index $value end] ne "\n"} {
@@ -677,7 +654,7 @@ then any additional configuration is added to the definition of the class.
 ----
 <<domain config commands>>=
 proc class {name body} {
-    namespace upvar [namespace current] DomainName DomainName ; # <1>
+    variable DomainName ; # <1>
 
     if {[isEmptyRef [DomainElement findById Domain $DomainName Name $name]]} {# <2>
         DomainElement create Domain $DomainName Name $name
@@ -823,7 +800,7 @@ relvar create Config_SpecDetail {
 
 relvar association C1\
     Config_AssocSpec SpecID +\
-    Config_SpecDetails SpecID 1
+    Config_SpecDetail SpecID 1
 
 relvar eval {
     relvar insert Config_AssocSpec {
@@ -869,7 +846,7 @@ relvar eval {
         SpecName    1..*--1..*
         SpecID      sp7
     } {
-        SpecName    *--?
+        SpecName    +--+
         SpecID      sp7
     } {
         SpecName    0..*--1..*
@@ -987,7 +964,7 @@ proc association {name args} {
     lassign $args source spec target script
 
     # Obtain references to the domain name
-    namespace upvar ::micca::@Config@::DomainDef DomainName DomainName
+    variable DomainName
 
     <<association: check arguments>>
 
@@ -1050,7 +1027,7 @@ of checking code.
 <<association: check arguments>>=
 set csd [pipe {
     relvar restrictone ::micca::@Config@::Config_AssocSpec SpecName $spec |
-    relation semijoin ~ $::micca::@Config@::Config_SpecDetail
+    relation semijoin ~ [relvar set ::micca::@Config@::Config_SpecDetail]
 }]
 if {[relation isempty $csd]} {
     tailcall DeclError BAD_RELATIONSHIP_SPEC $spec
@@ -1335,7 +1312,7 @@ proc generalization {name args} {
         tailcall DeclError DUPLICATE_SUBCLASS $args
     }
 
-    namespace upvar ::micca::@Config@::DomainDef DomainName DomainName
+    variable DomainName
 
     set reltuple [list\
         Domain  $DomainName\
@@ -1500,7 +1477,7 @@ that are included in the generated code.
 ----
 <<domain config commands>>=
 proc typealias {aliasname typename} {
-    namespace upvar ::micca::@Config@::DomainDef DomainName DomainName
+    variable DomainName
     TypeAlias create Domain $DomainName TypeName $aliasname\
         TypeDefinition $typename
 
@@ -1565,7 +1542,7 @@ to access major services of the domain.
 ----
 <<domain config commands>>=
 proc domainop {rettype name parameters body} {
-    namespace upvar ::micca::@Config@::DomainDef DomainName DomainName
+    variable DomainName
 
     DomainOperation create Domain $DomainName Name $name Body $body\
         ReturnDataType $rettype
@@ -1685,8 +1662,8 @@ proc attribute {name type args} {
         tailcall DeclError ARG_FORMAT $args
     }
 
-    namespace upvar ::micca::@Config@::DomainDef DomainName DomainName
-    namespace upvar ::micca::@Config@::DomainDef::ClassDef ClassName ClassName
+    upvar #0 [namespace parent]::DomainName DomainName
+    variable ClassName
 
     ClassComponent create\
         Domain      $DomainName\
@@ -1715,10 +1692,12 @@ proc attribute {name type args} {
 }
 ----
 
+(((error code,ARG_FORMAT)))
 (((error code,ATTRIBUTE_OPTIONS)))
 [source,tcl]
 ----
 <<error code formats>>=
+ARG_FORMAT      {options and values must come in pairs, got "%s"}
 ATTRIBUTE_OPTIONS {attribute options error, expected "-default <value>",\
             got "%s"}
 ----
@@ -1867,8 +1846,8 @@ proc reference {relname args} {
         tailcall DeclError ARG_FORMAT $args
     }
 
-    namespace upvar ::micca::@Config@::DomainDef DomainName DomainName
-    namespace upvar ::micca::@Config@::DomainDef::ClassDef ClassName ClassName
+    upvar #0 [namespace parent]::DomainName DomainName
+    variable ClassName
 
     set reftype {}
     set role {}
@@ -1941,23 +1920,10 @@ that was created by the invocations of the `reference` command.
 [source,tcl]
 ----
 <<domain: bind relationship references>>=
-set errcount 0
+upvar #0 ::micca::@Config@::errcount errcount
 relation foreach ref [relvar set Class_Reference] {
     <<domain: link one reference>>
 }
-
-if {$errcount > 0} {# <1>
-    tailcall DeclError REFERENCE_ERRORS $errcount
-}
-----
-<1> We accumulate errors in the iteration loop and then report at the end.
-Detected error result in a logged error message.
-
-(((error code,REFERENCE_ERRORS)))
-[source,tcl]
-----
-<<error code formats>>=
-REFERENCE_ERRORS    {%d reference errors found}
 ----
 
 The first item of business is to deal with reflexive associations.
@@ -1998,8 +1964,8 @@ does not even participate in the relationship.
 if {[isNotEmptyRef $crref]} {
     <<domain: resolve class role>>
 } else {
-    log::error "class, \"$Class\", does not participate in relationship,\
-            \"$Relationship\""
+    log::error "in domain, \"$refDomain\", class, \"$refClass\",\
+        does not participate in relationship, \"$refRelationship\""
     incr errcount
 }
 ----
@@ -2015,8 +1981,9 @@ no way to distinguish them.
 if {[isRefSingular $crref]} {
     <<domain: resolve single class role>>
 } else {
-    log::error "relationship, \"$Relationship\", is reflexive for\
-        class, \"$Class\", and no \"-path\" option was specified"
+    log::error "in domain, \"$refDomain\", relationship, \"$Relationship\",\
+        is reflexive for\ class, \"$Class\", and no \"-path\"\
+        option was specified"
     incr errcount
 }
 ----
@@ -2044,8 +2011,9 @@ if {[ResolveSuper $crref]} {
 if {[ResolveSub $crref]} {
     continue
 }
-log::warn "in class, \"$refClass\", reference for relationship,\
-    \"$refRelationship\", is ignored: may be part of a union generalization"
+log::warn "in domain, \"$refDomain\", class, \"$refClass\",\
+    reference for relationship, \"$refRelationship\", is ignored:\
+    may be part of a union generalization"
 ----
 
 ==== Resolving Association References
@@ -2100,8 +2068,9 @@ proc ResolveSimpleReferring {apcref reftype} {
 
     assignAttribute $srcref
     if {$reftype ne {}} {# <1>
-        log::warn "reference type, \"$reftype\", is ignored for the\
-            singular reference from \"$Class\" along \"$Relationship\""
+        log::warn "in domain, \"$Domain\", reference type, \"$reftype\",\
+            is ignored for the singular reference from \"$Class\"\
+            along \"$Relationship\""
     }
     SingularReference create Domain $Domain Class $Class Name $Relationship\
             Role $Role
@@ -2174,8 +2143,8 @@ proc CreateAssociationReferences {srcref multiplicity target reftype capacity} {
 
     if {$multiplicity} {
         if {$reftype eq {}} {
-            log::info "multiple reference by \"$Class\" along\
-                \"$Relationship\" defaults to \"linked\" type"
+            log::info "in domain, \"$Domain\", multiple reference by\
+                \"$Class\" along \"$Relationship\" defaults to \"linked\" type"
         }
         switch -exact -- $reftype {
             vector {
@@ -2198,8 +2167,9 @@ proc CreateAssociationReferences {srcref multiplicity target reftype capacity} {
         }
     } else {
         if {$reftype ne {}} {
-            log::warn "reference type, \"$reftype\", is ignored for the\
-                singular reference by \"$Class\" along \"$Relationship\""
+            log::warn "in domain, \"$Domain\", reference type, \"$reftype\",\
+                is ignored for the singular reference by \"$Class\"\
+                along \"$Relationship\""
         }
         SingularReference create Domain $Domain Class $Class\
             Name $Relationship Role $Role
@@ -2665,8 +2635,8 @@ locally in a state model.
 ----
 <<class config commands>>=
 proc polymorphic {name args} {
-    namespace upvar ::micca::@Config@::DomainDef DomainName DomainName
-    namespace upvar ::micca::@Config@::DomainDef::ClassDef ClassName ClassName
+    upvar #0 [namespace parent]::DomainName DomainName
+    variable ClassName
 
     set psigid [expr {[llength $args] != 0 ?\
             [FindParameterSignature $args] : {}}]
@@ -2747,8 +2717,8 @@ some other generalization.
 [source,tcl]
 ----
 <<domain: propagate polymorphic events>>=
-set subs [deRef [Subclass findAll]
-set supers [deRef [Superclass findAll]
+set subs [deRef [Subclass findAll]]
+set supers [deRef [Superclass findAll]]
 set ultimates [pipe {
     relation semiminus $subs $supers -using {Domain Domain Class Class} |
     ::rosea::Helpers::ToRef ::micca::Superclass ~
@@ -3081,13 +3051,11 @@ if {[isNotEmptyRef $multigens]} {
     <<PropagatePolyEvents: compute subclasses using event>>
 
     if {[llength $usingevent] != 0} {
-        log::error "In domain, \"$subDomain\", class, \"$subClass\",\
+        error "In domain, \"$subDomain\", class, \"$subClass\",\
             event, \"$event\", is inherited across, \"$subRelationship\"\
             and is consumed in the $subClass state model:\
             yet class(es), \"[join $usingevent {, }]\", assume \"$event\"\
             is deferred to them"
-        incr ::micca::@Config@::errorcount
-        error "consumed deferred event masks event in subclasses"
     }
 }
 ----
@@ -3962,7 +3930,7 @@ test polymorphic-1.9 {
             generalization R1 S X Y
         }
     }
-} -result {*R86*} -match glob -returnCodes error
+} -result {encountered 1 configuration script errors} -returnCodes error
 ----
 
 [source,tcl]
@@ -4129,7 +4097,7 @@ common code.
 ----
 <<class config commands>>=
 proc DefineOperation {isinst rettype name parameters body} {
-    namespace upvar ::micca::@Config@::DomainDef DomainName DomainName
+    upvar #0 [namespace parent]::DomainName DomainName
     variable ClassName
 
     Operation create Domain $DomainName Class $ClassName Name $name Body $body\
@@ -4248,8 +4216,8 @@ when an instance of a class is created.
 ----
 <<class config commands>>=
 proc constructor {body} {
-    namespace upvar ::micca::@Config@::DomainDef DomainName DomainName
-    namespace upvar ::micca::@Config@::DomainDef::ClassDef ClassName ClassName
+    upvar #0 [namespace parent]::DomainName DomainName
+    variable ClassName
     Constructor create\
         Domain $DomainName\
         Class $ClassName\
@@ -4283,8 +4251,8 @@ when an instance of a class is deleted.
 ----
 <<class config commands>>=
 proc destructor {body} {
-    namespace upvar ::micca::@Config@::DomainDef DomainName DomainName
-    namespace upvar ::micca::@Config@::DomainDef::ClassDef ClassName ClassName
+    upvar #0 [namespace parent]::DomainName DomainName
+    variable ClassName
     Destructor create\
         Domain $DomainName\
         Class $ClassName\
@@ -4359,7 +4327,7 @@ collect the state model specifications.
 ----
 <<class config commands>>=
 proc statemodel {body} {
-    namespace upvar ::micca::@Config@::DomainDef DomainName DomainName
+    upvar #0 [namespace parent]::DomainName DomainName
     variable ClassName
 
     namespace upvar StateModelDef\
@@ -4371,30 +4339,24 @@ proc statemodel {body} {
     set DefaultTrans {}
     set Terminals [list]
 
-    try {
-        ConfigEvaluate [namespace current]::StateModelDef $body
+    ConfigEvaluate [namespace current]::StateModelDef $body
 
-        if {$DefaultTrans eq {}} {
-            set DefaultTrans CH
-        }
-        StateModel create\
-            Domain          $DomainName\
-            Model           $ClassName\
-            InitialState    $InitialState\
-            DefaultTrans    $DefaultTrans
-        InstanceStateModel create\
-            Domain          $DomainName\
-            Class           $ClassName
+    if {$DefaultTrans eq {}} {
+        set DefaultTrans CH
+    }
+    StateModel create\
+        Domain          $DomainName\
+        Model           $ClassName\
+        InitialState    $InitialState\
+        DefaultTrans    $DefaultTrans
+    InstanceStateModel create\
+        Domain          $DomainName\
+        Class           $ClassName
 
-        foreach terminal $Terminals {
-            set sref [State findWhere Domain $DomainName Model $ClassName\
-                    Name $terminal]
-            updateAttribute $sref IsFinal true
-        }
-    } on error {result opts} {
-        log::error $result
-        upvar #0 ::micca::@Config@::errcount errcount
-        incr errcount
+    foreach terminal $Terminals {
+        set sref [State findWhere Domain $DomainName Model $ClassName\
+                Name $terminal]
+        updateAttribute $sref IsFinal true
     }
 }
 ----
@@ -4535,6 +4497,40 @@ test state-1.0 {
     log::debug [formatMiccaClass ArgumentSignature]
     log::debug [formatMiccaClass Argument]
 } -result {}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test state-2.0 {
+    State / event parameter mismatch
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain foo {
+            class c1 {
+                attribute a1 int
+
+                statemodel {
+                    event e1 a float b int
+
+                    state s1 {a int b float} {
+                    }
+                    transition s1 - e1 -> s1
+                }
+            }
+        }
+    }
+    log::debug [formatMiccaClass Event]
+    log::debug [formatMiccaClass State]
+    log::debug [formatMiccaClass StateTransition]
+    log::debug [formatMiccaClass ParameterSignature]
+    log::debug [formatMiccaClass Parameter]
+    log::debug [formatMiccaClass ArgumentSignature]
+    log::debug [formatMiccaClass Argument]
+} -result {encountered 1 configuration script errors} -returnCodes error
 ----
 
 === State Parameters
@@ -4840,7 +4836,7 @@ proc event {name args} {
             relation update ~ sttuple {1} {
                 tuple update $sttuple ASigID $asigid
             }
-        }]
+        }] ; # <2>
     }
 }
 ----
@@ -5234,41 +5230,35 @@ proc statemodel {body} {
     set DefaultTrans {}
     set Terminals [list]
 
-    try {
-        ConfigEvaluate ::micca::@Config@::DomainDef::ClassDef::StateModelDef $body ; # <1>
+    ConfigEvaluate ::micca::@Config@::DomainDef::ClassDef::StateModelDef $body ; # <1>
 
-        if {$DefaultTrans eq {}} {
-            set DefaultTrans CH
-        }
-        StateModel create\
-            Domain          $DomainName\
-            Model           $AssocName\
-            InitialState    $InitialState\
-            DefaultTrans    $DefaultTrans
+    if {$DefaultTrans eq {}} {
+        set DefaultTrans CH
+    }
+    StateModel create\
+        Domain          $DomainName\
+        Model           $AssocName\
+        InitialState    $InitialState\
+        DefaultTrans    $DefaultTrans
 
-        set assoctuple [list\
-            Domain          $DomainName\
-            Association     $AssocName
-        ]
-        AssignerStateModel create {*}$assoctuple
+    set assoctuple [list\
+        Domain          $DomainName\
+        Association     $AssocName
+    ]
+    AssignerStateModel create {*}$assoctuple
 
-        variable IdClassName
-        if {$IdClassName eq {}} {
-            SingleAssigner create {*}$assoctuple
-        } else {
-            MultipleAssigner create {*}$assoctuple Class $IdClassName
-            ValueElement create Domain $DomainName Name $AssocName
-        }
+    variable IdClassName
+    if {$IdClassName eq {}} {
+        SingleAssigner create {*}$assoctuple
+    } else {
+        MultipleAssigner create {*}$assoctuple Class $IdClassName
+        ValueElement create Domain $DomainName Name $AssocName
+    }
 
-        foreach terminal $Terminals {
-            set sref [State findWhere Domain $DomainName Model $ClassName\
-                    Name $terminal]
-            updateAttribute $sref IsFinal true
-        }
-    } on error {result opts} {
-        log::error $result
-        upvar #0 ::micca::@Config@::errcount errcount
-        incr errcount
+    foreach terminal $Terminals {
+        set sref [State findWhere Domain $DomainName Model $ClassName\
+                Name $terminal]
+        updateAttribute $sref IsFinal true
     }
 }
 ----
@@ -5421,12 +5411,12 @@ For many systems, particularly small embedded systems,
 much of the class instance data can be specified as part of the initial
 instance population.
 This has a substantial benefit to the implementation.
-Since class data is held in ``C'' arrays, then initial instances can be
-specified as initializers for class storage arrays.
-The ``C'' language then guarantees that initializer values are put in
+Since class data is held in ``C'' arrays, initial instances can be
+specified as initializers for those class storage arrays.
+The ``C'' language then guarantees that initializer values are in
 place before `main` begins execution.
-This is usually a much more efficient arrangement than having initialiation
-code to create the initial instances that code is executed only once.
+This usually requires much less memory space than having initialiation code to
+create the initial instances and that code is executed only once.
 
 In our population scheme, we allow for several populations to be defined
 for a domain.
@@ -5452,6 +5442,7 @@ namespace eval PopDef {
     <<population config commands>>
 
     <<class instance config namespace layout>>
+    <<assigner instance config namespace layout>>
 }
 ----
 
@@ -5464,14 +5455,18 @@ with the same name are allowed and simply add values to the accumulated
 population.
 
 *****
-`population` _name_ _script_
+`population` _name_ _domain_ _script_
 
+`name`::
+    The name of the population.
+`domain`::
+    The name of the domain to which the population applies.
 `script`::
     A Tcl Script that is evaluated in a context to allow the definition
-    initial instance values for a domain.
+    of initial instance values for a domain.
 
 The `population` command is used to define initial instance values for
-the classes and assigners in a domain.
+the classes and assigners in _domain_.
 This command may be invoked multiple times and the population is
 cumulative.
 *****
@@ -5481,15 +5476,15 @@ cumulative.
 
 [source,tcl]
 ----
-<<domain config commands>>=
-proc population {name script} {
+<<config commands>>=
+proc population {name domain script} {
     if {$name eq {}} {
         tailcall DeclError BAD_NAME $name population
     }
 
-    namespace upvar [namespace current] DomainName DomainName
-    namespace upvar PopDef PopulationName PopulationName
+    namespace upvar PopDef PopulationName PopulationName DomainName DomainName
     set PopulationName $name
+    set DomainName $domain
 
     if {[isEmptyRef [Population findById Domain $DomainName Name $name]]} {
         Population create Domain $DomainName Name $name
@@ -5499,7 +5494,22 @@ proc population {name script} {
 }
 ----
 
-=== Populating a Class
+=== Class
+
+The `class` command (in the context of a population) is used to specify
+the initial instances of a class.
+
+*****
+`class` _name_ _script_
+
+`name`::
+    The name of the class.
+`script`::
+    A Tcl Script that is evaluated in a context to allow the definition
+    of class component values for a class.
+
+The `class` command is used to define initial instances for a class.
+*****
 
 Populating a class entails specifying attribute and reference values
 as well as setting space allocation and storage characteristics of the class.
@@ -5509,11 +5519,11 @@ This determines the maximum number of instances that may exist
 simultaneously.
 A class population can consist of initial instances as well as those
 created at run time.
-Of course, initial instances may be deleted at run time and their space
+Initial instances may be deleted at run time and their space
 is then available for newly created instances.
 To control the amount of space allocated,
 the `allocation` command can be used to set the additional number of instances
-beyond the initial instances that are to allocated.
+beyond the initial instances that are allocated.
 The total number of simultaneous instances is then the sum of the
 allocation amount and the initial instances.
 
@@ -5552,16 +5562,16 @@ proc class {name script} {
         tailcall DeclError BAD_NAME $name class
     }
 
-    upvar #0 ::micca::@Config@::DomainDef::DomainName DomainName
     variable PopulationName
+    variable DomainName
 
-    namespace upvar ClassInstDef Element Element Allocation Allocation\
+    namespace upvar ClassInstDef ClassName ClassName Allocation Allocation\
         IsConstant IsConstant
     set ClassName $name
     set Allocation {}
     set IsConstant {}
 
-    ConfigEvaluate ClassInstDef $script
+    ConfigEvaluate [namespace current]::ClassInstDef $script
 
     if {[isEmptyRef [ElementPopulation findById Population $PopulationName\
             Domain $DomainName Element $name]]} {
@@ -5584,6 +5594,19 @@ proc class {name script} {
 
 === Allocating Space
 
+*****
+`allocate` _size_
+
+`size`::
+    The number of additional class instances beyond those defined
+    by the initial instances for which storage is allocated.
+
+The `allocate` command is used to allocate space for additional class
+instances that will be created at run time.
+If no `allocate` command is invoked for a class the no additional
+instance space is set aside.
+*****
+
 [float]
 ==== Implementation
 
@@ -5605,6 +5628,16 @@ proc allocate {size} {
 ----
 
 === Constant Class Population
+
+*****
+`constant`
+
+The `constant` command declares that the storage for the class is
+to be placed in read only memory.
+It is an error to declare classes that have state models as constant.
+Attempting to update attributes at run time for a constant class will
+result in undefined behavior.
+*****
 
 [float]
 ==== Implementation
@@ -5703,8 +5736,8 @@ proc instance {name args} {
         tailcall DeclError ARG_FORMAT $args
     }
 
-    upvar #0 ::micca::@Config@::DomainDef::DomainName DomainName
     upvar #0 [namespace parent]::PopulationName PopulationName
+    upvar #0 [namespace parent]::DomainName DomainName
     variable ClassName
 
     set insttuple [list\
@@ -5745,31 +5778,20 @@ test populate-1.0 {
                 reference R1
             }
             class c2 {
-                attribute c2_id
+                attribute c2_id int
                 reference R1
             }
             association R1 c1 1..*--1 c2
         }
 
-        domain foo {
-            population p1 {
-                class c1 {
-                    instance chuck1 {
-                        c1_id 5
-                        R1 fred1
-                    }
-                    instance chuck2 {
-                        c1_id 7
-                        R1 fred1
-                    }
-                }
-                class c2 {
-                    constant
-                    instance fred1 {
-                        c2_id 20
-                        R1 {chuck1 chuck2}
-                    }
-                }
+        population p1 foo {
+            class c1 {
+                instance chuck1 c1_id 5 R1 fred1
+                instance chuck2 c1_id 7 R1 fred1
+            }
+            class c2 {
+                constant
+                instance fred1 c2_id 20 R1 {chuck1 chuck2}
             }
         }
     }
@@ -5800,7 +5822,7 @@ class component names.
     A list of class component names that are to be specified in
     the remaining arguments
 `nameN valuesN`::
-    A list of instance names / instance value sets pairs.
+    A list of instance names / instance value set pairs.
     Each _nameN_ argument gives the name of an instance to be initialized.
     Each corresponding _valueN_ argument is a list of values to be
     given the the instance.
@@ -5840,7 +5862,7 @@ proc table {heading args} {
         Class $ClassName\
     ]
 
-    dict for {instname compvalues} {
+    dict for {instname compvalues} $args {
         dict set insttuple Instance $instname
         ClassInstance create {*}$insttuple\
             Number [GenNumber $DomainName ClassInstance\
@@ -5876,25 +5898,23 @@ test populate-2.0 {
                 reference R1
             }
             class c2 {
-                attribute c2_id
+                attribute c2_id int
                 reference R1
             }
             association R1 c1 1..*--1 c2
         }
 
-        domain foo {
-            population p1 {
+        population p1 foo {
+            class c1 {
                 allocate 10
-                class c1 {
-                    table   {c1_id  R1}\
-                    chuck1  {5      fred1}\
-                    chuck2  {7      fred1}
-                }
-                class c2 {
-                    constant
-                    table       {c2_id  R1}\
-                        fred1   {20     {chuck1 chuck2}}
-                }
+                table   {c1_id      R1}\
+                chuck1  {5          fred1}\
+                chuck2  {7          fred1}
+            }
+            class c2 {
+                constant
+                table       {c2_id      R1}\
+                fred1       {20         {chuck1 chuck2}}
             }
         }
     }
@@ -5918,8 +5938,9 @@ for the attribute or is the _nil_ reference value.
 
 [source,tcl]
 ----
+<<helper commands>>=
 proc ResolveInitialValue {domain class component value} {
-    if {$compvalue eq "-"} {
+    if {$value eq "-"} {
         set compref [ClassComponent findById\
             Domain $domain\
             Class $class\
@@ -5940,11 +5961,394 @@ proc ResolveInitialValue {domain class component value} {
             }
             error "component, \"$component\", cannot be set to a default value"
         }
-    } elseif {$compvalue eq "--"} {
-        set compvalue -
+    } elseif {$value eq "--"} {
+        set value -
     }
 
     return $value
+}
+----
+
+=== Populating Multiple Assigners
+
+For multiple assigners,
+it is necessary to specify which instances of the identifying class
+is associated to the assigner.
+The only information needed to define an assigner is its name
+and the name of the instance of the identifying class corresponding to the
+assigner.
+
+We start with the now familiar namespace definition.
+
+[source,tcl]
+----
+<<assigner instance config namespace layout>>=
+namespace eval AssignerInstDef {
+    logger::initNamespace [namespace current]
+
+    <<tclral imports>>
+    namespace import ::micca::@Config@::ConfigEvaluate
+    namespace path {::micca ::micca::@Config@::Helpers ::rosea::InstCmds}
+
+    <<assigner instance commands>>
+}
+----
+
+=== Assigner
+
+The `assigner` command (in the context of a population) is used to specify
+the initial instances of an assigner
+
+*****
+`assigner` _association_ _script_
+
+`association`::
+    The name of the assocition which has a multiple assigner.
+`script`::
+    A Tcl Script that is evaluated in a context to allow the definition
+    of assigner values.
+
+The `assigner` command is used to define initial instances for an assigner.
+*****
+
+[float]
+==== Implementation
+
+[source,tcl]
+----
+<<population config commands>>=
+proc assigner {assoc script} {
+    variable PopulationName
+    variable DomainName
+
+    set maref [MultipleAssigner findById Domain $DomainName Association $assoc]
+    if {[isEmptyRef $maref]} {# <1>
+        tailcall DeclError UNKNOWN_MULT_ASSIGNER $assoc
+    }
+
+    namespace upvar AssignerInstDef AssocName AssocName IdClass IdClass
+    set AssocName $assoc
+    set IdClass [readAttribute $maref Class]
+
+    ConfigEvaluate [namespace current]::AssignerInstDef $script
+
+    if {[isEmptyRef [ElementPopulation findById Population $PopulationName\
+            Domain $DomainName Element $assoc]]} {
+        ElementPopulation create Population $PopulationName\
+            Domain $DomainName Element $assoc
+        AssignerPopulation create Population $PopulationName\
+            Domain $DomainName Association $assoc
+    }
+
+    return
+}
+----
+<1> We need to know the identifying class and insist it is define by this
+point.
+
+=== Populating An Assigner Instance
+
+The `instance` command (in the context of an assigner) is used to specify
+the initial instance of the identifying class assocated with the assigner
+instance.
+
+*****
+`instance` _name_ _script_
+
+`name`::
+    The name of the assigner instance.
+`idinstance`::
+    The name of the identifying instance associated with the assigner.
+    The _idinstance_ must be an instance defined for the identifying
+    class associated with the multiple assigner.
+
+The `instance` command is used to define initial instances for an assigner.
+*****
+
+[float]
+==== Implementation
+
+[source,tcl]
+----
+<<assigner instance commands>>=
+proc instance {name idinstance} {
+
+    upvar #0 [namespace parent]::PopulationName PopulationName
+    upvar #0 [namespace parent]::DomainName DomainName
+    variable AssocName
+    variable IdClass
+
+    MultipleAssignerInstance create\
+        Population $PopulationName\
+        Domain $DomainName\
+        Association $AssocName\
+        Instance $name\
+        Number [GenNumber $DomainName MultipleAssignerInstance\
+            [list $PopulationName $DomainName $AssocName]]\
+        IdClass $IdClass\
+        IdInstance $idinstance
+
+    return
+}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test populate-3.0 {
+    Populate a multiple assigner
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain foo {
+            class clerk {
+                reference R1
+                reference R2
+            }
+            class client {
+                reference R1
+            }
+            association R1 clerk 0..1--0..1 client {
+                identifyby department
+                statemodel {
+                    defaulttrans IG
+
+                    state waitingForClerk {} {
+                    }
+                    transition waitingForClerk - clerkReady -> waitingForClient
+
+                    state waitingForClient {} {
+                    }
+                    transition waitingForClient - clientReady -> assigningClerk
+
+                    state assigningClerk {} {
+                    }
+                    transition assigningClerk - clerkAssigned -> waitingForClerk
+                }
+            }
+            class department {
+                reference R2
+            }
+            association R2 department 1..*--1 clerk
+        }
+
+        population p1 foo {
+            class clerk {
+                instance fred R2 shoes
+                instance alice R2 mens
+                instance john R2 housewares
+            }
+            class department {
+                instance shoes R2 fred
+                instance mens R2 alice
+                instance housewares R2 john
+            }
+            assigner R1 {
+                instance shoeclerks shoes
+                instance mensclerks mens
+                instance housewaresclerks housewares
+            }
+        }
+    }
+    log::debug [formatMiccaClass AssignerPopulation]
+    log::debug [formatMiccaClass MultipleAssignerInstance]
+    log::debug [formatMiccaClass ClassInstance]
+    testConditions\
+        {[refMultiplicity [AssignerPopulation findAll]] == 1}\
+        {[refMultiplicity [MultipleAssignerInstance findAll]] == 3}\
+} -result {1}
+----
+
+== Handling Configuration Errors
+
+One of the design elements of the configuration DSL is the use of
+`rosea` based platform model to hold the configuration information.
+This design approach allows us to encode the rules for what is a valid
+domain configuration into the constraints.
+Any attempt to define domain elements that violate those rules
+will be caught at the end of the relvar transaction that end
+the `configure` command.
+
+The problem with this approach is that the error messages the are
+returned refer to the relvars of the platform model not those of
+the domain we were attempting to define.
+
+We will mitigate this problem by capturing the result returned by
+TclRAL and turning it into error messages that are more meaningful
+to the task of configuring a domain.
+Unfortunately,
+the messages produced by TclRAL are intended to be human readable,
+so we will have to parse them into a form that is easier to deal
+with programmatically.
+Fortunately, the messages are very regular in structure so
+the parsing code need not be very sophisticated.
+
+Our strategy is to extract only the essential information from the
+error message and then map the information onto a more meaningful error
+message.
+Part of what we want to include in the error message is the values
+from the tuples failing the constraint.
+These values contain information the user entered rather than the
+abstractions of the meta-model.
+
+The essential information mapping is shown below.
+Naturally enough, we hold it in a relvar.
+
+[source,tcl]
+----
+<<config data>>=
+relvar create Config_DataError {
+    Relationship        string
+    RefClass            string
+    RefType             string
+    Format              string
+} {Relationship RefClass RefType}
+----
+
+The *Relationship* attribute is the name of the relationship in the
+platform model that failed the constraint check.
+The *RefClass* attribute is the platform model class that has the tuples
+that failed the constraint check.
+The *RefType* attribute defines the way in which the constraint failed.
+The *Format* attribute is a string that contains the text of the
+error message that we want to display.
+The text in the *Format* attribute may also contain variable references
+to attributes in the tuple of *RefClass* that failed.
+The variable references in the *Format* will be substituted
+with the values from the failing tuples in order to give specifics of
+the error back to the user.
+
+[float]
+===== Implementation
+
+The design of the `HandleConfigError` procedure is shown below.
+It is a nested iteration over the lines of the error result, pulling
+off the constraint violation details and then iterating over the
+tuples that were found in the violation.
+
+(((rosea,Config,HandleConfigError)))
+[source,tcl]
+----
+<<config commands>>=
+proc HandleConfigError {result} {
+    set lines [split [string trimright $result] \n]
+    set nlines [llength $lines]
+    set lineno 0
+    upvar #0 ::micca::@Config@::errcount errcount
+    while {$lineno < $nlines} {
+        <<HandleConfigError: examine one failure>>
+    }
+
+    return
+}
+----
+
+The information in the TclRAL error message is simple enough
+and well structured enough that a regular expression can be used
+to match and extract the interesting parts.
+
+[source,tcl]
+----
+<<HandleConfigError: examine one failure>>=
+set line [lindex $lines $lineno]
+incr lineno
+if {[regexp {^for[^:]+([^(]+)\(.+\), in relvar (.+)$} $line\
+        match rnum refclass]} {
+    set rnum [namespace tail $rnum]
+    set refclass [namespace tail $refclass]
+
+    # Now iterate over the "tuple" lines that follow the constraint message.
+    while {$lineno < $nlines} {
+        set tupline [lindex $lines $lineno]
+        if {[regexp {^tuple {(.+)} (.+)$} $tupline match tuple phrase]} {
+            incr lineno
+            incr errcount
+            <<HandleConfigError: examine one tuple>>
+            <<HandleConfigError: format error message>>
+        } else {
+            break
+        }
+    }
+} elseif {[regexp {procedural contraint, "([^"]+)", failed} $line match\
+        constraint]} {
+    if {[namespace tail $constraint] eq "R74C"} {
+        log::error "argument signature mismatch between states and events"
+        incr errcount
+    } else {
+        log::error $result
+        incr errcount
+    }
+} else {
+    log::error $result
+    incr errcount
+}
+----
+
+We match the phrase in the tuple message to create an enumeration of
+the types of constraint violations.
+These are just a bit simpler to handle and look up.
+
+[source,tcl]
+----
+<<HandleConfigError: examine one tuple>>=
+if {[string match {is not referenced*} $phrase]} {
+    set reftype notrefed
+} elseif {[string match {references no*} $phrase]} {
+    set reftype refnone
+} elseif {[string match {*to by multiple*} $phrase]} {
+    set reftype multrefed
+} else {
+    log::error "unknown constraint phrasing, \"$phrase\""
+    continue
+}
+----
+
+Finally, we look up the format information and generate an error message.
+Using the `dict with` command allows us to take the tuple value from the
+error message, treat it like a dictionary and get the values into
+Tcl variable.
+The `subst` command then will perform the variable substitutions in the
+format string.
+
+[source,tcl]
+----
+<<HandleConfigError: format error message>>=
+set cde [relvar restrictone Config_DataError Relationship $rnum RefClass\
+        $refclass RefType $reftype]
+if {[relation isnotempty $cde]} {
+    dict with tuple {
+        log::error [subst -nocommands [relation extract $cde Format]]
+    }
+} else {
+    log::error "$line\n$tupline"
+}
+----
+
+We now need to enumerate all the meta-model constraints that can be violated
+and supply messages that provide less abstract and more useful user error
+messages.
+Because of the way the configuration data is stored into the meta-model
+relvars,
+not all violations are even possible.
+
+[source,tcl]
+----
+<<config data>>=
+relvar insert Config_DataError {
+    Relationship        R20
+    RefClass            Class
+    RefType             notrefed
+    Format              {in domain, \"$Domain\", class, \"$Name\",\
+                        has no class components}
+} {
+    Relationship        R86
+    RefClass            DeferredEvent
+    RefType             notrefed
+    Format              {in domain, \"$Domain\", class, \"$Model\",\
+                        defines event, \"$Event\" as polymorphic, yet\
+                        $Model is not a superclass}
 }
 ----
 
