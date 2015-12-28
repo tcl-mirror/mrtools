@@ -4275,9 +4275,11 @@ NewState \{R72}::
     The name of the state to which state transition arrives.
 [horizontal]
     Data Type::: Refers to State.Name
-ASigID \{R74}::
+ASigID \{R74,C}::
     The identifier of the argument signature that will govern the
     transfer of values from the event arguments to the activity parameters.
+    The value of `ASigID` is constrained by the constraints placed on
+    `R74`.
 [horizontal]
     Data Type::: Refers to Argument Signature.SigID
 
@@ -4298,29 +4300,6 @@ class StateTransition {
         -link Event
     reference R72 State -link Domain -link Model -link {NewState Name}
     reference R74 ArgumentSignature -link Domain -link ASigID
-}
-----
-
-[source,tcl]
-----
-<<micca constraints>>=
-ral relvar procedural ::micca::R74C ::micca::StateTransition {
-    set viaState [ral relation semijoin\
-        $::micca::StateTransition $::micca::State\
-            -using {Domain Domain Model Model NewState Name}\
-        $::micca::ParameterSignature $::micca::ArgumentSignature]
-    # puts [ral relformat $viaState viaState]
-    set viaR74 [ral relation semijoin\
-        $::micca::StateTransition $::micca::ArgumentSignature]
-    # puts [ral relformat $viaR74 viaR74]
-    set viaEvent [ral relation semijoin\
-        $::micca::StateTransition $::micca::TransitionPlace\
-        $::micca::TransitioningEvent $::micca::Event\
-        $::micca::ParameterSignature $::micca::ArgumentSignature]
-    # puts [ral relformat $viaEvent viaEvent]
-
-    return [expr {[ral relation is $viaState == $viaR74] &&\
-                  [ral relation is $viaEvent == $viaR74]}]
 }
 ----
 
@@ -4459,6 +4438,114 @@ to different states.
 ----
 <<micca configuration>>=
 association R74 StateTransition 0..*--0..1 ArgumentSignature
+----
+
+*R74* is _not_ an independent relationship.
+It is constrained by the requirement that the Argument Signature associated
+with both the new state of a transition and the event that causes
+a transition must be the same.
+We insist that:
+
+* R74 = R72 + R78 + R76
+* R74 = R71 + R70 + R80 + R69 + R76
+
+In other words,
+both the Argument Signatures of the New State of a State Transition and
+that of the Event that causes the transiton must be the same.
+To enforce that constraint,
+we write a TclRAL procedural constraint on the State Transition
+class.
+
+Matching argument signatures for a state transition is one of the more
+complicated aspects of the platform model.
+We define the procedural constraint below that will insure that the
+two constaints are enforced.
+We must also print any error messages as part of the procedural constraint,
+because after the constraint fails, the configuration classes (relvars)
+will have been rolled back to their previous values.
+
+Procedural constraints are not directly supported by `rosea`,
+so we have to fall back to TclRAL commands to implement it.
+The strategy is to compute the argument signature directly across *R74*
+and then compare that result with those obtained from the
+relationship composition equations above.
+If there is a mismatch,
+then we determine which transitions are causing the problem.
+
+[source,tcl]
+----
+<<micca constraints>>=
+ral relvar procedural ::micca::R74C ::micca::StateTransition {
+    set found 0
+    set viaR74 [ral relation semijoin\
+        $::micca::StateTransition $::micca::ArgumentSignature]
+    set viaState [ral relation semijoin\
+        $::micca::StateTransition $::micca::State\
+            -using {Domain Domain Model Model NewState Name}\
+        $::micca::ParameterSignature $::micca::ArgumentSignature]
+    if {[ral relation is $viaState != $viaR74]} {
+        incr found
+        # puts [ral relformat $viaR74 viaR74]
+        # puts [ral relformat $viaState viaState]
+
+        set ssigs [ralutil::pipe {
+            ral relation semijoin $::micca::StateTransition $::micca::State\
+                -using {Domain Domain Model Model NewState Name} |
+            ral relation join ~ $::micca::ParameterSignature |
+            ral relation project ~ Domain Model Name ASigID |
+            ral relation rename ~ ASigID StateASigID |
+            relation join $::micca::StateTransition ~\
+                -using {Domain Domain Model Model NewState Name} |
+            relation restrict ~ stup {
+                [tuple extract $stup ASigID] ne [tuple extract $stup StateASigID]
+            }
+        }]
+        # puts [ral relformat $ssigs ssigs]
+        ral relation foreach ssig $ssigs {
+            relation assign $ssig {Domain domain} {Model model} {Event event}\
+                {NewState newstate}
+            log::error "in domain, \"$domain\", class or assigner, \"$model\",\
+                event, \"$event\", causes a transition to state, \"$newstate\",\
+                but the state and event argument signatures do not match"
+            incr ::micca::@Config@::errcount
+        }
+    }
+
+    set viaEvent [ral relation semijoin\
+        $::micca::StateTransition $::micca::TransitionPlace\
+        $::micca::TransitioningEvent $::micca::Event\
+        $::micca::ParameterSignature $::micca::ArgumentSignature]
+    if {[ral relation is $viaEvent != $viaR74]} {
+        incr found
+        # puts [ral relformat $viaR74 viaR74]
+        # puts [ral relformat $viaEvent viaEvent]
+
+        set esigs [ralutil::pipe {
+            ral relation semijoin $::micca::StateTransition\
+                $::micca::TransitionPlace $::micca::TransitioningEvent\
+                $::micca::Event |
+            ral relation join ~ $::micca::ParameterSignature |
+            ral relation project ~ Domain Model Event ASigID |
+            ral relation rename ~ ASigID EventASigID |
+            relation join $::micca::StateTransition ~\
+                -using {Domain Domain Model Model Event Event} |
+            relation restrict ~ etup {
+                [tuple extract $etup ASigID] ne [tuple extract $etup EventASigID]
+            }
+        }]
+        # puts [ral relformat $esigs esigs]
+        ral relation foreach esig $esigs {
+            relation assign $esig {Domain domain} {Model model} {Event event}\
+                {NewState newstate}
+            log::error "in domain, \"$domain\", class or assigner, \"$model\",\
+                event, \"$event\", causes a transition to state, \"$newstate\",\
+                but the event and state argument signatures do not match"
+            incr ::micca::@Config@::errcount
+        }
+    }
+
+    return [expr {$found == 0}]
+}
 ----
 
 === Parameter Signature

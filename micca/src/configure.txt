@@ -279,7 +279,6 @@ variable evalLambda {{body} {
             try {
                 eval $command
             } on error {result} {
-                puts $::errorInfo
                 log::error "line $configlineno: \"$result\""
                 incr errcount
             }
@@ -1921,7 +1920,11 @@ that was created by the invocations of the `reference` command.
 ----
 <<domain: bind relationship references>>=
 upvar #0 ::micca::@Config@::errcount errcount
-relation foreach ref [relvar set Class_Reference] {
+set class_references [pipe {
+    relvar set Class_Reference |
+    relation restrict ~ crtup {[tuple extract $crtup Domain] eq $DomainName}
+}]
+relation foreach ref $class_references {
     <<domain: link one reference>>
 }
 ----
@@ -1964,9 +1967,8 @@ does not even participate in the relationship.
 if {[isNotEmptyRef $crref]} {
     <<domain: resolve class role>>
 } else {
-    log::error "in domain, \"$refDomain\", class, \"$refClass\",\
+    error "in domain, \"$refDomain\", class, \"$refClass\",\
         does not participate in relationship, \"$refRelationship\""
-    incr errcount
 }
 ----
 
@@ -1981,10 +1983,9 @@ no way to distinguish them.
 if {[isRefSingular $crref]} {
     <<domain: resolve single class role>>
 } else {
-    log::error "in domain, \"$refDomain\", relationship, \"$Relationship\",\
+    error "in domain, \"$refDomain\", relationship, \"$Relationship\",\
         is reflexive for\ class, \"$Class\", and no \"-path\"\
         option was specified"
-    incr errcount
 }
 ----
 
@@ -4496,7 +4497,11 @@ test state-1.0 {
     log::debug [formatMiccaClass Parameter]
     log::debug [formatMiccaClass ArgumentSignature]
     log::debug [formatMiccaClass Argument]
-} -result {}
+    testConditions\
+        {[refMultiplicity [State findAll]] == 3}\
+        {[refMultiplicity [Event findAll]] == 2}\
+        {[refMultiplicity [ParameterSignature findAll]] == 5}
+} -result {1}
 ----
 
 [source,tcl]
@@ -4516,9 +4521,19 @@ test state-2.0 {
                 statemodel {
                     event e1 a float b int
 
+                    transition s1 - e1 -> s1
+
                     state s1 {a int b float} {
                     }
-                    transition s1 - e1 -> s1
+
+                    state s2 {a int b float} {
+                    }
+
+                    event e2 f int g float
+                    transition s1 - e2 -> s2
+
+                    transition s2 - e3 -> s1
+                    event e3 h char i unsigned
                 }
             }
         }
@@ -4530,7 +4545,7 @@ test state-2.0 {
     log::debug [formatMiccaClass Parameter]
     log::debug [formatMiccaClass ArgumentSignature]
     log::debug [formatMiccaClass Argument]
-} -result {encountered 1 configuration script errors} -returnCodes error
+} -result {encountered 2 configuration script errors} -returnCodes error
 ----
 
 === State Parameters
@@ -5703,8 +5718,8 @@ The default value of a reference is the _nil_ reference,
 which refers to no instance.
 It is an error to specify the _nil_ value for a reference representing
 an unconditional side of a relationship.
-If an attribute value need to be set to "-", then it must be escaped
-and written as two dashes, "--".
+If an attribute value needs to be set to "-", then it must be escaped
+and written as, "\-".
 
 === Setting Instance Values
 
@@ -5715,6 +5730,9 @@ It is a convenient way to specify a small number of class instances.
 *****
 `instance` _name_ _comp1 value1 comp2 value2 ..._
 
+`name`::
+    The name of the instance. Instance names must be unique within a
+    class.
 `compN valueN`::
     The remaining arguments are in the form of component name / component
     value pairs. All components of a class must be present except for
@@ -5728,6 +5746,17 @@ corresponding _valueN_ value.
 [float]
 ==== Implementation
 
+We want the `instance` command to set the values for every class component
+that can be set, _i.e._ we don't want any underdefined instances.
+To do that,
+we will determine if the component names provided are sufficient.
+If they are, then we can create the Class Instance and the set
+of Class Component Value instances.
+The latter fall into two types,
+those provided as arguments and those which are missing from the arguments but
+for which a default value can be deduced.
+
+
 [source,tcl]
 ----
 <<class instance commands>>=
@@ -5740,6 +5769,8 @@ proc instance {name args} {
     upvar #0 [namespace parent]::DomainName DomainName
     variable ClassName
 
+    <<instance: determine correct components>>
+
     set insttuple [list\
         Population $PopulationName\
         Domain $DomainName\
@@ -5749,13 +5780,158 @@ proc instance {name args} {
     ClassInstance create {*}$insttuple\
         Number [GenNumber $DomainName ClassInstance\
             [list $PopulationName $DomainName $ClassName]]
-    dict for {compname value} $args {
-        set value [ResolveInitialValue $DomainName $ClassName $name $value]
-        ClassComponentValue create {*}$insttuple\
-            Component $compname Value $value
-    }
+
+    <<instance: set values from arguments>>
+
+    <<instance: set remaining defaulted values>>
 
     return
+}
+----
+
+To determine if we have the correct components as arguments,
+we need to find those components that must be set,
+_i.e._ they have no reasonable default.
+That set component names must be a subset of those provided as arguments.
+
+[source,tcl]
+----
+<<instance: determine correct components>>=
+set compnames [FindComponentNames $DomainName $ClassName]
+set argcomps [dict keys $args]
+set compdiff [struct::set difference $compnames $argcomps]
+if {![struct::set empty $compdiff]} {
+    error "for domain, \"$DomainName\",\
+        population, \"$PopulationName\", class, \"$ClassName\",\
+        instance, \"$name\", values for class components,\
+        \"[join $compdiff {, }]\", are not provided\
+        and have no default values"
+    return
+}
+----
+
+All class components must be set to a value _except_ attributes that
+have a default value, association references that can be set to _nil_
+and link containers which are not set by the user.
+
+[source,tcl]
+----
+<<helper commands>>=
+proc FindComponentNames {domain class} {
+    set assocrefs [pipe {
+        AssociationReference findWhere {$Domain eq $domain && $Class eq $class} |
+        findRelated ~ R23 R21
+    }]
+    set defcomps [pipe {
+        DefaultValue findWhere {$Domain eq $domain && $Class eq $class} |
+        findRelated ~ R22 R21
+    }]
+    set lcont [pipe {
+        LinkContainer findWhere {$Domain eq $domain && $Class eq $class} |
+        findRelated ~ R21
+    }]
+    set compnames [ClassComponent findWhere\
+        {$Domain eq $domain && $Class eq $class}]
+
+    set settable [pipe {
+        refMinus $compnames $assocrefs |
+        refMinus ~ $defcomps |
+        refMinus ~ $lcont |
+        deRef ~ |
+        relation project ~ Name |
+        relation list ~ Name
+    }]
+}
+----
+
+Create a Class Component Value instance for all the provided component
+name / component values provided as arguments to the `instance` command.
+
+[source,tcl]
+----
+<<instance: set values from arguments>>=
+dict for {compname value} $args {
+    set value [ResolveInitialValue $DomainName $ClassName $compname $value]
+    ClassComponentValue create {*}$insttuple\
+        Component $compname Value $value
+}
+
+----
+
+The class components that remain to be set to default values are
+those class components that are *not* link containers (these are always set
+as part of setting a linked reference) and have not already been set
+from the provided arguments.
+
+[source,tcl]
+----
+<<instance: set remaining defaulted values>>=
+set defaultcomps [FindRemainingComponents $DomainName $ClassName $argcomps]
+foreach compname $defaultcomps {
+    set value [ResolveInitialValue $DomainName $ClassName $compname -]
+    ClassComponentValue create {*}$insttuple\
+        Component $compname Value $value
+}
+----
+
+[source,tcl]
+----
+<<helper commands>>=
+proc FindRemainingComponents {domain class except} {
+    set lcont [pipe {
+        LinkContainer findWhere {$Domain eq $domain && $Class eq $class} |
+        findRelated ~ R21
+    }]
+    set remcomps [ClassComponent findWhere {$Domain eq $domain &&\
+        $Class eq $class && $Name ni $except}]
+    return [pipe {
+        refMinus $remcomps $lcont |
+        deRef ~ |
+        relation list ~ Name
+    }]
+}
+----
+
+==== Resolving Initial Values
+
+Because we introduced the "-" syntax for specifying default values,
+we need to look up any defaults at instance population time.
+This procedure does the work of insuring that the component exists
+and if the default value was specified, makes sure such a default was defined
+for the attribute or is the _nil_ reference value.
+
+[source,tcl]
+----
+<<helper commands>>=
+proc ResolveInitialValue {domain class component value} {
+    if {$value eq "-"} {
+        set compref [ClassComponent findById\
+            Domain $domain\
+            Class $class\
+            Name $component]
+        if {[isNotEmptyRef $compref]} {
+            # Check for default attribute value
+            set attrref [findRelated $compref {~R21 Attribute}]
+            if {[isNotEmptyRef $attrref]} {
+                set defref [findRelated $attrref ~R22]
+                if {[isNotEmptyRef $defref]} {
+                    return [readAttribute $defref Value]
+                }
+                error "attribute $component does not have a default value"
+            }
+            # Check for an association reference we can set to nil
+            set refref [findRelated $compref {~R21 Reference}\
+                    {~R23 AssociationReference}]
+            if {[isNotEmptyRef $refref]} {
+                return @nil@
+            }
+            error "component, \"$component\", cannot be set to a default value"
+        }
+    } else {
+        set value [subst -nocommands -novariables $value]
+    }
+
+    return $value
 }
 ----
 
@@ -5766,7 +5942,7 @@ proc instance {name args} {
 ----
 <<config command tests>>=
 test populate-1.0 {
-    Population a domain
+    population instances
 } -setup {
 } -cleanup {
     cleanupDomain
@@ -5803,6 +5979,89 @@ test populate-1.0 {
         {[refMultiplicity [ClassInstance findAll]] == 3}\
         {[refMultiplicity [ClassComponentValue findAll]] == 6}
 } -result {1}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test populate-1.1 {
+    population instances using default values
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain foo {
+            class c1 {
+                attribute c1_id int
+                attribute color int -default 5
+                reference R1
+            }
+            class c2 {
+                attribute c2_id int
+                reference R1
+            }
+            association R1 c1 1..*--0..1 c2
+        }
+
+        population p1 foo {
+            class c1 {
+                # color attribute is defaulted
+                instance chuck1 c1_id 5 R1 fred1
+                instance chuck2 c1_id 7 ; # leave off R1 ==> set to nil
+            }
+            class c2 {
+                constant
+                instance fred1 c2_id 20 R1 {chuck1 chuck2}
+            }
+        }
+    }
+    log::debug [formatMiccaClass ClassPopulation]
+    log::debug [formatMiccaClass ClassInstance]
+    log::debug [formatMiccaClass ClassComponentValue]
+    testConditions\
+        {[refMultiplicity [ClassPopulation findAll]] == 2}\
+        {[refMultiplicity [ClassInstance findAll]] == 3}\
+        {[refMultiplicity [ClassComponentValue findAll]] == 8}
+} -result {1}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test populate-1.2 {
+    population fails for under specifying components
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain foo {
+            class c1 {
+                attribute c1_id int
+                attribute color int
+                reference R1
+            }
+            class c2 {
+                attribute c2_id int
+                reference R1
+            }
+            association R1 c1 1..*--0..1 c2
+        }
+
+        population p1 foo {
+            class c1 {
+                instance chuck1 c1_id 5 R1 fred1 ; # missing color
+                instance chuck2 c1_id 7 color 10
+                instance chuck3 R1 fred1 ; # missing c1_id and color
+            }
+            class c2 {
+                constant
+                instance fred1 c2_id 20 R1 {chuck1 chuck2}
+            }
+        }
+    }
+} -result {encountered 2 configuration script errors} -returnCodes error
 ----
 
 === Tables of Instance Values
@@ -5844,6 +6103,11 @@ than the `instance` command and saves repeating class component names.
 [float]
 ==== Implementation
 
+Our implementation of the `table` command follows from that of
+the `instance` command.
+The difference is that there is another iteration that allows multiple
+instances to be created.
+
 [source,tcl]
 ----
 <<class instance commands>>=
@@ -5856,6 +6120,8 @@ proc table {heading args} {
     upvar #0 [namespace parent]::PopulationName PopulationName
     variable ClassName
 
+    <<table: determine correct components>>
+
     set insttuple [list\
         Population $PopulationName\
         Domain $DomainName\
@@ -5863,22 +6129,72 @@ proc table {heading args} {
     ]
 
     dict for {instname compvalues} $args {
-        dict set insttuple Instance $instname
-        ClassInstance create {*}$insttuple\
-            Number [GenNumber $DomainName ClassInstance\
-                [list $PopulationName $DomainName $ClassName]]
-        if {[llength $heading] != [llength $compvalues]} {
-            error "number of component values does not match heading"
+        if {[llength $heading] != [llength $compvalues]} {# <1>
+            error "number of component values does not match heading:\
+                got [llength $compvalues], expected [llength $heading]"
         }
-        foreach compname $heading compvalue $compvalues {
-            set compvalue [ResolveInitialValue $DomainName $ClassName $compname\
-                    $compvalue]
-            ClassComponentValue create {*}$insttuple\
-                Component $compname Value $compvalue
-        }
+        dict set insttuple Instance $instname ; # <2>
+
+        <<table: set values from arguments>>
+
+        <<table: set remaining defaulted values>>
     }
 
     return
+}
+----
+<1> The number values associated with each instance have to match the
+heading.
+<2> Each time through the loop, set up a new instance name.
+
+The `heading` argument must have all the component names that
+cannot be defaulted in some way.
+
+[source,tcl]
+----
+<<table: determine correct components>>=
+set compnames [FindComponentNames $DomainName $ClassName]
+set compdiff [struct::set difference $compnames $heading]
+if {![struct::set empty $compdiff]} {
+    error "for domain, \"$DomainName\",\
+        population, \"$PopulationName\", class, \"$ClassName\",\
+        instance, \"$name\", values for class components,\
+        \"[join $compdiff {, }]\", are not provided\
+        and have no default values"
+    return
+}
+----
+
+We start by creating the Class Instance and setting up
+Class Component Values that match the arguments.
+
+[source,tcl]
+----
+<<table: set values from arguments>>=
+ClassInstance create {*}$insttuple\
+    Number [GenNumber $DomainName ClassInstance\
+        [list $PopulationName $DomainName $ClassName]]
+foreach compname $heading compvalue $compvalues {
+    set compvalue [ResolveInitialValue $DomainName $ClassName $compname\
+            $compvalue]
+    ClassComponentValue create {*}$insttuple\
+        Component $compname Value $compvalue
+}
+----
+
+Finally, Class Component Value instances are created for any missing components
+that can have a default value.
+
+[source,tcl]
+----
+<<table: set remaining defaulted values>>=
+set defaultcomps [FindRemainingComponents $DomainName $ClassName\
+        $heading]
+foreach compname $defaultcomps {
+    set compvalue [ResolveInitialValue $DomainName $ClassName\
+            $compname -]
+    ClassComponentValue create {*}$insttuple\
+        Component $compname Value $compvalue
 }
 ----
 
@@ -5928,45 +6244,52 @@ test populate-2.0 {
 } -result {1}
 ----
 
-==== Resolving Initial Values
-
-Because we introduced the "-" syntax for specifying default values,
-we need to look up any defaults at instance population time.
-This procedure does the work of insuring that the component exists
-and if the default value was specified, makes sure such a default was defined
-for the attribute or is the _nil_ reference value.
-
 [source,tcl]
 ----
-<<helper commands>>=
-proc ResolveInitialValue {domain class component value} {
-    if {$value eq "-"} {
-        set compref [ClassComponent findById\
-            Domain $domain\
-            Class $class\
-            Name $component]
-        if {[isNotEmptyRef $compref]} {
-            set attrref [findRelated $compref {~R21 Attribute}]
-            if {[isNotEmptyRef $attrref]} {
-                set defref [findRelated $attrref ~R22]
-                if {[isNotEmptyRef $defref]} {
-                    return [readAttribute $defref Value]
-                } else {
-                    error "attribute $component does not have a default value"
-                }
+<<config command tests>>=
+test populate-2.1 {
+    Population using tables and default values
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain foo {
+            class c1 {
+                attribute c1_id int
+                attribute color int -default 42
+                reference R1
             }
-            set refref [findRelated $compref {~R21 Reference}]
-            if {[isNotEmpty $refref]} {
-                return @nil
+            class c2 {
+                attribute c2_id int
+                reference R1
             }
-            error "component, \"$component\", cannot be set to a default value"
+            association R1 c1 1..*--0..1 c2
         }
-    } elseif {$value eq "--"} {
-        set value -
-    }
 
-    return $value
-}
+        population p1 foo {
+            class c1 {
+                allocate 10
+                table   {c1_id      R1}\
+                chuck1  {5          fred1}\
+                chuck2  {7          fred1}\
+                chuck3  {7          -}
+            }
+            class c2 {
+                constant
+                table       {c2_id      R1}\
+                fred1       {20         {chuck1 chuck2 chuck3}}
+            }
+        }
+    }
+    log::debug [formatMiccaClass ClassPopulation]
+    log::debug [formatMiccaClass ClassInstance]
+    log::debug [formatMiccaClass ClassComponentValue]
+    testConditions\
+        {[refMultiplicity [ClassPopulation findAll]] == 2}\
+        {[refMultiplicity [ClassInstance findAll]] == 4}\
+        {[refMultiplicity [ClassComponentValue findAll]] == 11}
+} -result {1}
 ----
 
 === Populating Multiple Assigners
@@ -6164,7 +6487,7 @@ test populate-3.0 {
 == Handling Configuration Errors
 
 One of the design elements of the configuration DSL is the use of
-`rosea` based platform model to hold the configuration information.
+the `micca` platform model to hold the configuration information.
 This design approach allows us to encode the rules for what is a valid
 domain configuration into the constraints.
 Any attempt to define domain elements that violate those rules
@@ -6172,7 +6495,7 @@ will be caught at the end of the relvar transaction that end
 the `configure` command.
 
 The problem with this approach is that the error messages the are
-returned refer to the relvars of the platform model not those of
+returned refer to the classes of the platform model not those of
 the domain we were attempting to define.
 
 We will mitigate this problem by capturing the result returned by
@@ -6273,10 +6596,11 @@ if {[regexp {^for[^:]+([^(]+)\(.+\), in relvar (.+)$} $line\
     }
 } elseif {[regexp {procedural contraint, "([^"]+)", failed} $line match\
         constraint]} {
-    if {[namespace tail $constraint] eq "R74C"} {
-        log::error "argument signature mismatch between states and events"
-        incr errcount
-    } else {
+    # There is only one procedural constraint, R74C.
+    # If an error is detected in the procedural constraint script,
+    # messages will be printed there.
+    # If anything other than R74C come along, we will just log it.
+    if {[namespace tail $constraint] ne "R74C"} {
         log::error $result
         incr errcount
     }
@@ -6349,6 +6673,29 @@ relvar insert Config_DataError {
     Format              {in domain, \"$Domain\", class, \"$Model\",\
                         defines event, \"$Event\" as polymorphic, yet\
                         $Model is not a superclass}
+} {
+    Relationship        R101
+    RefClass            ElementPopulation
+    RefType             refnone
+    Format              {in population, \"$Population\",\
+                         for domain, \"$Domain\", class or assigner,\
+                         \"$Element\", does not exist}
+} {
+    Relationship        R72
+    RefClass            StateTransition
+    RefType             refnone
+    Format              {in domain, \"$Domain\", class or assigner,\
+                         \"$Model\", for the transition,\
+                         \"$State - $Event -> $NewState\", state $NewState does\
+                         not exist}
+} {
+    Relationship        R70
+    RefClass            TransitionPlace
+    RefType             refnone
+    Format              {in domain, \"$Domain\", class or assigner,\
+                         \"$Model\", event, \"$Event\", causes a transition\
+                         out of state, \"$State\", but state $State does not\
+                         exist}
 }
 ----
 
