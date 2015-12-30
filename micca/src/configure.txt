@@ -1752,33 +1752,8 @@ reference pointers are stored to enable the navigation.
     allocated.
 
 `option value`::
-    Option / value pairs define the characteristics of the storage for
-    the reference.
+    Option / value pairs define additional characteristics of the reference.
     Valid options are:
-    `-type linked | vector | constant`:::
-        The `-type` option specifies the type of storage to be used for
-        the reference pointers.
-        This option only applies when the multiplicity of the relationship
-        is greater than one in the direction of traversal implied by the
-        reference.
-        Singular references are all stored the same, namely as a single
-        pointer.
-        The choices for the `-type` option allow for different space / speed
-        trade offs depending upon the dynamic nature of the instances
-        of the relationship.
-        The value of the `-type` option may be one of:
-        `linked`::::
-            Referenced instances are stored on a linked list.
-        `vector`::::
-            Referenced instances are stored in a vector.
-        `constant`::::
-            Referenced instances are stored in an array placed in read-only
-            memory.
-    `-capacity` _size_::
-        When `-type` is specified as `vector`, the `-capacity` option
-        defines the maxiumum number of reference pointers to be held in
-        the relationship storage. The _size_ must be specified as a
-        positive integer.
     `-path forward | backward`::
         When an association is reflexive, _i.e._ the source and target
         classes are the same class,
@@ -1827,8 +1802,6 @@ relvar create Class_Reference {
     Class               string
     Relationship        string
     Role                string
-    ReferenceType       string
-    Capacity            int
 } {Domain Class Relationship Role}
 ----
 
@@ -1848,21 +1821,10 @@ proc reference {relname args} {
     upvar #0 [namespace parent]::DomainName DomainName
     variable ClassName
 
-    set reftype {}
     set role {}
-    set capacity 0
 
     foreach {option value} $args {
         switch -exact -- $option {
-            -type {
-                if {$value ni {linked vector constant}} {
-                    tailcall DeclError BAD_REF_TYPE $value
-                }
-                set reftype $value
-            }
-            -capacity {
-                set capacity $value
-            }
             -path {
                 if {$value ni {forward backward}} {
                     tailcall DeclError BAD_PATH $value
@@ -1875,30 +1837,20 @@ proc reference {relname args} {
         }
     }
 
-    if {$reftype eq "vector" && $capacity <= 0} {
-        tailcall DeclError BAD_CAPACITY
-    }
-
     relvar insert ::micca::@Config@::Class_Reference [list\
         Domain              $DomainName\
         Class               $ClassName\
         Relationship        $relname\
         Role                $role\
-        ReferenceType       $reftype\
-        Capacity            $capacity\
     ]
 }
 ----
 
-(((error code,BAD_REF_TYPE)))
 (((error code,BAD_PATH)))
 [source,tcl]
 ----
 <<error code formats>>=
-BAD_REF_TYPE    {unknown reference type value, "%s": should be linked,\
-                array or constant}
 BAD_PATH        {unknown path value, "%s": should be forward or backward}
-BAD_CAPCITY     {vector references require a non-zero "-capacity" option}
 ----
 
 
@@ -1946,7 +1898,7 @@ That is accomplished as shown below
 ----
 <<domain: link one reference>>=
 relation assign $ref {Domain refDomain} {Class refClass}\
-    {Relationship refRelationship} {Role refRole} ReferenceType Capacity
+    {Relationship refRelationship} {Role refRole}
 if {$refRole ne {}} {
     set crref [ClassRole findById Domain $refDomain Class $refClass\
         Relationship $refRelationship Role $refRole]
@@ -2003,13 +1955,19 @@ The procedures return true if they successfully resolved the reference.
 [source,tcl]
 ----
 <<domain: resolve single class role>>=
-if {[ResolveParticipantReference $crref $ReferenceType $Capacity]} {
+if {[ResolveParticipantReference $crref]} {
     continue
 }
 if {[ResolveSuper $crref]} {
     continue
 }
 if {[ResolveSub $crref]} {
+    continue
+}
+# For associator references we have already created the necessary
+# class components when the association defined.
+set assocref [findRelated $crref {~R40 AssociatorClass}]
+if {[isNotEmptyRef $assocref]} {
     continue
 }
 log::warn "in domain, \"$refDomain\", class, \"$refClass\",\
@@ -2029,23 +1987,23 @@ in the platform model.
 [source,tcl]
 ----
 <<config commands>>=
-proc ResolveParticipantReference {crref reftype capacity} {
+proc ResolveParticipantReference {crref} {
     set apcref [findRelated $crref {~R40 AssociationParticipantClass}] ; # <1>
     if {[isEmptyRef $apcref]} {
         return false
     }
 
     # Now try each of the four cases stemming from R38
-    if {[ResolveSimpleReferring $apcref $reftype]} {
+    if {[ResolveSimpleReferring $apcref]} {
         return true
     }
-    if {[ResolveSimpleReferenced $apcref $reftype $capacity]} {
+    if {[ResolveSimpleReferenced $apcref]} {
         return true
     }
-    if {[ResolveSource $apcref $reftype $capacity]} {
+    if {[ResolveSource $apcref]} {
         return true
     }
-    if {[ResolveTarget $apcref $reftype $capacity]} {
+    if {[ResolveTarget $apcref]} {
         return true
     }
     return false
@@ -2061,26 +2019,16 @@ related instance.
 [source,tcl]
 ----
 <<config commands>>=
-proc ResolveSimpleReferring {apcref reftype} {
+proc ResolveSimpleReferring {apcref} {
     set srcref [findRelated $apcref {~R38 SimpleReferringClass}]
     if {[isEmptyRef $srcref]} {
         return false
     }
-
     assignAttribute $srcref
-    if {$reftype ne {}} {# <1>
-        log::warn "in domain, \"$Domain\", reference type, \"$reftype\",\
-            is ignored for the singular reference from \"$Class\"\
-            along \"$Relationship\""
-    }
-    SingularReference create Domain $Domain Class $Class Name $Relationship\
-            Role $Role
-    CreateDirectionalReference $Domain $Class $Relationship $Role
+    CreateDirectionalReference $Domain $Class $Relationship $Role singular
     return true
 }
 ----
-<1> In case a reference type was specified in the `reference` command
-for this direction of the association, we warn that it is being ignored.
 
 In the case of a reflexive association,
 there will be multiple instances of Direction Reference related to the
@@ -2093,9 +2041,9 @@ with the other direction of the reflexive association.
 [source,tcl]
 ----
 <<config commands>>=
-proc CreateDirectionalReference {domain class relationship role} {
+proc CreateDirectionalReference {domain class relationship role type} {
     set drref [DirectionalReference create Domain $domain Class $class\
-            Name $relationship Role $role]
+            Name $relationship Role $role ReferenceType $type]
     if {[isEmptyRef [findRelated $drref R25]]} {
         AssociationReference create Domain $domain Class $class\
             Name $relationship
@@ -2108,13 +2056,16 @@ proc CreateDirectionalReference {domain class relationship role} {
 
 For a Simple Referenced Class,
 it is possible to refer to multiple instances.
-This is where the choice of pointer storage comes into play.
+We will assume all multiple references are dynamic.
+Later during domain population,
+we can determine if the reference is static and if so, we will
+update the *ReferenceType* attribute
 
 (((micca,Helpers,ResolveSimpleReferenced)))
 [source,tcl]
 ----
 <<config commands>>=
-proc ResolveSimpleReferenced {apcref reftype capacity} {
+proc ResolveSimpleReferenced {apcref} {
     set srcref [findRelated $apcref {~R38 SimpleReferencedClass}]
     if {[isEmptyRef $srcref]} {
         return false
@@ -2123,7 +2074,7 @@ proc ResolveSimpleReferenced {apcref reftype capacity} {
     set targetref [findRelated $srcref R33 ~R32]
     assignAttribute $targetref Multiplicity {Class target}
 
-    CreateAssociationReferences $srcref $Multiplicity $target $reftype $capacity
+    CreateAssociationReferences $srcref $Multiplicity $target
 
     return true
 }
@@ -2139,54 +2090,13 @@ to a target class.
 [source,tcl]
 ----
 <<config commands>>=
-proc CreateAssociationReferences {srcref multiplicity target reftype capacity} {
+proc CreateAssociationReferences {srcref multiplicity target} {
     assignAttribute $srcref Domain Class Relationship Role
 
-    if {$multiplicity} {
-        if {$reftype eq {}} {
-            log::info "in domain, \"$Domain\", multiple reference by\
-                \"$Class\" along \"$Relationship\" defaults to \"linked\" type"
-        }
-        switch -exact -- $reftype {
-            vector {
-                VectorReference create Domain $Domain Class $Class\
-                    Name $Relationship Role $Role Capacity $capacity
-            }
-            constant {
-                ConstantReference create Domain $Domain Class $Class\
-                    Name $Relationship Role $Role
-            }
-            linked -
-            default {
-                LinkedReference create Domain $Domain Class $Class\
-                    Name $Relationship Role $Role ; # <1>
-                LinkContainer create Domain $Domain Class $target\
-                    Name ${Relationship}_${Role}_links
-                ClassComponent create Domain $Domain Class $target\
-                    Name ${Relationship}_${Role}_links
-            }
-        }
-    } else {
-        if {$reftype ne {}} {
-            log::warn "in domain, \"$Domain\", reference type, \"$reftype\",\
-                is ignored for the singular reference by \"$Class\"\
-                along \"$Relationship\""
-        }
-        SingularReference create Domain $Domain Class $Class\
-            Name $Relationship Role $Role
-    }
-
-    CreateDirectionalReference $Domain $Class $Relationship $Role
+    CreateDirectionalReference $Domain $Class $Relationship $Role\
+        [expr {$multiplicity ? "dynamic" : "singular"}]
 }
 ----
-<1> Creating a Linked Reference involves additional work.
-We must create the Class Component in the target class to hold the links.
-Linked list storage for association uses a doubly linked list to make
-insertion and deletion fast.
-We choose to allocate the memory for the links in the classes that
-reside in the lists.
-This makes the memory allocation easier and means that a given instance
-may be threaded onto as many lists as necessary for its relationships.
 
 For classes that serve a Source Class role,
 we encounter how to deal with class based associations.
@@ -2202,7 +2112,7 @@ to which the references will point.
 [source,tcl]
 ----
 <<config commands>>=
-proc ResolveSource {apcref reftype capacity} {
+proc ResolveSource {apcref} {
     set scref [findRelated $apcref {~R38 SourceClass}]
     if {[isEmptyRef $scref]} {
         return false
@@ -2211,7 +2121,7 @@ proc ResolveSource {apcref reftype capacity} {
     set multiplicity [readAttribute [findRelated $cbaref ~R35] Multiplicity]
     set assocclass [readAttribute [findRelated $cbaref ~R42] Class]
 
-    CreateAssociationReferences $scref $multiplicity $assocclass $reftype $capacity
+    CreateAssociationReferences $scref $multiplicity $assocclass
 
     return true
 }
@@ -2225,7 +2135,7 @@ to know the Associator Class since that is where the references point.
 [source,tcl]
 ----
 <<config commands>>=
-proc ResolveTarget {apcref reftype capacity} {
+proc ResolveTarget {apcref} {
     set tcref [findRelated $apcref {~R38 TargetClass}]
     if {[isEmptyRef $tcref]} {
         return false
@@ -2234,7 +2144,7 @@ proc ResolveTarget {apcref reftype capacity} {
     set multiplicity [readAttribute [findRelated $cbaref ~R34] Multiplicity]
     set assocclass [readAttribute [findRelated $cbaref ~R42] Class]
 
-    CreateAssociationReferences $tcref $multiplicity $assocclass $reftype $capacity
+    CreateAssociationReferences $tcref $multiplicity $assocclass
 
     return true
 }
@@ -2271,14 +2181,10 @@ test reference-1.0 {
         }
     }
     log::debug [formatMiccaClass AssociationReference]
-    log::debug [formatMiccaClass LinkedReference]
-    log::debug [formatMiccaClass LinkContainer]
-    log::debug [formatMiccaClass SingularReference]
+    log::debug [formatMiccaClass DirectionalReference]
     testConditions\
         {[refMultiplicity [AssociationReference findAll]] == 2}\
-        {[refMultiplicity [LinkedReference findAll]] == 1}\
-        {[refMultiplicity [LinkContainer findAll]] == 1}\
-        {[refMultiplicity [SingularReference findAll]] == 1}
+        {[refMultiplicity [DirectionalReference findAll]] == 2}
 } -result {1}
 ----
 
@@ -2305,10 +2211,10 @@ test reference-2.0 {
         }
     }
     log::debug [formatMiccaClass AssociationReference]
-    log::debug [formatMiccaClass SingularReference]
+    log::debug [formatMiccaClass DirectionalReference]
     testConditions\
         {[refMultiplicity [AssociationReference findAll]] == 1}\
-        {[refMultiplicity [SingularReference findAll]] == 2}
+        {[refMultiplicity [DirectionalReference findAll]] == 2}
 } -result {1}
 ----
 
@@ -2336,14 +2242,12 @@ test reference-2.1 {
         }
     }
     log::debug [formatMiccaClass AssociationReference]
+    log::debug [formatMiccaClass DirectionalReference]
     log::debug [formatMiccaClass AssociatorReference]
-    log::debug [formatMiccaClass LinkedReference]
-    log::debug [formatMiccaClass LinkContainer]
     testConditions\
         {[refMultiplicity [AssociationReference findAll]] == 1}\
         {[refMultiplicity [AssociatorReference findAll]] == 1}\
-        {[refMultiplicity [LinkedReference findAll]] == 2}\
-        {[refMultiplicity [LinkContainer findAll]] == 2}
+        {[refMultiplicity [DirectionalReference findAll]] == 2}
 } -result {1}
 ----
 
@@ -2351,7 +2255,7 @@ test reference-2.1 {
 ----
 <<config command tests>>=
 test reference-2.2 {
-    Define class with multiple reflexive association reference using vector
+    Define class with multiple reflexive association reference
 } -setup {
 } -cleanup {
     cleanupDomain
@@ -2363,53 +2267,17 @@ test reference-2.2 {
                 attribute a2 int -default 20
 
                 reference R1 -path forward
-                reference R1 -path backward -type vector -capacity 20
+                reference R1 -path backward
             }
 
             association R1 c1 1..*--1 c1
         }
     }
     log::debug [formatMiccaClass AssociationReference]
-    log::debug [formatMiccaClass SingularReference]
-    log::debug [formatMiccaClass VectorReference]
+    log::debug [formatMiccaClass DirectionalReference]
     testConditions\
         {[refMultiplicity [AssociationReference findAll]] == 1}\
-        {[refMultiplicity [SingularReference findAll]] == 1}\
-        {[refMultiplicity [VectorReference findAll]] == 1}
-} -result {1}
-----
-
-[source,tcl]
-----
-<<config command tests>>=
-test reference-2.3 {
-    Define class with multiple reflexive association reference using linked
-} -setup {
-} -cleanup {
-    cleanupDomain
-} -body {
-    micca configure {
-        domain foo {
-            class c1 {
-                attribute a1 char
-                attribute a2 int -default 20
-
-                reference R1 -path forward
-                reference R1 -path backward -type linked
-            }
-
-            association R1 c1 1..*--1 c1
-        }
-    }
-    log::debug [formatMiccaClass AssociationReference]
-    log::debug [formatMiccaClass SingularReference]
-    log::debug [formatMiccaClass LinkedReference]
-    log::debug [formatMiccaClass LinkContainer]
-    testConditions\
-        {[refMultiplicity [AssociationReference findAll]] == 1}\
-        {[refMultiplicity [SingularReference findAll]] == 1}\
-        {[refMultiplicity [LinkedReference findAll]] == 1}\
-        {[refMultiplicity [LinkContainer findAll]] == 1}
+        {[refMultiplicity [DirectionalReference findAll]] == 2}
 } -result {1}
 ----
 
@@ -2417,7 +2285,7 @@ test reference-2.3 {
 ----
 <<config command tests>>=
 test reference-3.0 {
-    Define class many to many association using links
+    Define class many to many association
 } -setup {
 } -cleanup {
     cleanupDomain
@@ -2442,54 +2310,13 @@ test reference-3.0 {
             association R1 -associator a c1 0..*--1..* c2
         }
     }
-    log::debug [formatMiccaClass AssociatorReference]
     log::debug [formatMiccaClass AssociationReference]
-    log::debug [formatMiccaClass LinkedReference]
-    log::debug [formatMiccaClass LinkContainer]
+    log::debug [formatMiccaClass DirectionalReference]
+    log::debug [formatMiccaClass AssociatorReference]
     testConditions\
         {[refMultiplicity [AssociatorReference findAll]] == 1}\
         {[refMultiplicity [AssociationReference findAll]] == 2}\
-        {[refMultiplicity [LinkedReference findAll]] == 2}\
-        {[refMultiplicity [LinkContainer findAll]] == 2}
-} -result {1}
-----
-
-[source,tcl]
-----
-<<config command tests>>=
-test reference-3.1 {
-    Define class many to many association using vectors
-} -setup {
-} -cleanup {
-    cleanupDomain
-} -body {
-    micca configure {
-        domain foo {
-            class c1 {
-                attribute a1 char
-                attribute a2 int -default 20
-
-                reference R1 -type vector -capacity 10
-            }
-            class c2 {
-                attribute a1 int
-                attribute b1 float
-
-                reference R1 -type vector -capacity 10
-            }
-            class a {
-            }
-
-            association R1 -associator a c1 0..*--1..* c2
-        }
-    }
-    log::debug [formatMiccaClass AssociatorReference]
-    log::debug [formatMiccaClass AssociationReference]
-    log::debug [formatMiccaClass VectorReference]
-    testConditions\
-        {[refMultiplicity [AssociatorReference findAll]] == 1}\
-        {[refMultiplicity [AssociationReference findAll]] == 2}\
-        {[refMultiplicity [VectorReference findAll]] == 2}
+        {[refMultiplicity [DirectionalReference findAll]] == 2}
 } -result {1}
 ----
 
@@ -5467,9 +5294,7 @@ namespace eval PopDef {
 
 The `population` command gives a collection of class component values a
 name.
-A domain population is open ended and multiple invocation of `population`
-with the same name are allowed and simply add values to the accumulated
-population.
+The complete domain population must be given by the invocation of `population`.
 
 *****
 `population` _name_ _domain_ _script_
@@ -5484,8 +5309,6 @@ population.
 
 The `population` command is used to define initial instance values for
 the classes and assigners in _domain_.
-This command may be invoked multiple times and the population is
-cumulative.
 *****
 
 [float]
@@ -5504,12 +5327,605 @@ proc population {name domain script} {
     set PopulationName $name
     set DomainName $domain
 
-    if {[isEmptyRef [Population findById Domain $DomainName Name $name]]} {
-        Population create Domain $DomainName Name $name
-    }
+    set popref [Population create Name $name Domain $DomainName]
 
     ConfigEvaluate [namespace current]::PopDef $script
+
+    <<population: check completeness>>
+    <<population: check static populations>>
+    <<population: check dynamic populations>>
+    <<population: update storage types>>
+    <<population: check reference values>>
+    <<population: check referential integrity>>
 }
+----
+
+==== Validating a Population
+
+Once a population has been gather by the `population` command,
+we perform some validation on the population to make sure it
+is correct and we will be able to proceed to code generations.
+We inspect several factors:
+
+* We insist that there be some population for every domain element
+that can have values.
+* All Static Class Populations must have at least one Class Instance.
+* All Dynamic Class Population with Allocation of 0 must have at least
+one Class Instance.
+* At the end of population, we know which classes are static and can
+then make the final decision about reference storage.
+* All initial instances have their references define so we can make sure
+there is no referential integrity problems with the initial instance
+population.
+
+==== Checking Completeness
+
+[source,tcl]
+----
+<<population: check completeness>>=
+upvar #0 ::micca::@Config@::errcount errcount
+set missing [pipe {
+    findRelated $popref {R101 ElementPopulation} |
+    findUnrelated ~ R101
+}]
+if {[isNotEmptyRef $missing]} {
+    set elements [pipe {
+        deRef $missing |
+        relation list ~ Name
+    }]
+    log::error "in population, \"$name\", for domain, \"$domain\",\
+        the following elements are missing any population values:\
+        [join $elements {, }]"
+    incr errcount
+}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test populate-4.0 {
+    Population missing elements
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain bar {
+            class c1 {
+                attribute c1_id int
+                attribute c1_color {char const*}
+            }
+            class c2 {
+                attribute c2_id int
+                attribute temp int -default 25
+            }
+        }
+
+        population p1 bar {
+            class c1 {
+                instance fred1 c1_id 20 c1_color {"blue"}
+            }
+        }
+    }
+} -result {encountered 1 configuration script errors} -returnCodes error
+----
+
+==== Checking Populations Declared Static
+
+[source,c]
+----
+<<population: check static populations>>=
+set noinsts [pipe {
+    StaticClassPopulation findWhere\
+            {$Population eq $name && $Domain eq $domain} |
+    findRelated ~ R109 |
+    deRef ~ |
+    ralutil::rvajoin ~ [deRef [ClassInstance findAll]] Instances |
+    relation restrictwith ~ {[relation isempty $Instances]}
+}]
+
+if {[relation isnotempty $noinsts]} {
+    log::error "in population, \"$name\", for domain, \"$domain\",\
+        the following classes have a static population but no defined\
+        instances: [join [relation list $noinsts Class] {, }]"
+    incr errcount
+}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test populate-4.1 {
+    static population with no instances
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain bar {
+            class c1 {
+                attribute c1_id int
+                attribute c1_color {char const*}
+            }
+            class c2 {
+                attribute c2_id int
+                attribute temp int -default 25
+            }
+        }
+
+        population p1 bar {
+            class c1 {
+                instance fred1 c1_id 20 c1_color {"blue"}
+            }
+            class c2 {
+                static
+            }
+        }
+    }
+} -result {encountered 1 configuration script errors} -returnCodes error
+----
+
+==== Checking Populations Declared Dynamic
+
+[source,c]
+----
+<<population: check dynamic populations>>=
+set noinsts [pipe {
+    DynamicClassPopulation findWhere\
+        {$Population eq $name && $Domain eq $domain && $Allocation == 0} |
+    findRelated ~ R109 |
+    deRef ~ |
+    ralutil::rvajoin ~ [deRef [ClassInstance findAll]] Instances |
+    relation restrictwith ~ {[relation isempty $Instances]}
+}]
+
+if {[relation isnotempty $noinsts]} {
+    log::error "in population, \"$name\", for domain, \"$domain\",\
+        the following classes have no defined instances and a zero allocation:\
+        [join [relation list $noinsts Class] {, }]"
+    incr errcount
+}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test populate-4.2 {
+    dynamic population with no instances and 0 allocation
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain bar {
+            class c1 {
+                attribute c1_id int
+                attribute c1_color {char const*}
+            }
+            class c2 {
+                attribute c2_id int
+                attribute temp int -default 25
+            }
+        }
+
+        population p1 bar {
+            class c1 {
+                instance fred1 c1_id 20 c1_color {"blue"}
+            }
+            class c2 {
+            }
+        }
+    }
+} -result {encountered 1 configuration script errors} -returnCodes error
+----
+
+==== Updating Direction Reference Types
+
+During the configuration process,
+all directional reference instances were assumed to be dynamic.
+Now that we have populated the domain,
+the dynamic characteristics of the class are known.
+If a population has been declared as static, then all of its associated
+Directional Reference instances that are of Reference Type, "dynamic",
+need to be updated to be, "static".
+
+[source,c]
+----
+<<population: update storage types>>=
+DirectionalReference update [pipe {
+    StaticClassPopulation findWhere\
+        {$Population eq $name && $Domain eq $domain} |
+    findRelated % R109 ~R102 R103 {~R21 Reference} {~R23 AssociationReference}\
+        ~R25 |
+    deRef % ReferenceType |
+    relation restrictwith % {$ReferenceType eq "dynamic"} |
+    relation update % drtup {1} {tuple update $drtup ReferenceType static}
+} {} |%]
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test populate-4.3 {
+    static population with directional reference
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain bar {
+            class c1 {
+                attribute c1_id int
+                attribute c1_color {char const*}
+                reference R1
+            }
+            class c2 {
+                attribute c2_id int
+                attribute temp int -default 25
+            }
+
+            association R1 c2 1..*--1 c1
+        }
+
+        population p1 bar {
+            class c1 {
+                static
+                instance fred1 c1_id 20 c1_color {"blue"} R1 alice1
+            }
+            class c2 {
+                instance alice1 c2_id 15
+            }
+        }
+    }
+    log::debug [formatMiccaClass DirectionalReference]
+    testConditions\
+        {[refMultiplicity [DirectionalReference findWhere\
+            {$ReferenceType eq "static"}]] == 1}
+} -result {1}
+----
+
+==== Checking Reference Values
+
+The values given to reference components for a population are
+simply strings that must refer to instances names of the proper
+class.
+We need to go though all the values for the various types of references
+and make sure they were specified correctly.
+
+[source,c]
+----
+<<population: check reference values>>=
+<<population: check superclass references>>
+<<population: check subclass references>>
+<<population: check associator references>>
+<<population: check association references>>
+----
+
+==== Checking Superclass Reference Values
+
+[source,c]
+----
+<<population: check superclass references>>=
+set supers [pipe {
+    ReferencedSuperclass findWhere {$Domain eq $domain} |
+    deRef ~ |
+    relation project ~ Domain Class Relationship |
+    relation rename ~ Class Superclass
+}]
+#puts [relformat $supers supers]
+
+set popinsts [pipe {
+    ClassInstance findWhere {$Population eq $name} |
+    deRef ~
+}]
+#puts [relformat $popinsts popinsts]
+
+set badrefs [pipe {
+    SuperclassReference findWhere {$Domain eq $domain} |
+    findRelatedWhere % {R23 R21 {~R103 ClassComponentValue}}\
+        {$Population eq $name} |
+    deRef % |
+    relation rename % Component Relationship |
+    relation join % $supers |
+    relation rename % Class Subclass Superclass Class Instance Subinstance\
+        Value Instance |
+    ralutil::rvajoin % $popinsts ValueMatch |
+    relation restrictwith % {[relation isempty $ValueMatch]}
+} {} |%]
+#puts [relformat $badrefs badsuperrefs]
+
+relation foreach badref $badrefs {
+    relation assign $badref
+    log::error "in population, \"$Population\", for domain, \"$Domain\",\
+        subclass instance, \"$Subclass.$Subinstance\", references\
+        superclass instance, \"$Class.$Instance\" across,\
+        \"$Relationship\", but $Instance does not exist"
+    incr errcount
+}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test populate-4.4 {
+    bad superclass reference
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain bar {
+            class super {
+                attribute s_id int
+            }
+            class sub1 {
+                attribute temp int -default 25
+                reference R1
+            }
+            class sub2 {
+                attribute color int -default 25
+                reference R1
+            }
+
+            generalization R1 super sub1 sub2
+        }
+
+        population p1 bar {
+            class super {
+                instance super1 s_id 20
+                instance super2 s_id 40
+            }
+            class sub1 {
+                instance fred1 R1 super1
+            }
+            class sub2 {
+                instance alice1 R1 super3
+            }
+        }
+    }
+} -result {encountered 1 configuration script errors} -returnCodes error
+----
+
+==== Checking Subclass Reference Values
+
+[source,c]
+----
+<<population: check subclass references>>=
+set subs [pipe {
+    ReferringSubclass findWhere {$Domain eq $domain} |
+    deRef ~ |
+    relation project ~ Domain Class Relationship
+}]
+# puts [relformat $subs subs]
+
+set subrefs [pipe {
+    SubclassReference findWhere {$Domain eq $domain} |
+    findRelatedWhere % {R23 R21 {~R103 ClassComponentValue}}\
+        {$Population eq $name} |
+    deRef % |
+    relation rename % Class Superclass Component Relationship\
+            Instance Superinstance |
+    relation extend % brtuple\
+        Class string {[lindex [tuple extract $brtuple Value] 0]}\
+        Instance string {[lindex [tuple extract $brtuple Value] 1]} |
+    relation eliminate % Value
+} {} |%]
+# puts [relformat $subrefs subrefs]
+
+set nonparts [relation semiminus $subs $subrefs]
+# puts [relformat $nonparts nonparts]
+
+relation foreach nonpart $nonparts {
+    relation assign $nonpart
+    log::error "in population, \"$Population\", for domain, \"$Domain\",\
+        superclass instance, \"$Superclass.$Superinstance\", references\
+        subclass instance, \"$Class.$Instance\" across,\
+        \"$Relationship\", but $Class is not a subclass of $Relationship"
+    incr errcount
+}
+
+set badrefs [pipe {
+    relation minus $subrefs $nonparts |
+    ralutil::rvajoin ~ $popinsts ValueMatch |
+    relation restrictwith ~ {[relation isempty $ValueMatch]}
+}]
+
+relation foreach badref $badrefs {
+    relation assign $badref
+    log::error "in population, \"$Population\", for domain, \"$Domain\",\
+        superclass instance, \"$Superclass.$Superinstance\", references\
+        subclass instance, \"$Class.$Instance\" across,\
+        \"$Relationship\", but $Instance does not exist"
+    incr errcount
+}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test populate-4.5 {
+    bad subclass reference
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain bar {
+            class super {
+                attribute s_id int
+                reference R1
+            }
+            class sub1 {
+                attribute temp int -default 25
+            }
+            class sub2 {
+                attribute color int -default 25
+            }
+
+            generalization R1 super sub1 sub2
+        }
+
+        population p1 bar {
+            class super {
+                instance super1 s_id 20 R1 {sub1 fred1}
+                instance super2 s_id 40 R1 {sub2 alice2}
+                instance super3 s_id 40 R1 {sub3 foo}
+            }
+            class sub1 {
+                instance fred1
+            }
+            class sub2 {
+                instance alice1
+            }
+        }
+    }
+} -result {encountered 2 configuration script errors} -returnCodes error
+----
+
+==== Checking Associator Reference Values
+
+// This does not handle the reflexive case.
+// In that case we expect the reference value to be {forward xx backward yy}
+// where xx and yy are instances names of the reflexive class.
+
+[source,c]
+----
+<<population: check associator references>>=
+set assocref [AssociatorClass findWhere {$Domain eq $domain}]
+set srcrefs [findRelated $assocref R42 ~R34]
+set targetrefs [findRelated $assocref R42 ~R35]
+
+set assocs [pipe {
+    deRef $assocref |
+    relation project ~ Domain Class Relationship
+}]
+# puts [relformat $assocs assocs]
+
+set sources [pipe {
+    deRef $srcrefs |
+    relation project ~ Domain Class Relationship
+}]
+# puts [relformat $sources sources]
+
+set targets [pipe {
+    deRef $targetrefs |
+    relation project ~ Domain Class Relationship
+}]
+# puts [relformat $targets targets]
+
+set participants [relation union $sources $targets]
+
+set assocvalues [pipe {
+    AssociatorReference findWhere {$Domain eq $domain} |
+    findRelatedWhere % {R23 R21 {~R103 ClassComponentValue}}\
+        {$Population eq $name} |
+    deRef % |
+    relation rename % Class Assocclass Component Relationship\
+        Instance Associnstance
+} {} |%]
+# puts [relformat $assocvalues assocvalues]
+
+set onerefs [pipe {
+    relation extend $assocvalues atup\
+        Class string {[lindex [tuple extract $atup Value] 0]}\
+        Instance string {[lindex [tuple extract $atup Value] 1]} |
+    relation eliminate ~ Value
+}]
+# puts [relformat $onerefs onerefs]
+
+set otherrefs [pipe {
+    relation extend $assocvalues atup\
+        Class string {[lindex [tuple extract $atup Value] 2]}\
+        Instance string {[lindex [tuple extract $atup Value] 3]} |
+    relation eliminate ~ Value
+}]
+# puts [relformat $otherrefs otherrefs]
+
+set allrefs [relation union $onerefs $otherrefs]
+# puts [relformat $allrefs allrefs]
+
+set nonparts [relation semiminus $participants $allrefs]
+# puts [relformat $nonparts nonparts]
+
+relation foreach nonpart $nonparts {
+    relation assign $nonpart
+    log::error "in population, \"$Population\", for domain, \"$Domain\",\
+        associator instance, \"$Assocclass.$Associnstance\", references\
+        class instance, \"$Class.$Instance\" across,\
+        \"$Relationship\", but $Class does not participate in $Relationship"
+    incr errcount
+}
+
+set allrefs [relation minus $allrefs $nonparts]
+# puts [relformat $allrefs allrefs]
+
+set badrefs [pipe {
+    ralutil::rvajoin $allrefs $popinsts ValueMatch |
+    relation restrictwith ~ {[relation isempty $ValueMatch]}
+}]
+# puts [relformat $badrefs badrefs]
+
+relation foreach badref $badrefs {
+    relation assign $badref
+    log::error "in population, \"$Population\", for domain, \"$Domain\",\
+        associator instance, \"$Assocclass.$Associnstance\", references\
+        instance, \"$Class.$Instance\" across,\
+        \"$Relationship\", but $Instance does not exist"
+    incr errcount
+}
+
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test populate-4.6 {
+    bad associator class reference
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain bar {
+            class A {
+                attribute date int -default 0
+                reference R1
+            }
+            class X {
+                attribute temp int -default 25
+                reference R1
+            }
+            class Y {
+                attribute color int -default 25
+                reference R1
+            }
+
+            association R1 -associator A X 1--1 Y
+        }
+
+        population p1 bar {
+            class A {
+                instance a1 R1 {X x1 Y y1}
+                instance a2 R1 {X x2 Y y2} ; # instance y2 is not defined
+                instance a3 R1 {Z x2 Q y2} ; # neither Z nor Q participate in R1
+            }
+            class X {
+                instance x1 R1 a1
+                instance x2 R1 a2
+            }
+            class Y {
+                instance y1 R1 a1
+            }
+        }
+    }
+} -result {encountered 3 configuration script errors} -returnCodes error
+----
+
+==== Checking Association Reference Values
+
+[source,c]
+----
+<<population: check association references>>=
 ----
 
 === Class
@@ -5584,46 +6000,49 @@ proc class {name script} {
     variable PopulationName
     variable DomainName
 
-    namespace upvar ClassInstDef ClassName ClassName Allocation Allocation\
-        IsConstant IsConstant
+    namespace upvar ClassInstDef ClassName ClassName IsDynamic IsDynamic\
+        Allocation Allocation IsConstant IsConstant
     set ClassName $name
-    set Allocation {}
-    set IsConstant {}
+    set IsDynamic {}
+    set Allocation 0
+    set IsConstant false
 
     ConfigEvaluate [namespace current]::ClassInstDef $script
 
-    if {[isEmptyRef [ElementPopulation findById Population $PopulationName\
-            Domain $DomainName Element $name]]} {
-        if {$Allocation eq {}} {
-            set Allocation 0
-        }
-        if {$IsConstant eq {}} {
-            set IsConstant false
-        }
-        ElementPopulation create Population $PopulationName\
-            Domain $DomainName Element $name
-        ClassPopulation create Population $PopulationName\
+    if {$IsDynamic eq {}} {
+        set IsDynamic true
+    }
+    ElementPopulation create Population $PopulationName\
+        Domain $DomainName Element $name
+    ClassPopulation create Population $PopulationName Domain $DomainName\
+            Class $name
+    if {$IsDynamic} {
+        DynamicClassPopulation create Population $PopulationName\
             Domain $DomainName Class $name Allocation $Allocation\
-            IsConstant $IsConstant
+    } else {
+        StaticClassPopulation create Population $PopulationName\
+            Domain $DomainName Class $name IsConstant $IsConstant
     }
 
     return
 }
 ----
 
-=== Allocating Space
+=== Dynamic Class Population
 
 *****
-`allocate` _size_
+`dynamic` ?_size_?
 
 `size`::
     The number of additional class instances beyond those defined
     by the initial instances for which storage is allocated.
 
-The `allocate` command is used to allocate space for additional class
-instances that will be created at run time.
-If no `allocate` command is invoked for a class the no additional
-instance space is set aside.
+The `dynamic` command is used declare that a class population is dynamic and
+optionally to allocate space for additional class instances that will be
+created at run time.
+If no `dynamic` command is invoked for a class,
+then the class is assumed to be dynamic with zero additional instances
+allocated.
 *****
 
 [float]
@@ -5632,27 +6051,35 @@ instance space is set aside.
 [source,tcl]
 ----
 <<class instance commands>>=
-proc allocate {size} {
-    variable Allocation
-    if {$Allocation ne {}} {
-        variable Element
-        log::warn "allocation size for class, \"$Element\",\
-            is already set to $Allocation: ignoring second attempt"
+proc dynamic {{size 0}} {
+    variable IsDynamic
+    if {$IsDynamic eq {}} {
+        set IsDynamic true
+        variable Allocation $size
+    } elseif {$IsDynamic} {
+        variable ClassName
+        error "$ClassName is already declared as a dynamic population"
     } else {
-        set Allocation $size
+        variable ClassName
+        error "$ClassName is already declared as a static population"
     }
 
     return
 }
 ----
 
-=== Constant Class Population
+=== Static Class Population
 
 *****
-`constant`
+`static` ?_isconstant_?
 
-The `constant` command declares that the storage for the class is
-to be placed in read only memory.
+`isconstant`::
+    A boolean value that determines if the population of the class will
+    be placed in read only memory.
+    If missing, then _isconstant_ is assumed to be false.
+
+The `static` command declares that the population of a class is
+static and optionally whether the class is stored in read only memory.
 It is an error to declare classes that have state models as constant.
 Attempting to update attributes at run time for a constant class will
 result in undefined behavior.
@@ -5664,14 +6091,17 @@ result in undefined behavior.
 [source,tcl]
 ----
 <<class instance commands>>=
-proc constant {} {
-    variable IsConstant
-    if {$IsConstant ne {}} {
-        variable Element
-        log::warn "constant property for class, \"$Element\",\
-            is already set to $IsConstant: ignoring second attempt"
+proc static {{isconstant false}} {
+    variable IsDynamic
+    if {$IsDynamic eq {}} {
+        set IsDynamic false
+        variable IsConstant $isconstant
+    } elseif {$IsDynamic} {
+        variable ClassName
+        error "$ClassName is already declared as a dynamic population"
     } else {
-        set IsConstant true
+        variable ClassName
+        error "$ClassName is already declared as a static population"
     }
 }
 ----
@@ -5970,7 +6400,7 @@ test populate-1.0 {
                 instance chuck2 c1_id 7 R1 fred1
             }
             class c2 {
-                constant
+                static
                 instance fred1 c2_id 20 R1 {chuck1 chuck2}
             }
         }
@@ -6015,7 +6445,7 @@ test populate-1.1 {
                 instance chuck2 c1_id 7 ; # leave off R1 ==> set to nil
             }
             class c2 {
-                constant
+                static
                 instance fred1 c2_id 20 R1 {chuck1 chuck2}
             }
         }
@@ -6060,7 +6490,7 @@ test populate-1.2 {
                 instance chuck3 R1 fred1 ; # missing c1_id and color
             }
             class c2 {
-                constant
+                static
                 instance fred1 c2_id 20 R1 {chuck1 chuck2}
             }
         }
@@ -6226,13 +6656,13 @@ test populate-2.0 {
 
         population p1 foo {
             class c1 {
-                allocate 10
+                dynamic 10
                 table   {c1_id      R1}\
                 chuck1  {5          fred1}\
                 chuck2  {7          fred1}
             }
             class c2 {
-                constant
+                static
                 table       {c2_id      R1}\
                 fred1       {20         {chuck1 chuck2}}
             }
@@ -6273,14 +6703,14 @@ test populate-2.1 {
 
         population p1 foo {
             class c1 {
-                allocate 10
+                dynamic 10
                 table   {c1_id      R1}\
                 chuck1  {5          fred1}\
                 chuck2  {7          fred1}\
                 chuck3  {7          -}
             }
             class c2 {
-                constant
+                static
                 table       {c2_id      R1}\
                 fred1       {20         {chuck1 chuck2 chuck3}}
             }
@@ -6467,6 +6897,9 @@ test populate-3.0 {
                 instance fred R2 shoes
                 instance alice R2 mens
                 instance john R2 housewares
+            }
+            class client {
+                dynamic 10
             }
             class department {
                 instance shoes R2 fred
@@ -6709,6 +7142,15 @@ relvar insert Config_DataError {
                          \"$Model\", event, \"$Event\", causes a transition\
                          out of state, \"$State\", but state $State does not\
                          exist}
+} {
+    Relationship        R103
+    RefClass            ClassComponentValue
+    RefType             refnone
+    Format              {in population, \"$Population\", for domain,\
+                         \"$Domain\", class, \"$Class\", instance,\
+                         \"$Instance\" sets the value of \"$Component\" to\
+                         \"$Value\", but $Component is not a known\
+                         element of $Class"}
 }
 ----
 
@@ -6867,7 +7309,6 @@ oo::class create typeverifier {
             my parset $typename
             return true
         } on error {result} {
-            puts $result
             return false
         }
     }
