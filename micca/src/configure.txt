@@ -2906,8 +2906,8 @@ transitive closure.
 
 [source,tcl]
 ----
-<<config commands>>=
-proc findSubsUsing {supers event} {
+<<helper commands>>=
+proc findSubclassesOf {supers} {
     if {[isEmptyRef $supers]} {# <1>
         return [relation create {Super string Sub string}]
     }
@@ -2933,7 +2933,7 @@ proc findSubsUsing {supers event} {
         ::rosea::Helpers::ToRef ::micca::Superclass ~
     }] ; # <5>
 
-    set uses [relation union $uses [findSubsUsing $nextsupers $event]] ; # <6>
+    return [relation union $uses [findSubclassesOf $nextsupers]] ; # <6>
 }
 ----
 <1> Stop if there are no further generalizations.
@@ -2954,7 +2954,7 @@ we we restrict the result to being just paths from our current subclass.
 ----
 <<PropagatePolyEvents: compute subclasses using event>>=
 set subsusing [pipe {
-    findSubsUsing $multigens $event |
+    findSubclassesOf $multigens|
     relation tclose ~ |
     relation restrictwith ~ {$Super eq $subClass} |
     relation project ~ Sub |
@@ -5331,6 +5331,8 @@ proc population {name domain script} {
 
     ConfigEvaluate [namespace current]::PopDef $script
 
+    upvar #0 ::micca::@Config@::errcount errcount
+
     <<population: check completeness>>
     <<population: check static populations>>
     <<population: check dynamic populations>>
@@ -5360,10 +5362,13 @@ population.
 
 ==== Checking Completeness
 
+We want to query all the Value Elements that have no Element Population
+in the Population.
+These are the missing elements that were not included in the population.
+
 [source,tcl]
 ----
 <<population: check completeness>>=
-upvar #0 ::micca::@Config@::errcount errcount
 set missing [pipe {
     findRelated $popref {R101 ElementPopulation} |
     findUnrelated ~ R101
@@ -5411,6 +5416,12 @@ test populate-4.0 {
 ----
 
 ==== Checking Populations Declared Static
+
+Part of populating a domain includes the ability to declare that the
+instances of a class are static.
+This means that during the run time of the domain,
+no instances of a static class are created or deleted and all the
+instances of the class are defined by the initial instance population.
 
 [source,c]
 ----
@@ -5467,6 +5478,14 @@ test populate-4.1 {
 
 ==== Checking Populations Declared Dynamic
 
+The counter point to a static population is a dynamic one.
+For dynamic populations,
+the maximum number of simultaneous instances is the sum of the
+initial instance population plus the number of additional storage locations
+allocated in the `dynamic` command.
+If both these quantities sum to zero,
+then it is not possible to ever have an instance of the class.
+
 [source,c]
 ----
 <<population: check dynamic populations>>=
@@ -5513,6 +5532,7 @@ test populate-4.2 {
                 instance fred1 c1_id 20 c1_color {"blue"}
             }
             class c2 {
+                dynamic 0
             }
         }
     }
@@ -5528,6 +5548,8 @@ the dynamic characteristics of the class are known.
 If a population has been declared as static, then all of its associated
 Directional Reference instances that are of Reference Type, "dynamic",
 need to be updated to be, "static".
+This change in reference type results in different data structures for holding
+the reference pointers being chosen by the code generation phase.
 
 [source,c]
 ----
@@ -5603,6 +5625,9 @@ and make sure they were specified correctly.
 
 ==== Checking Superclass Reference Values
 
+When a subclass defines a reference to its superclass,
+we must make sure that the superclass instance actually exists.
+
 [source,c]
 ----
 <<population: check superclass references>>=
@@ -5612,35 +5637,40 @@ set supers [pipe {
     relation project ~ Domain Class Relationship |
     relation rename ~ Class Superclass
 }]
-#puts [relformat $supers supers]
-
 set popinsts [pipe {
     ClassInstance findWhere {$Population eq $name} |
     deRef ~
 }]
-#puts [relformat $popinsts popinsts]
+puts [relformat $popinsts popinsts]
 
-set badrefs [pipe {
-    SuperclassReference findWhere {$Domain eq $domain} |
-    findRelatedWhere % {R23 R21 {~R103 ClassComponentValue}}\
-        {$Population eq $name} |
-    deRef % |
-    relation rename % Component Relationship |
-    relation join % $supers |
-    relation rename % Class Subclass Superclass Class Instance Subinstance\
-        Value Instance |
-    ralutil::rvajoin % $popinsts ValueMatch |
-    relation restrictwith % {[relation isempty $ValueMatch]}
-} {} |%]
-#puts [relformat $badrefs badsuperrefs]
+# We can save ourselves some substantial computation if there are no
+# ReferencedSuperclass instances in the domain.
+# Note that the computation works properly without this test, we are
+# just skipping things is we know at this point the result will be empty.
+if {[relation isnotempty $supers]} {
+    #puts [relformat $supers supers]
+    set badrefs [pipe {
+        SuperclassReference findWhere {$Domain eq $domain} |
+        findRelatedWhere % {R23 R21 {~R103 ClassComponentValue}}\
+            {$Population eq $name} |
+        deRef % |
+        relation rename % Component Relationship |
+        relation join % $supers |
+        relation rename % Class Subclass Superclass Class Instance Subinstance\
+            Value Instance |
+        ralutil::rvajoin % $popinsts ValueMatch |
+        relation restrictwith % {[relation isempty $ValueMatch]}
+    } {} |%]
+    #puts [relformat $badrefs badsuperrefs]
 
-relation foreach badref $badrefs {
-    relation assign $badref
-    log::error "in population, \"$Population\", for domain, \"$Domain\",\
-        subclass instance, \"$Subclass.$Subinstance\", references\
-        superclass instance, \"$Class.$Instance\" across,\
-        \"$Relationship\", but $Instance does not exist"
-    incr errcount
+    relation foreach badref $badrefs {
+        relation assign $badref
+        log::error "in population, \"$Population\", for domain, \"$Domain\",\
+            subclass instance, \"$Subclass.$Subinstance\", references\
+            superclass instance, \"$Class.$Instance\" across,\
+            \"$Relationship\", but $Instance does not exist"
+        incr errcount
+    }
 }
 ----
 
@@ -5679,7 +5709,7 @@ test populate-4.4 {
                 instance fred1 R1 super1
             }
             class sub2 {
-                instance alice1 R1 super3
+                instance alice1 R1 super3 ; # There is no "super3" instance.
             }
         }
     }
@@ -5687,6 +5717,12 @@ test populate-4.4 {
 ----
 
 ==== Checking Subclass Reference Values
+
+When a superclass instance refers to its subclass,
+the population value is a list of the form {<subclass> <instance>},
+where <subclass> must be one of the subclasses of the generalization
+and <instance> must be an instance of <subclass>.
+Here we check both conditions.
 
 [source,c]
 ----
@@ -5698,6 +5734,7 @@ set subs [pipe {
 }]
 # puts [relformat $subs subs]
 
+# HERE check for the Value to be a list of length 2
 set subrefs [pipe {
     SubclassReference findWhere {$Domain eq $domain} |
     findRelatedWhere % {R23 R21 {~R103 ClassComponentValue}}\
@@ -5768,8 +5805,8 @@ test populate-4.5 {
         population p1 bar {
             class super {
                 instance super1 s_id 20 R1 {sub1 fred1}
-                instance super2 s_id 40 R1 {sub2 alice2}
-                instance super3 s_id 40 R1 {sub3 foo}
+                instance super2 s_id 40 R1 {sub2 alice2} ; # there is no alice2
+                instance super3 s_id 40 R1 {sub3 foo} ; # there is no sub3
             }
             class sub1 {
                 instance fred1
