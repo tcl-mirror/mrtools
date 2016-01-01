@@ -77,7 +77,7 @@ namespace eval ::rosea {
     
     namespace ensemble create
 
-    variable version 1.6.1
+    variable version 1.6.2
 
     logger::initNamespace [namespace current]
 
@@ -1465,6 +1465,28 @@ namespace eval ::rosea {
                     relvar union ::rosea::Config::MappedEvent [relation extend\
                         $defrdevents metuple ParentModel string {$supername}]
                 } else {
+                    set consumed [relation semijoin $defrdevents $LocalEvent]
+                    if {[relation isnotempty $consumed]} {
+                        relvar minus ::rosea::Config::LocalEvent $consumed ; # <1>
+                        relvar union ::rosea::Config::MappedEvent [relation extend\
+                            $consumed ctup ParentModel string {$supername}]
+                        relvar union ::rosea::Config::NonLocalEvent [relation extend\
+                            $consumed nletuple\
+                            Relationship string {[relation extract $sub Relationship]}\
+                            Role string {[relation extract $sub Role]}]
+                        set defrdevents [relation minus $defrdevents $consumed] ; # <2>
+                    
+                        set usedinsubs [pipe {
+                            FindSubclassesOf $multigens|
+                            relation tclose ~ |
+                            relation semijoin $consumed ~ -using {Model Super} |
+                            relation semijoin ~ $LocalEvent -using {Sub Model} |
+                            relation semijoin $consumed ~ -using {Domain Domain Event Event}
+                        }]
+                        relvar minus ::rosea::Config::LocalEvent $usedinsubs ; # <3>
+                        relvar minus ::rosea::Config::EffectiveEvent $usedinsubs
+                        relvar minus ::rosea::Config::Event $usedinsubs
+                    }
                     relvar union ::rosea::Config::Event $defrdevents
                     relvar union ::rosea::Config::DeferredEvent $defrdevents
                     relvar union ::rosea::Config::InheritedEvent $defrdevents
@@ -1480,6 +1502,34 @@ namespace eval ::rosea {
                     PropagatePolyEvents $multigen
                 }
             }
+        }
+        proc FindSubclassesOf {supers} {
+            namespace upvar ::rosea::Config\
+                Generalization Generalization\
+                Superclass Superclass\
+                Subclass Subclass
+        
+            if {[relation isempty $supers]} {# <1>
+                return [relation create {Super string Sub string}]
+            }
+            set supnames [pipe {
+                relation project $supers Class |
+                relation rename ~ Class Super
+            }] ; # <2>
+            set subclasses [relation semijoin $supers\
+                    $Generalization -using {Domain Domain Relationship Name}\
+                    $Subclass -using {Domain Domain Name Relationship}]
+            set subnames [pipe {
+                relation project $subclasses Class |
+                relation rename ~ Class Sub
+            }] ; # <3>
+            
+            set uses [relation times $supnames $subnames] ; # <4>
+        
+            set nextsupers [relation semijoin $subclasses $Superclass\
+                    -using {Domain Domain Class Class}] ; # <5>
+        
+            return [relation union $uses [FindSubclassesOf $nextsupers]] ; # <6>
         }
         proc UserDefaultTrace {defheading defvalues op relvar tuple} {
             tuple create\
@@ -1759,7 +1809,10 @@ namespace eval ::rosea {
                             -using {Name Name SrcClass PrevSrcClass}]
                         if {[relation isnotempty $assoc]} {
                             relation assign $assoc DstClass Attrs
-                            set related [eval $relatedQuery]
+                            set related [pipe {# <1>
+                                relvar set ${domain}::$DstClass |
+                                relation semijoin $related ~ -using $Attrs
+                            }]
                         }
                     } else {
                         # If a destination was specified in the linkage, then we need to verify
@@ -3525,6 +3578,14 @@ namespace eval ::rosea {
                                 \"$ReferencedClass\", but the class, attribute or\
                                 relationship does not exist}
         } {
+            Relationship        R12
+            RefClass            ReferringClass
+            RefType             notrefed
+            Format              {in domain, \"$Domain\", in class, \"$Class\",\
+                                makes a reference along relationship,\
+                                \"$Relationship\", but $Class does not pariticipate\
+                                in $Relationship}
+        } {
             Relationship        R13
             RefClass            AttributeReference
             RefType             refnone
@@ -3545,6 +3606,14 @@ namespace eval ::rosea {
             Format              {in domain, \"$Domain\", an assigner state model is\
                                 defined on relationship, \"$Relationship\", which is\
                                 not an association type relationship}
+        } {
+            Relationship        R70
+            RefClass            TransitionPlace
+            RefType             refnone
+            Format              {in domain, \"$Domain\", the state model for,\
+                                \"$Model\", contains a transition for event,\
+                                \"$Event\", but $Event was a polymorphic event\
+                                consumed by a superclass of $Model}
         } {
             Relationship        R72
             RefClass            StateTransition
@@ -3585,13 +3654,13 @@ namespace eval ::rosea {
             namespace upvar DomainDef DomainName DomainName ; # <1>
             set DomainName $name
         
-            relvar uinsert ::rosea::Config::Domain [list Name $name Location {}] ; # <2>
+            relvar insert ::rosea::Config::Domain [list Name $name Location {}]
             try {
                 if {$name eq {}} {
                     tailcall DeclError EMPTY_NAME domain
                 }
         
-                relvar eval { # <3>
+                relvar eval { # <2>
                     ConfigEvaluate [namespace current]::DomainDef $body
         
                     # At this point we have the definition of the domain and enough
@@ -3659,6 +3728,7 @@ namespace eval ::rosea {
                     }
                 }
             } on error {result} {
+                # puts $::errorInfo
                 ::rosea::Config::HandleConfigError $result
             }
         }
@@ -3687,6 +3757,8 @@ namespace eval ::rosea {
                                 set reftype refnone
                             } elseif {[string match {*to by multiple*} $phrase]} {
                                 set reftype multrefed
+                            } elseif {[string match {is not referred to*} $phrase]} {
+                                set reftype notrefto
                             } else {
                                 log::error "unknown constraint phrasing, \"$phrase\""
                                 continue
@@ -4398,7 +4470,7 @@ namespace eval ::rosea {
                             tailcall DeclError EMPTY_NAME event
                         }
                         if {$source in {CH IG}} {
-                            tailcall DeclError PSEUDO_STATE $name "transition source state"
+                            tailcall DeclError PSEUDO_STATE $source "transition source state"
                         }
                         namespace upvar ::rosea::Config::DomainDef DomainName DomainName
                         namespace upvar ::rosea::Config::DomainDef::ClassDef ClassName ClassName

@@ -4373,7 +4373,10 @@ if {$dst eq {}} {
         -using {Name Name SrcClass PrevSrcClass}]
     if {[relation isnotempty $assoc]} {
         relation assign $assoc DstClass Attrs
-        set related [eval $relatedQuery]
+        set related [pipe {# <1>
+            relvar set ${domain}::$DstClass |
+            relation semijoin $related ~ -using $Attrs
+        }]
     }
 } else {
     # If a destination was specified in the linkage, then we need to verify
@@ -4385,6 +4388,13 @@ if {$dst eq {}} {
     set related [eval $relatedQuery]
 }
 ----
+<1> Note that when we do the traversal from the associative class
+to the related target, we always use "semijoin".
+The traversal from the source to associative class is done using the
+requested operation, but since associative classes are always unconditionally
+related to the target, we just want semijoin straight across.
+To do otherwise inverts the sense of the operation if we were looking
+for unrelated instances.
 
 If the linkage is not associative, then it must be a superclass to subclass
 traversal.
@@ -4819,6 +4829,39 @@ test findRelated-2.1 {
 } -body {
     ::rosea::InstCmds::findRelated $ref {R1 A}
 } -result {::rosea::test::foo::A {{A1 int B1 int} {{A1 5 B1 10}}}} -match ref
+----
+
+[source,tcl]
+----
+<<instance command tests>>=
+test findUnrelated-1.0 {
+    Navigate a relationship -- associative class -- unrelated instances
+} -setup {
+    setupDomain foo
+    addClass foo X {A1 int A2 string} A1
+    addClass foo Y {B1 int B2 string} B1
+    addClass foo A {A1 int B1 int} {A1 B1}
+    # Forward direction is from X -> Y via A
+    addAssocLink foo {Name R1 SrcClass X}\
+        {Name R1 SrcClass X DstClass A Attrs {A1 A1} PrevSrcClass {}}
+    addAssocLink foo {Name R1 SrcClass A}\
+        {Name R1 SrcClass A DstClass Y Attrs {B1 B1} PrevSrcClass X}
+    addAssocLink foo {Name ~R1 SrcClass Y}\
+        {Name ~R1 SrcClass Y DstClass A Attrs {B1 B1} PrevSrcClass {}}
+    addAssocLink foo {Name ~R1 SrcClass A}\
+        {Name ~R1 SrcClass A DstClass X Attrs {A1 A1} PrevSrcClass Y}
+
+    set ref [rosea::ClassCmds::create [namespace current]::foo::X A1 5 A2 baz]
+    rosea::ClassCmds::create [namespace current]::foo::X A1 7 A2 zzz
+    rosea::ClassCmds::create [namespace current]::foo::Y B1 10 B2 bar
+    rosea::ClassCmds::create [namespace current]::foo::Y B1 17 B2 xxx
+    rosea::ClassCmds::create [namespace current]::foo::A A1 5 B1 10
+    rosea::ClassCmds::create [namespace current]::foo::A A1 7 B1 17
+} -cleanup {
+    cleanupDomain foo
+} -body {
+    ::rosea::InstCmds::findUnrelated $ref R1
+} -result {::rosea::test::foo::Y {{B1 int} {{B1 17}}}} -match ref
 ----
 
 [source,tcl]
@@ -8051,8 +8094,6 @@ domain definitions.
 The [cmd domain] command executes [arg body] as a Tcl script in an environment
 where the characteristics of the domain may be defined.
 The domain is given [arg name] as a name which may not be the empty string.
-The [cmd domain] command may be invoked multiple times for the
-same [arg name] and the resulting domain definitions are simply accumulated.
 The [arg body] of the domain configuration script should invoke
 Domain Configuration Commands as
 described [sectref "Domain Configuration Commands" below].
@@ -8078,13 +8119,13 @@ proc domain {name body} {
     namespace upvar DomainDef DomainName DomainName ; # <1>
     set DomainName $name
 
-    relvar uinsert ::rosea::Config::Domain [list Name $name Location {}] ; # <2>
+    relvar insert ::rosea::Config::Domain [list Name $name Location {}]
     try {
         if {$name eq {}} {
             tailcall DeclError EMPTY_NAME domain
         }
 
-        relvar eval { # <3>
+        relvar eval { # <2>
             ConfigEvaluate [namespace current]::DomainDef $body
 
             # At this point we have the definition of the domain and enough
@@ -8097,16 +8138,14 @@ proc domain {name body} {
             <<domain: propagate polymorphic events>>
         }
     } on error {result} {
+        # puts $::errorInfo
         ::rosea::Config::HandleConfigError $result
     }
 }
 ----
 <1> We place the domain name into the child namespace where the context
 implies that all the components defined are to be part of this domain.
-<2> We allow the +domain+ command to be invoked more than once.
-Domains are open ended definitions and the +uinsert+ command will not
-throw an error upon a duplicate.
-<3> Evaluating the script must be done as a +relvar+ transaction
+<2> Evaluating the script must be done as a +relvar+ transaction
 as we will need to defer the constraint checking until all the domain
 components have been defined.
 
@@ -8133,13 +8172,6 @@ Polymorphic events also must be dealt with after the domain configuration
 is in place.
 Again we will discuss this further
 <<domain-propagate-polymorphic-events,below>>.
-
-Although we have said that domain configurations are cumulative,
-clearly the need to resolve association bindings and polymorphic event
-inheritance means that domain configurations cannot be split arbitrarily.
-You will need to be aware that certain divisions of domain configuration
-will end up separating information that is needed at the end of the
-configuration process.
 
 [float]
 ===== Tests
@@ -11705,7 +11737,13 @@ For sub classes that are leafs of generalization hierarchy,
 polymorphic events inherited from the super class are migrated to
 be *Mapped Events*.
 For sub classes that are intermediate in the hierarchy,
-polymorhphic events are migrated to instances of *Inherited Event*.
+two cases arise.
+If there exists a *Local Event* for the sub class,
+then the the event is consumed by the subclass and is no longer available
+to be inherited down the hierarchy.
+The *Local Event* instance must be migrated to be a *Mapped Event*.
+Otherwise, the event is inherited and an instance of *Inherited Event*
+is created to indicate that case.
 Both *Inherited Event* and *Mapped Event* are types of *Non-Local Event*
 and *R85* insures that they affect only *Subclass* instances.
 
@@ -11830,16 +11868,156 @@ relvar union ::rosea::Config::MappedEvent [relation extend\
     $defrdevents metuple ParentModel string {$supername}]
 ----
 
-For the case where a subclass participates in a multiple generalization,
+For the case where a subclass participates in multiple generalizations,
 the deferred events become instances of *Inherited Event*.
+However, there is also the case where what would be an inherited event
+is actually consumed by a state model at an intermediate level.
+We can recognized that fact by looking to see if there are any
+Local Events defined for the sub class.
+Recall that the `transition` command will instanciate Local Events
+for all the events that it sees.
+
+In this later case where the deferred event is consumed locally,
+we don't want to create any duplicated deferred event.
+Further,
+the event that was consumed locally is no longer available to any
+subclasses that might be further along the hierarchy.
+If a given subclass is subject to repeated generalization (_i.e._ it is
+the superclass for another generalization) or compound generalization
+(_i.e._ it is the superclass for multiple other generalizations)
+the subclasses further down the generalization hierarchy may not respond
+to the polymorphic event.
+Thus when a polymorphic event is consumed locally its effect end there.
+We will deal with this situation by removing any Local Event instances
+(and their correponding superclass instances) for any class that is
+further down a generalization hierarchy from where the polymorphic
+event was consumed locally.
 
 [source,tcl]
 ----
 <<PropagatePolyEvents: migrate for multiple generalization>>=
+set consumed [relation semijoin $defrdevents $LocalEvent]
+if {[relation isnotempty $consumed]} {
+    relvar minus ::rosea::Config::LocalEvent $consumed ; # <1>
+    relvar union ::rosea::Config::MappedEvent [relation extend\
+        $consumed ctup ParentModel string {$supername}]
+    relvar union ::rosea::Config::NonLocalEvent [relation extend\
+        $consumed nletuple\
+        Relationship string {[relation extract $sub Relationship]}\
+        Role string {[relation extract $sub Role]}]
+    set defrdevents [relation minus $defrdevents $consumed] ; # <2>
+
+    <<PropagatePolyEvents: find where event is used in subclasses>>
+    relvar minus ::rosea::Config::LocalEvent $usedinsubs ; # <3>
+    relvar minus ::rosea::Config::EffectiveEvent $usedinsubs
+    relvar minus ::rosea::Config::Event $usedinsubs
+}
 relvar union ::rosea::Config::Event $defrdevents
 relvar union ::rosea::Config::DeferredEvent $defrdevents
 relvar union ::rosea::Config::InheritedEvent $defrdevents
 ----
+<1> If the polymorphic event is consumed locally, it is really an
+instance of Mapped Event and we make that adjustment here.
+<2> Consumed event are subtracted out of the set of events that are
+to be made deferred.
+<3> Any useage of the event by subclasses is removed.
+This will cause a referential integrity error that will indicate the
+mistaken event usage to the user.
+
+The query to find where the consumed event may have been used by
+some subclass needs careful explanation.
+
+[source,c]
+----
+<<PropagatePolyEvents: find where event is used in subclasses>>=
+set usedinsubs [pipe {
+    FindSubclassesOf $multigens|
+    relation tclose ~ |
+    relation semijoin $consumed ~ -using {Model Super} |
+    relation semijoin ~ $LocalEvent -using {Sub Model} |
+    relation semijoin $consumed ~ -using {Domain Domain Event Event}
+}]
+----
+
+. `FindSubclassesOf` is explained below, but the command returns a binary
+relation with a tuple for each superclass and its immediate subclasses,
+recursively, down any generalizations that stem from the subclass we are
+working on.
+. The `tclose` command computes the transitive closure and the result
+will contain tuples for all edges of the conceptual graph that extends
+down the generalization hierarchy from the subclass we are working on.
+. We are only intested in the subset of the transitive close that
+starts with the same class as the consumed events.
+. This finds all the Local Events that are defined by any of the subclasses
+of the superclass that consumed the event.
+. Finally, we restrict the Local Event instances of the subclasses to those
+that match the event that was actually consumed.
+
+To compute the entire set of subclasses that may be contained in
+generalizations rooted at the current subclass,
+we will build a binary relation that can be used to compute
+the transitive closure.
+We define a helper procedure that can be called recursively to
+descend the generalization hierarchy.
+The strategy is to build a relation that is the Cartesian product of
+a relation that holds the names of superclasses and one that holds
+the names of the subclasses on the next level.
+Then, we find superclasses that are immediately related to the subclasses
+and recursively compute the binary relation again.
+By taking the union of this binary relation at each level in the
+generalization,
+we have a relation that contains a tuple for each edge of the hierarchy tree
+that is rooted at a particular subclass and can pass that off to compute the
+transitive closure.
+
+[source,tcl]
+----
+<<helper commands>>=
+proc FindSubclassesOf {supers} {
+    namespace upvar ::rosea::Config\
+        Generalization Generalization\
+        Superclass Superclass\
+        Subclass Subclass
+
+    if {[relation isempty $supers]} {# <1>
+        return [relation create {Super string Sub string}]
+    }
+    set supnames [pipe {
+        relation project $supers Class |
+        relation rename ~ Class Super
+    }] ; # <2>
+    set subclasses [relation semijoin $supers\
+            $Generalization -using {Domain Domain Relationship Name}\
+            $Subclass -using {Domain Domain Name Relationship}]
+    set subnames [pipe {
+        relation project $subclasses Class |
+        relation rename ~ Class Sub
+    }] ; # <3>
+    
+    set uses [relation times $supnames $subnames] ; # <4>
+
+    set nextsupers [relation semijoin $subclasses $Superclass\
+            -using {Domain Domain Class Class}] ; # <5>
+
+    return [relation union $uses [FindSubclassesOf $nextsupers]] ; # <6>
+}
+----
+<1> Stop if there are no further generalizations and return the empty
+relation value with the proper header.
+<2> Superclass names in a relation with one attribute, `Super`.
+<3> Find the immediate subclasses and place the subclass names
+in a relation with one attribute, `Sub`.
+<4> The Cartesian product yields a tuple for each edge of the conceptual
+tree extending from the superclass to the subclasses.
+<5> Step down the hierarchy to those superclasses that have the same
+name as the subclasses.
+<6> Recursively descend to the next level and union the results from there.
+
+Given a relation value that has the Superclasses and Subclasses at each
+level in a generalization hierarchy,
+we can compute the transitive closure of this relation.
+The `relation tclose` command computes all possible paths and
+we we restrict the result to being just paths from our current subclass.
 
 Because we are creating new instances of *Deferred Event*,
 we must also add instances of *Deferral Path* so as to know
@@ -12249,6 +12427,149 @@ test configure-6.5 {
         {[relation cardinality $::rosea::Config::MappedEvent] == 6}\
         {[relation cardinality $::rosea::Config::LocalEvent] == 0}
 } -result {1}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test configure-6.6 {
+    Define polymorphic events -- consume mid level event
+} -setup {
+} -cleanup {
+    cleanupConfigData
+} -body {
+    rosea configure {
+        domain foo {
+            class S {
+                attribute id int -id 1
+                polymorphic e1
+                polymorphic e2
+            }
+            class X {
+                attribute id int -id 1
+                reference R1 S -link id
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                }
+            }
+            class Y {
+                attribute id int -id 1
+                reference R1 S -link id
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                }
+            }
+            generalization R1 S X Y
+
+            class A {
+                attribute id int -id 1
+                reference R2 X -link id
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e2 -> s1
+                }
+            }
+            class B {
+                attribute id int -id 1
+                reference R2 X -link id
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e2 -> s1
+                }
+            }
+            generalization R2 X A B
+        }
+    }
+    puts [relformat $::rosea::Config::EffectiveEvent EffectiveEvent]
+    puts [relformat $::rosea::Config::DeferredEvent DeferredEvent]
+    puts [relformat $::rosea::Config::NonLocalEvent NonLocalEvent]
+    puts [relformat $::rosea::Config::InheritedEvent InheritedEvent]
+    puts [relformat $::rosea::Config::MappedEvent MappedEvent]
+    puts [relformat $::rosea::Config::LocalEvent LocalEvent]
+    testConditions\
+        {[relation cardinality $::rosea::Config::NonLocalEvent] == 6}\
+        {[relation cardinality $::rosea::Config::InheritedEvent] == 1}\
+        {[relation cardinality $::rosea::Config::MappedEvent] == 5}\
+        {[relation cardinality $::rosea::Config::LocalEvent] == 0}
+} -result {1}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test configure-6.7 {
+    Define polymorphic events -- consume mid level event, use in subclass
+} -setup {
+} -cleanup {
+    cleanupConfigData
+} -body {
+    rosea configure {
+        domain foo {
+            class S {
+                attribute id int -id 1
+                polymorphic e1
+                polymorphic e2
+            }
+            class X {
+                attribute id int -id 1
+                reference R1 S -link id
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                }
+            }
+            class Y {
+                attribute id int -id 1
+                reference R1 S -link id
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                }
+            }
+            generalization R1 S X Y
+
+            class A {
+                attribute id int -id 1
+                reference R2 X -link id
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e2 -> s1
+                    transition s1 - e1 -> s1
+                }
+            }
+            class B {
+                attribute id int -id 1
+                reference R2 X -link id
+                statemodel {
+                    state s1 {} {
+                        puts "in s1"
+                    }
+                    transition s1 - e2 -> s1
+                    transition s1 - e1 -> s1
+                }
+            }
+            generalization R2 X A B
+        }
+    }
+} -result {encountered 2 configuration script errors} -returnCodes error
 ----
 
 === Defining Assigners
@@ -12716,6 +13037,10 @@ test configure-7.1 {
 
 === Defining Domain Operations
 
+The set of domain operations for a domain constitute the external interface
+for the domain.
+The `operation` command is used to define the operations.
+
 *****
 +operation+ _name params body_
 
@@ -12743,6 +13068,9 @@ All domain operations are realized as subcommands of the domain
 ensemble command.
 ----
 ///////
+
+[float]
+==== Implementation
 
 [source,tcl]
 ----
@@ -12806,10 +13134,11 @@ as is required by the *R4* association.
 You can see this on the class diagram for
 <<config-classes-diagram,configuring classes>>.
 
-All of these terms are meaningless to someone trying to run a `configure`
-script and finding out which class is lacking the identifier means
-looking at the values of tuples of the *Class* relvar for the value
-of the *Name* attribute.
+All of these terms are meaningless to someone that has an error in a
+`configure` script and is trying to find out which class is lacking the
+identifier.
+The information needed to correct the error is found by looking at the values
+of tuples of the *Class* relvar for the value of the *Name* attribute.
 
 We will mitigate this problem by capturing the result returned by
 TclRAL and turning it into error messages that are more meaningful
@@ -12925,6 +13254,8 @@ if {[string match {is not referenced*} $phrase]} {
     set reftype refnone
 } elseif {[string match {*to by multiple*} $phrase]} {
     set reftype multrefed
+} elseif {[string match {is not referred to*} $phrase]} {
+    set reftype notrefto
 } else {
     log::error "unknown constraint phrasing, \"$phrase\""
     continue
@@ -13000,6 +13331,14 @@ relvar insert Config_DataError {
                         \"$ReferencedClass\", but the class, attribute or\
                         relationship does not exist}
 } {
+    Relationship        R12
+    RefClass            ReferringClass
+    RefType             notrefed
+    Format              {in domain, \"$Domain\", in class, \"$Class\",\
+                        makes a reference along relationship,\
+                        \"$Relationship\", but $Class does not pariticipate\
+                        in $Relationship}
+} {
     Relationship        R13
     RefClass            AttributeReference
     RefType             refnone
@@ -13020,6 +13359,14 @@ relvar insert Config_DataError {
     Format              {in domain, \"$Domain\", an assigner state model is\
                         defined on relationship, \"$Relationship\", which is\
                         not an association type relationship}
+} {
+    Relationship        R70
+    RefClass            TransitionPlace
+    RefType             refnone
+    Format              {in domain, \"$Domain\", the state model for,\
+                        \"$Model\", contains a transition for event,\
+                        \"$Event\", but $Event was a polymorphic event\
+                        consumed by a superclass of $Model}
 } {
     Relationship        R72
     RefClass            StateTransition
@@ -13330,10 +13677,7 @@ class or relationship, _etc._
 Generating a domain should happen after all the configuration for the
 domain is complete.
 It is allowable to invoke the +configure+ command multiple times
-and domain configurations are cumulative in the sense that a configuration
-script may refer to the same domain many times and the additional
-configuration is simply added to any previous one.
-
+to configure multiple domains.
 But at some point configuration is finished and that must be followed
 by an invocation of +generate+.
 Although the +generate+ command may be invoked on a _per domain_ basis
@@ -22334,7 +22678,7 @@ namespace eval ::rosea {
     <<rosea exports>>
     namespace ensemble create
 
-    variable version 1.6.1
+    variable version 1.6.2
 
     logger::initNamespace [namespace current]
 
@@ -22472,7 +22816,7 @@ rosea populate {
 [source,tcl]
 ----
 <<rosea.man>>=
-[manpage_begin rosea n 1.6.1]
+[manpage_begin rosea n 1.6.2]
 [comment {
 <<copyright info>>
 }]
