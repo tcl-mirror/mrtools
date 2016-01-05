@@ -272,8 +272,9 @@ variable evalLambda {{body} {
             try {
                 eval $command
             } on error {result} {
-                puts $::errorInfo
-                log::error "line $configlineno: \"$result\""
+                # puts $::errorInfo
+                log::error "line $configlineno:\
+                    \"[string trim $command]\":\n\"$result\""
                 incr errcount
             }
             set command {} ; # <4>
@@ -360,7 +361,7 @@ proc domain {name body} {
             <<domain: propagate polymorphic events>>
         }
     } on error {result} {
-        puts $::errorInfo
+        # puts $::errorInfo
         HandleConfigError $result
     }
 }
@@ -5339,7 +5340,7 @@ proc population {name domain script} {
             ConfigEvaluate [namespace current]::PopDef $script
         }
     } on error {result} {
-        puts $::errorInfo
+        # puts $::errorInfo
         HandleConfigError $result
         return
     }
@@ -5368,9 +5369,6 @@ proc population {name domain script} {
     <<population: check dynamic populations>>
     <<population: update storage types>>
     <<population: check reference values>>
-    if {$errcount == 0} {
-        <<population: check referential integrity>>
-    }
 }
 ----
 
@@ -5700,26 +5698,74 @@ we must make sure that the superclass instance actually exists.
 [source,c]
 ----
 <<population: check superclass references>>=
-set badsuperrefs [pipe {
+set superrefs [pipe {
     relation semijoin $::micca::ReferringSubclass $popvalues\
         -using {Domain Domain Class Class Relationship Component} |
     relation rename ~ Class Subclass Instance Subinstance Value Instance\
         Component Relationship |
     relation join ~ $::micca::ReferencedSuperclass\
         -using {Domain Domain Relationship Relationship} |
-    relation eliminate ~ Role |
-    ralutil::rvajoin ~ $popinsts ValueMatch |
-    relation restrictwith ~ {[relation isempty $ValueMatch]}
+    relation eliminate ~ Role
 }] ; # <1>
-# puts [relformat $badsuperrefs badsuperrefs]
 
-relation foreach badsuperref $badsuperrefs {
-    relation assign $badsuperref
-    log::error "in population, \"$Population\", for domain, \"$Domain\",\
-        subclass instance, \"$Subclass.$Subinstance\", references\
-        superclass instance, \"$Class.$Instance\" across,\
-        \"$Relationship\", but $Instance does not exist"
-    incr errcount
+if {[relation isnotempty $superrefs]} {
+    # puts [relformat $superrefs superrefs]
+
+    set badsuperrefs [pipe {
+        ralutil::rvajoin $superrefs $popinsts ValueMatch |
+        relation restrictwith ~ {[relation isempty $ValueMatch]}
+    }]
+    # puts [relformat $badsuperrefs badsuperrefs]
+    relation foreach badsuperref $badsuperrefs {
+        relation assign $badsuperref
+        log::error "in population, \"$Population\", for domain, \"$Domain\",\
+            subclass instance, \"$Subclass.$Subinstance\", references\
+            superclass instance, \"$Class.$Instance\" across,\
+            \"$Relationship\", but $Instance does not exist"
+        incr errcount
+    }
+
+    set superrefs [pipe {
+        relation eliminate $badsuperrefs ValueMatch |
+        relation minus $superrefs ~
+    }]
+
+    set multirefs [pipe {
+        relation group $superrefs SubRefs Subclass Subinstance |
+        relation restrictwith ~ {[relation cardinality $SubRefs] > 1}
+    }]
+    # puts [relformat $multirefs multirefs]
+    relation foreach multiref $multirefs {
+        relation assign $multiref
+        relation foreach sref $SubRefs {
+            relation assign $sref
+            lappend screfs $Subclass.$Subinstance
+        }
+        log::error "in population, \"$Population\", for domain, \"$Domain\",\
+            superclass instance, \"$Class.$Instance\", is referenced by\
+            multiple subclass instances, \"[join $screfs {, }]\" across,\
+            \"$Relationship\": this violates the referential integrity of\
+            generalizations"
+        incr errcount
+    }
+
+    # No need to remove the multirefs from consideration, that can create
+    # false positives.
+    set unrefsupers [pipe {
+        relation join $::micca::ReferencedSuperclass $popinsts |
+        relation eliminate ~ Number Role |
+        ralutil::rvajoin ~ $superrefs RefedSupers |
+        relation restrictwith ~ {[relation isempty $RefedSupers]}
+    }]
+    # puts [relformat $unrefsupers unrefsupers]
+    relation foreach unrefsuper $unrefsupers {
+        relation assign $unrefsuper
+        log::error "in population, \"$Population\", for domain, \"$Domain\",\
+            superclass instance, \"$Class.$Instance\", is not referenced\
+            by any subclass across \"$Relationship\":\
+            this violates the referential integrity of generalizations"
+        incr errcount
+    }
 }
 ----
 <1> Queries such as this are much easier to follow if you have the
@@ -5766,13 +5812,52 @@ test populate-4.4 {
         population p1 bar {
             class super {
                 instance super1 s_id 20
-                instance super2 s_id 40
+                instance super2 s_id 40 ; # super2 is never referenced
             }
             class sub1 {
                 instance fred1 R1 super1
             }
             class sub2 {
                 instance alice1 R1 super3 ; # There is no "super3" instance.
+            }
+        }
+    }
+} -result {encountered 2 configuration script errors} -returnCodes error
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test populate-4.17 {
+    multiple superclass reference
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain bar {
+            class super {
+                attribute s_id int -default 30
+            }
+            class sub1 {
+                reference R1
+            }
+            class sub2 {
+                reference R1
+            }
+
+            generalization R1 super sub1 sub2
+        }
+
+        population p1 bar {
+            class super {
+                instance super1
+            }
+            class sub1 {
+                instance fred1 R1 super1
+            }
+            class sub2 {
+                instance alice1 R1 super1 ; # Multiple reference to super1
             }
         }
     }
@@ -5807,7 +5892,7 @@ proc CheckSubclassReferences {supers subs insts} {
     if {[relation isempty $supers]} {
         return
     }
-    puts [relformat $supers supers]
+    # puts [relformat $supers supers]
 
     upvar #0 ::micca::@Config@::errcount errcount
 
@@ -5845,10 +5930,14 @@ proc CheckSubclassReferences {supers subs insts} {
         incr errcount
     }
 
-    set badrefs [pipe {
+    set supers [pipe {
         relation eliminate $nonparts ClassMatch |
-        relation minus $supers ~ |
-        ralutil::rvajoin ~ $insts InstanceMatch |
+        relation minus $supers ~
+    }]
+    # puts [relformat $supers supers]
+
+    set badrefs [pipe {
+        ralutil::rvajoin $supers $insts InstanceMatch |
         relation restrictwith ~ {[relation isempty $InstanceMatch]}
     }] ; # <4>
     # puts [relformat $badrefs badrefs]
@@ -5858,6 +5947,40 @@ proc CheckSubclassReferences {supers subs insts} {
             superclass instance, \"$Superclass.$Superinstance\", references\
             subclass instance, \"$Class.$Instance\" across,\
             \"$Relationship\", but $Instance does not exist"
+        incr errcount
+    }
+
+    set multirefs [pipe {
+        relation eliminate $badrefs InstanceMatch |
+        relation minus $supers ~ |
+        relation group ~ SuperRefs Superinstance |
+        relation restrictwith ~ {[relation cardinality $SuperRefs] > 1}
+    }]
+    # puts [relformat $multirefs multirefs]
+    relation foreach multiref $multirefs {
+        relation assign $multiref
+        log::error "in population, \"$Population\", for domain, \"$Domain\",\
+            superclass, \"$Superclass\", instances,\
+            \"[join [relation list $SuperRefs Superinstance] {, }]\",\
+            all reference subclass instance, \"$Class.$Instance\" across,\
+            \"$Relationship\": this violates the referential integrity of\
+            generalizations"
+        incr errcount
+    }
+
+    set unrefsubs [pipe {
+        relation join $subs $insts |
+        relation eliminate ~ Number Role |
+        ralutil::rvajoin ~ $supers RefedSubs |
+        relation restrictwith ~ {[relation isempty $RefedSubs]}
+    }]
+    # puts [relformat $unrefsubs unrefsubs]
+    relation foreach unrefsub $unrefsubs {
+        relation assign $unrefsub
+        log::error "in population, \"$Population\", for domain, \"$Domain\",\
+            subclass instance, \"$Class.$Instance\", is not referenced\
+            by any superclass across \"$Relationship\":\
+            this violates the referential integrity of generalizations"
         incr errcount
     }
 }
@@ -5910,11 +6033,53 @@ test populate-4.5 {
                 instance fred1
             }
             class sub2 {
+                instance alice1 ; # not referenced
+            }
+        }
+    }
+} -result {encountered 3 configuration script errors} -returnCodes error
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test populate-4.15 {
+    multiple subclass reference
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain bar {
+            class super {
+                attribute s_id int
+                reference R1
+            }
+            class sub1 {
+                attribute temp int -default 25
+            }
+            class sub2 {
+                attribute color int -default 25
+            }
+
+            generalization R1 super sub1 sub2
+        }
+
+        population p1 bar {
+            class super {
+                instance super1 s_id 20 R1 {sub1 fred1}
+                instance super2 s_id 40 R1 {sub2 alice1}
+                instance super3 s_id 60 R1 {sub1 fred1} ; # multiple fred1
+            }
+            class sub1 {
+                instance fred1
+            }
+            class sub2 {
                 instance alice1
             }
         }
     }
-} -result {encountered 2 configuration script errors} -returnCodes error
+} -result {encountered 1 configuration script errors} -returnCodes error
 ----
 
 ==== Checking Union Subclass Reference Values
@@ -5944,7 +6109,7 @@ test populate-4.14 {
         domain bar {
             class super {
                 attribute s_id int
-                reference R1
+                # reference R1 ; # this will generate a warning of being ignored
             }
             class sub1 {
                 attribute temp int -default 25
@@ -5966,11 +6131,11 @@ test populate-4.14 {
                 instance fred1
             }
             class sub2 {
-                instance alice1
+                instance alice1 ; # never referenced by a superclass instance
             }
         }
     }
-} -result {encountered 2 configuration script errors} -returnCodes error
+} -result {encountered 3 configuration script errors} -returnCodes error
 ----
 
 ==== Checking Associator Reference Values
@@ -6804,14 +6969,6 @@ test populate-4.13 {
         }
     }
 } -result {encountered 4 configuration script errors} -returnCodes error
-----
-
-[float]
-==== Checking Referential Integrity
-
-[source,c]
-----
-<<population: check referential integrity>>=
 ----
 
 === Class
