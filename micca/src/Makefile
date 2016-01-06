@@ -10,6 +10,7 @@
 #
 
 DOCDIR	= ../doc
+CODEDIR	= ../code
 TESTDIR = ../tests
 PKGDIR	= ../../packages
 IMAGEDIR = ./images
@@ -18,6 +19,8 @@ vpath %.pdf $(DOCDIR)
 vpath %.html $(DOCDIR)
 vpath %.test $(TESTDIR)
 vpath %.uxf $(IMAGEDIR)
+vpath %.tcl $(CODEDIR)/tcl
+vpath %.c $(CODEDIR)/c/posix
 
 DOCSRC 	=\
 	micca.aweb\
@@ -60,6 +63,10 @@ IMAGES =\
 TCLSRC	=\
      	$(patsubst %.aweb,%.tcl,$(DOCSRC))\
 	$(NULL)
+
+POSIXH	= $(CODEDIR)/c/posix/mrt_interface.h
+POSIXC	= $(CODEDIR)/c/posix/mrt_implementation.c
+POSIXOBJ	= $(CODEDIR)/c/posix/mrt_implementation.o
 
 PDF 	=\
      	$(DOCDIR)/$(patsubst %.aweb,%.pdf,$(DOCSRC))\
@@ -126,8 +133,9 @@ ASCIIDOC_OPTS =\
 	$(NULL)
 
 .PHONY : all doc code tests runtests
+.PHONY : posixcode posixh posixc
 
-all : doc code tests
+all : doc code tests ccode
 
 doc : $(PDF)
 
@@ -137,6 +145,22 @@ tests : code $(TESTS)
 
 runtests : tests
 	cd $(TESTDIR) ; tclsh $(TESTS) -verbose bet -level debug
+
+posixcode : $(POSIXOBJ)
+
+$(POSIXOBJ) : posixc posixh
+
+posixc : $(POSIXC)
+
+posixh : $(POSICH)
+
+$(POSIXOBJ) : $(POSIXH) $(POSIXC)
+
+$(POSIXH) : $(DOCSRC) $(DOCPARTS)
+	atangle $(ATANGLEOPTS) -line '#line %l% "%f%"' -root mrt_interface.h -output $@ $<
+
+$(POSIXC) : $(DOCSRC) $(DOCPARTS)
+	atangle $(ATANGLEOPTS) -line '#line %l% "%f%"' -root mrt_posix.c -output $@ $<
 
 clean :
 	$(RM) $(CLEANFILES)
@@ -155,11 +179,16 @@ $(DOCDIR)/%.pdf : %.aweb
 	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) $<
 	$(RM) $(DOCDIR)/*__[0-9].pdf
 
+mrt_interface.h : runtime.txt
+
+mrt_implementation.c : runtime.txt
+
 %.tcl : %.aweb
-	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
+	atangle $(ATANGLEOPTS) -root $@ -output $(CODEDIR)/tcl/$@ $<
 
 %.test : %.aweb
 	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $(TESTDIR)/$@ $<
+
 
 $(IMAGEDIR)/platform-%.pdf : platform-%.uxf
 	umlet -action=convert -format=pdf\

@@ -5,30 +5,174 @@
 [partintro]
 .Runtime Support
 --
-Runtime Support
+In the previous part of the book,
+we described the domain specific language (DSL) that is used to
+describe a domain to `micca`.
+From that description,
+code is generated and the generated code targets the run time
+environment that is explained in this part of the book.
+
+When translating an executable model,
+parts of the model can be mapped directly onto the implementation language.
+For example in a `micca` translation,
+class instances are referred to using a ``C'' pointer to the instance
+memory.
+This allows attribute access by simple indirection on the pointer,
+_e.g._ for a state activity, `self->Temp = 27`, can be used to update the
+`Temp` attribute of the instance.
+
+Other aspects of mapping model execution to the implementation are not
+directly supported in the implementation language.
+Perhaps the best example is execution of a state model.
+There is no intrinsic support for state machines in the ``C'' language.
+To dispatch events to state machines requires that we write additional
+``C'' code to implement the execution rules of Moore state machines.
+We will gather that code into ``C'' functions and the functions will require
+data that must be structured in a particular way.
+
+This part of the book is primarily concerned with showing those functions
+and data structures.
+Taken together,
+they define the details of how execution happens in a `micca` translated
+domain.
+We have purposely chosen a simple scheme of execution, namely,
+single threaded and event driven with callbacks to handle the specific
+computations.
+This choice enables this translation scheme to be used in small,
+embedded, ``bare metal'' computing technology.
+We will also produce a flavor of the run time that can execute in a POSIX
+environment.
+This will allow us to target POSIX,
+if that is appropriate to the application,
+and also to use POSIX as a simulation environment for testing an embedded
+system.
+This turns out to be very useful since debugging and other facilities
+tend to be much richer in the POSIX world than in the bare metal embedded
+world.
+
+Once we know how to interface to the run time code,
+we can show the code generation that takes the platform model data and
+converts it to ``C'' code.
+That is the subject of the next part of the book.
 --
 
 == Introduction
-Introduction
 
-== Main Loop
+To start,
+we want to enumerate the characteristics of `micca` run time architecture.
+
+* The implementation language is ``C''.
+* All data is held in primary memory.
+* All classes and other resources are allocated fixed size memory pools
+whose size is known at compile time. There is no use of a system heap
+by the run time code.
+* The address in memory of a class instance serves as an architecturally
+generated identifier for the instance and we use that identifier execlusively
+in the interfaces of the run time code.
+* Execution is single threaded. There is no notion of _task_ or _process_
+or _thread_ as those terms are usually defined for computer operating systems.
+There is no notion of processor context, context switching or process
+preemption.
+* The only support for asynchronous execution is that of an interrupt.
+Facilities are provided to allow interrupt service code to synchronize
+to the running background.
+There is no notion of semiphores, condition variables or any other
+mutual exclusion locking scheme other than that required for interrupts.
+* The execution pattern is event driven with callbacks that run to completion
+and perform the required computation.
+Given the single threaded nature of sequencing execution,
+callbacks that run for longer than the desired response latency time of the
+system can be problematic.
+This scheme is targeted at applications that are _reactive_ in nature,
+sensing external stimulus and responding to that stimulus,
+and _not_ long-running computationally intensive transformations.
+The execution scheme is very similar to that used for most graphical
+user interface applications.
+* There is no notion of event priority.
+Events are dispatched in the order they are signaled.
+There is, however, a notion of thread of control and threads of control
+have an implicit relationship with transactions on the domain data.
+* Referential integrity is enforced at the end of each thread of control.
+This implies that any changes in the stored data for relationships is
+verified against the constraints implied by the relationship
+conditionality and multiplicity.
+* Some of the constructs for the run time depend upon the target processor.
+We will show three implementations, namely, the ARM V7-M architecture,
+the TI MSP430 architecture and the POSIX architecture.
+
+As we have said before,
+this execution scheme is _not_ intended for all applications.
+The computational demands of some applications are such that the
+single threaded, event driven, callback nature is simply inappropriate
+and another execution scheme should be used.
+However,
+for a large class of applications,
+this scheme works very well and has many advantages in terms of simplicity
+and the lack of shared state information between concurrent execution
+threads.
+
+== The Main Program
+
+In ``C'',
+execution begins with the function called, `main`.
+`Micca` does _not_ provide this function.
+Each system will have to construct a custom `main` function.
+The goals of this function are to perform any required initialization
+and then to enter the event loop.
+Below we show an outline of what a `main` function would do.
+The only hard and fast requirements are that `mrt_Init` must be called
+before any run time facilities are used and `mrt_EventLoop` must
+be invoked to cause the system to run.
 
 [source,c]
 ----
 int
 main(void)
 {
+    /*
+     * Hardware and other low level system initialization is usually done
+     * first.
+     */
+
+    /*
+     * Initialize the run time code itself.
+     */
     mrt_Init() ;
 
-    // other initializations, such as hardware, domains, etc.
+    /*
+     * Initialize domains, bridges and any other code that might require access
+     * to the facilities of the run time code. Typically, each domain in the
+     * system would have an "init()" domain operation and these can be invoked
+     * here. Sometimes domain interactions are such that a second round of
+     * initialization is required.  Bridges between domains may also require
+     * that the initialization for a domain be done before the bridge can be
+     * initialized.  Since the run time initialization has been done by this
+     * point, domains may generate events and do other model level activities.
+     * Regardless of how the initialization is accomplished, it is system
+     * specific and, unfortunately, only temporally cohesive.
+     */
 
-    mrt_EnterEventLoop() ;
+    /*
+     * Entering the event loop causes the system to dispatch events.
+     */
+    mrt_EventLoop() ;
 }
 ----
 
+=== Event Loop
+
+To a first approximation,
+the run time event loop is an infinite loop.
+Most applications will enter the event loop after their initialization
+phase and remain there forever.
+However,
+testing and other considerations mean that we will want to exit the
+event loop under control of the program.
+
+(((micca,Run Time,mrt_EventLoop)))
 [source,c]
 ----
-<<mrt external interface>>=
+<<mrt external interfaces>>=
 extern void mrt_EventLoop(void) ;
 
 <<mrt external functions>>=
@@ -38,38 +182,44 @@ mrt_EventLoop(void)
     for (exitEventLoop = false ; !exitEventLoop ;
             exitEventLoop = false) {
 
-        <<EventLoop: background sync>>
-
-        if (!dispatchOneEvent()) {
+        if (!mrt_ProcessOneEvent()) {
             mrt_Wait() ;
         }
     }
 }
 ----
 
-[source,c]
-----
-<<mrt external interfaces>>=
-extern bool mrt_ProcessOneEvent(void) ;
+As we see,
+the event loop loops processing one event at a time as long as it has not
+been requested to exit the loop.
 
-<<mrt external functions>>=
-bool
-mrt_ProcessOneEvent(void)
-{
-    <<EventLoop: background sync>>
-    return dispatchOneEvent() ;
-}
-----
+Exiting the event loop is controlled by a simple boolean variable.
 
+(((micca,Run Time,exitEventLoop)))
 [source,c]
 ----
 <<mrt static data>>=
 static bool exitEventLoop ;
 ----
 
+Rather than expose the variable directly,
+we provide a function to set it.
+The usual usage for this function is in test code where the main
+test application will enter the event loop and some state activity
+will execute `mrt_SyncEventLoop()` to return control back to the test
+application.
+There are other uses.
+For example, if the system detects a catastrophic situation,
+it may want to exit the event loop and allow the subsequent code to
+gracefully bring down the system or force the system to reset.
+The exact details are system specific,
+but this provides the means to gain control of the run time execution
+for exceptional situations.
+
+(((micca,Run Time,mrt_SyncEventLoop)))
 [source,c]
 ----
-<<mrt external interface>>=
+<<mrt external interfaces>>=
 extern bool mrt_SyncEventLoop() ;
 
 <<mrt external functions>>=
@@ -82,9 +232,81 @@ mrt_SyncEventLoop(void)
 }
 ----
 
+=== Process a Single Event
+
+A public interface is also provided to process a single event.
+This is used by the event loop but can also be invoked on it own.
+This is _not_ the recommended mechanism of running a `micca` based
+applications, but sometimes it is necessary.
+Again,
+testing is sometimes best accomplished by letting a test program
+control event by event dispatch.
+The other use case involves situations where `micca` generated domains
+must be integrated with legacy code.
+The legacy code will probably have its own execution loop and
+we will have to dispatch `micca` events under control of the legacy
+execution scheme.
+This is not an ideal situation,
+but when migrating an older system to a `micca` translated system
+a transition period is unavoidable.
+We provide the ability to micro-manage the event dispatch with the full
+realization that the facility will be abused by some projects.
+
+(((micca,Run Time,mtr_ProcessOneEvent)))
+[source,c]
+----
+<<mrt external interfaces>>=
+extern bool mrt_ProcessOneEvent(void) ;
+
+<<mrt external functions>>=
+bool
+mrt_ProcessOneEvent(void)
+{
+    <<EventLoop: background sync>>
+
+    return dispatchOneEvent() ;
+}
+----
+
+The return value for `mrt_ProcessOneEvent` indictes if an event
+was actually dispatched.
+A return value of `false` indicates that there is no additional work
+that needs to be done at this time.
+
+We will discuss the internal logic of processing an event later.
+For now, we make two points.
+
+. If interrupts have occurred,
+we deal with their background synchronization first and completely.
+The exact process to synchronize between interrupts and the background
+is processor architecture dependent.
+. Only one event is dispatched after synchronizing with interrupts.
+Because we deal with all the interrupts before dispatching a single event,
+interrupt synchronization has an effective higher priority than event dispatch.
+
 == Managing Data
 
-=== Class Instances
+Before we discuss the details of how execution is sequenced,
+we will show how data is managed by the run time.
+Execution sequencing is directed at class instances and it will be
+helpful to understand how instances are stored before we get to
+discussing how they are operated upon.
+
+The run time provides functions to support the basic lifetime of
+instances.
+We need to be able to:
+
+* Create instances synchronously as part of an activity.
+* Create instances asynchronously as part of a event dispatch.
+* Delete instances synchronously as part of an activity.
+* Delete instances asynchronously when the instance enters a terminal state.
+
+=== Instance Data
+
+The structure of the instances of each class is, in general, different.
+However from the point of view of the run time,
+instances can be treated the same.
+The view of a class instance by the run time is shown below.
 
 [source,c]
 ----
@@ -92,34 +314,345 @@ mrt_SyncEventLoop(void)
 typedef struct mrtinstance {
     struct mrtclass const *instClass ;
     AllocStatus alloc ;
-    StateCode currentState ;
+    MRT_StateCode currentState ;
 } MRT_Instance ;
 ----
 
-[source,c]
-----
-<<mrt interface simple types>>=
-typedef int8_t AllocStatus ;
-----
+`instClass`::
+    A pointer to a class data structure. The class data structure contains
+    information that is common to all instances of the class.
+`alloc`::
+    A value that shows the allocation status of the memory for the instance.
+    A value of 0, means the instance memory is not in use and can allocated
+    to a new instance.
+    A negative value means the memory has been reserved but is not in active
+    use.
+    A positive value means the memory has been reserved and the instances
+    is in active use.
+`currentState`::
+    For those class that have a state model,
+    the `currentState` member holds a small integer number indicating the
+    current state in which the instance resides.
+    A value of -1 is used to show that the class does not have a state model.
 
 [source,c]
 ----
 <<mrt interface simple types>>=
-typedef int8_t StateCode ;
+typedef short int AllocStatus ;
 ----
+
+A class instance is mapped onto the element of a ``C'' array.
+The size of the array is fixed at compile time.
+The `alloc` member of the instance structure is used to keep track of
+the array elements as instances are created and deleted at run time.
+We will also use this member to track _event in flight_ errors.
+We will discuss this more below,
+but we need a way to insure that events that have been signaled are not
+delivered to instances that have been deleted.
+
+[source,c]
+----
+<<mrt interface simple types>>=
+typedef int8_t MRT_StateCode ;
+----
+
+The data type for the `currentState` member is just a small integer.
+By specifying 8 bits we limit the number of states of a state model to 127.
+That is an enormous number of states for a class state model.
+We use negative state numbers to indicate the non-transitioning actions
+that can happen when an event is dispatched.
 
 [source,c]
 ----
 <<mrt constants>>=
-static const StateCode StateCode_IG = -1 ;
-static const StateCode StateCode_CH = -2 ;
+#define MRT_StateCode_IG    (-1)
+#define MRT_StateCode_CH    (-2)
 ----
+
+=== Class Data
+
+All the behavior of data management and execution sequencing is
+completely determined by the values contained in the data structures
+supplied to the various functions of the mechanisms.
+This is different from some software architecture mechanisms that
+use _ad hoc_ generated code from a model compiler to implement
+some capabilities.
+
+Since the behavior of all instances of a given class is the same,
+each class that requires data management or has execution behavior has a data
+structure that contains all the class invariant information.
+
+[source,c]
+----
+<<mrt interface data types>>=
+typedef struct mrtclass {
+    struct installocblock *iab ;
+    struct objectdispatchblock const *odb ;
+    struct polydispatchblock const *pdb ;
+} MRT_Class ;
+----
+
+`iab`::
+    A pointer to an instance allocation block.
+    The IAB is used to dynamically allocation class instances.
+    For class populations that are static,
+    this value is set to `NULL`.
+`odb`::
+    A pointer to an object dispatch block.
+    The ODB is used to dispatch events to a state machine.
+    For classes that do not have a state model,
+    this value is set to `NULL`.
+`pdb`::
+    A pointer to a polymorphic dispatch block.
+    The PDB is used to dispatch polymorphic events.
+    For classes that have no polymorphic events,
+    this value is set to `NULL`.
+
+In the next section,
+the instance allocation block is described as we continue to define
+how data is managed by the run time.
+Later, we describe the object dispatch block and polymorphic dispatch
+block when we discuss event dispatch.
+
+=== Instance Allocation
+
+There are three ways to create an instance:
+
+. Create an instance as part of an initial instance population.
+. Create an instance synchronously to the execution of some activity by invoking
+a function.
+. Create an instance asynchronously to the execution of some activity by sending
+an event.
+
+Creating initial instances is handled during code generation using the
+population data specified when the domain is configured.
+In this section we are going to discuss synchronous instance creation.
+This is instance creation by a direct function invocation and when
+the function returns the instance is ready and available.
+Later we will discuss asynchronous instance creation which is instance
+creation by generating an event.
+
+Instance creation and deletion also supports a very simplified notion of
+construction and destruction for the instances.
+This is no where near as complicated or full featured as something in C\++.
+Constructors and destructors take no arguments other than a pointer to the
+instance.
+
+[source,c]
+----
+<<mrt interface data types>>=
+typedef void (*InstCtor)(MRT_Instance *) ;
+typedef void (*InstDtor)(MRT_Instance *) ;
+----
+
+Constructors and destructors are primarily useful for when the instance has a
+more complicated data structure as an attribute,
+as might be the case if the attribute data type is user defined.
+If you need to do complicated construction of instances,
+the preferred method is to do that with an instance based operation
+or as part of a state activity for an asynchronously created instance.
+
+The instances of a class are contained in a single array variable
+which serves as the memory pool for the instances.
+To support managing a pool of class instances,
+an *Instance Allocation Block*, or *IAB* for short,
+data structure is used to keep track of the memory pool.
+What we need is a data structure that can find the bounds of the pool.
+
+[source,c]
+----
+<<mrt interface data types>>=
+typedef struct installocblock {
+    void *storageStart ;
+    void *storageFinish ;
+    void *storageLast ;
+    AllocStatus allocCounter ;
+    size_t instanceSize ;
+    InstCtor construct ;
+    InstDtor destruct ;
+} MRT_InstAllocBlock ;
+----
+
+`storageStart`::
+    A pointer to the beginning of the memory where the instance storage
+    pool is located.
+    This is the array allocated to hold the instances of a class.
+`storageFinish`::
+    A pointer to one element beyond the end of the instance storage pool
+    for the class.
+    This pointer may not be dereferenced, of course, but provides the
+    boundary marker for the end of the pool.
+`storageLast`::
+    A pointer to the instance that was last allocated. This is used as
+    the starting point for allocating the next instance.
+`allocCounter`::
+    The next value of the allocation counter to be assigned to a newly
+    allocated instance.
+`instanceSize`::
+    The number of bytes of memory occupied by an instance.
+`construct`::
+    A pointer to a constructor function. If there is no constructor defined
+    for the class, then the value of this member may be set to `NULL`.
+`destruct`::
+    A pointer to a destructor function. If there is no destructor defined
+    for the class, then the value of this member may be set to `NULL`.
+
+The underlying allocation algorithm is a simple linear search starting
+at the last location that was allocated.
+
+[source,c]
+----
+<<mrt forward references>>=
+static MRT_Instance *mrtInstFindSlot(MRT_Class const *instClass) ;
+----
+
+[source,c]
+----
+<<mrt static functions>>=
+static MRT_Instance *
+mrtInstFindSlot(
+    MRT_Class const *instClass)
+{
+    assert(instClass != NULL) ;
+    MRT_InstAllocBlock *iab = instClass->iab ;
+    if (iab == NULL) {
+        return NULL ;
+    }
+    assert(iab->storageLast < iab->storageFinish) ;
+    /*
+     * Search for an empty slot in the pool. Start at the location where we
+     * last allocated an instance.
+     */
+    MRT_Instance *inst ;
+    for (inst = mrtInstNext(iab, iab->storageLast) ;
+            inst->alloc != 0 && inst != iab->storageLast ;
+            inst = mrtInstNext(iab, inst)) {
+        // Empty
+    }
+    /*
+     * Check if we ended up on a slot that is not allocated.
+     */
+    if (inst->alloc != 0) {
+        return NULL ; // <1>
+    }
+
+    memset(inst, 0, iab->instanceSize) ; // <2>
+    return inst ;
+
+}
+----
+<1> If we wrap all the way around to where we started and still did not
+find an instance storage element whose `alloc` member was zero,
+the we have run out of space!
+That condition is indicated by returning `NULL`.
+<2> The newly allocated instance slot is returned zeroed out.
+
+Finding the next element in the instance storage array involves
+performing the pointer arithmetic modulo the size of the array.
+Since the pool is allocated in a contiguous block of memory,
+we must wrap around the iterator when it passes the end of the
+storage pool.
+That is accomplished with the `mrtInstNext()` function.
+
+[source,c]
+----
+<<mrt forward references>>=
+static inline void *mrtInstNext(MRT_InstAllocBlock *iab, void *ptr) ;
+----
+
+[source,c]
+----
+<<mrt static functions>>=
+static inline 
+void *
+mrtInstNext(
+    MRT_InstAllocBlock *iab,
+    void *ptr)
+{
+    ptr = (void *)((uintptr_t)ptr + iab->instanceSize) ; // <1>
+    if (ptr >= iab->storageFinish) { // <2>
+        ptr = iab->storageStart ;
+    }
+    return ptr ;
+}
+----
+<1> Since the size of instance varies from class to class,
+we must take over scaling the pointer arithmetic by the size of the
+instance.
+<2> Perform the modulus wrap around if we cross over the boundary of
+the storage array.
+
+=== Creating an Instance
+The function, `mrt_CreateInst`, is used to synchronously
+create an instance of a class.
+
+[source,c]
+----
+<<mrt external interfaces>>=
+extern MRT_Instance *
+mrt_CreateInst(
+    MRT_Class const *instClass,
+    MRT_StateCode initialState) ;
+----
+`instClass`::
+    A pointer to the class data for the instance to be created.
+`initialState`::
+    The state number into which the instance will be placed.
+    For classes that do not have an associated state model this argument
+    is ignored.
+
+[source,c]
+----
+<<mrt external functions>>=
+MRT_Instance *
+mrt_CreateInst(
+    MRT_Class const *instClass,
+    MRT_StateCode initialState)
+{
+    assert(instClass != NULL) ;
+    MRT_InstAllocBlock *iab = instClass->iab ;
+
+#       ifndef NDEBUG
+    if (instClass->odb) {
+        assert(initialState < instClass->odb->stateCount) ;
+    }
+#       endif /* NDEBUG */
+
+    /*
+     * Search for an empty slot in the pool.
+     */
+    MRT_Instance *inst = mrtInstFindSlot(instClass) ;
+    if (inst == NULL) {
+        mrtFatalError(mechNoInstSlot, instClass) ;
+    }
+    /*
+     * Record where we left off for the next allocation attempt.
+     */
+    iab->storageLast = inst ;
+    /*
+     * Mark the slot as in use.
+     */
+    inst->instClass = instClass ;
+    inst->alloc = mrtInstIncrCounter(iab) ;
+    inst->currentState = instClass->odb ? initialState : MRT_StateCode_IG ; // <1>
+    /*
+     * Run the constructor if there is one.
+     */
+    if (iab->construct) {
+        iab->construct(inst) ;
+    }
+    return inst ;
+}
+----
+<1> If a class does not have a state model, then we ignore the
+value passed in to the function and set the current state to ignored.
+This is a convenient value for such a situation.
 
 == Foreground / Background Synchronization
 
 [source,c]
 ----
-<<mrt static functions>>=
+<<EventLoop: background sync>>=
 #   ifndef __ARM_ARCH_7M__
 while (invokeOneSyncFunc()) {
     ; /* empty */
@@ -165,4 +698,105 @@ PendSV_Handler(void)
         }
     }
 }
+----
+
+== Code Organization
+
+[source,c]
+----
+<<mrt_interface.h>>=
+/*
+<<copyright info>>
+*/
+
+#ifndef MRT_INTERFACE_H_
+#define MRT_INTERFACE_H_
+
+/*
+ * Standard Includes
+ */
+<<standard includes>>
+
+/*
+ * Constants
+ */
+<<mrt constants>>
+
+/*
+ * Data Types
+ */
+<<mrt interface simple types>>
+<<mrt interface data types>>
+
+/*
+ * External Functions
+ */
+<<mrt external interfaces>>
+
+#endif /* MRT_INTERFACE_H_ */
+----
+
+[source,c]
+----
+<<standard includes>>=
+#include <stddef.h>
+#include <stdint.h>
+#include <stdbool.h>
+----
+
+[source,c]
+----
+<<common includes>>=
+#include <string.h>
+#include "mrt_interface.h"
+----
+
+[source,c]
+----
+<<mrt_arm7m.c>>=
+/*
+<<copyright info>>
+*/
+
+<<common includes>>
+----
+
+[source,c]
+----
+<<mrt_msp430.c>>=
+/*
+<<copyright info>>
+*/
+
+<<common includes>>
+----
+
+[source,c]
+----
+<<mrt_posix.c>>=
+/*
+<<copyright info>>
+*/
+
+<<common includes>>
+
+/*
+ * Forward References
+ */
+<<mrt forward references>>
+
+/*
+ * Static Data
+ */
+<<mrt static data>>
+
+/*
+ * Static Functions
+ */
+<<mrt static functions>>
+
+/*
+ * External Functions
+ */
+<<mrt external functions>>
 ----
