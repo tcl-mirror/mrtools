@@ -15,6 +15,8 @@ TESTDIR = ../tests
 PKGDIR	= ../../packages
 IMAGEDIR = ./images
 
+CFLAGS	= -std=c11
+
 vpath %.pdf $(DOCDIR)
 vpath %.html $(DOCDIR)
 vpath %.test $(TESTDIR)
@@ -135,7 +137,7 @@ ASCIIDOC_OPTS =\
 .PHONY : all doc code tests runtests
 .PHONY : posixcode posixh posixc
 
-all : doc code tests ccode
+all : doc code tests
 
 doc : $(PDF)
 

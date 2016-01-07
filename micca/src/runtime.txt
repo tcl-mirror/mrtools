@@ -120,7 +120,7 @@ Each system will have to construct a custom `main` function.
 The goals of this function are to perform any required initialization
 and then to enter the event loop.
 Below we show an outline of what a `main` function would do.
-The only hard and fast requirements are that `mrt_Init` must be called
+The only hard and fast requirements are that `mrt_Initialize` must be called
 before any run time facilities are used and `mrt_EventLoop` must
 be invoked to cause the system to run.
 
@@ -137,7 +137,7 @@ main(void)
     /*
      * Initialize the run time code itself.
      */
-    mrt_Init() ;
+    mrt_Initialize() ;
 
     /*
      * Initialize domains, bridges and any other code that might require access
@@ -166,8 +166,8 @@ the run time event loop is an infinite loop.
 Most applications will enter the event loop after their initialization
 phase and remain there forever.
 However,
-testing and other considerations mean that we will want to exit the
-event loop under control of the program.
+testing and other considerations mean that at times we will want to exit the
+event loop to gain control of the program.
 
 (((micca,Run Time,mrt_EventLoop)))
 [source,c]
@@ -190,8 +190,9 @@ mrt_EventLoop(void)
 ----
 
 As we see,
-the event loop loops processing one event at a time as long as it has not
-been requested to exit the loop.
+the flow of control loops,
+processing one event at a time as long as it has not been requested to exit the
+loop.
 
 Exiting the event loop is controlled by a simple boolean variable.
 
@@ -241,7 +242,7 @@ applications, but sometimes it is necessary.
 Again,
 testing is sometimes best accomplished by letting a test program
 control event by event dispatch.
-The other use case involves situations where `micca` generated domains
+Another use case involves situations where `micca` generated domains
 must be integrated with legacy code.
 The legacy code will probably have its own execution loop and
 we will have to dispatch `micca` events under control of the legacy
@@ -335,6 +336,12 @@ typedef struct mrtinstance {
     current state in which the instance resides.
     A value of -1 is used to show that the class does not have a state model.
 
+The code generation will facilitate this view of an arbitrary instance
+by inserting this structure as the first element of the ``C'' structure
+that is generated for each class.
+In this manner a pointer to an arbitrary class can be cast to a
+pointer to a `MRT_Instance` with impunity.
+
 [source,c]
 ----
 <<mrt interface simple types>>=
@@ -343,8 +350,8 @@ typedef short int AllocStatus ;
 
 A class instance is mapped onto the element of a ``C'' array.
 The size of the array is fixed at compile time.
-The `alloc` member of the instance structure is used to keep track of
-the array elements as instances are created and deleted at run time.
+The `alloc` member of the instance structure is used to keep track of the
+status of the array elements as instances are created and deleted at run time.
 We will also use this member to track _event in flight_ errors.
 We will discuss this more below,
 but we need a way to insure that events that have been signaled are not
@@ -360,7 +367,7 @@ The data type for the `currentState` member is just a small integer.
 By specifying 8 bits we limit the number of states of a state model to 127.
 That is an enormous number of states for a class state model.
 We use negative state numbers to indicate the non-transitioning actions
-that can happen when an event is dispatched.
+that may occur when an event is dispatched.
 
 [source,c]
 ----
@@ -434,7 +441,7 @@ creation by generating an event.
 
 Instance creation and deletion also supports a very simplified notion of
 construction and destruction for the instances.
-This is no where near as complicated or full featured as something in C\++.
+This is no where near as complicated or full featured as something in C++.
 Constructors and destructors take no arguments other than a pointer to the
 instance.
 
@@ -520,8 +527,8 @@ mrtInstFindSlot(
     }
     assert(iab->storageLast < iab->storageFinish) ;
     /*
-     * Search for an empty slot in the pool. Start at the location where we
-     * last allocated an instance.
+     * Search for an empty slot in the pool. Start at the next location after
+     * where we last allocated an instance.
      */
     MRT_Instance *inst ;
     for (inst = mrtInstNext(iab, iab->storageLast) ;
@@ -536,7 +543,6 @@ mrtInstFindSlot(
         return NULL ; // <1>
     }
 
-    memset(inst, 0, iab->instanceSize) ; // <2>
     return inst ;
 
 }
@@ -545,7 +551,6 @@ mrtInstFindSlot(
 find an instance storage element whose `alloc` member was zero,
 the we have run out of space!
 That condition is indicated by returning `NULL`.
-<2> The newly allocated instance slot is returned zeroed out.
 
 Finding the next element in the instance storage array involves
 performing the pointer arithmetic modulo the size of the array.
@@ -583,17 +588,19 @@ instance.
 the storage array.
 
 === Creating an Instance
-The function, `mrt_CreateInst`, is used to synchronously
+
+The function, `mrt_CreateInstance`, is used to synchronously
 create an instance of a class.
 
 [source,c]
 ----
 <<mrt external interfaces>>=
 extern MRT_Instance *
-mrt_CreateInst(
+mrt_CreateInstance(
     MRT_Class const *instClass,
     MRT_StateCode initialState) ;
 ----
+
 `instClass`::
     A pointer to the class data for the instance to be created.
 `initialState`::
@@ -605,12 +612,11 @@ mrt_CreateInst(
 ----
 <<mrt external functions>>=
 MRT_Instance *
-mrt_CreateInst(
+mrt_CreateInstance(
     MRT_Class const *instClass,
     MRT_StateCode initialState)
 {
     assert(instClass != NULL) ;
-    MRT_InstAllocBlock *iab = instClass->iab ;
 
 #       ifndef NDEBUG
     if (instClass->odb) {
@@ -623,17 +629,22 @@ mrt_CreateInst(
      */
     MRT_Instance *inst = mrtInstFindSlot(instClass) ;
     if (inst == NULL) {
-        mrtFatalError(mechNoInstSlot, instClass) ;
+        mrtFatalError(mrtNoInstSlot, instClass) ;
     }
     /*
      * Record where we left off for the next allocation attempt.
      */
+    MRT_InstAllocBlock *iab = instClass->iab ;
     iab->storageLast = inst ;
+    /*
+     * Start with a zeroed out memory space.
+     */
+    memset(inst, 0, iab->instanceSize) ;
+    inst->instClass = instClass ;
     /*
      * Mark the slot as in use.
      */
-    inst->instClass = instClass ;
-    inst->alloc = mrtInstIncrCounter(iab) ;
+    inst->alloc = mrtIncrAllocCounter(iab) ;
     inst->currentState = instClass->odb ? initialState : MRT_StateCode_IG ; // <1>
     /*
      * Run the constructor if there is one.
@@ -648,6 +659,323 @@ mrt_CreateInst(
 value passed in to the function and set the current state to ignored.
 This is a convenient value for such a situation.
 
+One other important point here.
+There is a counter in the IAB that is incremented each time an
+instance is allocated and this value is used in the `alloc`
+member of the instance.
+This is another part of the strategy to detect an
+_event in flight_ error.
+This is described further below.
+The effect of running this counter is that every instance gets a
+different `alloc` member value (modulo the size of the counter variable)
+The increment has one little catch.
+The counter is signed and we use the positive and negative values
+differently.
+Here we want to make sure the value remains positive.
+
+
+[source,c]
+----
+<<mrt forward references>>=
+static inline AllocStatus mrtIncrAllocCounter(MRT_InstAllocBlock *iab) ;
+----
+
+[source,c]
+----
+<<mrt static functions>>=
+static inline 
+AllocStatus
+mrtIncrAllocCounter(
+    MRT_InstAllocBlock *iab)
+{
+    /*
+     * Catch any overflow
+     */
+    if (++iab->allocCounter < 0) {
+        iab->allocCounter = 1 ;
+    }
+    return iab->allocCounter ;
+}
+----
+
+=== Deleting an Instance
+
+The function, `mrt_DeleteInst`, is used to synchronously
+destroy an instance.
+
+[source,c]
+----
+<<mrt external interfaces>>=
+extern void mrt_DeleteInst(MRT_Instance *inst) ;
+----
+
+`inst`::
+    A pointer to an instance to be destroyed.
+
+Just as there was a distinction between synchronous and asynchronous
+instance creation,
+there is a similar distinction for destruction.
+Asynchronous destruction happens as a result of an instance entering
+an _terminal_ state and that is discussed further below.
+Here we are dealing with synchronous destruction of an instance.
+
+[source,c]
+----
+<<mrt external functions>>=
+void
+mrt_DeleteInst(
+    MRT_Instance *inst)
+{
+    MRT_InstAllocBlock *iab = inst->instClass->iab ;
+    assert(iab != NULL) ;
+    /*
+     * Run the destructor, if there is one.
+     */
+    if (iab->destruct) {
+        iab->destruct(inst) ;
+    }
+    /*
+     * Mark the slot as free.
+     */
+    inst->alloc = 0 ;
+}
+----
+
+Deleting an instance is a very simple matter indeed.
+If there is a destructor, it is run.
+The slot is free when its `alloc` member has a value of 0.
+But beware,
+for designs that have complicated relationships among the classes,
+instance deletion can be very complicated, requiring much care
+that the interdependencies among classes are properly preserved.
+That work is not done here!
+It is the responsibility of the analysis model to take any actions
+necessary to delete an instance and have the data integrity preserved.
+
+== Managing Execution
+
+In this section we discuss the rules and policies associated
+with managing the sequencing of execution.
+There are two means available to an application to control the
+sequencing of execution.
+
+* Invoke an ordinary function.
+* Generate an event to the instance of a class.
+
+Not much needs to be said about invoking functions.
+Computation transfers to the entry point and runs until the function
+is complete, transferring control back to next statement of the caller.
+Typically, such functions are organized into those that are associated
+with the domain as whole, a particular class or instances of a class.
+Such organization may be helpful to the programmer,
+but since they are directly supported by the implementation language,
+the `micca` run time does not get involved in mediating them.
+
+Where the run time does get involved is for those computation that must leave
+off at some point,
+waiting for some other action in the system or the external environment,
+and then resume execution maintaining the past history.
+This type of execution is implemented as a state machine.
+
+=== State Machine Rules
+
+Each class that has lifecycle behavior may have a state model associated
+with it and each instance of that class will have a state variable.
+The run time supports a Moore type state model.
+
+In the Moore formulation of state models,
+action code is associated with states and is executed
+upon entry into a state.
+This is distinguished from the Mealy formulation where
+actions are associated with the transitions and are executed
+upon exiting a state.
+Much writing and discussion has been wasted attempting to
+justify one type of state model over another.
+What we know is they are computationally equivalent,
+_i.e._ we can prove that there is no problem that you can solve
+with a Moore machine that cannot also be solved with a Mealy
+machine and _vice versa_.
+Whether your application is easier to describe with one type rather
+than the other is something that you alone may decide.
+Moore machines are the traditional formulation for Executable UML
+and they have the simplest implementation structures.
+What we specifically reject here is any use of hierarchical state
+models.
+They are unnecessary and add complication that is not welcome.
+The power of computation in Executable UML is derived from the
+interaction of simple state machines each of which is tied to the
+lifecycle of a particular class.
+If you have some state model that is large and complicated where
+you think some other kind of higher order structure is needed,
+the usual reason is that you have multiple classes masquerading as one
+and further refinement of your analysis is necessary.
+That is not usually a welcome answer to the problem,
+because if the analyst had been able to conceive of a better solution,
+he/she would probably already have done so.
+
+Generally, state actions affect other computations in the domain
+by updating instance attribute values or by generating events to
+other instances.
+The important distinction here is that the application code of the
+state actions does not deal with actually dispatching the events
+nor does it control which event is dispatched next.
+
+=== Event Generation
+
+There are three types of events:
+
+. Transition events that cause transitions in state machines.
+. Polymorphic events that are mapped at runtime across a generalization
+hierarchy.
+. Creations events that support asynchronous instance creation.
+
+Creation events are transition events that are also associated with
+an instance creation.
+Our strategy for creation events is to create the instance in an inactive
+state before queuing the event that will activate the instance and
+cause a transition.
+We will have need to distinguish between transition events and
+polymorphic events and an enumeration will do that.
+
+[source,c]
+----
+<<mrt interface simple types>>=
+typedef enum {
+    MRT_TransitionEvent,
+    MRT_PolymorphicEvent
+} MRT_EventType ;
+----
+
+The process of generating an event involves the following steps:
+. Obtain an *Event Control Block* (ECB) from the free pool of ECB's.
+. Set the values of the fields in the ECB.
+. Queue the ECB for later dispatch.
+
+=== Event Control Block
+
+The Event Control Block (ECB) is the primary data structure for generating and
+dispatching events.
+
+[source,c]
+----
+<<mrt interface data types>>=
+typedef struct mrtecb {
+    struct mrtecb *next ;
+    struct mrtecb *prev ;
+    MRT_EventCode eventNumber ;
+    AllocStatus alloc ;
+    MRT_EventType eventType ;
+    MRT_Instance targetInst ;
+    MRT_Instance sourceInst ;
+    MRT_DelayTime delay ;
+    alignas(uint64_t) MRT_EventParamType eventParameters ;
+} MRT_Ecb ;
+----
+
+`next`, `prev`::
+    Event queuing is done by doubly linked lists
+    and the links are allocated as part of the ECB as the `next` and
+    `prev` members.
+`eventNumber`::
+    The event number.
+    Events are also encoded as small zero based sequential integers
+    that are unique only within the class to which they are associated.
+    Event numbers are ultimately used as an array index.
+`alloc`::
+    The `alloc` member is yet another part of _event in flight_ detection.
+    We will discuss that more below when we discuss event dispatch.
+    For now, this member of the ECB holds the value of the allocation
+    counter for the instance that is the target of the event.
+    So when an event is generated, a copy of the current value of
+    the `alloc` member of the instance is stored in the ECB.
+`eventType`::
+    The `eventType` member describes which of the two
+    types of events this ECB is being used for.
+`targetInst`::
+    A pointer to the instance that is to receive the event.
+`sourceInst`::
+    A pointer to the instance that is the signaler of the event.
+    If the event is generated outside the context of an instance
+    (_e.g._ in an domain operation), then this member value is set to `NULL`.
+    The `srcInst` member also serves an important role in enforcing the rules
+    for delayed events.
+    More on that later.
+`delay`::
+    The number of milliseconds to delay before the event is posted.
+`eventParameters`::
+    Storage for any parameter values passed along with the event.
+
+
+Event codes are captured by small integer values.
+
+[source,c]
+----
+<<mrt interface simple types>>=
+typedef uint8_t MRT_EventCode ;
+typedef unsigned long int MRT_DelayTime ;
+----
+
+Note that there is no notion of priority contained in the ECB.
+Some software architectures queue events in a priority order.
+That is not supported here.
+Frankly, if you need event priorities to make your system work,
+then you need to revisit your design or look for a software architecture
+that supports multiple threads of execution.
+
+=== Event Parameter Storage
+
+We need to discuss events that carry parametric data and how that will happen.
+In this formulation of state machines,
+events may carry additional parameters.
+Space has to be allocated for that data.
+The more difficult issue is to deal with the type of the parameter data.
+There are a couple of solutions, neither of which is very satisfying.
+We could collect all the parameters from all the state machines
+in the system and create a giant union.
+This would properly allocate the amount of parameter storage required
+and provide a type safe manner to deal with that data.
+Unfortunately, the parameters to states are scattered in very many
+places in a system and gathering them together is a difficult
+undertaking.
+
+Here we take the view of providing some generic parameter fields
+with a fixed amount of memory and letting state actions
+cast that memory into the appropriate type.
+Needless to say, this can also be a source of errors, but is
+much easier to manage.
+This choice makes sense for many systems.
+The number of states that use parametric data is usually small and using a
+fixed size works better than might be expected.
+The important point here is that events can carry data with them.
+Many state machine formulations don't support this
+and it is very difficult to correctly manage memory lifetime
+without it.
+It is one of those things that you might not use very often but
+it is difficult to do without when you need it.
+
+We fix the amount of memory used for event parameter storage,
+allowing it to be overridden by the compiler command.
+
+[source,c]
+----
+<<mrt constants>>=
+#ifndef MRT_ECB_PARAM_SIZE
+#   define MRT_ECB_PARAM_SIZE  16
+#endif /* MRT_ECB_PARAM_SIZE */
+----
+
+[source,c]
+----
+<<mrt interface simple types>>=
+typedef char MRT_EventParamType[MRT_ECB_PARAM_SIZE] ;
+----
+
+State actions may use the fields in the above union,
+or cast the whole thing to a type they like better.
+It is necessary that the code that generates the
+event and the code that consumes the event
+have the same idea of how the data will be treated.
+
 == Foreground / Background Synchronization
 
 [source,c]
@@ -661,7 +989,6 @@ while (invokeOneSyncFunc()) {
 ----
 
 === Dispatching Synchronization Functions
-
 
 [source,c]
 ----
@@ -697,6 +1024,336 @@ PendSV_Handler(void)
             blk->function(&blk->params) ;
         }
     }
+}
+----
+
+== Error Handling
+
+Until now we have glossed over the subject of how to handle errors
+in the software mechanisms.
+In XUML,
+the domains assume a perfect architecture in the sense that
+no formal mechanism is provided to signal architectural errors back to
+the application domains.
+This makes sense because the application models are meant to be implementation
+independent and able to be run on a variety of underlying mechanisms.
+However,
+an error policy, in much the same terms as data and execution policies,
+must be put into place.
+The details of the error handling policy will vary between
+software architectures, so it is important to state them clearly.
+For the `micca` run time, the following principles guide error handling.
+
+* To that extent possible, the mechanisms operations should not report
+errors back to the application.
+For implementation languages that do not support exception handling,
+the usual technique of returning error codes is not very effective.
+Either by accident or sloth, many error codes are not checked.
+Even then the error code is checked, there is little recovery
+recourse for the application.
+For example,
+it does little good to know that we are unable to generate an
+event because we do not have sufficient ECB resources when there
+is nothing a state action can do to free up the required resources.
+* 
+Errors that result from exhausted resources or analysis errors
+detected at run time are *fatal*.
+Exactly how fatal errors are acted upon is platform dependent and may
+result in terminating a program or completely resetting the system.
+Regardless of the consequence of a fatal error, the assumption is
+that the program can no longer continue to run.
+
+With these principles in mind, we define a set of error conditions
+that are detected by the mechanism.
+All these conditions are fatal and are handled by invoking a fatal
+error handler.
+
+[source,c]
+----
+<<mrt interface simple types>>=
+typedef enum {
+    mrtCantHappen = 1,
+    mrtEventInFlight,
+    mrtNoECB,
+    mrtNoInstSlot,
+    mrtSyncOverflow,
+
+#       ifdef POSIX
+    mrtTimerOpFailed,
+    mrtSignalOpFailed,
+    mrtSelectWaitFailed,
+#       endif /* POSIX */
+} MRT_ErrorCode ;
+----
+
+We will need a string representation of the error codes to
+make human readable messages.
+
+[source,c]
+----
+<<mrt static data>>=
+static char const * const errMsgs[] = {
+    "no error",     /* place holder */
+    "can't happen transition: %p: %u - %u -> CH\n",
+    "event in flight error: %p -> %p %u\n",
+    "no available Event Control Blocks\n",
+    "no available instance slots: %p\n",
+    "synchronization queue overflow\n",
+
+#       ifdef POSIX
+    "interval timer operation failed: %s\n",
+    "signal operation failed: %s\n",
+    "blocking on pselect() failed: %s\n",
+#       endif /* POSIX */
+} ;
+----
+
+Everywhere else the mechanisms operations have been crafted to
+avoid error possibilities.
+For example, as discussed in delayed event generation,
+we interpret the attempt to generate a duplicate delayed event
+as wishing to cancel the existing one and instantiate a new one.
+This semantic interpretation avoids generating an error and avoids
+all the additional code require in state actions that generate
+delayed events.
+
+Exactly how fatal errors are handled will depend upon the specifics
+of how the platform handles errors.
+We define an interface for a fatal error handler.
+
+[source,c]
+----
+<<mrt interface data types>>=
+typedef void (*MRT_FatalErrHandler)(MRT_ErrorCode, char const *, va_list) ;
+----
+
+The interface is patterned after `vprintf`,
+giving a format string and a pointer to a variable length argument list.
+
+[source,c]
+----
+<<mrt forward references>>=
+static void
+mrtDefaultFatalErrorHandler(
+    MRT_ErrorCode errNum,
+    char const *fmt,
+    va_list ap) ;
+----
+
+The system provides a default fatal error handler.
+Assuming that standard I/O is included, we print a message to the
+standard error.
+
+[source,c]
+----
+<<mrt static functions>>=
+static void
+mrtDefaultFatalErrorHandler(
+    MRT_ErrorCode errNum,
+    char const *fmt,
+    va_list ap)
+{
+    vfprintf(stderr, errMsgs[errNum], ap) ;
+}
+----
+
+A pointer to the fatal error handler is initialized with the default one.
+
+[source,c]
+----
+<<mrt static data>>=
+static MRT_FatalErrHandler mrtErrHandler = mrtDefaultFatalErrorHandler ;
+----
+
+Because fatal error handling is usually so platform specific and
+because of the need to test fatal error paths,
+we provide the ability to delegate the consequence of the
+fatal error.
+
+[source,c]
+----
+<<mrt external interfaces>>=
+extern MRT_FatalErrHandler
+mrt_SetFatalErrHandler(
+    MRT_FatalErrHandler newHandler) ;
+----
+
+[source,c]
+----
+<<mrt external functions>>=
+MRT_FatalErrHandler
+mrt_SetFatalErrHandler(
+    MRT_FatalErrHandler newHandler)
+{
+    MRT_FatalErrHandler prevHandler = mrtErrHandler ;
+    if (newHandler) {
+        mrtErrHandler = newHandler ;
+    }
+    return prevHandler ;
+}
+----
+
+The mechanisms internally call `mrtFatalError`.
+This function is presented next.
+
+[source,c]
+----
+<<mrt static functions>>=
+static void
+mrtFatalError(
+    MRT_ErrorCode errNum,
+    ...)
+{
+    va_list ap ;
+    /*
+     * All hope is lost here. Make sure we don't
+     * execute any asynchronous code.
+     */
+    // beginCriticalSection() ;
+
+    assert(mrtErrHandler != NULL) ;
+    assert(errNum < COUNTOF(errMsgs)) ;
+
+    va_start(ap, errNum) ;
+    mrtErrHandler(errNum, errMsgs[errNum], ap) ;
+    /*
+     *  If the handler does return, we insist that all errors
+     *  are fatal. So we abort().
+     */
+    abort() ;
+}
+----
+
+As we see in the code,
+we insist that there is an error handler.
+There is always the default one and a different handler can be specified
+if necessary.
+Finally,
+`abort()` is called should the error handler return.
+
+== Avoiding Fatalities
+
+In this error handling strategy,
+every mechanism detected error is fatal.
+Although the details of the processing for fatal errors can be delegated,
+in most systems of the class we consider here,
+fatal errors usually result in a system reset.
+Under the vast majority of circumstances,
+that is the desired behavior.
+However,
+there are some particular circumstances where causing a fatal
+error is not the desired behavior.
+
+Consider the case where some external stimulus results in an event
+being generated.
+If the stimulus occurs more frequently than events can be processed,
+then the mechanisms will run out of event control blocks causing a
+fatal error.
+As an example,
+consider the arrival of a communications packet.
+If somewhere during the processing of the packet an event is generated,
+then if packets arrive too fast a fatal error can be generated.
+In effect it would provide a means for an external stimulus to cause the
+system to crash.
+Certainly for the case of a communications packet,
+the preferred behavior would be to drop the packet and let higher level
+protocol deal with the necessary retries, etc.
+It is then necessary to be able to determine if generating an event
+would be successful.
+
+In this section we describe functions that can be used to avoid mechanisms
+requests that would exhaust an underlying resource and therefore
+cause a fatal system error.
+It should be emphasized that these functions are *not*
+intended for ordinary or casual use.
+Under the vast majority of circumstances,
+such as when one state machine generates an event to another state
+machine,
+event generation and other such activities should continue to assume
+that there are no resources that can be consumed.
+System analysis and testing should then determine the appropriate sizing
+for the various resource pools.
+The capability described in this section is to handle unusual and
+extraordinary circumstances where hardware failure or failure to
+abide by communications protocols could force the system into a
+fatal error situation.
+
+Note also that the alternative provided here causes the external stimulus
+that would cause the fatal error condition effectively to be ignored.
+For some system requirements that is not an acceptable solution.
+For example,
+consider a digital input line that is used to generate an interrupt
+and that interrupt signals an external condition monitored by hardware,
+say the maximum extent of motion of physical robot arm.
+If this interrupt arrives at a very fast rate,
+one might conclude the hardware has failed.
+Ignoring the interrupt might do little other than mask a problem that should
+cause a fatal error condition and potentially reset the system.
+The conclusion is that providing a means of avoiding fatal error conditions
+is not intented to serve as an overall error handling policy.
+Careful analysis and consideration is still required.
+If an interrupt arrives faster than expected and,
+because of what the interrupt represents, it cannot be ignored,
+that fact and the response to it must be deduced by the interrupt service
+code (_e.g._ by determining the interrupt frequency) and actions
+appropriate to the system must be taken.
+It can be a difficult problem to solve and the functions provided here
+are too generic to be of much help.
+
+There are three internal mechanisms resources that can be exhausted.
+* Class instances can be dynamically created and each class has its own instance
+pool.
+* Event control blocks are used for generating and dispatching state machine
+events.
+* The foreground / background synchronization queue has a fixed number
+of slots and excessive synchronization requests from interrupt service
+routines can fill the queue.
+
+=== Checking for Available Instance Space
+
+[source,c]
+----
+<<mrt external interfaces>>=
+extern bool
+mrt_InstanceAvailable(
+    MRT_Class const *instClass) ;
+----
+
+`instClass`::
+    A pointer to the class data for which the space check is made.
+
+[source,c]
+----
+<<mrt external functions>>=
+bool
+mrt_InstanceAvailable(
+    MRT_Class const *instClass)
+{
+    assert(instClass != NULL) ;
+
+    /*
+     * Search for an empty slot in the pool.
+     */
+    return mrtInstFindSlot(instClass) != NULL ;
+}
+----
+
+=== Checking for Event Blocks
+
+[source,c]
+----
+<<mrt external interfaces>>=
+extern bool
+mrt_EventAvailable(void) ;
+----
+
+[source,c]
+----
+<<mrt external functions>>=
+bool
+mrt_EventAvailable(void)
+{
+    return !eventQueueEmpty(&freeEventQueue) ;
 }
 ----
 
@@ -739,9 +1396,13 @@ PendSV_Handler(void)
 [source,c]
 ----
 <<standard includes>>=
+#include <stdlib.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdalign.h>
 ----
 
 [source,c]
@@ -780,6 +1441,16 @@ PendSV_Handler(void)
 */
 
 <<common includes>>
+
+#ifndef COUNTOF
+#define COUNTOF(a)  (sizeof(a) / sizeof(a[0]))
+#endif /* COUNTOF */
+
+/*
+ * Data Types
+ */
+<<mrt implementation simple types>>
+<<mrt implementation data types>>
 
 /*
  * Forward References
