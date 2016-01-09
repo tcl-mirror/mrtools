@@ -239,14 +239,15 @@ terms specified in this license.
         }
         relation foreach part $parts -ascending {BlockLineNum Offset} {
             # log::debug "\n[relformat $part "Chunk Parts"]"
-            relation assign $part Content BlockLineNum Offset
+            relation assign $part Content BlockLineNum Offset FileName
             set refs [pipe {
                 relvar set ChunkRef |
                 relation semijoin $part ~\
                     -using {FileName FileName BlockLineNum ChunkLineNum Offset ChunkOffset}
             }]
             # log::debug "\n[relformat $refs "Refs in $chunk"]"
-            set linectrl [my LineDirective [expr {$BlockLineNum + $Offset +1}]]
+            set linectrl [my LineDirective\
+                [expr {$BlockLineNum + $Offset +1}] $FileName]
             if {$linectrl ne {}} {
                 lappend gathered $linectrl
             }
@@ -275,9 +276,8 @@ terms specified in this license.
         return $gathered
     }
 
-    method LineDirective {linenum} {
+    method LineDirective {linenum filename} {
         namespace upvar ::atangle options(line) linedir
-        namespace upvar ::atangle infilename filename
         set result [regsub -all -- {%f%} $linedir $filename]
         set result [regsub -all -- {%l%} $result $linenum]
         return $result

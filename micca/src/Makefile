@@ -15,7 +15,8 @@ TESTDIR = ../tests
 PKGDIR	= ../../packages
 IMAGEDIR = ./images
 
-CFLAGS	= -std=c11
+CFLAGS	= -std=c11 -g
+CPPFLAGS = -D_POSIX_C_SOURCE=200112L -D_ISOC11_SOURCE
 
 vpath %.pdf $(DOCDIR)
 vpath %.html $(DOCDIR)
@@ -159,7 +160,7 @@ posixh : $(POSICH)
 $(POSIXOBJ) : $(POSIXH) $(POSIXC)
 
 $(POSIXH) : $(DOCSRC) $(DOCPARTS)
-	atangle $(ATANGLEOPTS) -line '#line %l% "%f%"' -root mrt_interface.h -output $@ $<
+	atangle $(ATANGLEOPTS) -line '#line %l% "%f%"' -root mrt_posix.h -output $@ $<
 
 $(POSIXC) : $(DOCSRC) $(DOCPARTS)
 	atangle $(ATANGLEOPTS) -line '#line %l% "%f%"' -root mrt_posix.c -output $@ $<
