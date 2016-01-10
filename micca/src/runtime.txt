@@ -426,6 +426,10 @@ typedef struct mrtclass {
     struct mrtinstallocblock *iab ;
     struct mrteventdispatchblock const *edb ;
     struct mrtpolydispatchblock const *pdb ;
+
+#       ifndef MRT_NO_NAMES
+    char const *name ;
+#       endif /* MRT_NO_NAMES */
 } MRT_Class ;
 ----
 
@@ -444,6 +448,8 @@ typedef struct mrtclass {
     The PDB is used to dispatch polymorphic events.
     For classes that have no polymorphic events,
     this value is set to `NULL`.
+`name`::
+    A pointer to a `NUL` terminated string containing the name of the class.
 
 In the next section,
 the instance allocation block is described as we continue to define
@@ -1665,7 +1671,7 @@ mrt_RemainingDelayTime(
     The number of the event.
 `targetInst`::
     A pointer to the instance structure that is to receive the event.
-`srcInst`::
+`sourceInst`::
     A pointer to the instance structure that is sending the event.
     Events generated outside of a class instance set this argument to `NULL`.
 
@@ -2340,7 +2346,7 @@ typedef struct mrteventdispatchblock {
     char const *const *stateNames ;
     char const *const *eventNames ;
 #       endif /* MRT_NO_NAMES */
-} MRT_Odb ;
+} MRT_Edb ;
 ----
 
 `stateCount`::
@@ -2426,7 +2432,7 @@ mrtDispatchTransitionEvent(
     MRT_Ecb *ecb)
 {
     MRT_Instance *targetInst = ecb->targetInst ;
-    MRT_Odb const *edb = targetInst->instClass->edb ;
+    MRT_Edb const *edb = targetInst->instClass->edb ;
     assert(edb != NULL) ;
 
     /*
@@ -2449,13 +2455,13 @@ mrtDispatchTransitionEvent(
      */
     MRT_StateCode newState = *(edb->transitionTable +
             targetInst->currentState * edb->eventCount + ecb->eventNumber) ;
-#       ifdef MRT_TRACE
+#       ifndef MRT_NO_TRACE
     /*
      * Trace the transition.
      */
     mrtTraceTransitionEvent(ecb->eventNumber, ecb->sourceInst,
             ecb->targetInst, targetInst->currentState, newState) ;
-#       endif /* MRT_TRACE */
+#       endif /* MRT_NO_TRACE */
     /*
      * Check for a can't happen transition.
      */
@@ -2643,6 +2649,10 @@ typedef struct mrtsubclassdispatch {
     MRT_AttributeOffset subInstOffset ;
     MRT_DispatchCount subclassCount ;
     struct mrtpolyeventmap const *eventMap ;
+
+#       ifndef MRT_NO_NAMES
+    char const *const *subclassNames ;
+#       endif /* MRT_NO_NAMES */
 } MRT_SubclassDispatch ;
 ----
 
@@ -2698,6 +2708,11 @@ typedef struct mrtpolydispatchblock {
     MRT_DispatchCount eventCount ;
     MRT_DispatchCount genCount ;
     struct mrtsubclassdispatch const *genDispatch ;
+
+#       ifndef MRT_NO_NAMES
+    char const *const *eventNames ;
+    char const *const *generalizationNames ;
+#       endif /* MRT_NO_NAMES */
 } MRT_PolyDispatchBlock ;
 ----
 
@@ -2745,13 +2760,13 @@ mrtDispatchPolymorphicEvent(
         MRT_PolyEventMap const *pem = sdb->eventMap +
                 (type * pdb->eventCount + origEvent) ;
 
-#           ifdef MRT_TRACE
+#           ifndef MRT_NO_TRACE
         /*
          * Trace the transition.
          */
-        mrtTracePolyEvent(origEvent, ecb->srcInst, ecb->targetInst,
+        mrtTracePolyEvent(origEvent, ecb->sourceInst, ecb->targetInst,
                 type, gnum, pem->event, pem->eventType) ;
-#           endif /* MRT_TRACE */
+#           endif /* MRT_NO_TRACE */
 
         ecb->eventNumber = pem->event ;
         ecb->eventType = pem->eventType ;
@@ -2827,12 +2842,13 @@ static void
 mrtDispatchCreationEvent(
     MRT_Ecb *ecb)
 {
-#       ifdef MRT_TRACE
+#       ifndef MRT_NO_TRACE
     /*
      * Trace the transition.
      */
-    mrtTraceCreationEvent(ecb->eventNumber, ecb->sourceInst, ecb->targetInst) ;
-#       endif /* MRT_TRACE */
+    mrtTraceCreationEvent(ecb->eventNumber, ecb->sourceInst, ecb->targetInst,
+            ecb->targetInst->instClass) ;
+#       endif /* MRT_NO_TRACE */
 
     assert(ecb->alloc == ecb->targetInst->alloc) ;
     assert(ecb->alloc < 0) ;
@@ -3194,6 +3210,309 @@ PendSV_Handler(void)
 }
 ----
 
+== Event Dispatch Tracing
+
+Debugging event driven, callback, state machine based applications can be
+rather more complicated than conventional, linear flow code.
+When class instances generate events to other instances and it can
+be hard to determine the exact sequence of execution by simply
+examining the source code.
+Indeed, part of the intent here is to factor away from the application
+the details of sequencing execution.
+Setting a breakpoint in the action of a state is easy enough,
+the difficulties arise when trying to determine where to set a breakpoint
+to catch the results of the next event dispatch.
+Given that many events will be flying around a given program,
+it is very useful to be able to extract the set of event dispatches
+in chronological order.
+
+To help in debugging,
+the run time can be conditionally compiled to support tracing the event
+dispatch.
+After the code is properly compiled,
+a pointer to a trace callback function may be registered and
+then each event dispatched will result in the function being called
+with the information about the dispatch.
+
+It should be noted that dealing with trace information can be
+very difficult.
+For small embedded systems,
+there may not be sufficient space to store the strings that give
+names to states and events (the `MRT_NO_NAMES` macro can be defined
+to remove the string information).
+This means that only numbers are available to the tracing code
+and there is substantial effort required to back
+translate the numbers into strings that are meaningful to a human.
+
+Because tracing also affects the performance of the run time code,
+it may also be excluded by defining the `MRT_NO_TRACE` macro.
+
+
+==== Trace Information
+
+Since there are three types of events,
+there are three distinct sets of information generated when
+an event is dispatched.
+There is information common to all events and information
+specific to each event type.
+
+[source,c]
+----
+<<mrt trace aggregate types>>=
+typedef struct mrttraceinfo {
+    MRT_EventType eventType ;
+    MRT_EventCode eventNumber ;
+    MRT_Instance *sourceInst ;
+    MRT_Instance *targetInst ;
+    union {
+        struct transitiontrace {
+            MRT_StateCode currentState ;
+            MRT_StateCode newState ;
+        } transitionTrace ;
+        struct polytrace {
+            MRT_SubclassCode subcode ;
+            MRT_DispatchCount genNumber ;
+            MRT_EventCode mappedEvent ;
+            MRT_EventType mappedType ;
+        } polyTrace ;
+        struct creationtrace {
+            MRT_Class const *targetClass ;
+        } creationTrace ;
+    } info ;
+} MRT_TraceInfo ;
+----
+
+Data common to all event dispatch traces.
+
+`eventType`::
+    The type of the event that was dispatched.
+`eventNumber`::
+    The number of the event that was dispatched.
+`sourceInst`::
+    A pointer to the instance that was the source of the dispatched event.
+`targetInst`::
+    A pointer to the instance that was the target of the dispatched event.
+
+Data for normal event dispatch traces.
+`currentState`::
+    The current state of the instance before the event dispatch.
+`newState`::
+    The new state entered as a result of the transition.
+
+Data for polymorphic event dispatch traces.
+
+`subcode`::
+    The subclass code of the currently related instance.
+`genNumber`::
+    The number of the generalization down which the event was dispatched.
+`mappedNumber`::
+    The new event number to which the polymorphic event mapped.
+`mappedType`::
+    The new event type corresponding to `mappedNumber`.
+
+Data for creation event dispatch traces.
+
+`targetClass`::
+    A pointer to the class structure for the target of the
+    creation event.
+
+==== Access to Trace Information
+
+Event tracing information is passed out of the mechanisms by
+having the application register a callback function.
+That function takes a pointer to the trace information as its
+argument.
+
+[source,c]
+----
+<<mrt trace aggregate types>>=
+typedef void (*MRT_TraceHandler)(MRT_TraceInfo const *) ;
+----
+
+The function is registered with the mechanisms by invoking:
+
+[source,c]
+----
+<<mrt trace external interface>>=
+extern MRT_TraceHandler mrt_RegisterTraceHandler(MRT_TraceHandler) ;
+----
+
+The trace callback function is supplied as the argument and the
+previous value of the callback is returned.
+Tracing can be turned off by invoking `mrt_RegisterTraceHandler` with `NULL`.
+
+[source,c]
+----
+<<mrt trace static data>>=
+static MRT_TraceHandler mrtTraceHandler ;
+----
+
+[source,c]
+----
+<<mrt trace external functions>>=
+MRT_TraceHandler
+mrt_RegisterTraceHandler(
+    MRT_TraceHandler handler)
+{
+    MRT_TraceHandler oldhandler = mrtTraceHandler ;
+    mrtTraceHandler = handler ;
+    return oldhandler ;
+}
+----
+
+The implementation of registering a handler is simply to record the
+function pointer in a variable.
+
+For each type of event dispatch,
+the mechanisms call a specific function to determine if tracing
+is enabled and to marshal the trace information into the proper
+data structure.
+
+[source,c]
+----
+<<mrt trace static functions>>=
+static inline 
+void
+mrtTraceTransitionEvent(
+    MRT_EventCode event,
+    MRT_Instance *source,
+    MRT_Instance *target,
+    MRT_StateCode currentState,
+    MRT_StateCode newState)
+{
+    if (mrtTraceHandler) {
+        MRT_TraceInfo trace ;
+
+        trace.eventType = mrtTransitionEvent ;
+        trace.eventNumber = event ;
+        trace.sourceInst = source ;
+        trace.targetInst = target ;
+        trace.info.transitionTrace.currentState = currentState ;
+        trace.info.transitionTrace.newState = newState ;
+
+        mrtTraceHandler(&trace) ;
+    }
+}
+----
+
+[source,c]
+----
+<<mrt trace static functions>>=
+static inline 
+void
+mrtTracePolyEvent(
+    MRT_EventCode event,
+    MRT_Instance *source,
+    MRT_Instance *target,
+    MRT_SubclassCode subclass,
+    MRT_DispatchCount genNumber,
+    MRT_EventCode newEvent,
+    MRT_EventType newEventType)
+{
+    if (mrtTraceHandler) {
+        MRT_TraceInfo trace ;
+
+        trace.eventType = mrtPolymorphicEvent ;
+        trace.eventNumber = event ;
+        trace.sourceInst = source ;
+        trace.targetInst = target ;
+        trace.info.polyTrace.subcode = subclass ;
+        trace.info.polyTrace.genNumber = genNumber ;
+        trace.info.polyTrace.mappedEvent = newEvent ;
+        trace.info.polyTrace.mappedType = newEventType ;
+
+        mrtTraceHandler(&trace) ;
+    }
+}
+----
+
+[source,c]
+----
+<<mrt trace static functions>>=
+static inline 
+void
+mrtTraceCreationEvent(
+    MRT_EventCode event,
+    MRT_Instance *source,
+    MRT_Instance *target,
+    MRT_Class const *class)
+{
+    if (mrtTraceHandler) {
+        MRT_TraceInfo trace ;
+
+        trace.eventType = mrtCreationEvent ;
+        trace.eventNumber = event ;
+        trace.sourceInst = source ;
+        trace.targetInst = target ;
+        trace.info.creationTrace.targetClass = class ;
+
+        mrtTraceHandler(&trace) ;
+    }
+}
+----
+
+==== Tracing Strategies
+
+Clearly,
+tracing can generate data at a rather high rate and can be
+rather intrusive upon the execution of the system.
+Several strategies may be used to deal with the trace data.
+If possible,
+all the trace data can be dumped in a raw form out a communications
+interface and let some other program decode and display it.
+That may still be too intrusive and sometimes it is best to
+filter the trace data based on the target instance pointer value.
+In this way you may trace the event dispatches on only a subset of
+instances.
+Several different filtering schemes, such as source instance or classes,
+can be envisioned.
+
+Another possibility is to store trace information in a memory
+area in some sort of circular queue arrangement.
+Then it is possible for the application to start and stop such tracing
+and achieve ``logic analyzer'' type triggering functionality.
+The trace information can then be extracted from memory and analyzed.
+
+When running in a POSIX environment,
+one can assume reasonable I/O facilities.
+The POSIX version of the run time includes default trace handling to
+timestamp and print the trace data in human readable form.
+
+You will also note that the trace information has no timing data associated
+with it.
+This type of data is so system specific that it is left to the
+tracing callback to supply.
+If you have a free running cycle counter in your system,
+this can be a good indicator of relative time and the trace callback
+function can add this to the data set supplied by the mechanisms.
+Your system may also have source of clocked timing data that can also
+be used as a timing reference.
+In either case, augmenting the trace data with some sort of relative
+time information is very valuable.
+
+Tracing can also be used as a framework for testing.
+If a domain is built to run in a testing framework where tracing is enabled,
+then recording all the trace information allows one to determine
+the amount of \emph{transition} coverage a test set causes.
+The goal is to develop test sets that
+drive the domain by invoking the domain interface functions with
+appropriate data so that all state transitions are taken.
+Tracing allows the recording of what transitions a given thread of control
+causes.
+Since in most well designed state machines,
+state action code is small and does not contain complicated or intricate
+internal program flow,
+causing all state actions to be executed is often close to complete
+statement coverage.
+As an added benefit,
+state machines can be considered as directed graphs.
+A depth first traversal of a directed graph can be be used to determine
+a spanning tree for the graph.
+Traversing a spanning tree for a graph insures that all nodes in the graph
+are visited and the event sequence given by the spanning tree
+can guide the generation of test set data and can help to minimize the
+number of test cases required to ensure adequate coverage.
+
 == Error Handling
 
 Until now we have glossed over the subject of how to handle errors
@@ -3539,7 +3858,15 @@ mrt_EventAvailable(void)
 }
 ----
 
-== POSIX Specific Interfaces
+=== Non-Fatal Background Synchronization
+
+[source,c]
+----
+<<mrt external interfaces>>=
+MRT_SyncParams *mrt_TrySyncRequest(MRT_SyncFunc f) ;
+----
+
+== POSIX Specific Code
 
 At this point we have reached the end of the generic
 code and must now begin to account for the platform differences
@@ -3559,6 +3886,7 @@ With I/O and disk storage, testing and tracing logic is often much easier.
 #include <errno.h>
 #include <sys/select.h>
 #include <sys/time.h>
+#include <time.h>
 ----
 
 === POSIX Critical Sections
@@ -3812,7 +4140,7 @@ mrtSysTimerExpire(
 ----
 <<posix static functions>>=
 static void
-mrtSysTimerInit(void)
+mrtInitSysTimer(void)
 {
     mrt_RegisterSignal(SIGALRM, mrtSysTimerExpire) ;
 }
@@ -4192,7 +4520,7 @@ are maintaining.
 ----
 <<posix static functions>>=
 static void
-mrtFDServiceInit(void)
+mrtInitFDService(void)
 {
     FD_ZERO(&mrtReadFDS) ;
     FD_ZERO(&mrtWriteFDS) ;
@@ -4320,7 +4648,132 @@ It is also worth noting we do _not_ use any time out in the
 All timing is done via delayed events, and they are signalled via
 `SIGALRM` and managed on the delayed event queue as discussed before.
 
+=== POSIX Tracing
+
+
+[source,c]
+----
+<<posix static functions>>=
+#   ifndef MRT_NO_NAMES
+static
+void
+mrtPrintTraceInfo(
+    MRT_TraceInfo const *traceInfo)
+{
+    static char const * const eventTypeNames[] = {
+        [mrtTransitionEvent] = "Transition",
+        [mrtPolymorphicEvent] = "Polymorphic",
+        [mrtCreationEvent] = "Creation"
+    } ;
+
+    char const *sourceName ;
+    char const *sourceClassName ;
+
+    if (traceInfo->sourceInst == NULL) {
+        sourceName = "none" ;
+        sourceClassName = "" ;
+    } else {
+        if (traceInfo->sourceInst->name == NULL) {
+            sourceName = "unknown" ;
+        } else {
+            sourceName = traceInfo->sourceInst->name ;
+        }
+        sourceClassName = traceInfo->sourceInst->instClass->name ;
+    }
+    
+    char const *targetName = traceInfo->targetInst->name ?
+            traceInfo->targetInst->name : "unknown" ;
+
+    switch (traceInfo->eventType) {
+    case mrtTransitionEvent:
+        printf("%s: Transition: %s(%s) - %s -> %s(%s): %s ==> %s\n",
+            mrtTimestamp(), sourceName, sourceClassName,
+            traceInfo->targetInst->instClass->edb->eventNames[
+                traceInfo->eventNumber],
+            targetName, traceInfo->targetInst->instClass->name,
+            traceInfo->targetInst->instClass->edb->stateNames[
+                traceInfo->info.transitionTrace.currentState],
+            traceInfo->targetInst->instClass->edb->stateNames[
+                traceInfo->info.transitionTrace.newState]) ;
+        break ;
+
+    case mrtPolymorphicEvent:
+        printf("%s: Polymorphic: %s(%s) - %s -> %s(%s): %s ==> %s(%d) %s\n",
+            mrtTimestamp(), sourceName, sourceClassName,
+            traceInfo->targetInst->instClass->pdb->eventNames[
+                traceInfo->eventNumber],
+            targetName, traceInfo->targetInst->instClass->name,
+            traceInfo->targetInst->instClass->pdb->generalizationNames[
+                traceInfo->info.polyTrace.genNumber],
+            eventTypeNames[traceInfo->info.polyTrace.mappedType],
+            traceInfo->info.polyTrace.mappedEvent,
+            traceInfo->targetInst->instClass->pdb->genDispatch[
+                traceInfo->info.polyTrace.genNumber].subclassNames[
+                traceInfo->info.polyTrace.subcode]) ;
+        break ;
+
+    case mrtCreationEvent:
+        printf("%s: Creation: %s(%s) - %s -> %s: %s\n",
+            mrtTimestamp(), sourceName, sourceClassName,
+            traceInfo->targetInst->instClass->edb->eventNames[
+                traceInfo->eventNumber],
+            traceInfo->info.creationTrace.targetClass->name,
+            targetName) ;
+        break ;
+
+        /*
+         * N.B. no default case. Just fall through and return.
+         */
+    }
+}
+#   else  /* MRT_NO_NAMES is defined */
+#   endif /* MRT_NO_NAMES */
+----
+
+[source,c]
+----
+<<posix forward references>>=
+static char const *mrtTimestamp(void) ;
+----
+
+[source,c]
+----
+<<posix static functions>>=
+static
+char const *
+mrtTimestamp(void)
+{
+    static char timestamp[128] ;
+
+    struct timeval now ;
+    if (gettimeofday(&now, NULL) != 0) {
+        return "unknown" ;
+    }
+
+    struct tm *ltime ;
+    ltime = localtime(&now.tv_sec) ;
+    if (ltime == NULL) {
+        return strerror(errno) ;
+    }
+
+    int tlen = strftime(timestamp, sizeof(timestamp), "%FT%T", ltime) ;
+    if (tlen == 0) {
+        return strerror(errno) ;
+    }
+
+    int flen = snprintf(timestamp + tlen, sizeof(timestamp) - tlen,
+            ".%03u.%03u", (unsigned)(now.tv_usec / 1000),
+            (unsigned)(now.tv_usec % 1000)) ;
+    if (flen > (sizeof(timestamp) - tlen)) {
+        return "too big" ;
+    }
+
+    return timestamp ;
+}
+----
+
 === POSIX Initialization
+
 Here we present the POSIX version of the required internal initialization.
 
 [source,c]
@@ -4329,8 +4782,10 @@ Here we present the POSIX version of the required internal initialization.
 void
 mrt_Initialize(void)
 {
-    mrtSysTimerInit() ;
-    mrtFDServiceInit() ;
+    mrtInitEventPool() ;
+    mrtInitSysTimer() ;
+    mrtInitFDService() ;
+    mrt_RegisterTraceHandler(mrtPrintTraceInfo) ;
 }
 ----
 
@@ -4338,13 +4793,13 @@ mrt_Initialize(void)
 
 [source,c]
 ----
-<<mrt_posix.h>>=
+<<micca_rt_posix.h>>=
 /*
 <<copyright info>>
 */
 
-#ifndef MRT_INTERFACE_H_
-#define MRT_INTERFACE_H_
+#ifndef MICCA_RT_H_
+#define MICCA_RT_H_
 
 /*
  * Standard Includes
@@ -4362,9 +4817,18 @@ mrt_Initialize(void)
 <<mrt interface simple types>>
 <<mrt interface aggregate types>>
 
+#   ifndef MRT_NO_TRACE
+<<mrt trace aggregate types>>
+#   endif /* MRT_NO_TRACE */
+
+
 /*
  * External Functions
  */
+#   ifndef MRT_NO_TRACE
+<<mrt trace external interfaces>>
+#   endif /* MRT_NO_TRACE */
+
 <<mrt external interfaces>>
 <<posix external interfaces>>
 
@@ -4388,7 +4852,7 @@ mrt_Initialize(void)
 <<common includes>>=
 #include <string.h>
 #include <assert.h>
-#include "mrt_interface.h"
+#include "micca_rt.h"
 ----
 
 [source,c]
@@ -4401,7 +4865,7 @@ mrt_Initialize(void)
 
 [source,c]
 ----
-<<mrt_arm7m.c>>=
+<<micca_rt_arm7m.c>>=
 /*
 <<copyright info>>
 */
@@ -4411,7 +4875,7 @@ mrt_Initialize(void)
 
 [source,c]
 ----
-<<mrt_msp430.c>>=
+<<micca_rt_msp430.c>>=
 /*
 <<copyright info>>
 */
@@ -4421,7 +4885,7 @@ mrt_Initialize(void)
 
 [source,c]
 ----
-<<mrt_posix.c>>=
+<<micca_rt_posix.c>>=
 /*
 <<copyright info>>
 */
@@ -4446,22 +4910,35 @@ mrt_Initialize(void)
  * Forward References
  */
 <<mrt forward references>>
+<<posix forward references>>
 
 /*
  * Static Data
  */
+#   ifndef MRT_NO_TRACE
+<<mrt trace static data>>
+#   endif /* MRT_NO_TRACE */
+
 <<mrt static data>>
 <<posix static data>>
 
 /*
  * Static Functions
  */
+#   ifndef MRT_NO_TRACE
+<<mrt trace static functions>>
+#   endif /* MRT_NO_TRACE */
+
 <<posix static functions>>
 <<mrt static functions>>
 
 /*
  * External Functions
  */
+#   ifndef MRT_NO_TRACE
+<<mrt trace external functions>>
+#   endif /* MRT_NO_TRACE */
+
 <<posix external functions>>
 <<mrt external functions>>
 ----

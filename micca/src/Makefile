@@ -10,10 +10,11 @@
 #
 
 DOCDIR	= ../doc
-CODEDIR	= ../code
 TESTDIR = ../tests
 PKGDIR	= ../../packages
 IMAGEDIR = ./images
+CODEDIR	= ../code
+POSIXDIR = $(CODEDIR)/c/posix
 
 CFLAGS	= -std=c11 -g
 CPPFLAGS = -D_POSIX_C_SOURCE=200112L -D_ISOC11_SOURCE
@@ -23,7 +24,7 @@ vpath %.html $(DOCDIR)
 vpath %.test $(TESTDIR)
 vpath %.uxf $(IMAGEDIR)
 vpath %.tcl $(CODEDIR)/tcl
-vpath %.c $(CODEDIR)/c/posix
+vpath %.c $(POSIXDIR)
 
 DOCSRC 	=\
 	micca.aweb\
@@ -67,9 +68,9 @@ TCLSRC	=\
      	$(patsubst %.aweb,%.tcl,$(DOCSRC))\
 	$(NULL)
 
-POSIXH	= $(CODEDIR)/c/posix/mrt_interface.h
-POSIXC	= $(CODEDIR)/c/posix/mrt_implementation.c
-POSIXOBJ	= $(CODEDIR)/c/posix/mrt_implementation.o
+POSIXH	= $(POSIXDIR)/micca_rt.h
+POSIXC	= $(POSIXDIR)/micca_rt.c
+POSIXOBJ = $(POSIXDIR)/micca_rt.o
 
 PDF 	=\
      	$(DOCDIR)/$(patsubst %.aweb,%.pdf,$(DOCSRC))\
@@ -160,10 +161,10 @@ posixh : $(POSICH)
 $(POSIXOBJ) : $(POSIXH) $(POSIXC)
 
 $(POSIXH) : $(DOCSRC) $(DOCPARTS)
-	atangle $(ATANGLEOPTS) -line '#line %l% "%f%"' -root mrt_posix.h -output $@ $<
+	atangle $(ATANGLEOPTS) -line '#line %l% "%f%"' -root micca_rt_posix.h -output $@ $<
 
 $(POSIXC) : $(DOCSRC) $(DOCPARTS)
-	atangle $(ATANGLEOPTS) -line '#line %l% "%f%"' -root mrt_posix.c -output $@ $<
+	atangle $(ATANGLEOPTS) -line '#line %l% "%f%"' -root micca_rt_posix.c -output $@ $<
 
 clean :
 	$(RM) $(CLEANFILES)
