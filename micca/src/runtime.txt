@@ -339,6 +339,7 @@ typedef struct mrtinstance {
     struct mrtclass const *instClass ;
     AllocStatus alloc ;
     MRT_StateCode currentState ;
+    unsigned refCount ;
 
 #       ifndef MRT_NO_NAMES
     char const *name ;
@@ -362,6 +363,8 @@ typedef struct mrtinstance {
     the `currentState` member holds a small integer number indicating the
     current state in which the instance resides.
     A value of -1 is used to show that the class does not have a state model.
+`refCount`::
+    A counter value used to enforce referential integrity.
 `name`::
     An instance may have a name that it was given during the intial instance
     population.
@@ -475,11 +478,15 @@ the function returns the instance is ready and available.
 Later we will discuss asynchronous instance creation which is instance
 creation by generating an event.
 
-Instance creation and deletion also supports a very simplified notion of
-construction and destruction for the instances.
-This is no where near as complicated or full featured as something in C++.
-Constructors and destructors take no arguments other than a pointer to the
-instance.
+=== Instance Allocation Block
+
+The instances of a class are contained in a single array variable
+which serves as the memory pool for the instances.
+To support managing a pool of class instances,
+an *Instance Allocation Block*, or *IAB* for short,
+data structure is used to keep track of the memory pool.
+What we need is a data structure that describes the properties of the
+class instance memory pool.
 
 [source,c]
 ----
@@ -487,20 +494,6 @@ instance.
 typedef void (*InstCtor)(MRT_Instance *) ;
 typedef void (*InstDtor)(MRT_Instance *) ;
 ----
-
-Constructors and destructors are primarily useful for when the instance has a
-more complicated data structure as an attribute,
-as might be the case if the attribute data type is user defined.
-If you need to do complicated construction of instances,
-the preferred method is to do that with an instance based operation
-or as part of a state activity for an asynchronously created instance.
-
-The instances of a class are contained in a single array variable
-which serves as the memory pool for the instances.
-To support managing a pool of class instances,
-an *Instance Allocation Block*, or *IAB* for short,
-data structure is used to keep track of the memory pool.
-What we need is a data structure that can find the bounds of the pool.
 
 [source,c]
 ----
@@ -513,7 +506,7 @@ typedef struct mrtinstallocblock {
     size_t instanceSize ;
     InstCtor construct ;
     InstDtor destruct ;
-} MRT_InstAllocBlock ;
+} MRT_iab ;
 ----
 
 `storageStart`::
@@ -530,7 +523,10 @@ typedef struct mrtinstallocblock {
     the starting point for allocating the next instance.
 `alloc`::
     The next value of the allocation counter to be assigned to a newly
-    allocated instance.
+    allocated instance. This member is used to give a unique number
+    (modulo the maximum value that can be held in the data type)
+    to each allocation of the array element where an instance is stored.
+    The number is used to diagnose run time analysis errors.
 `instanceSize`::
     The number of bytes of memory occupied by an instance.
 `construct`::
@@ -540,14 +536,43 @@ typedef struct mrtinstallocblock {
     A pointer to a destructor function. If there is no destructor defined
     for the class, then the value of this member may be set to `NULL`.
 
-The underlying allocation algorithm is a simple linear search starting
-at the last location that was allocated.
+Instance creation and deletion also supports a very simplified notion of
+construction and destruction for the instances.
+This is no where near as complicated or full featured as something in C++.
+Constructors and destructors take no arguments other than a pointer to the
+instance.
+
+Constructors and destructors are primarily useful for when the instance has a
+more complicated data structure as an attribute,
+as might be the case if the attribute data type is user defined.
+If you need to do complicated construction of instances,
+the preferred method is to do that with an instance based operation
+or as part of a state activity for an asynchronously created instance.
+
+=== Finding Instance Memory
 
 [source,c]
 ----
 <<mrt forward references>>=
-static MRT_Instance *mrtInstFindSlot(MRT_Class const *instClass) ;
+static
+MRT_Instance *
+mrtInstFindSlot(
+    MRT_Class const *instClass) ;
 ----
+
+`instClass`::
+    A pointer to the class data for which instance memory is to be allocated.
+
+`mrtInstFindSlot` searchs for unused instance memory in the memory pool
+associated with the class described by `instClass`.
+Returns a pointer to the allocated memory if successful.
+Returns `NULL` if no memory is available.
+
+[float]
+==== Implementation
+
+The allocation algorithm is a simple linear search starting at the last
+location that was allocated.
 
 [source,c]
 ----
@@ -557,7 +582,7 @@ mrtInstFindSlot(
     MRT_Class const *instClass)
 {
     assert(instClass != NULL) ;
-    MRT_InstAllocBlock *iab = instClass->iab ;
+    MRT_iab *iab = instClass->iab ;
     if (iab == NULL) {
         return NULL ;
     }
@@ -575,8 +600,8 @@ mrtInstFindSlot(
     /*
      * Check if we ended up on a slot that is not allocated.
      */
-    if (inst->alloc != 0) {
-        return NULL ; // <1>
+    if (inst->alloc != 0) { // <1>
+        return NULL ;
     }
 
     return inst ;
@@ -598,7 +623,7 @@ That is accomplished with the `mrtInstNext()` function.
 [source,c]
 ----
 <<mrt forward references>>=
-static inline void *mrtInstNext(MRT_InstAllocBlock *iab, void *ptr) ;
+static inline void *mrtInstNext(MRT_iab *iab, void *ptr) ;
 ----
 
 [source,c]
@@ -607,7 +632,7 @@ static inline void *mrtInstNext(MRT_InstAllocBlock *iab, void *ptr) ;
 static inline 
 void *
 mrtInstNext(
-    MRT_InstAllocBlock *iab,
+    MRT_iab *iab,
     void *ptr)
 {
     ptr = (void *)((uintptr_t)ptr + iab->instanceSize) ; // <1>
@@ -644,6 +669,11 @@ mrt_CreateInstance(
     For classes that do not have an associated state model this argument
     is ignored.
 
+`mrt_CreateInstance` allocates memory for an instance of the class
+described by `instClass` and places the instance in the state
+given by `initialState`.
+No state activity is run as part of synchronous instance creation.
+
 [source,c]
 ----
 <<mrt external functions>>=
@@ -665,9 +695,13 @@ mrt_CreateInstance(
      */
     MRT_Instance *inst = mrtInstFindSlot(instClass) ;
     if (inst == NULL) {
+#           ifndef MRT_NO_NAMES
+        mrtFatalError(mrtNoInstSlot, instClass->name) ;
+#           else
         mrtFatalError(mrtNoInstSlot, instClass) ;
+#           endif /* MRT_NO_NAMES */
     }
-    MRT_InstAllocBlock *iab = instClass->iab ;
+    MRT_iab *iab = instClass->iab ;
     /*
      * Record where we left off for the next allocation attempt.
      */
@@ -713,7 +747,7 @@ Here we want to make sure the value remains positive.
 [source,c]
 ----
 <<mrt forward references>>=
-static inline AllocStatus mrtIncrAllocCounter(MRT_InstAllocBlock *iab) ;
+static inline AllocStatus mrtIncrAllocCounter(MRT_iab *iab) ;
 ----
 
 [source,c]
@@ -722,7 +756,7 @@ static inline AllocStatus mrtIncrAllocCounter(MRT_InstAllocBlock *iab) ;
 static inline 
 AllocStatus
 mrtIncrAllocCounter(
-    MRT_InstAllocBlock *iab)
+    MRT_iab *iab)
 {
     /*
      * Catch any overflow
@@ -762,7 +796,7 @@ void
 mrt_DeleteInstance(
     MRT_Instance *inst)
 {
-    MRT_InstAllocBlock *iab = inst->instClass->iab ;
+    MRT_iab *iab = inst->instClass->iab ;
     assert(iab != NULL) ;
     /*
      * Run the destructor, if there is one.
@@ -787,6 +821,336 @@ that the interdependencies among classes are properly preserved.
 That work is not done here!
 It is the responsibility of the analysis model to take any actions
 necessary to delete an instance and have the data integrity preserved.
+
+=== Transactions on Domain Data
+
+[source,c]
+----
+<<mrt interface aggregate types>>=
+
+typedef struct mrtarrayref {
+    unsigned count ;
+    MRT_Instance * const *references ;
+} MRT_ArrayRef ;
+
+typedef struct mrtlinkref {
+    struct mrtrellink *next ;
+    struct mrtrellink *prev ;
+} MRT_LinkRef ;
+
+typedef enum {
+    mrtSimpleAssoc,
+    mrtClassAssoc,
+    mrtRefGeneralization,
+    mrtUnionGeneralization
+} MRT_RelType ;
+
+typedef enum {
+    mrtSingular,
+    mrtArray,
+    mrtLinkedList
+} MRT_RefStorageType ;
+
+typedef enum {
+    mrtAtMostOne,
+    mrtExactlyOne,
+    mrtZeroOrMore,
+    mrtOneOrMore
+} MRT_Cardinality ;
+
+typedef struct mrtrelationship {
+    MRT_RelType type ;
+    union {
+        struct mrtsimpassoc {
+            struct mrtroleinfo {
+                MRT_Class const *classInfo ;
+                MRT_Cardinality cardinality ;
+                MRT_RefStorageType storageType ;
+                MRT_AttributeOffset storageOffset ;
+                MRT_AttributeOffset linkOffset ;
+            } source ;
+            struct mrtroleinfo target ;
+        } simpleAssoc ;
+
+        struct mrtclassassoc {
+            struct mrtroleinfo source ;
+            struct mrtroleinfo target ;
+            struct mrtassociatorinfo {
+                MRT_Class const *classInfo ;
+                MRT_AttributeOffset forwardOffset ;
+                MRT_AttributeOffset backwardOffset ;
+            } associator ;
+        } classAssoc ;
+
+        struct mrtrefgen {
+            struct mrtrefsuperinfo {
+                MRT_Class const *classInfo ;
+                MRT_AttributeOffset subCodeOffset ;
+                MRT_AttributeOffset subReferenceOffset ;
+            } superclass ;
+            unsigned subclassCount ;
+            struct mrtsubclassinfo {
+                MRT_Class const *classInfo ;
+                MRT_AttributeOffset superReferenceOffset ;
+            } const *subclasses ;
+        } refGeneralization ;
+
+        struct mrtuniongen {
+            struct mrtunionsuperinfo {
+                MRT_Class const *classInfo ;
+                MRT_AttributeOffset subCodeOffset ;
+                MRT_AttributeOffset subOffset ;
+            } superclass ;
+        } unionGeneralization ;
+    } rel ;
+
+#       ifndef MRT_NO_NAMES
+    char const *name ;
+#       endif /* MRT_NO_NAMES */
+} MRT_Relationship ;
+----
+
+[source,c]
+----
+<<mrt static functions>>=
+static
+bool
+mrtCheckRelationship(
+    MRT_Relationship const *rel)
+{
+    bool result = false ;
+
+    switch (rel->type) {
+    case mrtSimpleAssoc:
+        mrtClearSimpAssocRefCounts(&rel->rel.simpleAssoc) ;
+        mrtCountSimpAssocRefs(&rel->rel.simpleAssoc) ;
+        result = mrtCheckSimpAssocRefCounts(&rel->rel.simpleAssoc) ;
+        break ;
+
+    case mrtClassAssoc:
+        break ;
+
+    case mrtRefGeneralization:
+        break ;
+
+    case mrtUnionGeneralization:
+        break ;
+
+    default:
+        break ;
+    }
+
+    return result ;
+}
+----
+
+[source,c]
+----
+<<mrt forward references>>=
+static void
+mrtClearSimpAssocRefCounts(struct mrtsimpassoc const *assoc) ;
+
+static void
+mrtCountSimpAssocRefs(struct mrtsimpassoc const *assoc) ;
+
+static bool
+mrtCheckSimpAssocRefCounts(struct mrtsimpassoc const *assoc) ;
+----
+
+[source,c]
+----
+<<mrt static functions>>=
+static void
+mrtClearSimpAssocRefCounts(
+    struct mrtsimpassoc const *assoc)
+{
+    mrtZeroRefCounts(&assoc->source) ;
+    mrtZeroRefCounts(&assoc->target) ;
+}
+
+static void
+mrtCountSimpAssocRefs(
+    struct mrtsimpassoc const *assoc)
+{
+    mrtCountRefs(&assoc->source, &assoc->target) ;
+}
+
+static bool
+mrtCheckSimpAssocRefCounts(
+    struct mrtsimpassoc const *assoc)
+{
+    return mrtCheckRefCounts(&assoc->source) &&
+            mrtCheckRefCounts(&assoc->target) ;
+}
+----
+
+[source,c]
+----
+<<mrt forward references>>=
+static void
+mrtZeroRefCounts(struct mrtroleinfo const *role) ;
+
+static void
+mrtCountRefs(struct mrtroleinfo const *source,
+    struct mrtroleinfo const *target) ;
+
+static bool
+mrtCheckRefCounts(struct mrtroleinfo const *role) ;
+----
+
+[source,c]
+----
+<<mrt static functions>>=
+static void
+mrtZeroRefCounts(
+    struct mrtroleinfo const *role)
+{
+    MRT_iab *iab = role->classInfo->iab ;
+
+    for (MRT_Instance *inst = (MRT_Instance *)iab->storageStart ;
+            inst < (MRT_Instance *)iab->storageFinish ;
+            inst = (MRT_Instance *)((uintptr_t)inst + iab->instanceSize)) {
+        inst->refCount = 0 ;
+    }
+}
+
+static void
+mrtCountSingularRefs(
+    MRT_iab *source,
+    MRT_AttributeOffset offset,
+    MRT_iab *target)
+{
+    for (MRT_Instance *inst = (MRT_Instance *)source->storageStart ;
+            inst < (MRT_Instance *)source->storageFinish ;
+            inst = (MRT_Instance *)((uintptr_t)inst + source->instanceSize)) {
+        if (inst->alloc <= 0) {
+            continue ;
+        }
+        void *targetRef = (void *)((uintptr_t)inst + offset) ;
+        if (targetRef >= target->storageStart &&
+                targetRef < target->storageFinish) {
+            MRT_Instance *targetInst = *(MRT_Instance **)targetRef ;
+            if (targetInst->alloc > 0) {
+                targetInst->refCount += 1 ;
+            }
+        }
+    }
+}
+
+static void
+mrtCountArrayRefs(
+    MRT_iab *source,
+    MRT_AttributeOffset offset,
+    MRT_iab *target)
+{
+    for (MRT_Instance *inst = (MRT_Instance *)source->storageStart ;
+            inst < (MRT_Instance *)source->storageFinish ;
+            inst = (MRT_Instance *)((uintptr_t)inst + source->instanceSize)) {
+        if (inst->alloc <= 0) {
+            continue ;
+        }
+        MRT_ArrayRef *refs = (MRT_ArrayRef *)((uintptr_t)inst + offset) ;
+        MRT_Instance * const *iter = refs->references ;
+        for (unsigned count = refs->count ; count != 0 ; --count, ++iter) {
+            MRT_Instance *targetInst = *iter ;
+            if ((void *)targetInst >= target->storageStart &&
+                    (void *)targetInst < target->storageFinish &&
+                    targetInst->alloc > 0) {
+                targetInst->refCount += 1 ;
+            }
+        }
+    }
+}
+
+static void
+mrtCountLinkedListRefs(
+    MRT_iab *source,
+    MRT_iab *target)
+{
+}
+
+static void
+mrtCountRefs(
+    struct mrtroleinfo const *source,
+    struct mrtroleinfo const *target)
+{
+    MRT_iab *iabSource = source->classInfo->iab ;
+    MRT_iab *iabTarget = target->classInfo->iab ;
+
+    switch (source->storageType) {
+    case mrtSingular:
+        mrtCountSingularRefs(iabSource, source->storageOffset, iabTarget) ;
+        break ;
+
+    case mrtArray:
+        mrtCountArrayRefs(iabSource, source->storageOffset, iabTarget) ;
+        break ;
+
+    case mrtLinkedList:
+        mrtCountLinkedListRefs(iabSource, iabTarget) ;
+        break ;
+    }
+
+    switch (target->storageType) {
+    case mrtSingular:
+        mrtCountSingularRefs(iabTarget, source->storageOffset, iabSource) ;
+        break ;
+
+    case mrtArray:
+        mrtCountArrayRefs(iabTarget, source->storageOffset, iabSource) ;
+        break ;
+
+    case mrtLinkedList:
+        mrtCountLinkedListRefs(iabTarget, iabSource) ;
+        break ;
+    }
+}
+
+static bool
+mrtCheckRefCounts(
+    struct mrtroleinfo const *role)
+{
+    MRT_iab *iab = role->classInfo->iab ;
+
+    for (MRT_Instance *inst = (MRT_Instance *)iab->storageStart ;
+            inst < (MRT_Instance *)iab->storageFinish ;
+            inst = (MRT_Instance *)((uintptr_t)inst + iab->instanceSize)) {
+        if (inst->alloc > 0) {
+            switch (role->cardinality) {
+            case mrtAtMostOne:
+                // only 0 or 1 is good
+                if (inst->refCount > 1) {
+                    return false ;
+                }
+                break ;
+
+            case mrtExactlyOne:
+                // only 1 is good
+                if (inst->refCount != 1) {
+                    return false ;
+                }
+                break ;
+
+            case mrtZeroOrMore:
+                // any value is good
+                break ;
+
+            case mrtOneOrMore:
+                // any value except 0 good
+                if (inst->refCount == 0) {
+                    return false ;
+                }
+                break ;
+
+            default:
+                return false ;
+            }
+        }
+    }
+
+    return true ;
+}
+----
 
 == Managing Execution
 
@@ -856,7 +1220,7 @@ The important distinction here is that the application code of the
 state actions does not deal with actually dispatching the events
 nor does it control which event is dispatched next.
 
-=== Signaling Events
+=== Event Types
 
 There are three types of events:
 
@@ -950,7 +1314,15 @@ Event codes are captured by small integer values.
 ----
 <<mrt interface simple types>>=
 typedef int8_t MRT_EventCode ;
-typedef unsigned long int MRT_DelayTime ;
+----
+
+Delay times are in milliseconds and we wish to have a wide dynamic
+range of times.
+
+[source,c]
+----
+<<mrt interface simple types>>=
+typedef uint32_t MRT_DelayTime ;
 ----
 
 Note that there is no notion of priority contained in the ECB.
@@ -959,85 +1331,6 @@ That is not supported here.
 Frankly, if you need event priorities to make your system work,
 then you need to revisit your design or look for a software architecture
 that supports multiple threads of execution.
-
-=== Event Parameter Storage
-
-We need to discuss events that carry parametric data and how that will happen.
-In this formulation of state machines,
-events may carry additional parameters.
-Space has to be allocated for that data.
-The more difficult issue is to deal with the type of the parameter data.
-There are a couple of solutions, neither of which is very satisfying.
-We could collect all the parameters from all the state machines
-in the system and create a giant union.
-This would properly allocate the amount of parameter storage required
-and provide a type safe manner to deal with that data.
-Unfortunately, the parameters to states are scattered in very many
-places in a system and gathering them together is a difficult
-undertaking.
-
-Here we take the view of providing some generic parameter fields
-with a fixed amount of memory and letting state actions
-cast that memory into the appropriate type.
-Needless to say, this can also be a source of errors, but is
-much easier to manage.
-This choice makes sense for many systems.
-The number of states that use parametric data is usually small and using a
-fixed size works better than might be expected.
-The important point here is that events can carry data with them.
-Many state machine formulations don't support this
-and it is very difficult to correctly manage memory lifetime
-without it.
-It is one of those things that you might not use very often but
-it is difficult to do without when you need it.
-
-We fix the amount of memory used for event parameter storage,
-allowing it to be overridden by the compiler command.
-
-[source,c]
-----
-<<mrt constants>>=
-#ifndef MRT_ECB_PARAM_SIZE
-#   define MRT_ECB_PARAM_SIZE  32
-#endif /* MRT_ECB_PARAM_SIZE */
-----
-
-[source,c]
-----
-<<mrt interface simple types>>=
-typedef char MRT_EventParams[MRT_ECB_PARAM_SIZE] ;
-----
-
-The platform model has been very careful to insure the type signatures
-of events and state activities.
-When signaling an event,
-the code generator will generate code to insert event parameters into
-the data area using the signature associated with the event.
-In the state activity,
-the parameters will be moved into local variables according to the
-signature of the state activity.
-
-Note that the parameters are passed by value but care must be taken when
-passing pointer references to data (_e.g._ `NUL` terminated strings passed as
-pointers). The run time does nothing to manage the life time of the
-storage when values are passed by reference.
-
-=== Event Queuing
-
-The last step in event signaling is to queue the event.
-In this architecture,
-we do asynchronous event dispatch.
-This insures that the state actions run to completion.
-Since a queue is used,
-as a state action executes and generates an event,
-we know that event will not be dispatched until after
-the state action completes.
-Therefore, there is no danger of a long complicated chain
-of event dispatching cycling back around to alter the state
-of the instance or potentially modify some data that the
-state action accesses after generating the event.
-The guaranteed of run-to-completion state activity execution is very important.
-We now examine the code that performs the queueing.
 
 Like all the other data structures, there is a storage pool for ECB's
 and we define a size for it here that can be overridden
@@ -1067,6 +1360,85 @@ As usual, storage is just an array of structures.
 static MRT_Ecb mrtECBPool[MRT_EVENTPOOLSIZE] ;
 ----
 
+=== Event Parameter Storage
+
+We need to discuss events that carry parametric data and how that will happen.
+In this formulation of state machines,
+events may carry additional parameters.
+Space has to be allocated for that data.
+The more difficult issue is to deal with the type of the parameter data.
+There are a couple of solutions, neither of which is very satisfying.
+We could collect all the parameters from all the state machines
+in the system and create a giant union.
+This would properly allocate the amount of parameter storage required
+and provide a type safe manner to deal with that data.
+Unfortunately, the parameters to states are scattered in very many
+places in a system and gathering them together is a difficult
+undertaking.
+
+Here we take the approach of providing a fixed amount of memory and letting
+state actions cast that memory into the appropriate type.
+Needless to say, this can also be a source of errors, but is
+much easier to manage.
+This choice makes sense for many systems.
+The number of states that use parametric data is usually small and using a
+fixed size works better than might be expected from first considerations.
+The important point here is that events can carry data with them.
+Many state machine formulations don't support this
+and it is very difficult to correctly manage memory lifetime
+without it.
+It is one of those things that you might not use very often but
+it is difficult to do without when you need it.
+
+We fix the amount of memory used for event parameter storage,
+allowing it to be overridden by the defining the appropriate macro.
+
+[source,c]
+----
+<<mrt constants>>=
+#ifndef MRT_ECB_PARAM_SIZE
+#   define MRT_ECB_PARAM_SIZE  32
+#endif /* MRT_ECB_PARAM_SIZE */
+----
+
+[source,c]
+----
+<<mrt interface simple types>>=
+typedef char MRT_EventParams[MRT_ECB_PARAM_SIZE] ;
+----
+
+The platform model has been very careful to insure the type signatures
+of events and state activities.
+When signaling an event,
+the code generator will generate code to insert event parameters into
+the data area using the signature associated with the event.
+In the state activity,
+the parameters will be moved into local variables according to the
+signature of the state activity.
+
+Note that the parameters are passed by value but care must be taken when
+passing pointer references to data (_e.g._ `NUL` terminated strings passed as
+pointers). The run time does nothing to manage the life time of the
+storage when values are passed by reference.
+
+=== Event Queues
+
+In this run time architecture,
+we do asynchronous event dispatch from an event queue.
+This is one of the simplest ways to insure that we meet the
+requirement that state activities run to completion.
+Since a queue is used,
+as a state activity executes and potentially signals other events,
+we know those events will not be dispatched until after the state activity
+completes.
+Therefore,
+there is no danger of a long complicated chain of event dispatching cycling
+back around to alter the state of the instance or potentially modify some data
+value that the state activity accesses after generating the event.
+The guaranteed of run-to-completion for state activity execution is very
+important.
+We now examine the code that performs the queueing.
+
 To serve as the head of the linked lists,
 we define an event queue structure that just contains the
 `next` and `prev` pointers.
@@ -1093,7 +1465,7 @@ static MRT_EventQueue freeEventQueue ;
 
 The `eventQueue` queue holds  events waiting to be dispatched.
 The events in this queue are those signaled as part of an
-ongoing thread of control
+ongoing thread of control.
 The `tocEventQueue` queue holds events that start a new thread of
 control.
 Typically,
@@ -1175,9 +1547,13 @@ mrtEventQueueRemove(
 {
     item->prev->next = item->next ;
     item->next->prev = item->prev ;
-    item->prev = item->next = NULL ;
+    item->prev = item->next = NULL ; // <1>
 }
 ----
+<1> Although it is not strictly necessary to NULL out the pointers when
+an item is removed from the queue,
+it does aid in debugging to know if an ECB is being held outside of
+one of the queues.
 
 Since we have a pool of ECB's,
 we need some operations to manage the pool.
@@ -1226,7 +1602,6 @@ mrtAllocEvent(void)
 
     MRT_Ecb *ecb = freeEventQueue.next ;
     mrtEventQueueRemove(ecb) ;
-    ecb->next = ecb->prev = NULL ;
     return ecb ;
 }
 ----
@@ -1244,6 +1619,10 @@ mrtFreeEvent(
     mrtEventQueueInsert(ecb, (MRT_Ecb *)&freeEventQueue) ;
 }
 ----
+
+We will have need to find particular events in a queue.
+Events are identified by the source of the event, the target of the event
+and the number of the event.
 
 [source,c]
 ----
@@ -1270,7 +1649,7 @@ mrtFindEvent(
 }
 ----
 
-=== Interface for Event Signaling
+=== Event Signaling
 
 Finally, we can get to functions that the run time provide for
 a state activity to signal an event.
@@ -1284,6 +1663,9 @@ extern MRT_Ecb *mrt_NewEvent(
     MRT_Instance *targetInst,
     MRT_Instance *sourceInst) ;
 ----
+
+The `mrt_NewEvent` function allocates an ECB structure,
+fills in the elements and returns the newly minted ECB.
 
 [source,c]
 ----
@@ -1314,6 +1696,12 @@ mrt_NewEvent(
 
 === Asynchronous Instance Creation
 
+As we mentioned earlier,
+asynchronous instance creation is accomplished by a combination of
+creating an instance and then sending it an event.
+The transition caused by the event then causes a state activity to be
+executed.
+
 [source,c]
 ----
 <<mrt external interfaces>>=
@@ -1322,6 +1710,10 @@ extern MRT_Instance *mrt_CreateAsync(
     MRT_EventCode event,
     MRT_Instance *sourceInst) ;
 ----
+
+The `mrt_CreateAsync` function asynchronously creates an instance of the
+class described by `targetClass` and arranges for `event` to be
+signaled to the new instance.
 
 [source,c]
 ----
@@ -1334,13 +1726,13 @@ mrt_CreateAsync(
 {
     assert(targetClass != NULL) ;
 
-    MRT_Instance *targetInst = mrt_CreateInstance(targetClass, 0) ;
-    targetInst->alloc = -targetInst->alloc ;
+    MRT_Instance *targetInst = mrt_CreateInstance(targetClass, 0) ; // <1>
+    targetInst->alloc = -targetInst->alloc ; // <2>
 
     MRT_Ecb *ecb = mrtAllocEvent() ;
     ecb->eventNumber = event ;
     ecb->alloc = targetInst->alloc ;
-    ecb->eventType = mrtCreationEvent ;
+    ecb->eventType = mrtCreationEvent ; // <3>
     ecb->targetInst = targetInst ;
     ecb->sourceInst = sourceInst ;
     ecb->delay = 0 ;
@@ -1350,6 +1742,15 @@ mrt_CreateAsync(
     return targetInst ;
 }
 ----
+<1> The code generator always arranges for the intial pseudo-state
+for creation events to be state zero.
+<2> The `alloc` member is made negative for instances that are awaiting
+the dispatch of a creation event.
+Effectively the negative `alloc` value signals that the memory is reserved
+but the instance is not yet active.
+During event dispatch, this value will be turned back into a positive one.
+<3> We mark this as a creation event so that some additional processing
+can be done before the event is dispatched.
 
 === Posting an Event
 
@@ -1362,6 +1763,11 @@ instance sends to itself and those that an instance sends to a different
 instance.
 Self directed events are placed on the front of the event queue
 so that they are dispatched in preference to the non-self directed events.
+This is one of the fundamental execution rules.
+Posting an event involves both determining the correct queue to which the
+event is to be placed and determining the correct place in the queue
+for the ECB.
+The decisions can be made based on the ECB content.
 
 [source,c]
 ----
@@ -1378,12 +1784,11 @@ mrt_PostEvent(
 {
     assert(ecb != NULL) ;
 
-    if (ecb->sourceInst == NULL) {
-        // queue to the toc event queue
+    if (ecb->sourceInst == NULL) { // <1>
         mrtEventQueueInsert(ecb, (MRT_Ecb *)&tocEventQueue) ;
     } else if (ecb->sourceInst == ecb->targetInst) {
         /*
-         * For self directed events, we want insert the event in the front of
+         * For self directed events, we insert the event in the front of
          * the event queue, but behind any other self directed events.
          */
         MRT_Ecb *iter ;
@@ -1395,19 +1800,21 @@ mrt_PostEvent(
             }
         }
         mrtEventQueueInsert(ecb, iter) ;
-    } else {
-        // ordinary transition event
+    } else { // <2>
         mrtEventQueueInsert(ecb, (MRT_Ecb *)&eventQueue) ;
     }
 }
 ----
+<1> All events that are signaled outside of a state activity start a
+new thread of control.
+<2> Ordinary transitioning events directed between distinct instances
+are queued to the end of the event queue.
+This is the most frequent case.
 
 === Delayed Events
 
-The concept of a delayed event is one where instead of the event
-begin posted to the event queue immediately,
-the run time is requested to post the event at some time in the
-future.
+The concept of a delayed event is to request the run time to post
+an event at some time in the future.
 This implies that the run time has access to some type of timing
 facility by which it can know that a given amount of time has elapsed
 and this implies that the run time will hold on to the ECB until
@@ -1431,9 +1838,9 @@ at its newly given time.
 This turns out to be very convenient in practice, eliminating the
 need to perform checks.
 Cancelling and reinstating a new event turns out to be what is
-required in most circumstances.
+desired in most circumstances.
 
-To understand delayed events,
+To understand the implementation of delayed events,
 it is necessary to understand the way the delayed event queue
 is maintained.
 The run time has a delayed event queue where ECB's are placed awaiting
@@ -1466,8 +1873,17 @@ The unit of time for delayed events is milliseconds.
 [source,c]
 ----
 <<mrt external interfaces>>=
-extern void mrt_PostDelayedEvent(MRT_Ecb *ecb, MRT_DelayTime time) ;
+extern void
+mrt_PostDelayedEvent(
+    MRT_Ecb *ecb,
+    MRT_DelayTime time) ;
 ----
+
+The `mrt_PostDelayedEvent` function requests that the event given by
+`ecb` be dispatched no sooner than `time` milliseconds from now.
+The value of the `time` argument may be 0,
+in which case the event is posted for dispatch immediately.
+All delayed events start a new thread of control.
 
 [source,c]
 ----
@@ -1489,6 +1905,9 @@ mrt_PostDelayedEvent(
 ----
 
 ==== Posting Delayed Events
+
+Posting delayed events involves finding the correct spot in the
+time relative delayed event queue to place the new event.
 
 [source,c]
 ----
@@ -1568,7 +1987,7 @@ delivered until such time when it is posted again.
 Note that it is possible to attempt to cancel a delayed event after
 it has already been delivered.
 This is not an error.
-Unfortunately, the run time cannot turn time backwards.
+Unfortunately, the run time code cannot turn time backwards.
 
 [source,c]
 ----
@@ -1816,7 +2235,7 @@ mrtRemoveDelayedEvent(
 }
 ----
 
-When the timer expires there are several ways to deal with the events
+When the delay time expires there are several ways to deal with the events
 that need to be dispatched.
 One temptation would be to simply sync to the background and let code
 run there to remove expired events from the delayed event queue
@@ -1836,16 +2255,16 @@ the maximum for a delay time as the expired marker.
 #define MRT_DELAY_EXPIRED  UINT32_MAX
 ----
 
-The `mrtExpireDelayedEvents` function
-is run to traverse the delayed event queue and
-mark any events that have a delay value of 0 as expired.
-It is used both in the delayed event timer service as well as
-in the background processing of the delayed event queue.
+The `mrtExpireDelayedEvents` function is run to traverse the delayed event
+queue and mark any events that have a delay value of 0 as expired.
+It is used both in the delayed event timer service as well as in the background
+processing of the delayed event queue.
 The return value is pointer to an ECB.
-This will be `NULL` if there are no other events in the delayed
-queue that require timing.
-Otherwise, the returned ECB pointer will reference the first
-unexpired, non-zero delay event.
+This will be `NULL` if there are no other events in the delayed queue that
+require timing.
+Otherwise,
+the returned ECB pointer will reference the first unexpired,
+non-zero delay event.
 The semantics are a bit strained,
 but the function is used for two distinct purposes.
 
@@ -1907,14 +2326,13 @@ mrtTransferExpiredEvents(void)
      */
     for (MRT_Ecb *iter = mrtEventQueueBegin(&delayedEventQueue) ;
             iter != mrtEventQueueEnd(&delayedEventQueue) &&
-            iter->delay == MRT_DELAY_EXPIRED ; /* empty loop end */) {
+            iter->delay == MRT_DELAY_EXPIRED ; /* empty 3rd expression */) {
         /*
-         * Advance the iterator, because we are about to invalidate it by
+         * Advance the iterator here, because we are about to invalidate it by
          * removing the entry from the queue.
          */
         MRT_Ecb *ecb = iter ;
         iter = iter->next ;
-
         /*
          * Remove the ECB from the delayed queue and insert it into the thread
          * of control event queue for dispatch.
@@ -2155,7 +2573,7 @@ queues are not accessed by asynchronous execution.
 <<mrt static functions>>=
 static void
 mrtExpiredEventService(
-    MRT_SyncParams *params) /* Not used */
+    MRT_SyncParams const *params) /* Not used */
 {
     /*
      * Since the expired event queue is accessed here, we must make sure that
@@ -2184,7 +2602,7 @@ but note that getting delayed event services running on any particular
 platform will require some additional work.
 
 We will try to make as few assumptions about the available timing services
-of the platform.
+of the platform as we can.
 Here are the constraints on the timing services:
 
 * The is only a single source of timing.
@@ -2229,6 +2647,10 @@ mrtDispatchOneEvent(void)
     MRT_Ecb *ecb = queue->next ;
     mrtEventQueueRemove(ecb) ;
     mrtDispatchEvent(ecb) ;
+    /*
+     * Return the ECB to the pool.
+     */
+    mrtFreeEvent(ecb) ;
 
     return true ;
 }
@@ -2246,43 +2668,41 @@ static void mrtDispatchPolymorphicEvent(MRT_Ecb *ecb) ;
 static void mrtDispatchCreationEvent(MRT_Ecb *ecb) ;
 ----
 
-We use a simple table to resolve the function selection at run time.
+We use a table to resolve the function selection at run time.
 
 [source,c]
 ----
 <<mrt static data>>=
 static void (* const mrtDispatchFuncs[])(MRT_Ecb *) = {
-    mrtDispatchTransitionEvent,
-    mrtDispatchPolymorphicEvent,
-    mrtDispatchCreationEvent,
+    [mrtTransitionEvent] = mrtDispatchTransitionEvent,
+    [mrtPolymorphicEvent] = mrtDispatchPolymorphicEvent,
+    [mrtCreationEvent] = mrtDispatchCreationEvent
 } ;
 ----
 
 The general function to dispatch an event just selects the specific
-dispatch function based on the event type.
+dispatch function based on the event type using the above table.
 
 [source,c]
 ----
 <<mrt forward references>>=
-static void mrtDispatchEvent(MRT_Ecb *ecb) ;
+static inline void mrtDispatchEvent(MRT_Ecb *ecb) ;
 ----
 
 [source,c]
 ----
 <<mrt static functions>>=
-static void
+static inline
+void
 mrtDispatchEvent(
     MRT_Ecb *ecb)
 {
     assert(ecb != NULL) ;
     assert(ecb->targetInst != NULL) ;
     assert(ecb->targetInst->instClass != NULL) ;
+    assert(ecb->eventType < COUNTOF(mrtDispatchFuncs)) ;
 
     mrtDispatchFuncs[ecb->eventType](ecb) ;
-    /*
-     * Return the ECB to the pool.
-     */
-    mrtFreeEvent(ecb) ;
 }
 ----
 
@@ -2293,8 +2713,8 @@ we consider the dispatch of each particular event type.
 
 Far and away the most common activity is to dispatch a transitioning event
 to a state machine.
-We call these event types _transition_ only to distinguish them
-from the more complicated polymorphic and creation event types.
+We refer to these event types, _transition_, only to distinguish them from the
+more complicated and less frequent polymorphic and creation event types.
 
 Dispatching an event in its simplest terms involves using the
 current state of the instance and the event number contained in
@@ -2319,7 +2739,7 @@ then it is declared as a can't happen event.
 In the micca run time,
 a can't happen transition is treated as a fatal system error.
 This is a policy decision of the architecture,
-so don't be confused that _can't happen_ means
+so don't assume that _can't happen_ means
 _shouldn't happen_ or _has a low probability of happening_.
 In this architecture, can't happen means absolutely impossible to
 happen and if it does happen then there has been a tear in the
@@ -2327,8 +2747,8 @@ space / time continuum and the only course available is to
 give up and declare a fatal error.
 
 The data structure used for transitioning event dispatch
-is called an *Object Dispatch Block* (EDB).
-Each class that has a state machine must supply an EDB.
+is called an *Event Dispatch Block* (EDB).
+The code generator supplies an EDB for each class that has a state model.
 Below we will see how all this ties together.
 For now, we discuss the data structure and how it is used.
 
@@ -2339,14 +2759,14 @@ typedef struct mrteventdispatchblock {
     MRT_DispatchCount stateCount ;
     MRT_DispatchCount eventCount ;
     MRT_StateCode const *transitionTable ;
-    PtrActionFunction const *activityTable ;
+    PtrActivityFunction const *activityTable ;
     bool const *terminalStates ;
 
 #       ifndef MRT_NO_NAMES
     char const *const *stateNames ;
     char const *const *eventNames ;
 #       endif /* MRT_NO_NAMES */
-} MRT_Edb ;
+} MRT_edb ;
 ----
 
 `stateCount`::
@@ -2397,8 +2817,8 @@ with each state.
 [source,c]
 ----
 <<mrt interface simple types>>=
-typedef void ActionFunction(void *const, void *const) ;
-typedef ActionFunction *PtrActionFunction ;
+typedef void ActivityFunction(void *const, void *const) ;
+typedef ActivityFunction *PtrActivityFunction ;
 ----
 
 Since Moore state machines associate the activity with the state,
@@ -2432,7 +2852,7 @@ mrtDispatchTransitionEvent(
     MRT_Ecb *ecb)
 {
     MRT_Instance *targetInst = ecb->targetInst ;
-    MRT_Edb const *edb = targetInst->instClass->edb ;
+    MRT_edb const *edb = targetInst->instClass->edb ;
     assert(edb != NULL) ;
 
     /*
@@ -2447,14 +2867,24 @@ mrtDispatchTransitionEvent(
      * detected analysis errors.
      */
     if (targetInst->alloc != ecb->alloc) {
-        mrtFatalError(mrtEventInFlight, ecb->sourceInst, targetInst,
-                ecb->eventNumber) ;
+#           ifndef MRT_NO_NAMES
+        mrtFatalError(mrtEventInFlight,
+                ecb->sourceInst ? ecb->sourceInst->name : "",
+                ecb->sourceInst ? ecb->sourceInst->name : "none",
+                targetInst->instClass->edb->eventNames[ecb->eventNumber],
+                targetInst->instClass->name,
+                targetInst->name ? targetInst->name : "unknown") ;
+#           else
+        mrtFatalError(mrtEventInFlight, ecb->sourceInst, ecb->eventNumber,
+                targetInst) ;
+#           endif /* MRT_NO_NAMES */
     }
     /*
      * Fetch the new state from the transition table.
      */
     MRT_StateCode newState = *(edb->transitionTable +
             targetInst->currentState * edb->eventCount + ecb->eventNumber) ;
+
 #       ifndef MRT_NO_TRACE
     /*
      * Trace the transition.
@@ -2462,42 +2892,52 @@ mrtDispatchTransitionEvent(
     mrtTraceTransitionEvent(ecb->eventNumber, ecb->sourceInst,
             ecb->targetInst, targetInst->currentState, newState) ;
 #       endif /* MRT_NO_TRACE */
+
     /*
      * Check for a can't happen transition.
      */
     if (newState == MRT_StateCode_CH) {
+#           ifndef MRT_NO_NAMES
+        mrtFatalError(mrtCantHappen, targetInst->instClass->name,
+                targetInst->name ? targetInst->name : "unknown",
+                targetInst->instClass->edb->stateNames[targetInst->currentState],
+                targetInst->instClass->edb->eventNames[ecb->eventNumber]) ;
+#           else
         mrtFatalError(mrtCantHappen, targetInst, targetInst->currentState,
                 ecb->eventNumber) ;
+#           endif /* MRT_NO_NAMES */
     } else if (newState != MRT_StateCode_IG) {
         /*
          * Check for corrupt transition table.
          */
         assert(newState < edb->stateCount) ;
         /*
-         * We update the current state to reflect the
-         * transition before executing the action for the
-         * state.
+         * We update the current state to reflect the transition before
+         * executing the activity for the state.
          */
         targetInst->currentState = newState ;
         /*
-         * Invoke the state action if there is one.
+         * Invoke the state activity if there is one.
          */
-        PtrActionFunction action = edb->activityTable[newState] ;
-        if (action) {
-            action(targetInst, &ecb->eventParameters) ;
+        PtrActivityFunction activity = edb->activityTable[newState] ;
+        if (activity) {
+            activity(targetInst, &ecb->eventParameters) ;
         }
         /*
          * Check if we have entered a terminal state. If so, the instance is
          * deleted.
          */
         if (edb->terminalStates && edb->terminalStates[newState]) {
-            mrt_DeleteInstance(targetInst) ;
+            mrt_DeleteInstance(targetInst) ; // <1>
         }
     }
 }
 ----
+<1> This is where asynchronous instance deletion occurs.
+If the state is designated as terminal,
+then the run time deletes the instance after its state activity completes.
 
-The processing for dispatching a normal event follows directly from
+The processing for dispatching a transition event follows directly from
 the definitions.
 After the check for an event-in-flight error,
 we perform the indexing into the transition matrix.
@@ -2508,8 +2948,8 @@ transition matrices for each different state model.
 After obtaining the new state,
 we must determine if we are actually going to make a transition
 or if the event is to be ignored or considered a fatal error.
-Assuming that we are transitioning, then the associated state action
-is found and executed.
+Assuming that we are transitioning,
+then the associated state action is found and executed.
 Note that empty state actions may be dispensed with and a `NULL`
 inserted into the action table.
 After the action, we check if the instance entered a final state.
@@ -2524,7 +2964,7 @@ while the event is on the queue awaiting to be delivered,
 the target instance is deleted by some other action code executing.
 For a single threaded architecture,
 this is considered an analysis error.
-In essence this should never happen!
+Deliverying events to deleted instances should never happen!
 The model is responsible for insuring that instance deletion is accomplished
 only after there are no events awaiting to be delivered.
 However, it can happen and the mechanisms detect and catch this.
@@ -2547,7 +2987,7 @@ When dispatched, the values of the `alloc` fields in the
 two structures must match or else the target instance has
 been destroyed and re-created in the same memory slot.
 Of course, the observant reader will have seen that in the case where
-the target instance is destroyed and recreated 126 times while the event
+the target instance is destroyed and recreated 16,000 times while the event
 is queued will result in the event being dispatched to the wrong
 instance.
 This is considered such a remote possibility as to be of no practical concern.
@@ -2627,7 +3067,7 @@ information from an arbitrary data structure in a generic fashion.
 [source,c]
 ----
 <<mrt interface simple types>>=
-typedef unsigned short int MRT_AttributeOffset ;
+typedef size_t MRT_AttributeOffset ;
 ----
 
 ==== Polymorphic Event Mapping
@@ -2643,7 +3083,7 @@ The data structure required for this is given by:
 [source,c]
 ----
 <<mrt interface aggregate types>>=
-typedef struct mrtsubclassdispatch {
+typedef struct mrtgendispatchblock {
     MRT_PolyStorageType refStorage ;
     MRT_AttributeOffset subCodeOffset ;
     MRT_AttributeOffset subInstOffset ;
@@ -2653,7 +3093,7 @@ typedef struct mrtsubclassdispatch {
 #       ifndef MRT_NO_NAMES
     char const *const *subclassNames ;
 #       endif /* MRT_NO_NAMES */
-} MRT_SubclassDispatch ;
+} MRT_gdb ;
 ----
 
 `refStorage`::
@@ -2676,6 +3116,9 @@ typedef struct mrtsubclassdispatch {
     of polymorphic events for the generalization.
     This mapping is indexed in major order by subclass code and in
     minor order by polymorphic event number.
+`subclassNames`::
+    A pointer to an array of names of the subclasses of generalization.
+    The array is of length, `subclassCount`.
 
 A key realization here is that as we are mapping along a generalization
 a given polymorphic event may be mapped into a normal event where it
@@ -2707,13 +3150,13 @@ as to how to perform the mapping of polymorphic events to normal events.
 typedef struct mrtpolydispatchblock {
     MRT_DispatchCount eventCount ;
     MRT_DispatchCount genCount ;
-    struct mrtsubclassdispatch const *genDispatch ;
+    struct mrtgendispatchblock const *genDispatch ;
 
 #       ifndef MRT_NO_NAMES
     char const *const *eventNames ;
-    char const *const *generalizationNames ;
+    char const *const *genNames ;
 #       endif /* MRT_NO_NAMES */
-} MRT_PolyDispatchBlock ;
+} MRT_pdb ;
 ----
 
 `eventCount`::
@@ -2725,10 +3168,16 @@ typedef struct mrtpolydispatchblock {
 `genCount`::
     The `genCount` member holds the number of generalization
     that originate at the superclass class.
-`hierarchy`::
-    The `hierarchy` member holds a pointer to an array of Subclass Dispatch
-    Blocks.
+`genDispatch`::
+    The `genDispatch` member holds a pointer to an array of
+    Generalization Dispatch Blocks.
     The array contains `genCount` elements.
+`eventNames`::
+    A pointer to an array of polymorphic event names.
+    The array is of length, `eventCount`.
+`genNames`::
+    A pointer to an array of generalization relationship names.
+    The array is of length, `genCount`.
 
 Now we can give the code for polymorphic event dispatch.
 
@@ -2739,20 +3188,26 @@ static void
 mrtDispatchPolymorphicEvent(
     MRT_Ecb *ecb)
 {
-    MRT_PolyDispatchBlock const *pdb = ecb->targetInst->instClass->pdb ;
+    MRT_pdb const *pdb = ecb->targetInst->instClass->pdb ;
 
     assert(pdb != NULL) ;
     assert(ecb->eventNumber < pdb->eventCount) ;
     assert(pdb->genCount > 0) ;
 
+    /*
+     * Save the original event number and target instance pointer.  We intend
+     * to reuse the same ECB for each event we dispatch and will need these
+     * values should there be more than one generalization associated with this
+     * superclass.
+     */
     MRT_EventCode origEvent = ecb->eventNumber ;
     MRT_Instance *origTarget = ecb->targetInst ;
     /*
      * Each generalization that originates at the superclass has an event
-     * generated down that hierarchy to one of the subclasss.
+     * generated down that generalization to one of the subclasss.
      */
-    MRT_SubclassDispatch const *sdb = pdb->genDispatch ;
-    for (unsigned gnum = 0 ; gnum < pdb->genCount ; ++gnum) {
+    MRT_gdb const *sdb = pdb->genDispatch ;
+    for (unsigned gnum = 0 ; gnum < pdb->genCount ; ++sdb, ++gnum) {
         MRT_SubclassCode type = *(MRT_SubclassCode *)
                 ((uintptr_t)origTarget + sdb->subCodeOffset) ;
 
@@ -2789,15 +3244,17 @@ mrtDispatchPolymorphicEvent(
         ecb->alloc = ecb->targetInst->alloc ;
         assert(ecb->alloc != 0) ;
 
-        mrtDispatchFuncs[ecb->eventType](ecb) ;
-        ++sdb ;
+        mrtDispatchEvent(ecb) ; // <1>
     }
 }
 ----
+<1> Since a polymorphic event may map to either another polymorphic event
+or to a transition event, we will use the general dispatch function
+to recursively dispatch the mapped event.
 
-The code loops through all of the hierarchies for which the `targetInst`
+The code loops through all of the generalizations for which the `targetInst`
 is a superclass.
-The vast majority of the time there is only one hierarchy.
+The vast majority of the time there is only one generalization.
 The strategy used here is to reuse the ECB that was carrying the polymorphic
 event as the ECB for the remapped events.
 The mapping of a polymorphic event is a function of the superclass target
@@ -2805,9 +3262,9 @@ and the polymorphic event number.
 So we hold them in local variables as we overwrite the necessary fields
 in the ECB to hold the mapped event information.
 
-The core of the algorithm is to fetch the subclass code from the instance
-and use that as the row index into the polymorphic event map for
-the generalization.
+The core of the algorithm is to fetch the subclass code from the superclass
+instance and use that as the row index into the polymorphic event map for the
+generalization.
 The event number is then used as the column index to find the mapping
 entry.
 That mapping entry contains a new event number and event type.
@@ -2819,7 +3276,7 @@ For the pointer case,
 we fetch the pointer from its location in the superclass structure.
 For the union case,
 the location in the superclass structure is the
-beginning of the union, ~i.e.~ we down cast to the subclass member.
+beginning of the union, _i.e._ we down cast to the subclass member.
 We fill in the `alloc` field to enable the event in
 flight detection just in case the mapped event causes a transition.
 Finally the newly minted ECB is recursively dispatched and the
@@ -2863,12 +3320,15 @@ mrtDispatchCreationEvent(
      * Change the event type to represent a transition event.
      */
     ecb->eventType = mrtTransitionEvent ;
-
+    /*
+     * Dispatch the event.
+     */
     mrtDispatchTransitionEvent(ecb) ;
 }
 ----
 
 == Asynchronous Execution
+
 When the main loop was discussed,
 we made a brief mention of asynchronous execution in the context
 of executing synchronization functions.
@@ -2898,20 +3358,18 @@ Most offer only a single priority of interrupt processing or place the
 burden of prioritization on the programmer or external hardware.
 The `micca` run time is intended for highly embedded systems and,
 in such systems, achieving the low execution overhead is of great value.
-So the model of asynchronous execution used by the
-mechanisms mirrors that which is provided for directly
-by the hardware architecture.
+So the model of asynchronous execution used by the run time mirrors that which
+is provided directly by the hardware architecture.
 Techniques for having multiple, scheduled execution contexts are very
 well known.
 None of them is used here.
-Here we are only interested in
-a very simple model of asynchronous execution that closely mirrors
-what is provided by the computing hardware.
+Here we are only interested in a very simple model of asynchronous execution
+that closely mirrors what is provided by the computing hardware.
 Amazingly, this is much less restrictive than might be first imagined.
 
 Nesting interrupts is not forbidden, but is definitely not encouraged.
 No restriction is put on what may happen at interrupt service.
-This is usually a great source of error in many systems.
+This is usually a potential source of error in many systems.
 Because the execution is asynchronous to domain model execution,
 any access to the domain data structures from interrupt service
 *must not* be attempted.
@@ -2923,10 +3381,8 @@ However, it is usually necessary for an interrupt to communicate
 back to the domain models.
 Usually, the interrupt signals some change of condition
 in the environment that has been detected by the hardware.
-The interrupt may be able to do everything require to handle the
-situation,
-but more often than not,
-additional computation is required to resolve what has happened.
+The interrupt may be able to do everything required to handle the situation and
+frequently additional computation is required to resolve what has happened.
 So the mechanisms provide a way for an interrupt to request
 synchronization with the running background.
 This is accomplished by having the interrupt service code
@@ -2979,7 +3435,16 @@ Usually it is sufficient to manage a pool in the background and use
 the synchronization mechanism to allow interrupt service to return memory
 to the pool when it is no longer needed.
 
-For our purposes, it is only necessary to define some data structure
+The architypical example is communications buffers.
+Background code can manage a buffer pool.
+When outgoing messages are transmitted,
+synchronization to the background can be used to return the buffer to
+the pool.
+Incoming messages can be placed in pre-queued buffers and when the message
+is complete, synchronizing to the background pass buffer pointers
+to be processed and returned to the pool.
+
+For our purposes here, it is only necessary to define some data structure
 that can be used by the interrupt service code to place data that
 will be delivered to the background function.
 The same considerations that were discussed for event
@@ -2997,7 +3462,7 @@ And so we can define the prototype for a sync function.
 [source,c]
 ----
 <<mrt interface aggregate types>>=
-typedef void (*MRT_SyncFunc)(MRT_SyncParams *) ;
+typedef void (*MRT_SyncFunc)(MRT_SyncParams const *) ;
 ----
 
 Each element of the sync queue is a pointer to the sync function
@@ -3108,7 +3573,7 @@ Overflow is detected as the queue being empty after the insertion is made.
 This logic has the effect of consuming one of the queue storage slots 
 in order to detect overflow and
 this will need to be accounted for in sizing the sync queue storage.
-The `fata` argument determines if queue overflow is a fatal system error
+The `fatal` argument determines if queue overflow is a fatal system error
 or not.
 This allow for dealing with sync requests that can be ignored if it would
 cause a sync queue overflow.
@@ -3158,11 +3623,36 @@ the array storage wrap around.
 
 === Dispatching Synchronization Functions
 
+The event loop we saw above performed the background synchronization
+before dispatching a single event.
+For most processor architectures,
+that code appears as below:
+
+[source,c]
+----
+<<EventLoop: background sync>>=
+#   ifndef __ARM_ARCH_7M__
+while (mrtInvokeOneSyncFunction()) {
+    ; /* empty */
+}
+#   endif
+----
+
+We execute in a loop, invoking one sync function until there are no
+more queued up.
+It turns out we can do something a bit better for the ARM v7-M
+architecture.
+We will discuss that below when we consider the platform specific code.
+
 [source,c]
 ----
 <<mrt forward references>>=
 static inline bool mrtInvokeOneSyncFunction(void) ;
 ----
+
+Invoking a sync function is a simple matter of pulling it off the
+sync queue and passing a pointer to the parameters to it.
+We return a value indicating if a function was called.
 
 [source,c]
 ----
@@ -3173,7 +3663,7 @@ mrtInvokeOneSyncFunction(void)
 {
     bool didOne ;
 
-    MRT_SyncBlock *blk = mrtSyncQueueGet() ;
+    MRT_SyncBlock const *blk = mrtSyncQueueGet() ;
     if (blk != NULL && blk->function != NULL) {
         blk->function(&blk->params) ;
         didOne = true ;
@@ -3185,15 +3675,11 @@ mrtInvokeOneSyncFunction(void)
 }
 ----
 
-[source,c]
-----
-<<EventLoop: background sync>>=
-#   ifndef __ARM_ARCH_7M__
-while (mrtInvokeOneSyncFunction()) {
-    ; /* empty */
-}
-#   endif
-----
+For the ARM v7-M processor,
+we can execute the sync functions in a service handler and then there
+is no burden to the event loop to constantly test if any synchronization
+need to be performed.
+The process will handle vectoring to this code when necessary.
 
 [source,c]
 ----
@@ -3293,32 +3779,33 @@ Data common to all event dispatch traces.
 `targetInst`::
     A pointer to the instance that was the target of the dispatched event.
 
-Data for normal event dispatch traces.
-`currentState`::
+`transitionTrace`::
+    Data for transition event dispatch traces.
+`currentState`:::
     The current state of the instance before the event dispatch.
-`newState`::
+`newState`:::
     The new state entered as a result of the transition.
 
-Data for polymorphic event dispatch traces.
-
-`subcode`::
+`polyTrace`::
+    Data for polymorphic event dispatch traces.
+`subcode`:::
     The subclass code of the currently related instance.
-`genNumber`::
+`genNumber`:::
     The number of the generalization down which the event was dispatched.
-`mappedNumber`::
+`mappedNumber`:::
     The new event number to which the polymorphic event mapped.
-`mappedType`::
+`mappedType`:::
     The new event type corresponding to `mappedNumber`.
 
-Data for creation event dispatch traces.
-
-`targetClass`::
+`creationTrace`::
+    Data for creation event dispatch traces.
+`targetClass`:::
     A pointer to the class structure for the target of the
     creation event.
 
 ==== Access to Trace Information
 
-Event tracing information is passed out of the mechanisms by
+Event tracing information is passed out of the run time by
 having the application register a callback function.
 That function takes a pointer to the trace information as its
 argument.
@@ -3579,18 +4066,25 @@ make human readable messages.
 ----
 <<mrt static data>>=
 static char const * const errMsgs[] = {
-    "no error",     /* place holder */
-    "can't happen transition: %p: %u - %u -> CH\n",
-    "event in flight error: %p -> %p %u\n",
-    "no available Event Control Blocks\n",
-    "no available instance slots: %p\n",
-    "synchronization queue overflow\n",
+    [0] = "no error",     /* place holder */
+    [mrtNoECB] = "no available Event Control Blocks\n",
+    [mrtSyncOverflow] = "synchronization queue overflow\n",
 
-#       ifdef POSIX
-    "interval timer operation failed: %s\n",
-    "signal operation failed: %s\n",
-    "blocking on pselect() failed: %s\n",
-#       endif /* POSIX */
+#       ifndef MRT_NO_NAMES
+    [mrtCantHappen] = "can't happen transition: %s.%s: %s - %s -> CH\n",
+    [mrtEventInFlight] = "event in flight error: %s.%s - %s -> %s.%s\n",
+    [mrtNoInstSlot] = "no available instance slots: %s\n",
+#       else
+    [mrtCantHappen] = "can't happen transition: %p: %u - %u -> CH\n",
+    [mrtEventInFlight] = "event in flight error: %p - %u -> %p\n",
+    [mrtNoInstSlot] = "no available instance slots: %p\n",
+#       endif /* MRT_NO_NAMES */
+
+#       ifdef _POSIX_C_SOURCE
+    [mrtTimerOpFailed] = "interval timer operation failed: %s\n",
+    [mrtSignalOpFailed] = "signal operation failed: %s\n",
+    [mrtSelectWaitFailed] = "blocking on pselect() failed: %s\n",
+#       endif /* _POSIX_C_SOURCE */
 } ;
 ----
 
@@ -4650,7 +5144,6 @@ All timing is done via delayed events, and they are signalled via
 
 === POSIX Tracing
 
-
 [source,c]
 ----
 <<posix static functions>>=
@@ -4686,11 +5179,11 @@ mrtPrintTraceInfo(
 
     switch (traceInfo->eventType) {
     case mrtTransitionEvent:
-        printf("%s: Transition: %s(%s) - %s -> %s(%s): %s ==> %s\n",
-            mrtTimestamp(), sourceName, sourceClassName,
+        printf("%s: Transition: %s.%s - %s -> %s.%s: %s ==> %s\n",
+            mrtTimestamp(), sourceClassName, sourceName,
             traceInfo->targetInst->instClass->edb->eventNames[
                 traceInfo->eventNumber],
-            targetName, traceInfo->targetInst->instClass->name,
+            traceInfo->targetInst->instClass->name, targetName,
             traceInfo->targetInst->instClass->edb->stateNames[
                 traceInfo->info.transitionTrace.currentState],
             traceInfo->targetInst->instClass->edb->stateNames[
@@ -4698,12 +5191,12 @@ mrtPrintTraceInfo(
         break ;
 
     case mrtPolymorphicEvent:
-        printf("%s: Polymorphic: %s(%s) - %s -> %s(%s): %s ==> %s(%d) %s\n",
-            mrtTimestamp(), sourceName, sourceClassName,
+        printf("%s: Polymorphic: %s.%s - %s -> %s.%s: %s ==> %s(%u) %s\n",
+            mrtTimestamp(), sourceClassName, sourceName,
             traceInfo->targetInst->instClass->pdb->eventNames[
                 traceInfo->eventNumber],
-            targetName, traceInfo->targetInst->instClass->name,
-            traceInfo->targetInst->instClass->pdb->generalizationNames[
+            traceInfo->targetInst->instClass->name, targetName,
+            traceInfo->targetInst->instClass->pdb->genNames[
                 traceInfo->info.polyTrace.genNumber],
             eventTypeNames[traceInfo->info.polyTrace.mappedType],
             traceInfo->info.polyTrace.mappedEvent,
@@ -4713,20 +5206,57 @@ mrtPrintTraceInfo(
         break ;
 
     case mrtCreationEvent:
-        printf("%s: Creation: %s(%s) - %s -> %s: %s\n",
-            mrtTimestamp(), sourceName, sourceClassName,
+        printf("%s: Creation: %s.%s - %s -> %s ==> %s\n",
+            mrtTimestamp(), sourceClassName, sourceName,
             traceInfo->targetInst->instClass->edb->eventNames[
                 traceInfo->eventNumber],
             traceInfo->info.creationTrace.targetClass->name,
             targetName) ;
         break ;
 
-        /*
-         * N.B. no default case. Just fall through and return.
-         */
+    default:
+        printf("%s: Unknown trace event type, \"%u\"",
+                mrtTimestamp(), traceInfo->eventType) ;
+        break ;
     }
 }
 #   else  /* MRT_NO_NAMES is defined */
+static
+void
+mrtPrintTraceInfo(
+    MRT_TraceInfo const *traceInfo)
+{
+    switch (traceInfo->eventType) {
+    case mrtTransitionEvent:
+        printf("%s: Transition: %p - %u -> %p: %u ==> %u\n",
+                mrtTimestamp(), traceInfo->sourceInst, traceInfo->eventNumber,
+                traceInfo->targetInst,
+                traceInfo->info.transitionTrace.currentState,
+                traceInfo->info.transitionTrace.newState) ;
+        break ;
+
+    case mrtPolymorphicEvent:
+        printf("%s: Polymorphic: %p - %u -> %p: %u ==> %u(%u) %p\n",
+                mrtTimestamp(), traceInfo->sourceInst, traceInfo->eventNumber,
+                traceInfo->targetInst,traceInfo->info.polyTrace.genNumber,
+                traceInfo->info.polyTrace.mappedType,
+                traceInfo->info.polyTrace.mappedEvent,
+                traceInfo->info.polyTrace.subcode) ;
+        break ;
+
+    case mrtCreationEvent:
+        printf("%s: Creation: %p - %u -> %p ==> %p\n",
+                mrtTimestamp(), traceInfo->sourceInst, traceInfo->eventNumber,
+                traceInfo->info.creationTrace.targetClass,
+                traceInfo->targetInst) ;
+        break ;
+
+    default:
+        printf("%s: Unknown trace event type, \"%u\"",
+                mrtTimestamp(), traceInfo->eventType) ;
+        break ;
+    }
+}
 #   endif /* MRT_NO_NAMES */
 ----
 
