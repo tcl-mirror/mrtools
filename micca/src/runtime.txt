@@ -62,23 +62,25 @@ To start,
 we want to enumerate the characteristics of `micca` run time architecture.
 
 * The implementation language is ``C''.
-* All data is held in primary memory.
+* All data is held in primary memory and there is no persistent storage.
 * All classes and other resources are allocated fixed size memory pools
-whose size is known at compile time. There is no use of a system heap
-by the run time code.
+whose size is known at compile time. There is no use of dynamically allocated
+memory or of any generic system heap by the run time code.
 * The address in memory of a class instance serves as an architecturally
 generated identifier for the instance and we use that identifier execlusively
 in the interfaces of the run time code.
-* Execution is single threaded. There is no notion of _task_ or _process_
-or _thread_ as those terms are usually defined for computer operating systems.
-There is no notion of processor context, context switching or process
-preemption.
 * The only support for asynchronous execution is that of an interrupt.
 Facilities are provided to allow interrupt service code to synchronize
 to the running background.
 There is no notion of semaphores, condition variables or any other
 mutual exclusion locking scheme other than that required to prevent
 interrupts from executing.
+* Background execution is single threaded.
+There is no notion of _task_ or _process_ or _thread_ as those terms are
+usually defined for computer operating systems.
+There is no notion of processor context, context switching or process
+preemption.
+All execution is run-to-completion except as preempted by interrupts.
 * The execution pattern is event driven with callbacks that run to completion
 and perform the required computation.
 Given the single threaded nature of sequencing execution,
@@ -93,7 +95,7 @@ user interface applications.
 Events are dispatched in the order they are signaled.
 There is, however, a notion of thread of control and threads of control
 have an implicit relationship with transactions on the domain data.
-* Referential integrity is enforced at the end of each thread of control.
+* Referential integrity is enforced at the end of each data transaction.
 This implies that any changes in the stored data for relationships is
 verified against the constraints implied by the relationship
 conditionality and multiplicity.
@@ -186,9 +188,7 @@ extern void mrt_EventLoop(void) ;
 void
 mrt_EventLoop(void)
 {
-    for (mrtExitEventLoop = false ; !mrtExitEventLoop ;
-            mrtExitEventLoop = false) {
-
+    for (mrtExitEventLoop = false ; !mrtExitEventLoop ; ) {
         if (!mrt_ProcessOneEvent()) {
             mrtWait() ;
         }
@@ -429,6 +429,8 @@ typedef struct mrtclass {
     struct mrtinstallocblock *iab ;
     struct mrteventdispatchblock const *edb ;
     struct mrtpolydispatchblock const *pdb ;
+    unsigned relCount ;
+    struct mrtrelationship const * const *classRels ;
 
 #       ifndef MRT_NO_NAMES
     char const *name ;
@@ -451,6 +453,12 @@ typedef struct mrtclass {
     The PDB is used to dispatch polymorphic events.
     For classes that have no polymorphic events,
     this value is set to `NULL`.
+`relCount`::
+    The number of relationships in which the class participates.
+`classRels`::
+    A pointer an array of relationship description pointers describing
+    the relationships in which the class participates.
+    The array has `relCount` elements.
 `name`::
     A pointer to a `NUL` terminated string containing the name of the class.
 
@@ -729,6 +737,8 @@ mrt_CreateInstance(
     if (iab->construct) {
         iab->construct(inst) ;
     }
+    mrtMarkTransaction(instClass->classRels, instClass->relCount) ;
+
     return inst ;
 }
 ----
@@ -817,6 +827,10 @@ mrt_DeleteInstance(
      * Mark the slot as free.
      */
     inst->alloc = 0 ;
+    /*
+     * Add the class relationships to the transaction.
+     */
+    mrtMarkTransaction(inst->instClass->classRels, inst->instClass->relCount) ;
 }
 ----
 
@@ -893,21 +907,22 @@ relationship.
 We will show how this is accomplished by:
 
 . Showing the data structures used to describe relationships.
-. Explaining how transaction work.
+. Explaining how transactions work and how referential integrity is checked.
 . Giving code to relate and unrelate instances in a relationship.
 
 === Describing Relationships
 
 In this section we present the data structure that is supplied
 by the code generator to describe the properties of a relationship.
-You can think of this data structure as an implementation of various
-classes in the platform model.
+You can think of this data structure as an implementation version
+of the various classes in the platform model that deal with
+class relationships.
 The code generator takes data from the platform model population that
 was created during domain configuration and places and generates
 initialized ``C'' variables of the types described below.
 
-From the platform model we know that there are four different types
-of relationships.
+From the <<relationship-subsystem,platform model>>,
+we know that there are four different types of relationships.
 
 [source,c]
 ----
@@ -946,6 +961,12 @@ typedef enum {
 } MRT_RefStorageType ;
 ----
 
+For singular references,
+a single pointer member is allocated in the class structure.
+
+For array reference storage,
+the class structure member is a counted array of the type shown below:
+
 [source,c]
 ----
 <<mrt interface aggregate types>>=
@@ -953,16 +974,23 @@ typedef struct mrtarrayref {
     unsigned count ;
     MRT_Instance * const *references ;
 } MRT_ArrayRef ;
+----
 
+For linked list reference storage,
+the referring class has a set of link pointers that serve as the
+terminus for the linked list.
+In addition,
+the referenced class has a set of link pointers that enable it to
+be linked into the list of instances headed by the referring class.
+
+[source,c]
+----
+<<mrt interface aggregate types>>=
 typedef struct mrtlinkref {
     struct mrtlinkref *next ;
     struct mrtlinkref *prev ;
 } MRT_LinkRef ;
 ----
-
-The relationship data is held as a discriminated union.
-There is a type field and a union of four structures for the
-specific information required to describe each type of relationship.
 
 ==== Association Participants
 
@@ -985,8 +1013,8 @@ struct mrtassociationrole {
     A pointer to the class data for the participant.
 `cardinality`::
     The encoding of the conditionality and multiplicity of the relationship.
-    This encoding is from point of view of how many references the
-    participant makes to the other participant in the relationship.
+    This encoding is from point of view of how many references to the
+    participant that are made by the other participant in the relationship.
 `storageType`::
     An encoding of the structure of how the reference pointers are stored.
 `storageOffset`::
@@ -1033,9 +1061,16 @@ struct mrtassocatorrole {
 `forwardOffset`::
     The offset in bytes from the begining of an instance of the
     associator class to the forward reference pointer.
+    The forward reference pointer refers to a class instance that
+    serves as the target of the association.
 `backwardOffset`::
     The offset in bytes from the begining of an instance of the
     associator class to the backward reference pointer.
+    The backward reference pointer refers to a class instance that
+    serves as the source of the association.
+
+A class based association has descriptive information on all three
+class roles.
 
 [source,c]
 ----
@@ -1049,14 +1084,9 @@ struct mrtclassassociation {
 
 ==== Reference Generalizations
 
-[source,c]
-----
-<<mrt interface aggregate types>>=
-struct mrtsuperclassrole {
-    MRT_Class const *classInfo ;
-    MRT_AttributeOffset storageOffset ;
-} ;
-----
+For generalization relationships implemented as references,
+the superclass implements its reference to a subclass using the following
+data structure.
 
 [source,c]
 ----
@@ -1066,6 +1096,40 @@ typedef struct mrtsuperclassref {
     void *subInst ;
 } MRT_SuperclassRef ;
 ----
+
+`subCode`::
+    An encoding of the type of the subclass to which the superclass instance
+    is related.
+    Subclasses are encoded using small, zero-based integers.
+    This information allows the superclass instance to determine if
+    the traversal of the generalization relationships to a particular
+    subclass type yields an instance or is empty.
+`subInst`::
+    A pointer to the subclass instance that is related to the superclass
+    instance.
+
+The information needed to describe the role of the superclass in a
+reference generalization is:
+
+[source,c]
+----
+<<mrt interface aggregate types>>=
+struct mrtrefsuperclassrole {
+    MRT_Class const *classInfo ;
+    MRT_AttributeOffset storageOffset ;
+} ;
+----
+
+`classInfo`::
+    A pointer to the class data for the participant.
+`storageOffset`::
+    The offset in bytes from the beginning of a reference superclass
+    instance to where the reference to its related subclass is stored.
+    The structure member found at `storageOffset` from the beginning of
+    the instance is of type `MRT_SuperclassRef`.
+
+The information needed to describe the role of the subclass in a
+reference generalization is:
 
 [source,c]
 ----
@@ -1077,17 +1141,65 @@ struct mrtrefsubclassrole {
 } ;
 ----
 
+`classInfo`::
+    A pointer to the class data for the participant.
+`storageOffset`::
+    The offset in bytes from the beginning of a reference superclass
+    instance to where the reference to its related superclass is stored.
+    The structure member found at `storageOffset` from the beginning of
+    the instance is a pointer to the superclass instance.
+`subCode`::
+    The numerical encoding of the subclass type.
+
+A reference generalization relationship can be described by its
+superclass role information and the set of subclass roles for the
+subclasses that participate in the generalization.
+We store the subclass role set as a count and pointer to a corresponding
+array.
+
 [source,c]
 ----
 <<mrt interface aggregate types>>=
 struct mrtrefgeneralization {
-    struct mrtsuperclassrole superclass ;
+    struct mrtrefsuperclassrole superclass ;
     unsigned subclassCount ;
     struct mrtrefsubclassrole const *subclasses ;
 } ;
 ----
 
 ==== Union Generalizations
+
+A union generalization results in subclass instances being held as a union in
+the superclass instance structure.
+This requires slightly different role information.
+
+[source,c]
+----
+<<mrt interface aggregate types>>=
+struct mrtunionsuperclassrole {
+    MRT_Class const *classInfo ;
+    MRT_AttributeOffset subCodeOffset ;
+    MRT_AttributeOffset subClassOffset ;
+} ;
+----
+
+`classInfo`::
+    A pointer to the class data for the participant.
+`subCodeOffset`::
+    The offset in bytes from the beginning of a union superclass
+    to where the subclass code for the related subclass instance is stored.
+    The structure member at this offset is of type, `MRT_SubclassCode`.
+`subClassOffset`::
+    The offset in bytes from the beginning of a union superclass
+    to the subclass instance union.
+    The structure member at this offset is the union of
+    all the subclass structures that participate in the relationship.
+
+Subclass instances held in union generalizations do not have a
+pointer back to their related superclasses.
+The related superclass can be determined by pointer arithmetic
+(_i.e._ subtracting `subClassOffset` from the subclass instance pointer).
+So the role information for a union subclass omits this information.
 
 [source,c]
 ----
@@ -1098,17 +1210,31 @@ struct mrtunionsubclassrole {
 } ;
 ----
 
+`classInfo`::
+    A pointer to the class data for the participant.
+`subCode`::
+    The numerical encoding of the subclass type.
+
+Similar to the reference generalization,
+the union generalization information consists of that for the
+superclass an a set of subclass role information values.
+
 [source,c]
 ----
 <<mrt interface aggregate types>>=
 struct mrtuniongeneralization {
-    struct mrtsuperclassrole superclass ;
+    struct mrtunionsuperclassrole superclass ;
     unsigned subclassCount ;
     struct mrtunionsubclassrole const *subclasses ;
 } ;
 ----
 
 ==== Relationship Properties
+
+Finally,
+the relationship data is held as a discriminated union.
+There is a type field and a union of four structures for the
+specific information required to describe each type of relationship.
 
 [source,c]
 ----
@@ -1128,15 +1254,57 @@ typedef struct mrtrelationship {
 } MRT_Relationship ;
 ----
 
+`relType`::
+    A value to indicate the type of the relationship.
+`relInfo`::
+    A union of the various types of relationship information
+    giving information that describes the details of the relationship.
+    The union must be interpreted according to the value of the `relType`
+    member.
+`name`::
+    The name of the relationship.
+
 === Data Transactions
 
-[source,c]
-----
-<<mrt constants>>=
-#ifndef MRT_TRANSACTIONSIZE
-#   define MRT_TRANSACTIONSIZE 64
-#endif /* MRT_TRANSACTIONSIZE */
-----
+To check referential integrity,
+it is necessary to introduce the concept of a transaction on the
+domain data model.
+The transaction concept is necessary because we must be able to defer
+the integrity check until such time as the analysis model can insure
+that the integrity constraints are met.
+For example consider two classes in a one-to-one unconditional
+relationship.
+If an instance of one class is created we do not want to check referential
+integrity until the code has had an opportunity to created a corresponding
+instance of the associated class.
+
+The precise rules of data integrity are that each state activity must
+leave the domain data in a consistent state or generate one or more events
+that, when dispatched, will ultimately bring the domain data into a
+consistent state.
+The later phrase of this rule implies that there is a thread of control
+which determines the boundary of when data consistency is checked.
+We will describe how threads of control work later.
+For now,
+we are concerned data transactions as a means of deciding when
+data integrity is to be verified.
+
+Each time a relationship is manipulated, by:
+
+* creating instances
+* deleting instances
+* relating instances together
+* unrelating instances
+* reclassifying subclass instances
+
+the relationship pointer references must be verified.
+As described below,
+the run time provides functions to perform the relationship pointer
+operations.
+During a transaction,
+we want to save a reference to the relationship information
+for each relationship that is manipulated.
+We save the affected relationships in the following structure.
 
 [source,c]
 ----
@@ -1147,22 +1315,73 @@ struct mrtTransaction {
 } ;
 ----
 
+Like all run time resource,
+the memory allocated to them is bound at compile time.
+
+[source,c]
+----
+<<mrt constants>>=
+#ifndef MRT_TRANSACTIONSIZE
+#   define MRT_TRANSACTIONSIZE 64
+#endif /* MRT_TRANSACTIONSIZE */
+----
+
+We use a static variable to hold the transaction relationships.
+
 [source,c]
 ----
 <<mrt static data>>=
 static struct mrtTransaction mrtDataTransaction ;
 ----
 
+During a transaction,
+run time functions that either modify the relationship pointer storage
+or change the number of active instances invoke
+`mrtMarkTransaction` to save away the relationships that will need to
+be checked at the end of the transaction.
+This prevents up from have to check every relationships at the end
+of every transaction.
+
+The only complication in the marking algorithm is that we wish to
+maintain the marked relationship descriptions as a set with no duplicates.
+Modifying a instances of relationships multiple times during the
+transaction does not mean we need to evaluate the referential integrity
+more than once.
+We wish to save that computation and consequently will search the
+marked relationships to eliminate any duplicate mark.
+
 [source,c]
 ----
 <<mrt static functions>>=
 static inline
 void
-mrtBeginTransaction(void)
+mrtMarkTransaction(
+    MRT_Relationship const * const *rel,
+    unsigned relCount)
 {
-    mrtDataTransaction.count = 0 ;
+    for ( ; relCount != 0 ; --relCount, ++rel) {
+        MRT_Relationship const **marked = mrtDataTransaction.relationships ;
+        for (unsigned markedCount = mrtDataTransaction.count ;
+                markedCount != 0 ; --markedCount, ++marked) {
+            if (*marked == *rel) {
+                continue ;
+            }
+        }
+
+        if (mrtDataTransaction.count >=
+                COUNTOF(mrtDataTransaction.relationships)) {
+            mrtFatalError(mrtTransOverflow) ; // <1>
+        }
+        mrtDataTransaction.relationships[mrtDataTransaction.count++] = *rel ;
+    }
 }
 ----
+<1> As usual, exceeding resource limits is a fatal error.
+
+At the end of a transaction,
+we iterate across all the relationship descriptions that were
+saved during the transaction and check the referential integrity
+of the stored pointers.
 
 [source,c]
 ----
@@ -1182,27 +1401,52 @@ mrtEndTransaction(void)
 }
 ----
 
-[source,c]
-----
-<<mrt static functions>>=
-static inline
-void
-mrtMarkTransaction(
-    MRT_Relationship const *rel)
-{
-    if (mrtDataTransaction.count >= COUNTOF(mrtDataTransaction.relationships)) {
-        mrtFatalError(mrtTransOverflow) ;
-    }
-    mrtDataTransaction.relationships[mrtDataTransaction.count] = rel ;
-    mrtDataTransaction.count += 1 ;
-}
-----
+==== Verifying Referential Integrity
+
+At the end of a transaction on the data model,
+`mrtEndTransaction` iterates across the set of saved relationship
+descriptors and check each relationship to make sure the data model
+is in a consistent state.
+The design approach is to use the `refCount` member of each instance
+as a place to store how many times the instances is referred to by
+the other participant in the relationship.
+Then knowing the cardinality of the relationship we can evaluate
+the `refCount` values to determine if referential integrity has been
+maintained.
+
+The overall steps are:
+
+. Zero out the `refCount` member of all instances of both participating
+classes.
+. Using the relationship description information,
+find the reference pointers in the class instance that refer to the
+other participating class instance and increment the `refCount` member in
+the other participating instance.
+This is done for both participants in the relationship.
+. Evaluate the `refCount` value against what the cardinality of the
+relationship requires.
+
+This algorithm must be generic and capable of operating on any class instance.
+This will mean that there will be a lot of pointer arithmetic using
+offsets to structure members and other
+type unsafe operations happening in the code.
+Sometimes ``C'' as a language is accused of being little more than a
+high level assembler and it is those facilities type unsafe facilities
+that we must employ here to obtain a single body of code that can
+operate on a class instance of any type.
 
 [source,c]
 ----
 <<mrt forward references>>=
 static bool mrtCheckRelationship(MRT_Relationship const *rel) ;
 ----
+
+The `mrtCheckRelationship` function returns a boolean value indicating
+if the relationship described by `rel` has correct referential integrity.
+
+Since there are four types of relationships in terms of how the
+reference pointers are stored,
+the function considers each type separately.
 
 [source,c]
 ----
@@ -1215,121 +1459,177 @@ mrtCheckRelationship(
     bool result = false ;
 
     switch (rel->relType) {
-    case mrtSimpleAssoc:
-        mrtZeroRefCounts(rel->relInfo.simpleAssociation.source.classInfo->iab) ;
-        mrtZeroRefCounts(rel->relInfo.simpleAssociation.target.classInfo->iab) ;
-
-        mrtCountAssocRefs(&rel->relInfo.simpleAssociation.source,
-                &rel->relInfo.simpleAssociation.target) ;
-
-        result =
-            mrtCheckRefCounts(rel->relInfo.simpleAssociation.source.classInfo->iab,
-                rel->relInfo.simpleAssociation.source.cardinality) &&
-            mrtCheckRefCounts(rel->relInfo.simpleAssociation.target.classInfo->iab,
-                rel->relInfo.simpleAssociation.target.cardinality) ;
-        break ;
-
-    case mrtClassAssoc:
-        mrtZeroRefCounts(rel->relInfo.classAssociation.source.classInfo->iab) ;
-        mrtZeroRefCounts(rel->relInfo.classAssociation.associator.classInfo->iab) ;
-        mrtCountClassAssocRefs(&rel->relInfo.classAssociation.source,
-                rel->relInfo.classAssociation.associator.classInfo->iab,
-                rel->relInfo.classAssociation.associator.backwardOffset) ;
-        result =
-            mrtCheckRefCounts(rel->relInfo.classAssociation.source.classInfo->iab,
-                rel->relInfo.classAssociation.source.cardinality) &&
-            mrtCheckRefCounts(rel->relInfo.classAssociation.associator.classInfo->iab,
-                mrtExactlyOne) ;
-        if (result) {
-            mrtZeroRefCounts(rel->relInfo.classAssociation.target.classInfo->iab) ;
-            mrtZeroRefCounts(rel->relInfo.classAssociation.associator.classInfo->iab) ;
-            mrtCountClassAssocRefs(&rel->relInfo.classAssociation.target,
-                    rel->relInfo.classAssociation.associator.classInfo->iab,
-                    rel->relInfo.classAssociation.associator.forwardOffset) ;
-            result =
-                mrtCheckRefCounts(rel->relInfo.classAssociation.target.classInfo->iab,
-                    rel->relInfo.classAssociation.target.cardinality) &&
-                mrtCheckRefCounts(rel->relInfo.classAssociation.associator.classInfo->iab,
-                    mrtExactlyOne) ;
-        }
-        break ;
-
-    case mrtRefGeneralization:
-        mrtZeroRefCounts(rel->relInfo.refGeneralization.superclass.classInfo->iab) ;
-        struct mrtrefsubclassrole const *subclass =
-                rel->relInfo.refGeneralization.subclasses ;
-        for (unsigned subcount = rel->relInfo.refGeneralization.subclassCount ;
-                subcount != 0 ; --subcount, ++subclass) {
-            mrtZeroRefCounts(subclass->classInfo->iab) ;
-        }
-        mrtCountGenRefs(&rel->relInfo.refGeneralization) ;
-
-        result = mrtCheckRefCounts(
-                rel->relInfo.refGeneralization.superclass.classInfo->iab,
-                mrtExactlyOne) ;
-        if (!result) {
-            break ;
-        }
-
-        subclass = rel->relInfo.refGeneralization.subclasses ;
-        for (unsigned subcount = rel->relInfo.refGeneralization.subclassCount ;
-                subcount != 0 ; --subcount, ++subclass) {
-            result = mrtCheckRefCounts(subclass->classInfo->iab, mrtExactlyOne) ;
-            if (!result) {
-                break ;
-            }
-        }
-        break ;
-
-    case mrtUnionGeneralization: {
-        result = true ;
-        MRT_iab *super = rel->relInfo.unionGeneralization.superclass.classInfo->iab ;
-        for (MRT_Instance *inst = (MRT_Instance *)super->storageStart ;
-                inst < (MRT_Instance *)super->storageFinish ;
-                inst = (MRT_Instance *)((uintptr_t)inst + super->instanceSize)) {
-            if (inst->alloc <= 0) {
-                continue ;
-            }
-            MRT_SuperclassRef *superRef = (MRT_SuperclassRef *)
-                ((uintptr_t)inst +
-                rel->relInfo.unionGeneralization.superclass.storageOffset) ;
-            if (superRef->subCode >=
-                    rel->relInfo.unionGeneralization.subclassCount) {
-                result = false ;
-                break ;
-            }
-        }
+    case mrtSimpleAssoc: {
+        <<mrtCheckRelationship: simple associations>>
     }
         break ;
 
-    default:
+    case mrtClassAssoc: {
+        <<mrtCheckRelationship: class based associations>>
+    }
         break ;
+
+    case mrtRefGeneralization: {
+        <<mrtCheckRelationship: reference generalizations>>
+    }
+        break ;
+
+    case mrtUnionGeneralization: {
+        <<mrtCheckRelationship: union generalizations>>
+    }
+        break ;
+
+    /*
+     * N.B. no default case. We will just fail the check if
+     * this happens.
+     */
     }
 
     return result ;
 }
 ----
 
+For simple associations,
+we zero out the `refCount` member in both participants.
+The references between the class instances is tracked
+and then the values of the `refCount` members are compared against
+what the relationship requires.
+
+[source,c]
+----
+<<mrtCheckRelationship: simple associations>>=
+struct mrtsimpleassociation const *assoc = &rel->relInfo.simpleAssociation ;
+
+mrtZeroRefCounts(assoc->source.classInfo->iab) ;
+mrtZeroRefCounts(assoc->target.classInfo->iab) ;
+
+mrtCountAssocRefs(&assoc->source, &assoc->target) ;
+
+result =
+    mrtCheckRefCounts(assoc->source.classInfo->iab, assoc->source.cardinality) &&
+    mrtCheckRefCounts(assoc->target.classInfo->iab, assoc->target.cardinality) ;
+----
+
+Class based associations are more complicated.
+Recall that class based associations are treated in a decomposed manner
+where each side is related to the associator class and the associator
+class is unconditionally singularly related to each participant.
+So we will consider each side separately.
+
+[source,c]
+----
+<<mrtCheckRelationship: class based associations>>=
+struct mrtclassassociation const *assoc = &rel->relInfo.classAssociation ;
+
+/*
+ * On the first side, we evaluate the references from the source class
+ * to the associator class.
+ */
+mrtZeroRefCounts(assoc->source.classInfo->iab) ;
+mrtZeroRefCounts(assoc->associator.classInfo->iab) ;
+mrtCountClassAssocRefs(&assoc->source, assoc->associator.classInfo->iab,
+        assoc->associator.backwardOffset) ;
+result =
+    mrtCheckRefCounts(assoc->source.classInfo->iab, assoc->source.cardinality) &&
+    mrtCheckRefCounts(assoc->associator.classInfo->iab, mrtExactlyOne) ;
+
+/*
+ * If the first side is okay, then we can evaluate the references from the
+ * target class to the associator class.
+ */
+if (result) {
+    mrtZeroRefCounts(assoc->target.classInfo->iab) ;
+    mrtZeroRefCounts(assoc->associator.classInfo->iab) ;
+    mrtCountClassAssocRefs(&assoc->target,
+            assoc->associator.classInfo->iab,
+            assoc->associator.forwardOffset) ;
+    result =
+        mrtCheckRefCounts(assoc->target.classInfo->iab, assoc->target.cardinality) &&
+        mrtCheckRefCounts(assoc->associator.classInfo->iab, mrtExactlyOne) ;
+}
+----
+
+Since a generalization represents a disjoint union between between the
+superclass and the set of subclasses,
+each superclass instance must be referenced exactly once from among all
+the subclasses of the generalization.
+Conversely,
+each subclass must reference exactly one superclass instance.
+This means we will have to iterate over the subclasses as we zero out
+the `refCount` member and count the references.
+
+[source,c]
+----
+<<mrtCheckRelationship: reference generalizations>>=
+struct mrtrefgeneralization const *gen = &rel->relInfo.refGeneralization ;
+
+mrtZeroRefCounts(gen->superclass.classInfo->iab) ;
+
+struct mrtrefsubclassrole const *subclass = gen->subclasses ;
+for (unsigned subcount = gen->subclassCount ; subcount != 0 ;
+        --subcount, ++subclass) {
+    mrtZeroRefCounts(subclass->classInfo->iab) ;
+}
+
+mrtCountGenRefs(gen) ;
+
+result = mrtCheckRefCounts(gen->superclass.classInfo->iab, mrtExactlyOne) ;
+subclass = gen->subclasses ;
+for (unsigned subcount = gen->subclassCount ; subcount != 0 && result ;
+        --subcount, ++subclass) {
+    result = mrtCheckRefCounts(subclass->classInfo->iab, mrtExactlyOne) ;
+}
+----
+
+When a generalization is stored in a union,
+there are no reference pointers.
+However, we can still verify that the subcode field has a valid value.
+This check is needed since unrelating a union generalization sets this
+field to an invalid value.
+We can also check each subclass instance to insure that its `alloc` field
+is set correctly.
+
+[source,c]
+----
+<<mrtCheckRelationship: union generalizations>>=
+struct mrtuniongeneralization const *gen = &rel->relInfo.unionGeneralization ;
+
+result = true ;
+MRT_iab *super = gen->superclass.classInfo->iab ;
+for (MRT_Instance *inst = (MRT_Instance *)super->storageStart ;
+        inst < (MRT_Instance *)super->storageFinish ;
+        inst = (MRT_Instance *)((uintptr_t)inst + super->instanceSize)) {
+    if (inst->alloc <= 0) {
+        continue ;
+    }
+    MRT_SubclassCode *subCode = (MRT_SubclassCode *)
+            ((uintptr_t)inst + gen->superclass.subCodeOffset) ;
+    if (*subCode >= gen->subclassCount) {
+        result = false ;
+        break ;
+    }
+    MRT_Instance *subInst = (MRT_Instance *)
+            ((uintptr_t)inst + gen->superclass.subClassOffset) ;
+    if (subInst->alloc <= 0) {
+        result = false ;
+        break ;
+    }
+}
+----
+
+The first of the generic operations that must be performed on
+class instances is to set the `refCount` member of the instance
+structure to zero.
+
 [source,c]
 ----
 <<mrt forward references>>=
-static void
-mrtZeroRefCounts(MRT_iab *iab) ;
-
-static void
-mrtCountAssocRefs(struct mrtassociationrole const *source,
-    struct mrtassociationrole const *target) ;
-
-static void
-mrtCountClassAssocRefs(struct mrtassociationrole const *participant,
-    MRT_iab *iabAssociator, MRT_AttributeOffset assocOffset) ;
-
-static void
-mrtCountGenRefs(struct mrtrefgeneralization const *gen) ;
-
-static bool
-mrtCheckRefCounts(MRT_iab *iab, MRT_Cardinality cardinality) ;
+static void mrtZeroRefCounts(MRT_iab *iab) ;
 ----
+
+Since the instance allocation block contains all the information
+we need to access the instance storage,
+we iterate across the class instance storage setting `refCount` to zero.
 
 [source,c]
 ----
@@ -1345,7 +1645,206 @@ mrtZeroRefCounts(
         inst->refCount = 0 ;
     }
 }
+----
 
+The other operation that depends only upon accessing the `refCount` member
+of an instance is to evaluate the value of `refCount` against what
+the cardinality of the relationship.
+There are four possible values of the cardinality.
+One of the values, `mrtZeroOrMore`, implies that any value of
+`refCount` is satisfactory since `refCount` is defined as an unsigned
+quantity.
+
+For the other three values of cardinality we define functions to
+perform the comparison.
+
+[source,c]
+----
+<<mrt static functions>>=
+static
+bool
+evalAtMostOne(
+    unsigned refCount)
+{
+    return refCount <= 1 ;
+}
+
+static
+bool
+evalExactlyOne(
+    unsigned refCount)
+{
+    return refCount == 1 ;
+}
+
+static
+bool
+evalOneOrMore(
+    unsigned refCount)
+{
+    return refCount >= 1 ;
+}
+----
+
+The reference counts are checked by iterating over the instances
+and invoking the proper cardinality evaluation function.
+The first failure means we can stop.
+
+[source,c]
+----
+<<mrt forward references>>=
+static bool
+mrtCheckRefCounts(MRT_iab *iab, MRT_Cardinality cardinality) ;
+----
+
+[source,c]
+----
+<<mrt static functions>>=
+static bool
+mrtCheckRefCounts(
+    MRT_iab *iab,
+    MRT_Cardinality cardinality)
+{
+    if (cardinality == mrtZeroOrMore) { // <1>
+        return true ;
+    }
+
+    assert(cardinality <= mrtOneOrMore) ;
+    static bool (*const evalFuncs[])(unsigned) = {
+        [mrtAtMostOne] = evalAtMostOne,
+        [mrtExactlyOne] = evalExactlyOne,
+        [mrtZeroOrMore] = NULL,
+        [mrtOneOrMore] = evalOneOrMore
+    } ;
+
+    bool (*const evalCardinality)(unsigned) = evalFuncs[cardinality] ; // <2>
+
+    for (MRT_Instance *inst = (MRT_Instance *)iab->storageStart ;
+            inst < (MRT_Instance *)iab->storageFinish ;
+            inst = (MRT_Instance *)((uintptr_t)inst + iab->instanceSize)) {
+        if (inst->alloc > 0 && !evalCardinality(inst->refCount)) {
+            return false ; // <3>
+        }
+    }
+
+    return true ;
+}
+----
+<1> Dispense with the always true case first. There is no reason
+to iterate through the instances when the result is always true.
+<2> Select the evaluation function based on the encoded cardinality.
+A small table of pointers to the evaluation functions is handy to do this.
+<3> We need not go past the first failure.
+
+==== Counting References
+
+Of the four types of relationships,
+three of them actually contain pointer values that refer to class instance.
+The differences in the manner in which the three pointer references are
+organized leads us have separate functions for each type.
+
+First we consider counting the references in a simple association.
+
+[source,c]
+----
+<<mrt forward references>>=
+static
+void
+mrtCountAssocRefs(
+    struct mrtassociationrole const *source,
+    struct mrtassociationrole const *target) ;
+----
+
+The `mrtCountAssocRefs` function counts the number of times each
+active instance of `source` refers to active instances of `target` and
+_vice versa_.
+
+Counting references mean understanding how the reference pointers are
+stored.
+There are three ways that reference pointer are stored:
+single pointer, counted arrays and linked lists.
+For counted arrays,
+these are associated with constant populations and they are not intended
+to be modified during the running of the program.
+So it is always an error to modify the instances or relationships
+of constant populations.
+This condition is checked first.
+Otherwise, we can use the knowledge of offsets in the instance to
+where the pointer values are stored to access target instances.
+
+[source,c]
+----
+<<mrt static functions>>=
+static void
+mrtCountAssocRefs(
+    struct mrtassociationrole const *source,
+    struct mrtassociationrole const *target)
+{
+    if (source->storageType == mrtArray || target->storageType == mrtArray) {
+        mrtFatalError(mrtConstRelationship) ;
+    }
+
+    MRT_iab *iabSource = source->classInfo->iab ;
+    MRT_iab *iabTarget = target->classInfo->iab ;
+
+    switch (source->storageType) {
+    case mrtSingular:
+        mrtCountSingularRefs(iabSource, source->storageOffset, iabTarget) ;
+        break ;
+
+    case mrtLinkedList:
+        mrtCountLinkedListRefs(iabSource, source->storageOffset,
+                iabTarget, source->linkOffset) ;
+        break ;
+    }
+
+    switch (target->storageType) {
+    case mrtSingular:
+        mrtCountSingularRefs(iabTarget, target->storageOffset, iabSource) ;
+        break ;
+
+    case mrtLinkedList:
+        mrtCountLinkedListRefs(iabTarget, target->storageOffset,
+                iabSource, target->linkOffset) ;
+        break ;
+    }
+}
+----
+
+We will show how single and linked list references are counted now.
+These functions are reused for counting classed based associations.
+
+For singular references, the reference is a pointer to the related
+class instance.
+
+[source,c]
+----
+<<mrt forward references>>=
+static
+void
+mrtCountSingularRefs(
+    MRT_iab *source,
+    MRT_AttributeOffset offset,
+    MRT_iab *target) ;
+----
+
+`source`::
+    A pointer to the instance allocation block for the class instances
+    that make a singular reference to target instances.
+`offset`::
+    The offset in bytes from the beginning of source instances to
+    where the pointer to the target instance is located.
+`target`::
+    A pointer to the instance allocation block for the class instances
+    to which the source instances refer.
+
+The `mrtCountSingularRefs` functions iterates across all the active
+`source` instances, accesses the pointer in the source instance
+and increments the `refCount` member in the referenced target instance.
+
+[source,c]
+----
+<<mrt static functions>>=
 static void
 mrtCountSingularRefs(
     MRT_iab *source,
@@ -1355,44 +1854,46 @@ mrtCountSingularRefs(
     for (MRT_Instance *inst = (MRT_Instance *)source->storageStart ;
             inst < (MRT_Instance *)source->storageFinish ;
             inst = (MRT_Instance *)((uintptr_t)inst + source->instanceSize)) {
-        if (inst->alloc <= 0) {
-            continue ;
-        }
-        MRT_Instance *targetInst =
-                *(MRT_Instance **)((uintptr_t)inst + offset) ;
-        if ((void *)targetInst >= target->storageStart &&
-                (void *)targetInst < target->storageFinish &&
-                targetInst->alloc > 0) {
-            targetInst->refCount += 1 ;
-        }
-    }
-}
-
-static void
-mrtCountArrayRefs(
-    MRT_iab *source,
-    MRT_AttributeOffset refOffset,
-    MRT_iab *target)
-{
-    for (MRT_Instance *inst = (MRT_Instance *)source->storageStart ;
-            inst < (MRT_Instance *)source->storageFinish ;
-            inst = (MRT_Instance *)((uintptr_t)inst + source->instanceSize)) {
-        if (inst->alloc <= 0) {
-            continue ;
-        }
-        MRT_ArrayRef *refs = (MRT_ArrayRef *)((uintptr_t)inst + refOffset) ;
-        MRT_Instance * const *iter = refs->references ;
-        for (unsigned count = refs->count ; count != 0 ; --count, ++iter) {
-            MRT_Instance *targetInst = *iter ;
+        if (inst->alloc > 0) { // <1>
+            MRT_Instance *targetInst =
+                    *(MRT_Instance **)((uintptr_t)inst + offset) ;
             if ((void *)targetInst >= target->storageStart &&
                     (void *)targetInst < target->storageFinish &&
-                    targetInst->alloc > 0) {
+                    targetInst->alloc > 0) { // <2>
                 targetInst->refCount += 1 ;
             }
         }
     }
 }
+----
+<1> Only consider active source instances.
+<2> Validate that the reference pointer value actually points into
+target instance storage. This will eliminate any NULL values also.
+Note we also insist that the target instance be active.
 
+The structure of the linked list pointers makes counting them
+a bit more complicated.
+We must know the offset within the source instance where the link
+list terminus is located.
+Since linked list point around other links and since the link pointers
+in the target are embedded somewhere in the target instance structure,
+we need to know the offset into the target instance that the links
+point to.
+
+[source,c]
+----
+<<mrt forward references>>=
+static void
+mrtCountLinkedListRefs(
+    MRT_iab *source,
+    MRT_AttributeOffset refOffset,
+    MRT_iab *target,
+    MRT_AttributeOffset linkOffset) ;
+----
+
+[source,c]
+----
+<<mrt static functions>>=
 static void
 mrtCountLinkedListRefs(
     MRT_iab *source,
@@ -1421,46 +1922,19 @@ mrtCountLinkedListRefs(
         }
     }
 }
+----
 
+[source,c]
+----
+<<mrt forward references>>=
 static void
-mrtCountAssocRefs(
-    struct mrtassociationrole const *source,
-    struct mrtassociationrole const *target)
-{
-    MRT_iab *iabSource = source->classInfo->iab ;
-    MRT_iab *iabTarget = target->classInfo->iab ;
+mrtCountClassAssocRefs(struct mrtassociationrole const *participant,
+    MRT_iab *iabAssociator, MRT_AttributeOffset assocOffset) ;
+----
 
-    switch (source->storageType) {
-    case mrtSingular:
-        mrtCountSingularRefs(iabSource, source->storageOffset, iabTarget) ;
-        break ;
-
-    case mrtArray:
-        mrtCountArrayRefs(iabSource, source->storageOffset, iabTarget) ;
-        break ;
-
-    case mrtLinkedList:
-        mrtCountLinkedListRefs(iabSource, source->storageOffset,
-                iabTarget, source->linkOffset) ;
-        break ;
-    }
-
-    switch (target->storageType) {
-    case mrtSingular:
-        mrtCountSingularRefs(iabTarget, target->storageOffset, iabSource) ;
-        break ;
-
-    case mrtArray:
-        mrtCountArrayRefs(iabTarget, target->storageOffset, iabSource) ;
-        break ;
-
-    case mrtLinkedList:
-        mrtCountLinkedListRefs(iabTarget, target->storageOffset,
-                iabSource, target->linkOffset) ;
-        break ;
-    }
-}
-
+[source,c]
+----
+<<mrt static functions>>=
 static void
 mrtCountClassAssocRefs(
     struct mrtassociationrole const *participant,
@@ -1474,10 +1948,6 @@ mrtCountClassAssocRefs(
         mrtCountSingularRefs(iabPart, participant->storageOffset, iabAssociator) ;
         break ;
 
-    case mrtArray:
-        mrtCountArrayRefs(iabPart, participant->storageOffset, iabAssociator) ;
-        break ;
-
     case mrtLinkedList:
         mrtCountLinkedListRefs(iabPart, participant->storageOffset,
                 iabAssociator, participant->linkOffset) ;
@@ -1485,7 +1955,18 @@ mrtCountClassAssocRefs(
     }
     mrtCountSingularRefs(iabAssociator, assocOffset, iabPart) ;
 }
+----
 
+[source,c]
+----
+<<mrt forward references>>=
+static void
+mrtCountGenRefs(struct mrtrefgeneralization const *gen) ;
+----
+
+[source,c]
+----
+<<mrt static functions>>=
 static void
 mrtCountGenRefs(
     struct mrtrefgeneralization const *gen)
@@ -1517,50 +1998,6 @@ mrtCountGenRefs(
                 gen->superclass.classInfo->iab) ;
     }
 }
-
-static bool
-mrtCheckRefCounts(
-    MRT_iab *iab,
-    MRT_Cardinality cardinality)
-{
-    for (MRT_Instance *inst = (MRT_Instance *)iab->storageStart ;
-            inst < (MRT_Instance *)iab->storageFinish ;
-            inst = (MRT_Instance *)((uintptr_t)inst + iab->instanceSize)) {
-        if (inst->alloc > 0) {
-            switch (cardinality) {
-            case mrtAtMostOne:
-                // only 0 or 1 is good
-                if (inst->refCount > 1) {
-                    return false ;
-                }
-                break ;
-
-            case mrtExactlyOne:
-                // only 1 is good
-                if (inst->refCount != 1) {
-                    return false ;
-                }
-                break ;
-
-            case mrtZeroOrMore:
-                // any value is good
-                break ;
-
-            case mrtOneOrMore:
-                // any value except 0 good
-                if (inst->refCount == 0) {
-                    return false ;
-                }
-                break ;
-
-            default:
-                return false ;
-            }
-        }
-    }
-
-    return true ;
-}
 ----
 
 === Relating Instances
@@ -1590,7 +2027,7 @@ mrt_Relate(
     va_list ap ;
     unsigned subcount ;
 
-    mrtMarkTransaction(rel) ;
+    mrtMarkTransaction(&rel, 1) ;
 
     switch (rel->relType) {
     case mrtSimpleAssoc:
@@ -1656,7 +2093,7 @@ mrt_Relate(
             break ;
         }
         MRT_SubclassCode *supercode = (MRT_SubclassCode *)((uintptr_t)target +
-                rel->relInfo.unionGeneralization.superclass.storageOffset) ;
+                rel->relInfo.unionGeneralization.superclass.subCodeOffset) ;
         *supercode = subclass->subCode ;
     }
         break ;
@@ -1693,7 +2130,7 @@ mrt_Unrelate(
     va_list ap ;
     unsigned subcount ;
 
-    mrtMarkTransaction(rel) ;
+    mrtMarkTransaction(&rel, 1) ;
 
     switch (rel->relType) {
     case mrtSimpleAssoc:
@@ -1743,20 +2180,8 @@ mrt_Unrelate(
         break ;
 
     case mrtUnionGeneralization: {
-        MRT_Instance *subInst = (MRT_Instance *)source ;
-        struct mrtunionsubclassrole const *subclass =
-                rel->relInfo.unionGeneralization.subclasses ;
-        for (subcount = rel->relInfo.refGeneralization.subclassCount ;
-                subcount != 0 ; --subcount, ++subclass) {
-            if (subInst->instClass == subclass->classInfo) {
-                break ;
-            }
-        }
-        if (subcount == 0) {
-            break ;
-        }
         MRT_SubclassCode *supercode = (MRT_SubclassCode *)((uintptr_t)target +
-                rel->relInfo.unionGeneralization.superclass.storageOffset) ;
+                rel->relInfo.unionGeneralization.superclass.subCodeOffset) ;
         *supercode = rel->relInfo.unionGeneralization.subclassCount ;
     }
         break ;
@@ -1774,7 +2199,6 @@ extern void *
 mrt_Reclassify(
     MRT_Relationship const *rel,
     void *super,
-    void *sub,
     MRT_Class const *newSubClass) ;
 ----
 
@@ -1785,10 +2209,62 @@ void *
 mrt_Reclassify(
     MRT_Relationship const *rel,
     void *super,
-    void *sub,
     MRT_Class const *newSubClass)
 {
-    mrtMarkTransaction(rel) ;
+    if (rel->relType == mrtSimpleAssoc || rel->relType == mrtClassAssoc) {
+        return NULL ;
+    }
+
+    mrtMarkTransaction(&rel, 1) ;
+
+    unsigned subcount ;
+
+    if (rel->relType == mrtRefGeneralization) {
+        struct mrtrefsubclassrole const *subclass =
+                rel->relInfo.refGeneralization.subclasses ;
+        for (subcount = rel->relInfo.refGeneralization.subclassCount ;
+                subcount != 0 ; --subcount, ++subclass) {
+            if (newSubClass == subclass->classInfo) {
+                break ;
+            }
+        }
+        if (subcount == 0) {
+            return NULL ;
+        }
+        MRT_SuperclassRef *superref = (MRT_SuperclassRef *)((uintptr_t)super +
+                rel->relInfo.refGeneralization.superclass.storageOffset) ;
+        mrt_DeleteInstance(superref->subInst) ;
+        superref->subInst = mrt_CreateInstance(newSubClass, MRT_StateCode_IG) ;
+        superref->subCode = rel->relInfo.refGeneralization.subclassCount ;
+
+        MRT_Instance **subref = (MRT_Instance **)((uintptr_t)superref->subInst +
+                subclass->storageOffset) ;
+        *subref = super ;
+    } else if (rel->relType == mrtUnionGeneralization) {
+        struct mrtunionsubclassrole const *subclass =
+                rel->relInfo.unionGeneralization.subclasses ;
+        for (subcount = rel->relInfo.unionGeneralization.subclassCount ;
+                subcount != 0 ; --subcount, ++subclass) {
+            if (newSubClass == subclass->classInfo) {
+                break ;
+            }
+        }
+        if (subcount == 0) {
+            return NULL ;
+        }
+        MRT_SubclassCode *supercode = (MRT_SubclassCode *)((uintptr_t)super +
+                rel->relInfo.unionGeneralization.superclass.subCodeOffset) ;
+        *supercode = rel->relInfo.unionGeneralization.subclassCount ;
+        MRT_Instance *subInst = (MRT_Instance *)((uintptr_t)super +
+                rel->relInfo.unionGeneralization.superclass.subClassOffset) ;
+        subInst->instClass = newSubClass ;
+        subInst->alloc = mrtIncrAllocCounter(newSubClass->iab) ;
+        subInst->currentState = newSubClass->edb ?
+                newSubClass->edb->initialState : MRT_StateCode_IG ;
+        subInst->refCount = 0 ;
+    }
+
+    return NULL ;
 }
 ----
 
@@ -3410,7 +3886,6 @@ mrtDispatchOneEvent(void)
     } else {
         mrtEndTransaction() ;
         if (!mrtEventQueueEmpty(&tocEventQueue)) {
-            mrtBeginTransaction() ;
             queue = &tocEventQueue ;
         } else {
             return false ;
@@ -4826,6 +5301,7 @@ typedef enum {
     mrtSyncOverflow,
     mrtRefIntegrity,
     mrtTransOverflow,
+    mrtConstRelationship,
 
 #       ifdef _POSIX_C_SOURCE
     mrtTimerOpFailed,
@@ -4847,6 +5323,7 @@ static char const * const errMsgs[] = {
     [mrtSyncOverflow] = "synchronization queue overflow\n",
     [mrtRefIntegrity] = "referential integrity check failed\n",
     [mrtTransOverflow] = "transaction markings overflow\n",
+    [mrtConstRelationship] = "attempt to modify constant relationship",
 
 #       ifndef MRT_NO_NAMES
     [mrtCantHappen] = "can't happen transition: %s.%s: %s - %s -> CH\n",
