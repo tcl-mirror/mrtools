@@ -16,7 +16,7 @@ IMAGEDIR = ./images
 CODEDIR	= ../code
 POSIXDIR = $(CODEDIR)/c/posix
 
-CFLAGS	= -std=c11 -g
+CFLAGS	= -std=c11 -g -L$(HOME)/local/lib
 CPPFLAGS = -D_POSIX_C_SOURCE=200112L -D_ISOC11_SOURCE
 
 vpath %.pdf $(DOCDIR)
@@ -162,10 +162,8 @@ $(POSIXOBJ) : $(POSIXH) $(POSIXC)
 
 $(POSIXH) : $(DOCSRC) $(DOCPARTS)
 	atangle $(ATANGLEOPTS) -line '#line %l% "%f%"' -root micca_rt_posix.h -output $@ $<
-
 $(POSIXC) : $(DOCSRC) $(DOCPARTS)
 	atangle $(ATANGLEOPTS) -line '#line %l% "%f%"' -root micca_rt_posix.c -output $@ $<
-
 clean :
 	$(RM) $(CLEANFILES)
 
@@ -215,6 +213,24 @@ builddoc :
 	    --destination-dir=$(DOCDIR)\
 	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) micca.aweb
 
+rttests : $(POSIXDIR)/micca_rt_test
+
+runrttests : rttests
+	$(POSIXDIR)/micca_rt_test
+	gcov micca_rt_test.c
+
+$(POSIXDIR)/micca_rt_test : CPPFLAGS += -I$(HOME)/local/include \
+    	-fprofile-arcs -ftest-coverage
+$(POSIXDIR)/micca_rt_test : LOADLIBES = $(HOME)/local/lib/libcunit.a
+
+$(POSIXDIR)/micca_rt_test : $(POSIXDIR)/micca_rt_test.c
+
+$(POSIXDIR)/micca_rt_test.c : $(POSIXC) $(POSIXH)
+
+$(POSIXDIR)/micca_rt_test.c : $(DOCSRC) $(DOCPARTS)
+	atangle $(ATANGLEOPTS) -root micca_rt_test.c -output $@ $<
+
+#atangle $(ATANGLEOPTS) -line '#line %l% "%f%"' -root micca_rt_test.c -output $@ $<
 #
 # vim :set sw=8 ts=8 sts=8 noexpandtab:
 #
