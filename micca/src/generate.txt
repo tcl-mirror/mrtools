@@ -23,9 +23,9 @@ model.
 The `micca` run time translates model level actions into ``C'' level
 execution.
 The run time can be compiled separately and is data driven.
-The details of how a domain behaves is completely driven by the
+The details of how a domain behaves is completely determined by the
 data values supplied to the run time and the state activities and
-domain operations supplied by ``C'' code as part of the domain configuration.
+domain operations supplied as ``C'' code.
 
 Code generation consist of two major pieces:
 
@@ -33,9 +33,15 @@ Code generation consist of two major pieces:
 * Generating ``C'' code for state activities and domain operations to
 facilitate the interface to the run time.
 
-== Generating Run Time Data
+In the next section we discuss generating the data required by the run time.
+Afterward, we describe generating ``C'' code to help interface
+user supplied state activity code to the run time.
 
-Generating Run Time Data
+=== Generating a Domain
+
+One of the domain operations provide by `micca` is a generate command.
+The usual workflow is to configure a domain, populate the domain and then
+generate the code files.
 
 [source,c]
 ----
@@ -45,33 +51,88 @@ operation generate {args} {
 }
 ----
 
+Since `micca` is a `rosea` based application,
+we will perform the code generation in a child namespace to prevent
+any possible name collisions.
+This follows the same pattern we used for the configuration command.
+
+[source,c]
+----
+<<generation commands namespace>>=
+namespace eval @Gen@ {
+    logger::initNamespace [namespace current]
+
+    <<tclral imports>>
+
+    <<generation helpers namespace>>
+    <<generation header namespace>>
+    <<generation code namespace>>
+
+    namespace path {
+        ::micca
+        ::micca::@Config@::Helpers
+        ::micca::@Gen@::Helpers
+        ::rosea::InstCmds
+    }
+
+    <<generation data>>
+    <<generation commands>>
+}
+----
+
+== Generating Run Time Data
+
+`Micca` creates two ``C'' files for each domain.
+The first is a header file that contains interfacing information
+for the domain.
+The second is a code file that contains all the run time data and
+``C'' code for the domain.
+
+A ``C'' compiler requires a large amount of type information in a
+specific order.
+One is required to define things in specific orders to satisfy the
+compiler.
+One way to accomplish this is to use a template.
+The template is orgainized in the order required by the compiler
+and contains embedded commands.
+When expanded the commands embedded in the template query the
+platform model and produce ``C'' code output.
+
+Most languages have template expansion libraries and Tcl is no different.
+We will use the `textutil::expander` package from _tcllib_.
+We will also have use for creating nicely adjusted text blocks,
+typically as comments, and will be using `textutil::adjust` for that purpose.
+
+[source,c]
+----
+<<required packages>>=
+package require textutil::expander
+package require textutil::adjust
+----
+
 [source,c]
 ----
 <<generation commands>>=
 proc miccaGenerate {arglist} {
-    upvar #0 ::micca::@Gen@::errorcount errcount
-
-    set errcount 0
+    variable errcount 0
 
     <<miccaGenerate: parse command line arguments>>
+    <<miccaGenerate: set up template expansion>>
     <<miccaGenerate: verify domains are populated>>
-
-    textutil::expander expand
-    expand setbrackets %< >%
-    expand errmode [dict get $options expanderror]
-    expand evalcmd "namespace eval ::micca::@Gen@::GenHeader"
-
     <<miccaGenerate: generate header files>>
     <<miccaGenerate: generate code files>>
 
-    rename expand {}
+    rename expand {} ; # <1>
 
     if {$errcount > 0} {
         tailcall DeclError GENERATE_ERRORS $errcount
     }
-    return $errcount
+    return
 }
 ----
+<1> The template expander creates a new command so we need to delete it
+so that there won't be any conflict the next time `micccaGenerate` is
+invoked.
 
 (((error code,CONFIG_ERRORS)))
 [source,tcl]
@@ -92,6 +153,19 @@ set options [dict merge $options $arglist]
 
 [source,c]
 ----
+<<miccaGenerate: set up template expansion>>=
+textutil::expander expand
+expand setbrackets %< >%
+expand errmode [dict get $options expanderror]
+----
+
+We will insist that each domain have exactly one population for it.
+This is accomplished by finding all the populations associated with
+the domains and looking for those where there is not exactly one
+population given for the domain.
+
+[source,c]
+----
 <<miccaGenerate: verify domains are populated>>=
 set pops [pipe {
     Domain findAll |
@@ -101,48 +175,49 @@ set pops [pipe {
     ralutil::rvajoin ~ $::micca::Population Populations 
 }]
 
-set nopops [relation restrictwith $pops {[relation isempty $Populations]}]
-relation foreach nopop $nopops {
-    relation assign $nopop
-    log::error "For domain, \"$Domain\", no population is given"
+set badops [relation restrictwith $pops {[relation cardinality $Populations] != 1}]
+relation foreach badop $badops {
+    relation assign $badpop Populations
+    set card [relation cardinality $Populations]
+    set msg [string cat "For domain, \"$Domain\", "\
+        [expr {$card == 0 ?\
+            "no population is given" :\
+            "$card populations are given"}]\
+        ": expected exactly one population for the domain"
+    log::error $msg
     incr errcount
 }
 
-set multipops [relation restrictwith $pops\
-    {[relation cardinality $Populations] > 1}]
-relation foreach multipop $multipops {
-    relation assign $multipop
-    log::error "For domain, \"$Domain\", [relation cardinality $Populations]\
-        populations are given"
-    incr errcount
+if {$errcount > 0} {
+    tailcall DeclError GENERATE_ERRORS $errcount
 }
 ----
 
-[source,c]
-----
-<<required packages>>=
-package require textutil::expander
-package require textutil::adjust
-package require tcl::chan::memchan
-----
+== Header Files
 
 [source,c]
 ----
 <<miccaGenerate: generate header files>>=
-forAllRefs domainRef [Domain findAll] {
-    namespace upvar GenHeader\
-        domain domain\
-        interface interface
+expand evalcmd "namespace eval [namespace current]::GenHeader"
+----
 
-    assignAttribute $domainRef\
-        {Name domain}\
-        {Interface interface}
+[source,c]
+----
+<<generation header namespace>>=
+namespace eval GenHeader {
+    logger::initNamespace [namespace current]
 
-    variable headerTemplate
+    <<tclral imports>>
 
-    set hchan [::open $domain.h w]
-    puts $hchan [expand expand $headerTemplate]
-    chan close $hchan
+    namespace path {
+        ::micca
+        ::micca::@Gen@::Helpers
+        ::micca::@Config@::Helpers
+        ::rosea::InstCmds
+    }
+
+    <<generation header data>>
+    <<generation header commands>>
 }
 ----
 
@@ -166,33 +241,29 @@ set headerTemplate [string cat\
 
 [source,c]
 ----
-<<generation header namespace>>=
-namespace eval GenHeader {
-    <<generation header data>>
-    <<generation header commands>>
+<<miccaGenerate: generate header files>>=
+forAllRefs domainRef [Domain findAll] {
+    namespace upvar GenHeader\
+        domain domain\
+        interface interface
 
-    namespace path {
-        ::micca
-        ::micca::@Gen@::Helpers
-        ::micca::@Config@::Helpers
-        ::rosea::InstCmds
+    assignAttribute $domainRef\
+        {Name domain}\
+        {Interface interface}
+
+    variable headerTemplate
+
+    set hchan [::open $domain.h w]
+    try {
+        puts $hchan [expand expand $headerTemplate]
+    } on error {result opts} {
+        puts $::errorInfo
+        return -options $opts $result
+    } finally {
+        chan close $hchan
     }
-}
-----
 
-[source,c]
-----
-<<generation header commands>>=
-proc banner {} {
-    string cat\
-        "/*\n"\
-        " * ---------------------------------------------------------------\n"\
-        " * THIS FILE IS AUTOMATICALLY GENERATED. DO NOT EDIT.\n"\
-        " * Created by: $::argv0 $::argv\n"\
-        " * Created on: [clock format [clock seconds]]\n"\
-        " * This is micca version $::micca::version\n"\
-        " * ---------------------------------------------------------------\n"\
-        " */\n"
+    unset domain interface
 }
 ----
 
@@ -201,7 +272,7 @@ proc banner {} {
 <<generation header commands>>=
 proc headerFileGuard {} {
     variable domain
-    return [string cat _ [string toupper [string trim $domain]] _H_]
+    return "_[string toupper [string trim $domain]]_H_"
 }
 ----
 
@@ -209,28 +280,36 @@ proc headerFileGuard {} {
 ----
 <<generation header commands>>=
 proc interface {} {
-    set result [comment "Domain Interface Contents"]
     variable interface
-    append result $interface\n
+
+    set result {}
+    if {$interface ne {}} {
+        append result\
+            [comment "Domain Interface Contents"]\
+            [indentCode [string trim $interface \n] 0]
+    }
+
+    return $result
 }
 ----
 
 [source,c]
 ----
 <<generate command tests>>=
-test header-1.0 {
+test headergen-1.0 {
     Generated header file with interface info
 } -setup {
-    #makeFile {} foo.h
+    makeFile {} header1.h
+    makeFile {} header1.c
     micca configure {
-        domain foo {
+        domain header1 {
             interface {#include <stdio.h>}
 
             class c1 {
                 attribute color int -default 20
             }
         }
-        population test foo {
+        population test header1 {
             class c1 {
                 instance fred1
             }
@@ -240,7 +319,7 @@ test header-1.0 {
     cleanupDomain
 } -body {
     micca generate
-    llength [fileutil::grep {stdio} foo.h]
+    llength [fileutil::grep {stdio} header1.h]
 } -result {1}
 ----
 
@@ -248,7 +327,6 @@ test header-1.0 {
 ----
 <<generation header commands>>=
 proc typeAliases {} {
-    set result [comment "Type Aliases"]
     variable domain
     set aliases [pipe {
         TypeAlias findWhere {$Domain eq $domain} |
@@ -267,12 +345,16 @@ proc typeAliases {} {
     } {} |%]
 
     set taRefs [refUnion $doRefs $dopRefs]
-    forAllRefs taRef $taRefs {
-        assignAttribute $taRef TypeName TypeDefinition
-        append result\
-            "typedef "\
-            [typeCheck composeDeclaration $TypeDefinition $TypeName]\
-            " \;\n"
+    set result {}
+    if {[isNotEmptyRef $taRefs]} {
+        append result [comment "Type Aliases"]
+        forAllRefs taRef $taRefs {
+            assignAttribute $taRef TypeName TypeDefinition
+            append result\
+                "typedef "\
+                [typeCheck composeDeclaration $TypeDefinition $TypeName]\
+                " \;\n"
+        }
     }
 
     return $result
@@ -282,12 +364,13 @@ proc typeAliases {} {
 [source,c]
 ----
 <<generate command tests>>=
-test header-2.0 {
+test headergen-2.0 {
     Generated header file with external type alias
 } -setup {
-    #makeFile {} foo.h
+    makeFile {} header2.h
+    makeFile {} header2.c
     micca configure {
-        domain foo {
+        domain header2 {
             typealias gCount uint64_t
             typealias pCount uint32_t
 
@@ -302,7 +385,7 @@ test header-2.0 {
                 attribute color int -default 20
             }
         }
-        population test foo {
+        population test header2 {
             class c1 {
                 instance fred1
             }
@@ -312,7 +395,7 @@ test header-2.0 {
     cleanupDomain
 } -body {
     micca generate
-    llength [fileutil::grep {typedef} foo.h]
+    llength [fileutil::grep {typedef} header2.h]
 } -result {2}
 ----
 
@@ -320,20 +403,28 @@ test header-2.0 {
 ----
 <<generation header commands>>=
 proc domainOpDeclarations {} {
-    set result [comment "External Declarations for Domain Operations"]
-
     variable domain
     set opRefs [DomainOperation findWhere {$Domain eq $domain}]
-    forAllRefs opRef $opRefs {
-        assignAttribute $opRef
-        append result "extern $ReturnDataType " $Domain _ $Name \(
-        set params [deRef [findRelated $opRef ~R6]]
-        relation foreach param $params -ascending Number {
-            relation assign $param DataType
-            append result $DataType {, }
+
+    set result {}
+    if {[isNotEmptyRef $opRefs]} {
+        append result [comment "External Declarations for Domain Operations"]
+
+        forAllRefs opRef $opRefs {
+            assignAttribute $opRef
+            if {$Comment ne {}} {
+                append result [comment $Comment]
+            }
+            append result "extern $ReturnDataType " $Domain _ $Name \(
+
+            set params [pipe {
+                findRelated $opRef ~R6 |
+                deRef % |
+                relation list % DataType -ascending Number |
+                join % {, }
+            } {} |%]
+            append result $params "\) ;\n"
         }
-        set result [string trimright $result {, }]
-        append result "\) ;\n"
     }
     return $result
 }
@@ -342,23 +433,28 @@ proc domainOpDeclarations {} {
 [source,c]
 ----
 <<generate command tests>>=
-test header-3.0 {
+test headergen-3.0 {
     Generated header file domain operations
 } -setup {
-    # makeFile {} bar.h
+    makeFile {} header3.h
+    makeFile {} header3.c
     micca configure {
-        domain bar {
+        domain header3 {
             domainop int op1 {a int b char} {
                 printf ("%d %c\n", a, b) ;
+            } {
+                two parameters
             }
             domainop int op2 {a {char *} b {uint8_t *}} {
                 printf ("%s %s\n", a, b) ;
+            } {
+                pointer type parameters
             }
             class c1 {
                 attribute color int -default 20
             }
         }
-        population test bar {
+        population test header3 {
             class c1 {
                 instance fred1
             }
@@ -368,7 +464,7 @@ test header-3.0 {
     cleanupDomain
 } -body {
     micca generate
-    llength [fileutil::grep {extern int bar_op[0-9]} bar.h]
+    llength [fileutil::grep {extern int header3_op[0-9]} header3.h]
 } -result {2}
 ----
 
@@ -410,12 +506,13 @@ proc portalIds {} {
 [source,c]
 ----
 <<generate command tests>>=
-test header-4.0 {
+test headergen-4.0 {
     Generated header file with portal constants
 } -setup {
-    # makeFile {} bar.h
+    makeFile {} header4.h
+    makeFile {} header4.c
     micca configure {
-        domain bar {
+        domain header4 {
             class c1 {
                 attribute color int -default 10
                 attribute temp double -default 2.0
@@ -425,7 +522,7 @@ test header-4.0 {
                 attribute temp double -default 2.0
             }
         }
-        population test bar {
+        population test header4 {
             class c1 {
                 instance fred1
             }
@@ -438,43 +535,517 @@ test header-4.0 {
     cleanupDomain
 } -body {
     micca generate
-    llength [fileutil::grep {CLASSID} bar.h]
+    llength [fileutil::grep {CLASSID} header4.h]
 } -result {2}
 ----
+
+== Generating Code Files
 
 [source,c]
 ----
 <<miccaGenerate: generate code files>>=
+expand evalcmd "namespace eval [namespace current]::GenCode"
 ----
 
 [source,c]
 ----
-<<generation commands namespace>>=
-namespace eval @Gen@ {
+<<generation code namespace>>=
+namespace eval GenCode {
     logger::initNamespace [namespace current]
 
     <<tclral imports>>
 
-    <<generation helpers namespace>>
-    <<generation header namespace>>
-
     namespace path {
         ::micca
-        ::micca::@Config@::Helpers
         ::micca::@Gen@::Helpers
+        ::micca::@Config@::Helpers
         ::rosea::InstCmds
     }
-    <<generation data>>
-    <<generation commands>>
+
+    <<generation code data>>
+    <<generation code commands>>
 }
 ----
 
 [source,c]
 ----
+<<generation data>>=
+set codeTemplate [string cat\
+    %<banner>%\
+    %<prologue>%\
+    %<domainInclude>%\
+    "#include micca_rt.h\n"\
+    %<forwardClassDeclarations>%\
+    %<classDefinitions>%\
+    %<epilogue>%\
+]
+----
+
+[source,c]
+----
+<<miccaGenerate: generate code files>>=
+forAllRefs domainRef [Domain findAll] {
+    namespace upvar GenCode\
+        domain domain\
+        prologue prologue\
+        epilogue epilogue
+
+    assignAttribute $domainRef\
+        {Name domain}\
+        {Prologue prologue}\
+        {Epilogue epilogue}
+
+    variable codeTemplate
+
+    PrepareClassProperties $domain
+
+    set cchan [::open $domain.c w]
+    try {
+        puts $cchan [expand expand $codeTemplate]
+    } on error {result opts} {
+        puts $::errorInfo
+        return -options $opts $result
+    } finally {
+        chan close $cchan
+    }
+}
+----
+
+[source,c]
+----
+<<generation helper commands>>=
+proc PrepareClassProperties {domain} {
+    variable ClassProperties
+
+    set cpops [pipe {
+        Class findWhere {$Domain eq $domain} |
+        findRelated % R104 {~R101 ElementPopulation} {~R105 ClassPopulation}
+    } {} |%]
+
+    set spops [pipe {
+        findRelated $cpops {~R109 StaticClassPopulation} |
+        deRef % |
+        relation extend % stup\
+            Declaration string {"struct [tuple extract $stup Class]"}\
+            Reference string {"struct [tuple extract $stup Class]\
+                [expr {[tuple extract $stup IsConstant] ? "const" : {}}] *"}\
+            Allocation int 0 |
+        relation project % Class IsConstant Declaration Reference Allocation |
+        relation rename % Class Name
+    } {} |%]
+
+    set dpops [pipe {
+        findRelated $cpops {~R109 DynamicClassPopulation} |
+        deRef % |
+        relation extend % stup\
+            IsConstant boolean {"false"}\
+            Declaration string {"struct [tuple extract $stup Class]"}\
+            Reference string {"struct [tuple extract $stup Class] *"} |
+        relation project % Class IsConstant Declaration Reference Allocation |
+        relation rename % Class Name
+    } {} |%]
+
+    set ClassProperties [relation union $spops $dpops]
+    return
+}
+
+proc GetClassProperty {class prop} {
+    variable ClassProperties
+    set cprop [relation restrictwith $ClassProperties {$Name eq $class}]
+    if {[relation isnotempty $cprop]} {
+        return [relation extract $cprop $prop]
+    }
+
+    error "unknown property, \"$prop\", for class, \"$class\""
+}
+----
+
+[source,c]
+----
+<<generation code commands>>=
+proc prologue {} {
+    variable prologue
+
+    set result {}
+    if {$prologue ne {}} {
+        append result\
+            [comment "Domain Prologue Begin"]\
+            [indentCode [string trim $prologue \n] 0]\
+            [comment "Domain Prologue End"]
+    }
+
+    return $result
+}
+----
+
+[source,c]
+----
+<<generation code commands>>=
+proc epilogue {} {
+    variable epilogue
+
+    set result {}
+    if {$epilogue ne {}} {
+        append result\
+            [comment "Domain Epilogue Begin"]\
+            [indentCode [string trim $epilogue \n] 0]\
+            [comment "Domain Epilogue End"]
+    }
+
+    return $result
+}
+----
+
+[source,c]
+----
+<<generation code commands>>=
+proc domainInclude {} {
+    variable domain
+
+    return "#include \"$domain.h\"\n"
+}
+----
+
+[source,c]
+----
+<<generate command tests>>=
+test codegen-1.0 {
+    Generated code file with prologue and epilogue
+} -setup {
+    # makeFile {} codegen1.h
+    # makeFile {} codegen1.c
+    micca configure {
+        domain codegen1 {
+            prologue {#include mySpecial.h}
+            prologue {#include theSpecial.h}
+            epilogue {
+                static int count(
+                    int a)
+                {
+                    return a + 1 ;
+                }
+            }
+            class c1 {
+                attribute color int -default 10
+                attribute temp double -default 2.0
+            }
+            class c2 {
+                attribute color int -default 10
+                attribute temp double -default 2.0
+            }
+        }
+        population test codegen1 {
+            class c1 {
+                instance fred1
+            }
+            class c2 {
+                instance fred1
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca generate
+    llength [fileutil::grep {Special} codegen1.c]
+} -result {2}
+----
+
+[source,c]
+----
+<<generation code commands>>=
+proc forwardClassDeclarations {} {
+    variable domain
+
+    set classNames [pipe {
+        Class findWhere {$Domain eq $domain} |
+        deRef ~ |
+        relation list ~ Name -ascending Number
+    }]
+    set result [comment "Class structure forward declarations"]
+    foreach className $classNames {
+        append result "struct $className ;\n"
+    }
+
+    return $result
+}
+----
+
+[source,c]
+----
+<<generation code commands>>=
+proc classDefinitions {} {
+    variable domain
+
+    set result [comment "Class structure definitions"]
+    set classRefs [Class findWhere {$Domain eq $domain}]
+    forAllRefs classRef $classRefs {
+        append result [DefineClassStructure $classRef]
+    }
+
+    return $result
+}
+----
+
+[source,c]
+----
+<<generation code commands>>=
+proc DefineClassStructure {classRef} {
+    assignAttribute $classRef {Name className}
+
+    append result\
+        "struct $className \{\n"\
+        "    MRT_Instance base__ ;\n"
+
+    set compRefs [findRelated $classRef ~R20]
+
+    # Attributes first
+    forAllRefs attrRef [findRelated $compRefs {~R21 Attribute}] {
+        assignAttribute $attrRef {Name attrName} DataType
+        append result "    $DataType $attrName ;\n"
+    }
+
+    # References second
+    set refRefs [findRelated $compRefs {~R21 Reference}]
+
+    # Superclass References
+    forAllRefs superRef [findRelated $refRefs {~R23 SuperclassReference}] {
+        assignAttribute $superRef {Name attrName}
+
+        set superDecl [pipe {
+            findRelated $superRef ~R91 R37 ~R36 |
+            readAttribute % Class |
+            GetClassProperty % Reference
+        } {} |%]
+        append result "    $superDecl$attrName ;\n"
+    }
+
+    # Subclass References
+    forAllRefs subRef [findRelated $refRefs {~R23 SubclassReference}] {
+        assignAttribute $subRef {Name attrName}
+        append result "    MRT_SuperclassRef $attrName ;\n"
+    }
+
+    # Associator Reference
+    forAllRefs atorRef [findRelated $refRefs {~R23 AssociatorReference}] {
+        assignAttribute $atorRef {Name attrName}
+
+        set aclassRef [findRelated $atorRef ~R93]
+        set sourceDecl [pipe {
+            findRelated $aclassRef R42 ~R34 |
+            readAttribute % Class |
+            GetClassProperty % Reference
+        } {} |%]
+        set targetDecl [pipe {
+            findRelated $aclassRef R42 ~R35 |
+            readAttribute % Class |
+            GetClassProperty % Reference
+        } {} |%]
+
+        append result\
+            "    struct \{\n"\
+            "        ${targetDecl}forward ;\n"\
+            "        ${sourceDecl}backward ;\n"\
+            "    \} $attrName ;\n"
+    }
+
+    # Association Reference
+    forAllRefs assocRef [findRelated $refRefs {~R23 AssociationReference}] {
+        assignAttribute $assocRef {Name attrName}
+
+        set apcRefs [findRelated $assocRef ~R25 R90]
+        set napcRefs [refMultiplicity $apcRefs]
+        if {$napcRefs == 1} {
+            set srcRef [findRelated $apcRefs {~R38 SimpleReferringClass}]
+            if {[isNotEmptyRef $srcRef]} {
+                set refedClass [pipe {
+                    findRelated $srcRef R32 ~R33 |
+                    readAttribute % Class
+                } {} |%]
+                append result\
+                    [GenDirectionalReference $attrName $refedClass false]
+            } else {
+                set srcRef [findRelated $apcRefs {~R38 SimpleReferencedClass}]
+                if {[isNotEmptyRef $srcRef]} {
+                    set refing [findRelated $srcRef R33 ~R32]
+                    append result\
+                        [GenDirectionalReference $attrName\
+                            {*}[readAttribute $refing Class Multiplicity]]
+                } else {
+                    set srcRef [findRelated $apcRefs {~R38 SourceClass}]
+                    if {[isNotEmptyRef $srcRef]} {
+                        set assoc [findRelated $srcRef R34 ~R42]
+                        set target [findRelated $srcRef R34 ~R35]
+                        append result\
+                            [GenDirectionalReference $attrName\
+                                [readAttribute $assoc Class]\
+                                [readAttribute $target Multiplicity]]
+                    } else {
+                        set trgRef [findRelated $apcRefs {~R38 TargetClass}]
+                        if {[isNotEmptyRef $trgRef]} {
+                            set assoc [findRelated $trgRef R35 ~R42]
+                            set source [findRelated $trgRef R35 ~R34]
+                            append result\
+                                [GenDirectionalReference $attrName\
+                                    [readAttribute $assoc Class]\
+                                    [readAttribute $source Multiplicity]]
+                        } else {
+                            error "cannot find association participant type\
+                                across R38"
+                        }
+                    }
+                }
+            }
+        } elseif {$ndirRefs == 2} {
+            # HERE -- do reflexive case
+            set dirDecl [pipe {
+                deRef $dirRefs |
+                relation list ~ Name |
+                GetClassProperty ~ Reference
+            }]
+            append result\
+                "    struct \{\n"\
+                "        ${dirDecl}forward ;\n"\
+                "        ${dirDecl}backward ;\n"\
+                "    \} $attrName ;\n"
+        } else {
+            error "unexpected number of directional references, \"$ndirRefs\""
+        }
+    }
+
+    append result "\} ;\n"
+}
+----
+
+[source,c]
+----
+<<generation helper commands>>=
+proc GenDirectionalReference {name reftoClass isMultiple} {
+    if {$isMultiple} {
+        if {[GetClassProperty $reftoClass IsConstant]} {
+            set result "    MRT_ArrayRef $name ;\n"
+        } else {
+            set result "    MRT_LinkRef $name ;\n"
+        }
+    } else {
+        set result "    [GetClassProperty $reftoClass Reference]$name ;\n"
+    }
+
+    return $result
+}
+----
+
+[source,c]
+----
+<<generate command tests>>=
+test codegen-2.0 {
+    Generated code file supertype and subtype references
+} -setup {
+    # makeFile {} codegen2.h
+    # makeFile {} codegen2.c
+    micca configure {
+        domain codegen2 {
+            class super {}
+            class sub1 {}
+            class sub2 {}
+            generalization R1 super sub1 sub2
+        }
+        population test codegen2 {
+            class super {
+                instance fred1 R1 {sub1 s1}
+                instance fred2 R1 {sub2 s2}
+            }
+            class sub1 {
+                instance s1 R1 fred1
+            }
+            class sub2 {
+                instance s2 R1 fred2
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca generate
+    testConditions\
+        {[llength [fileutil::grep {MRT_SuperclassRef} codegen2.c]] == 1}\
+        {[llength [fileutil::grep {struct super \*R1} codegen2.c]] == 2}
+} -result {1}
+----
+
+[source,c]
+----
+<<generate command tests>>=
+test codegen-3.0 {
+    Generated code file associative class references
+} -setup {
+    # makeFile {} codegen3.h
+    # makeFile {} codegen3.c
+    micca configure {
+        domain codegen3 {
+            class A {}
+            class X {}
+            class Y {}
+            association R1 -associator A X 0..*--0..* Y
+        }
+        population test codegen3 {
+            class A {
+                instance fred1 R1 {X x1 Y y1}
+                instance fred2 R1 {X x2 Y y2}
+            }
+            class X {
+                instance x1 R1 fred1
+                instance x2 R1 fred2
+            }
+            class Y {
+                instance y1 R1 fred1
+                instance y2 R1 fred2
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca generate
+    testConditions\
+        {[llength [fileutil::grep {R1} codegen3.c]] == 3}
+} -result {1}
+----
+    
+
+== Helper Commands
+
+[source,c]
+----
 <<generation helpers namespace>>=
 namespace eval Helpers {
+    logger::initNamespace [namespace current]
+
+    <<tclral imports>>
+
+    namespace path {
+        ::micca
+        ::rosea::InstCmds
+    }
+
     <<generation helper data>>
     <<generation helper commands>>
+}
+----
+
+[source,c]
+----
+<<generation helper commands>>=
+proc banner {} {
+    string cat\
+        "/*\n"\
+        " * [string repeat - 70]\n"\
+        " * THIS FILE IS AUTOMATICALLY GENERATED. DO NOT EDIT.\n"\
+        " * Created by: $::argv0 $::argv\n"\
+        " * Created on: [clock format [clock seconds]]\n"\
+        " * This is micca version $::micca::version\n"\
+        " * [string repeat - 70]\n"\
+        " */\n"
 }
 ----
 
@@ -486,6 +1057,17 @@ proc comment {c} {
         "/*\n"\
         [::textutil::adjust::indent [::textutil::adjust::adjust $c] " * "]\n\
         " */\n"
+}
+----
+
+[source,c]
+----
+<<generation helper commands>>=
+# Remove extraneous blanks from the beginning of lines of code
+# if so requested by the options.
+proc indentCode {code {indent 4}} {
+    return [textutil::adjust::indent [textutil::adjust::undent $code]\
+            [string repeat { } $indent]]\n
 }
 ----
 
