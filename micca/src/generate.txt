@@ -574,7 +574,7 @@ set codeTemplate [string cat\
     %<banner>%\
     %<prologue>%\
     %<domainInclude>%\
-    "#include micca_rt.h\n"\
+    "#include \"micca_rt.h\"\n"\
     %<forwardClassDeclarations>%\
     %<classDefinitions>%\
     %<epilogue>%\
@@ -597,7 +597,7 @@ forAllRefs domainRef [Domain findAll] {
 
     variable codeTemplate
 
-    PrepareClassProperties $domain
+    PrepareDomainProperties $domain
 
     set cchan [::open $domain.c w]
     try {
@@ -614,38 +614,47 @@ forAllRefs domainRef [Domain findAll] {
 [source,c]
 ----
 <<generation helper commands>>=
-proc PrepareClassProperties {domain} {
+proc PrepareDomainProperties {domain} {
     variable ClassProperties
 
-    set cpops [pipe {
-        Class findWhere {$Domain eq $domain} |
-        findRelated % R104 {~R101 ElementPopulation} {~R105 ClassPopulation}
-    } {} |%]
-
-    set spops [pipe {
-        findRelated $cpops {~R109 StaticClassPopulation} |
+    # Need to handle missing class populations.
+    # Not all classes will have a ClassPopulation instance.
+    set classRefs [Class findWhere {$Domain eq $domain}]
+    set allocs [pipe {
+        findRelated $classRefs R104 {~R101 ElementPopulation}\
+            {~R105 ClassPopulation} |
         deRef % |
-        relation extend % stup\
-            Declaration string {"struct [tuple extract $stup Class]"}\
-            Reference string {"struct [tuple extract $stup Class]\
-                [expr {[tuple extract $stup IsConstant] ? "const" : {}}] *"}\
-            Allocation int 0 |
-        relation project % Class IsConstant Declaration Reference Allocation |
+        relation project % Class Allocation |
         relation rename % Class Name
     } {} |%]
 
-    set dpops [pipe {
-        findRelated $cpops {~R109 DynamicClassPopulation} |
-        deRef % |
-        relation extend % stup\
-            IsConstant boolean {"false"}\
-            Declaration string {"struct [tuple extract $stup Class]"}\
-            Reference string {"struct [tuple extract $stup Class] *"} |
-        relation project % Class IsConstant Declaration Reference Allocation |
-        relation rename % Class Name
-    } {} |%]
+    set ClassProperties [pipe {
+        deRef $classRefs |
+        relation project ~ Name |
+        relation extend ~ stup\
+            Declaration string {"struct [tuple extract $stup Name]"}\
+            Reference string {"struct [tuple extract $stup Name] *"} |
+        ralutil::rvajoin ~ $allocs Allocations |
+        relation extend ~ atup Allocation int {
+            [relation isempty [tuple extract $atup Allocations]] ?\
+            0 : [relation extract [tuple extract $atup Allocations] Allocation]
+        } |
+        relation eliminate ~ Allocations
+    }]
 
-    set ClassProperties [relation union $spops $dpops]
+    variable AssocProperties
+
+    set AssocProperties [pipe {
+        Association findWhere {$Domain eq $domain} |
+        deRef ~ |
+        relation rename ~ Name Association |
+        ralutil::rvajoin ~ [deRef [StaticAssociation findAll]] Populations |
+        relation extend ~ atup IsStatic boolean {
+            [relation isnotempty [tuple extract $atup Populations]]} |
+        relation project ~ Association IsStatic |
+        relation rename ~ Association Name
+    }]
+
     return
 }
 
@@ -657,6 +666,16 @@ proc GetClassProperty {class prop} {
     }
 
     error "unknown property, \"$prop\", for class, \"$class\""
+}
+
+proc GetAssociationProperty {assoc prop} {
+    variable AssocProperties
+    set aprop [relation restrictwith $AssocProperties {$Name eq $assoc}]
+    if {[relation isnotempty $aprop]} {
+        return [relation extract $aprop $prop]
+    }
+
+    error "unknown property, \"$prop\", for association, \"$assoc\""
 }
 ----
 
@@ -778,9 +797,51 @@ proc classDefinitions {} {
     variable domain
 
     set result [comment "Class structure definitions"]
+
+    set subs [deRef [UnionSubclass findWhere {$Domain eq $domain}]]
+    set supers [deRef [UnionSuperclass findWhere {$Domain eq $domain}]]
+    set ultimates [pipe {
+        relation semiminus $subs $supers -using {Domain Domain Class Class} |
+        ::rosea::Helpers::ToRef ::micca::UnionSuperclass ~
+    }]
+    append result [DefineUnionSubclassStructures $ultimates]
+
     set classRefs [Class findWhere {$Domain eq $domain}]
-    forAllRefs classRef $classRefs {
+    set remaining [pipe {
+        Class findWhere {$Domain eq $domain} |
+        deRef ~ |
+        relation semiminus $subs ~ -using {Domain Domain Class Name} |
+        ::rosea::Helpers::ToRef ::micca::Class ~
+    }]
+
+    forAllRefs classRef $remaining {
         append result [DefineClassStructure $classRef]
+    }
+
+    return $result
+}
+----
+
+[source,c]
+----
+<<generation code commands>>=
+proc DefineUnionSubclassStructures {superRefs} {
+    if {[isEmptyRef $superRefs]} {
+        return
+    }
+
+    set subRefs [findRelated $superRefs R44 ~R45]
+    forAllRefs subRef $subRefs {
+        set newsupers [pipe {
+            deRef $subRef |
+            relation semijoin ~ $::micca::UnionSuperclass\
+                -using {Domain Domain Class Class} |
+            ::rosea::Helpers::ToRef ::micca::UnionSuperclass ~
+        }]
+
+        append result [DefineUnionSubclassStructures $newsupers]
+
+        append result [DefineClassStructure [findRelated $subRef R47 R40 R41]]
     }
 
     return $result
@@ -858,19 +919,17 @@ proc DefineClassStructure {classRef} {
         if {$napcRefs == 1} {
             set srcRef [findRelated $apcRefs {~R38 SimpleReferringClass}]
             if {[isNotEmptyRef $srcRef]} {
-                set refedClass [pipe {
-                    findRelated $srcRef R32 ~R33 |
-                    readAttribute % Class
-                } {} |%]
-                append result\
-                    [GenDirectionalReference $attrName $refedClass false]
+                set refedRef [findRelated $srcRef R32 ~R33]
+                append result [GenDirectionalReference $attrName\
+                        {*}[readAttribute $refedRef Relationship Class] false]
             } else {
                 set srcRef [findRelated $apcRefs {~R38 SimpleReferencedClass}]
                 if {[isNotEmptyRef $srcRef]} {
                     set refing [findRelated $srcRef R33 ~R32]
                     append result\
                         [GenDirectionalReference $attrName\
-                            {*}[readAttribute $refing Class Multiplicity]]
+                            {*}[readAttribute $refedRef\
+                                Relationship Class Multiplicity]]
                 } else {
                     set srcRef [findRelated $apcRefs {~R38 SourceClass}]
                     if {[isNotEmptyRef $srcRef]} {
@@ -878,7 +937,7 @@ proc DefineClassStructure {classRef} {
                         set target [findRelated $srcRef R34 ~R35]
                         append result\
                             [GenDirectionalReference $attrName\
-                                [readAttribute $assoc Class]\
+                                {*}[readAttribute $assoc Relationship Class]\
                                 [readAttribute $target Multiplicity]]
                     } else {
                         set trgRef [findRelated $apcRefs {~R38 TargetClass}]
@@ -887,7 +946,7 @@ proc DefineClassStructure {classRef} {
                             set source [findRelated $trgRef R35 ~R34]
                             append result\
                                 [GenDirectionalReference $attrName\
-                                    [readAttribute $assoc Class]\
+                                    {*}[readAttribute $assoc Relationship Class]\
                                     [readAttribute $source Multiplicity]]
                         } else {
                             error "cannot find association participant type\
@@ -896,20 +955,88 @@ proc DefineClassStructure {classRef} {
                     }
                 }
             }
-        } elseif {$ndirRefs == 2} {
-            # HERE -- do reflexive case
-            set dirDecl [pipe {
-                deRef $dirRefs |
-                relation list ~ Name |
-                GetClassProperty ~ Reference
-            }]
-            append result\
-                "    struct \{\n"\
-                "        ${dirDecl}forward ;\n"\
-                "        ${dirDecl}backward ;\n"\
-                "    \} $attrName ;\n"
+        } elseif {$napcRefs == 2} {
+            # do reflexive case
+            append result "    struct \{\n"
+
+            set refingRef [findRelated $apcRefs {~R38 SimpleReferringClass}]
+            if {[isNotEmptyRef $refingRef]} {
+                # simple association
+                set refedRef [findRelated $apcRefs {~R38 SimpleReferencedClass}]
+                append result "    " [GenDirectionalReference forward\
+                    {*}[readAttribute $refedRef Relationship Class] false]
+                append result "    " [GenDirectionalReference backward\
+                    {*}[readAttribute $refingRef Relationship Class Multiplicity]]
+            } else {
+                set sourceRef [findRelated $apcRefs {~R38 SourceClass}]
+                if {[isNotEmptyRef $sourceRef]} {
+                    set targetRef [findRelated $apcRefs {~R38 TargetClass}]
+                    set assocRef [findRelated $sourceRef R34 ~R42]
+                    append result [GenDirectionalReference forward\
+                        {*}[readAttribute $assocRef Relationship Class]\
+                        [readAttribute $targetRef Multiplicity] 8]
+                    append result [GenDirectionalReference backward\
+                        {*}[readAttribute $assocRef Relationship Class]\
+                        [readAttribute $sourceRef Multiplicity] 8]
+
+                } else {
+                    error "cannot resolve reflexive association"
+                }
+            }
+            append result "    \} $attrName ;\n"
         } else {
-            error "unexpected number of directional references, \"$ndirRefs\""
+            error "unexpected number of directional references, \"$napcRefs\""
+        }
+    }
+
+    # Subclass container
+    # Union supertypes will contain a supclass container.
+    forAllRefs contRef [findRelated $compRefs {~R21 SubclassContainer}] {
+        assignAttribute $contRef {Name attrName}
+
+        set subRefs [findRelated $contRef ~R96 R44 ~R45]
+        append result "    union \{\n"
+        foreach subName [relation list [deRef $subRefs] Class] {
+            append result "        "\
+                "[GetClassProperty $subName Declaration] $subName ;\n"
+        }
+        append result "    \} $attrName ;\n"
+    }
+
+    # Target links
+    # link pointers in classes that are referred to by classes with
+    # link references.
+    # Start with associator classes. They will have link containers if
+    # either source or target is multiple and non-static
+    set atorRef [findRelated $classRef {~R41 ClassRole} {~R40 AssociatorClass}]
+    if {[isNotEmptyRef $atorRef]} {
+        set sourceRef [findRelatedWhere $atorRef {R42 ~R34} {$Multiplicity}]
+        if {[isNotEmptyRef $sourceRef]} {
+            assignAttribute $sourceRef Class Relationship
+            if {![GetAssociationProperty $Relationship IsStatic]} {
+                append result "    "\
+                    "MRT_LinkRef ${Relationship}_forward ;\n"
+            }
+        }
+        set targetRef [findRelatedWhere $atorRef {R42 ~R35} {$Multiplicity}]
+        if {[isNotEmptyRef $targetRef]} {
+            assignAttribute $targetRef Class Relationship
+            if {![GetAssociationProperty $Relationship IsStatic]} {
+                append result "    "\
+                    "MRT_LinkRef ${Relationship}_backward ;\n"
+            }
+        }
+    }
+
+    # Now simple referring classes, multiple and non-static
+    set srcRef [findRelatedWhere $classRef {
+        {~R41 ClassRole}
+        {~R40 AssociationParticipantClass}
+        {~R38 SimpleReferringClass}} {$Multiplicity}]
+    if {[isNotEmptyRef $srcRef]} {
+        assignAttribute $srcRef Class Relationship
+        if {![GetAssociationProperty $Relationship IsStatic]} {
+            append result "    MRT_LinkRef ${Relationship}_links ;\n"
         }
     }
 
@@ -920,18 +1047,24 @@ proc DefineClassStructure {classRef} {
 [source,c]
 ----
 <<generation helper commands>>=
-proc GenDirectionalReference {name reftoClass isMultiple} {
+proc GenDirectionalReference {name assocName reftoClass isMultiple {indent 4}} {
+    set leader {    }
     if {$isMultiple} {
-        if {[GetClassProperty $reftoClass IsConstant]} {
-            set result "    MRT_ArrayRef $name ;\n"
+        if {[GetAssociationProperty $assocName IsStatic]} {
+            append result\
+                "struct \{\n"\
+                $leader "unsigned count ;\n"\
+                $leader "[GetClassProperty $reftoClass Reference]\
+                        const *references;\n"\
+                "\} $name ;\n"
         } else {
-            set result "    MRT_LinkRef $name ;\n"
+            set result "MRT_LinkRef $name ;\n"
         }
     } else {
-        set result "    [GetClassProperty $reftoClass Reference]$name ;\n"
+        set result "[GetClassProperty $reftoClass Reference]$name ;\n"
     }
 
-    return $result
+    return [indentCode $result $indent]
 }
 ----
 
@@ -1001,6 +1134,7 @@ test codegen-3.0 {
                 instance y1 R1 fred1
                 instance y2 R1 fred2
             }
+            static R1
         }
     }
 } -cleanup {
@@ -1011,7 +1145,238 @@ test codegen-3.0 {
         {[llength [fileutil::grep {R1} codegen3.c]] == 3}
 } -result {1}
 ----
-    
+
+[source,c]
+----
+<<generate command tests>>=
+test codegen-4.0 {
+    Generated code file reflexive class references
+} -setup {
+    # makeFile {} codegen4.h
+    # makeFile {} codegen4.c
+    micca configure {
+        domain codegen4 {
+            class X {}
+            association R1 X 0..1--0..1 X
+        }
+        population test codegen4 {
+            class X {
+                instance x1 R1 {forward x2 backward {}}
+                instance x2 R1 {forward {} backward x1}
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca generate
+    testConditions\
+        {[llength [fileutil::grep {R1} codegen4.c]] == 1}
+} -result {1}
+----
+
+[source,c]
+----
+<<generate command tests>>=
+test codegen-5.0 {
+    Generated code file reflexive associative class references
+} -setup {
+    # makeFile {} codegen5.h
+    # makeFile {} codegen5.c
+    micca configure {
+        domain codegen5 {
+            class A {}
+            class X {}
+            association R1 -associator A X 0..*--0..* X
+        }
+        population test codegen5 {
+            class A {
+                instance a1 R1 {forward x2 backward x1}
+            }
+            class X {
+                instance x1 R1 a1
+                instance x2 R1 a1
+            }
+            static R1
+        }
+    }
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca generate
+    testConditions\
+        {[llength [fileutil::grep {R1} codegen5.c]] == 2}
+} -result {1}
+----
+
+[source,c]
+----
+<<generate command tests>>=
+test codegen-6.0 {
+    Generated code file union generalization
+} -setup {
+    # makeFile {} codegen6.h
+    # makeFile {} codegen6.c
+    micca configure {
+        domain codegen6 {
+            class super {}
+            class sub1 {
+                attribute color int -default 10
+            }
+            class sub2 {
+                attribute temp int -default 20
+            }
+            generalization R1 -union super sub1 sub2
+
+            class sub3 {
+                attribute degree int -default 30
+            }
+            class sub4 {
+                attribute yaw int -default 40
+            }
+
+            generalization R2 -union sub1 sub3 sub4
+
+            class sub5 {
+                attribute degree int -default 30
+            }
+            class sub6 {
+                attribute degree int -default 30
+            }
+
+            generalization R3 -union sub1 sub5 sub6
+        }
+        population test codegen6 {
+            class super {
+                instance fred1 R1 {sub1 s1}
+                instance fred2 R1 {sub2 s2}
+            }
+            class sub1 {
+                instance s1 R2 {sub3 s3} R3 {sub5 s5}
+            }
+            class sub2 {
+                instance s2
+            }
+            class sub3 {
+                instance s3
+            }
+            class sub5 {
+                instance s5
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca generate
+    testConditions\
+        {[llength [fileutil::grep {R1} codegen6.c]] == 1}\
+        {[llength [fileutil::grep {R2} codegen6.c]] == 1}
+} -result {1}
+----
+
+[source,c]
+----
+<<generate command tests>>=
+test codegen-7.0 {
+    Generated code file associative class references -- non static
+} -setup {
+    # makeFile {} codegen7.h
+    # makeFile {} codegen7.c
+    micca configure {
+        domain codegen7 {
+            class A {}
+            class X {}
+            class Y {}
+            association R1 -associator A X 0..*--0..* Y
+        }
+        population test codegen7 {
+            class A {
+                instance fred1 R1 {X x1 Y y1}
+                instance fred2 R1 {X x2 Y y2}
+            }
+            class X {
+                instance x1 R1 fred1
+                instance x2 R1 fred2
+            }
+            class Y {
+                instance y1 R1 fred1
+                instance y2 R1 fred2
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca generate
+    testConditions\
+        {[llength [fileutil::grep {R1} codegen7.c]] == 5}
+} -result {1}
+----
+
+[source,c]
+----
+<<generate command tests>>=
+test codegen-8.0 {
+    Generated code file reflexive associative class references -- non static
+} -setup {
+    # makeFile {} codegen8.h
+    # makeFile {} codegen8.c
+    micca configure {
+        domain codegen8 {
+            class A {}
+            class X {}
+            association R1 -associator A X 0..*--0..* X
+        }
+        population test codegen8 {
+            class A {
+                instance a1 R1 {forward x2 backward x1}
+            }
+            class X {
+                instance x1 R1 a1
+                instance x2 R1 a1
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca generate
+    testConditions\
+        {[llength [fileutil::grep {R1} codegen8.c]] == 4}
+} -result {1}
+----
+
+[source,c]
+----
+<<generate command tests>>=
+test codegen-9.0 {
+    Generated code file reflexive class references
+} -setup {
+    # makeFile {} codegen9.h
+    # makeFile {} codegen9.c
+    micca configure {
+        domain codegen9 {
+            class X {}
+            association R1 X 0..*--0..1 X
+        }
+        population test codegen9 {
+            class X {
+                instance x1 R1 {forward x2 backward {x1 x3}}
+                instance x2 R1 {forward x3 backward {x1 x2}}
+                instance x3 R1 {forward x1 backward {x2 x3}}
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca generate
+    testConditions\
+        {[llength [fileutil::grep {R1} codegen9.c]] == 2}
+} -result {1}
+----
+
 
 == Helper Commands
 
