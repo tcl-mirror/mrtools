@@ -23,20 +23,21 @@ _e.g._ for a state activity, `self->Temp = 27`, can be used to update the
 
 Other aspects of mapping model execution to the implementation are not
 directly supported in the implementation language.
-Perhaps the best example is execution of a state model.
+Consider the execution of a state model.
 There is no intrinsic support for state machines in the ``C'' language.
 To dispatch events to state machines requires that we write additional
 ``C'' code to implement the execution rules of Moore state machines.
 We will gather that code into ``C'' functions and the functions will require
 data that must be structured in a particular way.
 
-This part of the book is primarily concerned with showing those functions
-and data structures.
+This part of the book is primarily concerned with showing the functions
+and data structures required to map model execution rules onto the
+implementation.
 Taken together,
 they define the details of how execution happens in a `micca` translated
 domain.
 We have purposely chosen a simple scheme of execution, namely,
-single threaded and event driven with callbacks to handle the specific
+single threaded and event driven with callbacks to handle the domain specific
 computations.
 This choice enables this translation scheme to be used in small,
 embedded, ``bare metal'' computing technology.
@@ -67,14 +68,14 @@ we want to enumerate the characteristics of `micca` run time architecture.
 whose size is known at compile time. There is no use of dynamically allocated
 memory or of any generic system heap by the run time code.
 * The address in memory of a class instance serves as an architecturally
-generated identifier for the instance and we use that identifier execlusively
+generated identifier for the instance and we use that identifier exclusively
 in the interfaces of the run time code.
 * The only support for asynchronous execution is that of an interrupt.
 Facilities are provided to allow interrupt service code to synchronize
 to the running background.
 There is no notion of semaphores, condition variables or any other
 mutual exclusion locking scheme other than that required to prevent
-interrupts from executing.
+interrupts from executing during small critical sections of code.
 * Background execution is single threaded.
 There is no notion of _task_ or _process_ or _thread_ as those terms are
 usually defined for computer operating systems.
@@ -175,7 +176,7 @@ the run time event loop is an infinite loop.
 Most applications will enter the event loop after their initialization
 phase and remain there forever.
 However,
-testing and other considerations mean that at times we will want to exit the
+testing and other considerations mean that we may want to exit the
 event loop to gain control of the program.
 
 (((micca,Run Time,mrt_EventLoop)))
@@ -359,12 +360,15 @@ typedef struct mrtinstance {
     A positive value means the memory has been reserved and the instances
     is in active use.
 `currentState`::
-    For those class that have a state model,
+    For those classes that have a state model,
     the `currentState` member holds a small integer number indicating the
     current state in which the instance resides.
     A value of -1 is used to show that the class does not have a state model.
 `refCount`::
     A counter value used to enforce referential integrity.
+    At the end of a data transaction,
+    this member is used as an accumulator of the number of times the
+    instance is referenced in a relationship.
 `name`::
     An instance may have a name that it was given during the intial instance
     population.
@@ -381,8 +385,9 @@ pointer to a `MRT_Instance` with impunity.
 typedef short int AllocStatus ;
 ----
 
-A class instance is mapped onto the element of a ``C'' array.
-The size of the array is fixed at compile time.
+A class instance is in reality an element of a ``C'' array.
+The size of the array, and consequently the maximum number of instances
+of the class, is fixed at compile time.
 The `alloc` member of the instance structure is used to keep track of the
 status of the array elements as instances are created and deleted at run time.
 We will also use this member to track _event in flight_ errors.
@@ -414,13 +419,14 @@ that may occur when an event is dispatched.
 All the behavior of data management and execution sequencing is
 completely determined by the values contained in the data structures
 supplied to the various functions of the mechanisms.
-This is different from some software architecture mechanisms that
+This is distinct from some software architecture mechanisms that
 use _ad hoc_ generated code from a model compiler to implement
-some capabilities.
+some capabilities and being completely data driven and separately
+compilable is a design goal of the run time.
 
 Since the behavior of all instances of a given class is the same,
-each class that requires data management or has execution behavior has a data
-structure that contains all the class invariant information.
+each class has a data structure that contains all the class invariant
+information.
 
 [source,c]
 ----
@@ -441,7 +447,7 @@ typedef struct mrtclass {
 `iab`::
     A pointer to an instance allocation block.
     The IAB is used to dynamically allocation class instances.
-    For class populations that are static,
+    For classes that are union subclasses,
     this value is set to `NULL`.
 `edb`::
     A pointer to an event dispatch block.
@@ -480,11 +486,14 @@ an event.
 
 Creating initial instances is handled during code generation using the
 population data specified when the domain is configured.
-In this section we are going to discuss synchronous instance creation.
+The code generator arranges for initial instances to be initializers
+of the class storage array.
+In this section,
+we are going to discuss synchronous instance creation.
 This is instance creation by a direct function invocation and when
 the function returns the instance is ready and available.
 Later we will discuss asynchronous instance creation which is instance
-creation by generating an event.
+creation by signaling an event.
 
 === Instance Allocation Block
 
@@ -897,7 +906,7 @@ to manage referential integrity we must supply:
 * Functions to relate and unrelate class instances across the data model
 relationships.
 * Data structures and values that encode the specifications of the
-relationships from the data model.
+relationships from the platform model.
 
 In keeping with our goal that the run time be completely data driven,
 the code generator will supply the necessary information about all the
@@ -1275,17 +1284,17 @@ domain data model.
 The transaction concept is necessary because we must be able to defer
 the integrity check until such time as the analysis model can insure
 that the integrity constraints are met.
-For example consider two classes in a one-to-one unconditional
-relationship.
+For example,
+consider two classes in a one-to-one unconditional relationship.
 If an instance of one class is created we do not want to check referential
-integrity until the code has had an opportunity to created a corresponding
+integrity until the code has had an opportunity to create a corresponding
 instance of the associated class.
 
 The precise rules of data integrity are that each state activity must
-leave the domain data in a consistent state or generate one or more events
+leave the domain data in a consistent state or signal one or more events
 that, when dispatched, will ultimately bring the domain data into a
 consistent state.
-The later phrase of this rule implies that there is a thread of control
+The later phrase of this rule implies that there is a _thread of control_
 which determines the boundary of when data consistency is checked.
 We will describe how threads of control work later.
 For now,
@@ -1294,8 +1303,8 @@ data integrity is to be verified.
 
 Each time a relationship is manipulated, by:
 
-* creating instances
-* deleting instances
+* creating instances that participate in a relationship
+* deleting instances that participate in a relationship
 * relating instances together
 * unrelating instances
 * reclassifying subclass instances
@@ -1371,8 +1380,7 @@ mrtMarkTransaction(
             }
         }
 
-        if (mrtDataTransaction.count >=
-                COUNTOF(mrtDataTransaction.relationships)) {
+        if (mrtDataTransaction.count >= COUNTOF(mrtDataTransaction.relationships)) {
             mrtFatalError(mrtTransOverflow) ; // <1>
         }
         mrtDataTransaction.relationships[mrtDataTransaction.count++] = *rel ;
@@ -1411,7 +1419,7 @@ At the end of a transaction on the data model,
 descriptors and check each relationship to make sure the data model
 is in a consistent state.
 The design approach is to use the `refCount` member of each instance
-as a place to store how many times the instances is referred to by
+as a place to store how many times the instance is referred to by
 the other participant in the relationship.
 Then knowing the cardinality of the relationship we can evaluate
 the `refCount` values to determine if referential integrity has been
@@ -1424,7 +1432,7 @@ classes.
 . Using the relationship description information,
 find the reference pointers in the class instance that refer to the
 other participating class instance and increment the `refCount` member in
-the other participating instance.
+the other participating instance if its pointer is found.
 This is done for both participants in the relationship.
 . Evaluate the `refCount` value against what the cardinality of the
 relationship requires.
@@ -1436,7 +1444,7 @@ type unsafe operations happening in the code.
 Sometimes ``C'' as a language is accused of being little more than a
 high level assembler and it is those type unsafe facilities
 that we must employ here to obtain a single body of code that can
-operate on a class instance of any type.
+operate on an arbitrary class instance.
 
 [source,c]
 ----
@@ -1524,31 +1532,34 @@ So we will consider each side separately.
 <<mrtCheckRelationship: class based associations>>=
 struct mrtclassassociation const *assoc = &rel->relInfo.classAssociation ;
 
-/*
- * On the first side, we evaluate the references from the source class
- * to the associator class.
- */
-mrtZeroRefCounts(assoc->source.classDesc->iab) ;
-mrtZeroRefCounts(assoc->associator.classDesc->iab) ;
-mrtCountClassAssocRefs(&assoc->source, assoc->associator.classDesc->iab,
-        assoc->associator.backwardOffset) ;
-result =
-    mrtCheckRefCounts(assoc->source.classDesc->iab, assoc->source.cardinality) &&
-    mrtCheckRefCounts(assoc->associator.classDesc->iab, mrtExactlyOne) ;
-
-/*
- * If the first side is okay, then we can evaluate the references from the
- * target class to the associator class.
- */
+result = mrtCheckAssociatorRefs(&assoc->associator) ;
 if (result) {
-    mrtZeroRefCounts(assoc->target.classDesc->iab) ;
+    /*
+     * On the first side, we evaluate the references from the source class
+     * to the associator class.
+     */
+    mrtZeroRefCounts(assoc->source.classDesc->iab) ;
     mrtZeroRefCounts(assoc->associator.classDesc->iab) ;
-    mrtCountClassAssocRefs(&assoc->target,
-            assoc->associator.classDesc->iab,
-            assoc->associator.forwardOffset) ;
-    result =
-        mrtCheckRefCounts(assoc->target.classDesc->iab, assoc->target.cardinality) &&
-        mrtCheckRefCounts(assoc->associator.classDesc->iab, mrtExactlyOne) ;
+    mrtCountClassAssocRefs(&assoc->source, assoc->associator.classDesc->iab,
+            assoc->associator.backwardOffset) ;
+    result = mrtCheckRefCounts(assoc->source.classDesc->iab,
+                assoc->source.cardinality) &&
+            mrtCheckRefCounts(assoc->associator.classDesc->iab, mrtExactlyOne) ;
+
+    /*
+     * If the first side is okay, then we can evaluate the references from the
+     * target class to the associator class.
+     */
+    if (result) {
+        mrtZeroRefCounts(assoc->target.classDesc->iab) ;
+        mrtZeroRefCounts(assoc->associator.classDesc->iab) ;
+        mrtCountClassAssocRefs(&assoc->target,
+                assoc->associator.classDesc->iab,
+                assoc->associator.forwardOffset) ;
+        result = mrtCheckRefCounts(assoc->target.classDesc->iab,
+                assoc->target.cardinality) &&
+            mrtCheckRefCounts(assoc->associator.classDesc->iab, mrtExactlyOne) ;
+    }
 }
 ----
 
@@ -1743,6 +1754,47 @@ and have factored out the `mrtZeroOrMore` case above.
 <3> Select the comparison function based on the encoded cardinality.
 A small table of pointers to the comparison functions is handy to do this.
 <4> We need not go past the first failure.
+
+The singular references made by associator classes are special in the
+sense that they should never be `NULL`.
+Unrelating class based associations will set those references to `NULL` and
+we need to make sure that either the associator instance was reused by
+relating to other instances or it was deleted.
+
+[source,c]
+----
+<<mrt forward references>>=
+static bool
+mrtCheckAssociatorRefs(struct mrtassociatorrole const *associator) ;
+----
+
+[source,c]
+----
+<<mrt static functions>>=
+static bool
+mrtCheckAssociatorRefs(
+    struct mrtassociatorrole const *associator)
+{
+    void **ref ;
+    MRT_iab const *iab = associator->classDesc->iab ;
+    for (MRT_Instance *inst = (MRT_Instance *)iab->storageStart ;
+            inst < (MRT_Instance *)iab->storageFinish ;
+            inst = (MRT_Instance *)((uintptr_t)inst + iab->instanceSize)) {
+        if (inst->alloc > 0) {
+            ref = (void **)((uintptr_t)inst + associator->forwardOffset) ;
+            if (*ref == NULL) {
+                return false ;
+            }
+            ref = (void **)((uintptr_t)inst + associator->backwardOffset) ;
+            if (*ref == NULL) {
+                return false ;
+            }
+        }
+    }
+
+    return true ;
+}
+----
 
 ==== Counting References
 
@@ -2166,8 +2218,6 @@ mrt_Relate(
     unsigned subcount ;
     void *associator = NULL ;
 
-    mrtMarkTransaction(&rel, 1) ;
-
     switch (rel->relType) {
     case mrtSimpleAssoc: {
         <<mrt_Relate: link simple association>>
@@ -2192,6 +2242,8 @@ mrt_Relate(
     default:
         break ;
     }
+
+    mrtMarkTransaction(&rel, 1) ;
 
     return associator ;
 }
@@ -2431,6 +2483,8 @@ mrtFindUnionGenSubclassRole(
 
 === Unrelating Instances
 
+The inverse of relating instances is to unrelate them.
+
 [source,c]
 ----
 <<mrt external interfaces>>=
@@ -2441,6 +2495,21 @@ mrt_Unrelate(
     void *target,
     ...) ;
 ----
+
+`rel`::
+    A pointer to a relationship description for the relationship
+    across which the relate operation is to happen.
+`source`::
+    A pointer to a class instance that serves the source role in the
+    relationship.
+`target`::
+    A pointer to a class instance that serves the target role in the
+    relationship.
+`?associator?`::
+    For simple associations and generalizations this argument may be omitted
+    and, if supplied, it is ignored.
+    For class based association,
+    it must be supplied and is the instance reference to the associator class.
 
 [source,c]
 ----
@@ -2457,8 +2526,6 @@ mrt_Unrelate(
 
     va_list ap ;
     unsigned subcount ;
-
-    mrtMarkTransaction(&rel, 1) ;
 
     switch (rel->relType) {
     case mrtSimpleAssoc: {
@@ -2484,8 +2551,14 @@ mrt_Unrelate(
     default:
         break ;
     }
+
+    mrtMarkTransaction(&rel, 1) ;
 }
 ----
+
+To unrelate simple associations we must verify that the classes of the
+instance actually participate in the association and the
+perform the pointer operations to unlink the instances.
 
 [source,c]
 ----
@@ -2501,6 +2574,12 @@ mrtUnlink(&assoc->source, source, target) ;
 mrtUnlink(&assoc->target, target, source) ;
 ----
 
+The pointer operation for unlinking mirror those for linking.
+For singular associations, we need only find the pointer member in the
+instance structure.
+For linked associations,
+we must unlink the target from the list.
+
 [source,c]
 ----
 <<mrt static functions>>=
@@ -2514,7 +2593,7 @@ mrtUnlink(
     switch (sourceRole->storageType) {
     case mrtSingular: {
         void **ref = (void **)((uintptr_t)source + sourceRole->storageOffset) ;
-        *ref = NULL ;
+        *ref = NULL ; // <1>
     }
         break ;
 
@@ -2535,6 +2614,14 @@ mrtUnlink(
     }
 }
 ----
+<1> Note that we set the pointer to `NULL` when it is unlinked.
+This is essential for the referential integrity checks.
+A `NULL` reference pointer means this instance does not add anything to
+the reference counts.
+
+For class based associations,
+we deal with the association in two steps, between each participant and
+the associator class.
 
 [source,c]
 ----
