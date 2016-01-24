@@ -523,6 +523,8 @@ typedef struct mrtinstallocblock {
     size_t instanceSize ;
     InstCtor construct ;
     InstDtor destruct ;
+    unsigned linkCount ;
+    MRT_AttrOffset const *linkOffsets ;
 } MRT_iab ;
 ----
 
@@ -552,6 +554,11 @@ typedef struct mrtinstallocblock {
 `destruct`::
     A pointer to a destructor function. If there is no destructor defined
     for the class, then the value of this member may be set to `NULL`.
+`linkCount`::
+    The number of link pointer containers in the instance.
+`linkOffsets`::
+    A pointer to an array of offsets to the link pointer containers
+    in an instance. The array contains `linkCount` elements.
 
 Instance creation and deletion also supports a very simplified notion of
 construction and destruction for the instances.
@@ -740,6 +747,14 @@ mrt_CreateInstance(
                 classDesc->edb->initialState : initialState ; // <1>
     } else {
         inst->currentState = MRT_StateCode_IG ; // <2>
+    }
+    /*
+     * Initialize the link pointer containers.
+     */
+    MRT_AttrOffset const *offsets = iab->linkOffsets ;
+    for (unsigned count = iab->linkCount ; count != 0 ; --count, ++offsets) {
+        MRT_LinkRef *link = (MRT_LinkRef *)((uintptr_t) inst + *offsets) ;
+        mrtLinkRefInit(link) ;
     }
     /*
      * Run the constructor if there is one.
@@ -2813,6 +2828,13 @@ mrtLinkRefEnd(
     return iter ;
 }
 static inline
+void
+mrtLinkRefInit(
+    MRT_LinkRef *ref)
+{
+    ref->next = ref->prev = mrtLinkRefEnd(ref) ;
+}
+static inline
 bool
 mrtLinkRefEmpty(
     MRT_LinkRef *iter)
@@ -3421,8 +3443,11 @@ mrt_CreateAsync(
     MRT_Instance *sourceInst)
 {
     assert(targetClass != NULL) ;
+    assert(targetClass->edb != NULL) ;
+    assert(targetClass->edb->creationState >= 0) ;
 
-    MRT_Instance *targetInst = mrt_CreateInstance(targetClass, 0) ; // <1>
+    MRT_Instance *targetInst = mrt_CreateInstance(targetClass,
+            targetClass->edb->creationState) ; // <1>
     targetInst->alloc = -targetInst->alloc ; // <2>
 
     MRT_Ecb *ecb = mrtAllocEvent() ;
@@ -3438,8 +3463,7 @@ mrt_CreateAsync(
     return targetInst ;
 }
 ----
-<1> The code generator always arranges for the intial pseudo-state
-for creation events to be state zero.
+<1> We want the instance created in the pseudo-initial state.
 <2> The `alloc` member is made negative for instances that are awaiting
 the dispatch of a creation event.
 Effectively the negative `alloc` value signals that the memory is reserved
@@ -4458,6 +4482,7 @@ typedef struct mrteventdispatchblock {
     MRT_DispatchCount stateCount ;
     MRT_DispatchCount eventCount ;
     MRT_StateCode initialState ;
+    MRT_StateCode creationState ;
     MRT_StateCode const *transitionTable ;
     PtrActivityFunction const *activityTable ;
     bool const *terminalStates ;
@@ -4473,6 +4498,12 @@ typedef struct mrteventdispatchblock {
     The number of states in the transition matrix.
 `eventCount`::
     The number of events in the transition matrix.
+`initialState`::
+    The number of the state that is the default state when an
+    instance is created synchronously.
+`creationState`::
+    The number of the state that is the default state when an
+    instance is created asynchronously.
 `transitionTable`::
     A pointer to the transition matrix.
 `activityTable`::
@@ -4517,7 +4548,7 @@ with each state.
 [source,c]
 ----
 <<mrt interface simple types>>=
-typedef void ActivityFunction(void *const, void *const) ;
+typedef void ActivityFunction(void *const, void const *const) ;
 typedef ActivityFunction *PtrActivityFunction ;
 ----
 

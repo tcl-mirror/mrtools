@@ -589,6 +589,14 @@ set codeTemplate [string cat\
     %<classDeclarations>%\
     %<stateParamDeclarations>%\
     %<operationDeclarations>%\
+    %<ctorDeclarations>%\
+    %<dtorDeclarations>%\
+    %<activityDeclarations>%\
+    %<storageDeclarations>%\
+    %<iabDefinitions>%\
+    %<edbDefinitions>%\
+    %<pdbDefinitions>%\
+    %<relationshipDefinitions>%\
     %<epilogue>%\
 ]
 ----
@@ -640,6 +648,14 @@ proc PrepareDomainProperties {domain} {
         relation rename % Class Name
     } {} |%]
 
+    set insts [pipe {
+        findRelated $classRefs R104 {~R101 ElementPopulation}\
+            {~R105 ClassPopulation} ~R102 |
+        deRef % |
+        relation project % Class Number |
+        relation rename % Class Name
+    } {} |%]
+
     set ClassProperties [pipe {
         deRef $classRefs |
         relation project ~ Name |
@@ -647,13 +663,21 @@ proc PrepareDomainProperties {domain} {
             Declaration string {"struct [tuple extract $stup Name]"}\
             Reference string {"struct [tuple extract $stup Name] *"}\
             StorageVariable string {"struct [tuple extract $stup Name]\
-                [tuple extract $stup Name]Pool"} |
+                [tuple extract $stup Name]__POOL"} |
         ralutil::rvajoin ~ $allocs Allocations |
         relation extend ~ atup Allocation int {
             [relation isempty [tuple extract $atup Allocations]] ?\
             0 : [relation extract [tuple extract $atup Allocations] Allocation]
         } |
-        relation eliminate ~ Allocations
+        relation eliminate ~ Allocations |
+        ralutil::rvajoin ~ $insts Instances |
+        relation extend ~ itup\
+            InitialInstance int {
+                [relation cardinality [tuple extract $itup Instances]]} \
+            TotalInstance int {
+                [relation cardinality [tuple extract $itup Instances]] +
+                [tuple extract $itup Allocation]} |
+        relation eliminate ~ Instances
     }]
 
     variable AssocProperties
@@ -670,6 +694,11 @@ proc PrepareDomainProperties {domain} {
     }]
 
     return
+}
+
+proc JoinToClassProperties {proprel} {
+    variable ClassProperties
+    set ClassProperties [relation join $ClassProperties $proprel]
 }
 
 proc GetClassProperty {class prop} {
@@ -810,29 +839,39 @@ proc forwardClassDeclarations {} {
 proc classDeclarations {} {
     variable domain
 
+    variable linkMemberNames [dict create]
+
     set result [comment "Class structure declarations"]
 
-    set subs [deRef [UnionSubclass findWhere {$Domain eq $domain}]]
-    set supers [deRef [UnionSuperclass findWhere {$Domain eq $domain}]]
     set ultimates [pipe {
-        relation semiminus $subs $supers -using {Domain Domain Class Class} |
-        ::rosea::Helpers::ToRef ::micca::UnionSuperclass ~
-    }]
+        FindUltimateSuperclasses $domain |
+        findRelated % {~R46 UnionSuperclass}
+    } {} |%]
     append result [DeclareUnionSubclassStructures $ultimates]
 
-    set classRefs [Class findWhere {$Domain eq $domain}]
-    set remaining [pipe {
-        Class findWhere {$Domain eq $domain} |
-        deRef ~ |
-        relation semiminus $subs ~ -using {Domain Domain Class Name} |
-        ::rosea::Helpers::ToRef ::micca::Class ~
-    }]
-
+    set remaining [FindNonUnionSubclasses $domain]
     forAllRefs classRef $remaining {
         append result [DeclareClassStructure $classRef]
     }
 
+    JoinToClassProperties [relation fromdict $linkMemberNames\
+        Name string LinkMembers list]
+
     return $result
+}
+----
+
+[source,c]
+----
+<<generation helper commands>>=
+proc FindNonUnionSubclasses {domain} {
+    set usubs [UnionSubclass findWhere {$Domain eq $domain}]
+    return [pipe {
+        Class findWhere {$Domain eq $domain} |
+        deRef ~ |
+        relation semiminus [deRef $usubs] ~ -using {Domain Domain Class Name} |
+        ::rosea::Helpers::ToRef ::micca::Class ~
+    }]
 }
 ----
 
@@ -870,7 +909,7 @@ proc DeclareClassStructure {classRef} {
 
     append result\
         "struct $className \{\n"\
-        "    MRT_Instance base__ ;\n"
+        "    MRT_Instance base__INST ;\n"
 
     set compRefs [findRelated $classRef ~R20]
 
@@ -1022,22 +1061,26 @@ proc DeclareClassStructure {classRef} {
     # link references.
     # Start with associator classes. They will have link containers if
     # either source or target is multiple and non-static
+    variable linkMemberNames
+    dict set linkMemberNames $className [list]
     set atorRef [findRelated $classRef {~R41 ClassRole} {~R40 AssociatorClass}]
     if {[isNotEmptyRef $atorRef]} {
         set sourceRef [findRelatedWhere $atorRef {R42 ~R34} {$Multiplicity}]
         if {[isNotEmptyRef $sourceRef]} {
-            assignAttribute $sourceRef Class Relationship
+            assignAttribute $sourceRef Relationship
             if {![GetAssociationProperty $Relationship IsStatic]} {
                 append result "    "\
                     "MRT_LinkRef ${Relationship}_forward ;\n"
+                dict lappend linkMemberNames $className ${Relationship}_forward
             }
         }
         set targetRef [findRelatedWhere $atorRef {R42 ~R35} {$Multiplicity}]
         if {[isNotEmptyRef $targetRef]} {
-            assignAttribute $targetRef Class Relationship
+            assignAttribute $targetRef Relationship
             if {![GetAssociationProperty $Relationship IsStatic]} {
                 append result "    "\
                     "MRT_LinkRef ${Relationship}_backward ;\n"
+                dict lappend linkMemberNames $className ${Relationship}_backward
             }
         }
     }
@@ -1048,9 +1091,10 @@ proc DeclareClassStructure {classRef} {
         {~R40 AssociationParticipantClass}
         {~R38 SimpleReferringClass}} {$Multiplicity}]
     if {[isNotEmptyRef $srcRef]} {
-        assignAttribute $srcRef Class Relationship
+        assignAttribute $srcRef Relationship
         if {![GetAssociationProperty $Relationship IsStatic]} {
             append result "    MRT_LinkRef ${Relationship}_links ;\n"
+            dict lappend linkMemberNames $className ${Relationship}_links
         }
     }
 
@@ -1229,8 +1273,8 @@ test codegen-5.0 {
 test codegen-6.0 {
     Generated code file union generalization
 } -setup {
-    makeFile {} codegen6.h
-    makeFile {} codegen6.c
+    # makeFile {} codegen6.h
+    # makeFile {} codegen6.c
     micca configure {
         domain codegen6 {
             class super {}
@@ -1295,8 +1339,8 @@ test codegen-6.0 {
 test codegen-7.0 {
     Generated code file associative class references -- non static
 } -setup {
-    makeFile {} codegen7.h
-    makeFile {} codegen7.c
+    # makeFile {} codegen7.h
+    # makeFile {} codegen7.c
     micca configure {
         domain codegen7 {
             class A {}
@@ -1324,7 +1368,7 @@ test codegen-7.0 {
 } -body {
     micca generate
     testConditions\
-        {[llength [fileutil::grep {R1} codegen7.c]] == 5}
+        {[llength [fileutil::grep {R1_} codegen7.c]] == 3}
 } -result {1}
 ----
 
@@ -1334,8 +1378,8 @@ test codegen-7.0 {
 test codegen-8.0 {
     Generated code file reflexive associative class references -- non static
 } -setup {
-    makeFile {} codegen8.h
-    makeFile {} codegen8.c
+    # makeFile {} codegen8.h
+    # makeFile {} codegen8.c
     micca configure {
         domain codegen8 {
             class A {}
@@ -1357,7 +1401,7 @@ test codegen-8.0 {
 } -body {
     micca generate
     testConditions\
-        {[llength [fileutil::grep {R1} codegen8.c]] == 4}
+        {[llength [fileutil::grep {R1_} codegen8.c]] == 3}
 } -result {1}
 ----
 
@@ -1367,8 +1411,8 @@ test codegen-8.0 {
 test codegen-9.0 {
     Generated code file reflexive class references
 } -setup {
-    makeFile {} codegen9.h
-    makeFile {} codegen9.c
+    # makeFile {} codegen9.h
+    # makeFile {} codegen9.c
     micca configure {
         domain codegen9 {
             class X {}
@@ -1387,7 +1431,7 @@ test codegen-9.0 {
 } -body {
     micca generate
     testConditions\
-        {[llength [fileutil::grep {R1} codegen9.c]] == 2}
+        {[llength [fileutil::grep {R1_links} codegen9.c]] == 2}
 } -result {1}
 ----
 
@@ -1605,7 +1649,7 @@ proc operationDeclarations {} {
 ----
 <<generate command tests>>=
 test codegen-11.0 {
-    Generated code file reflexive class references
+    Generated code file with class operations
 } -setup {
     # makeFile {} codegen11.h
     # makeFile {} codegen11.c
@@ -1637,6 +1681,538 @@ test codegen-11.0 {
         {[llength [fileutil::grep {X_count} codegen11.c]] == 1}\
         {[llength [fileutil::grep {X_addColor} codegen11.c]] == 1}
 } -result {1}
+----
+
+[source,c]
+----
+<<generation code commands>>=
+proc ctorDeclarations {} {
+    variable domain
+    set result {}
+
+    set ctors [Constructor findWhere {$Domain eq $domain}]
+    if {[isNotEmptyRef $ctors]} {
+        append result [comment "Class Constructor Forward Declarations"]
+        forAllRefs ctor $ctors {
+            assignAttribute $ctor {Class className}
+            append result\
+                "static void ${className}__CTOR\("\
+                [GetClassProperty $className Reference]\
+                "\) ; \n"
+        }
+    }
+
+    return $result
+}
+----
+
+[source,c]
+----
+<<generation code commands>>=
+proc dtorDeclarations {} {
+    variable domain
+    set result {}
+
+    set dtors [Destructor findWhere {$Domain eq $domain}]
+    if {[isNotEmptyRef $dtors]} {
+        append result [comment "Class Destructor Forward Declarations"]
+        forAllRefs dtor $dtors {
+            assignAttribute $dtor {Class className}
+            append result\
+                "static void ${className}__DTOR\("\
+                [GetClassProperty $className Reference]\
+                "\) ; \n"
+        }
+    }
+
+    return $result
+}
+----
+
+[source,c]
+----
+<<generation code commands>>=
+proc activityDeclarations {} {
+    variable domain
+    set result {}
+
+    set classes [pipe {
+        State findWhere {$Domain eq $domain && $Activity ne {}} |
+        deRef ~ |
+        relation eliminate ~ Domain Activity IsTerminal PSigID |
+        relation group ~ States Name
+    }]
+
+    if {[relation isnotempty $classes]} {
+        append result [comment "State Activities Forward Declarations"]
+
+        relation foreach class $classes -ascending Model {
+            relation assign $class
+            relation foreach state $States {
+                relation assign $state
+                append result "static void ${Model}_${Name}__ACTIVITY\("\
+                    "void *const s__, "\
+                    "void const *const p__) ;\n"
+            }
+        }
+    }
+
+    return $result
+}
+----
+
+[source,c]
+----
+<<generation code commands>>=
+proc storageDeclarations {} {
+    variable domain
+    set result {}
+
+    set cpops [pipe {
+        FindNonUnionSubclasses $domain |
+        findRelated % R104 {~R101 ElementPopulation} {~R105 ClassPopulation}
+    } {} |%]
+
+    if {[isNotEmptyRef $cpops]} {
+        append result [comment "Class Instance Storage Forward Declarations"]
+        forAllRefs cpop $cpops {
+            assignAttribute $cpop {Allocation allocation} {Class className}
+            set insts [refMultiplicity [findRelated $cpop ~R102]]
+            set total [expr {$allocation + $insts}]
+            append result "static "\
+                [GetClassProperty $className StorageVariable]\
+                "\[[GetClassProperty $className TotalInstance]\] ;\n"
+        }
+    }
+
+    return $result
+}
+----
+
+[source,c]
+----
+<<generation code commands>>=
+proc iabDefinitions {} {
+    variable domain
+    set result [comment "Instance Allocation Block Definitions"]
+
+    forAllRefs classRef [FindNonUnionSubclasses $domain] {
+        append result [DefineIABMembers $classRef false]
+    }
+
+    set unionRefs [pipe {
+        UnionSubclass findWhere {$Domain eq $domain} |
+        findRelated ~ R47 R40 R41
+    }]
+    forAllRefs classRef $unionRefs {
+        append result [DefineIABMembers $classRef true]
+    }
+
+    return $result
+}
+----
+
+[source,c]
+----
+<<generation helper commands>>=
+proc DefineIABMembers {classRef isUnionSubclass} {
+    assignAttribute $classRef {Name className}
+
+    set linkMembers [GetClassProperty $className LinkMembers]
+    set linkCount [llength $linkMembers]
+    if {$linkCount == 0} {
+        set linkOffsets NULL
+    } else {
+        set linkOffsets ${className}__LINKS
+        append result\
+            "static MRT_AttrOffset const $linkOffsets\[\] = \{"
+        foreach linkMember $linkMembers {
+            append result "offsetof\([GetClassProperty $className Declaration],\
+                $linkMember\), "
+        }
+        append result "\} ;\n"
+    }
+
+    append result\
+        "static MRT_iab const ${className}__IAB = \{\n"
+
+    if {$isUnionSubclass} {
+        append result\
+            "    .storageStart = NULL,\n"\
+            "    .storageFinish = NULL,\n"\
+            "    .storageLast = NULL,\n"
+    } else {
+        set nelements [GetClassProperty $className TotalInstance]
+        append result\
+            "    .storageStart = &${className}__POOL\[0\],\n"\
+            "    .storageFinish = &${className}__POOL\[$nelements\],\n"\
+            "    .storageLast = &${className}__POOL\[[expr {$nelements - 1}]\],\n"
+    }
+    set ctor [pipe {
+        findRelated $classRef ~R8 |
+        expr {[isEmptyRef %] ? "NULL" : "[readAttribute % Class]__CTOR"}
+    } {} |%]
+    set dtor [pipe {
+        findRelated $classRef ~R9 |
+        expr {[isEmptyRef %] ? "NULL" : "[readAttribute % Class]__DTOR"}
+    } {} |%]
+    append result\
+        "    .alloc = [expr {[GetClassProperty $className InitialInstance]\
+                    + 1}],\n"\
+        "    .instanceSize = sizeof\([GetClassProperty $className Declaration]\),\n"\
+        "    .construct = $ctor,\n"\
+        "    .destruct = $dtor,\n"\
+        "    .linkCount = $linkCount,\n"\
+        "    .linkOffsets = $linkOffsets\n"\
+        "\} ;\n"
+
+    return $result
+}
+----
+
+[source,c]
+----
+<<generation code commands>>=
+proc edbDefinitions {} {
+    variable domain
+    set result [comment "Event Dispatch Block Definitions"]
+
+    upvar #0 ::micca::@Gen@::options options
+
+    forAllRefs smodel [StateModel findWhere {$Domain eq $domain}] {
+        assignAttribute $smodel {Model className}
+
+        append result [GenerateTransitionTable $smodel]
+        append result [GenerateActivityTable $smodel]
+        set termstates [GenerateTerminalStates $smodel result]
+
+        if {![dict get $options nonames]} {
+            append result [GenerateModelNames $smodel]
+        }
+
+        append result "static MRT_edb const ${className}__EDB = \{\n"
+
+        set stateRefs [findRelated $smodel ~R55]
+        set cstateRef [findRelated $smodel ~R56]
+        append result\
+            "    .stateCount = [expr {[refMultiplicity $stateRefs] +\
+                [refMultiplicity $cstateRef]}],\n"
+
+        set eventRefs [findRelated $smodel ~R87]
+        append result\
+            "    .eventCount = [refMultiplicity $eventRefs],\n"\
+            "    .initialState = [readAttribute [findRelated $smodel R58 R57]\
+                        Number],\n"
+        set crstate [expr {[isNotEmptyRef $cstateRef] ?\
+            [readAttribute [findRelated R57] Number] : "MRT_StateCode_IG"}]
+        append result\
+            "    .creationState = $crstate,\n"\
+            "    .transitionTable = ${className}__TTAB,\n"\
+            "    .activityTable = ${className}__ATAB,\n"\
+            "    .terminalStates = $termstates,\n"
+
+        if {![dict get $options nonames]} {
+            append result\
+                "    .stateNames = ${className}__SNAMES,\n"\
+                "    .eventNames = ${className}__ENAMES,\n"
+        }
+
+        append result\
+            "\} ;\n"
+    }
+
+    return $result
+}
+----
+
+typedef struct mrteventdispatchblock {
+    MRT_DispatchCount stateCount ;
+    MRT_DispatchCount eventCount ;
+    MRT_StateCode initialState ;
+    MRT_StateCode creationState ;
+    MRT_StateCode const *transitionTable ;
+    PtrActivityFunction const *activityTable ;
+    bool const *terminalStates ;
+
+#       ifndef MRT_NO_NAMES
+    char const *const *stateNames ;
+    char const *const *eventNames ;
+#       endif /* MRT_NO_NAMES */
+} MRT_edb ;
+
+
+[source,c]
+----
+<<generation code commands>>=
+proc GenerateTransitionTable {smodel} {
+    variable domain
+    assignAttribute $smodel {Model className}
+
+    set states [pipe {
+        findRelated $smodel ~R55 |
+        deRef % |
+        relation rename % Name State |
+        relation eliminate % Activity IsTerminal PSigID
+    } {} |%]
+    set cstate [pipe {
+        findRelated $smodel ~R56 |
+        deRef % |
+        relation rename % Name State
+    } {} |%]
+    set states [relation union $states $cstate]
+    # puts [relformat $states states]
+
+    set events [pipe {
+        findRelated $smodel ~R87 |
+        deRef %
+    } {} |%]
+    # puts [relformat $events events]
+
+    set alltrans [relation join $states $events]
+    # puts [relformat $alltrans alltrans]
+
+    set statetrans [pipe {
+        StateTransition findWhere {$Domain eq $domain && $Model eq $className} |
+        deRef ~ |
+        relation eliminate ~ ASigID
+    }]
+    # puts [relformat $statetrans statetrans]
+    set nontrans [pipe {
+        Non-StateTransition findWhere {$Domain eq $domain && $Model eq $className} |
+        deRef ~ |
+        relation rename ~ TransRule NewState
+    }]
+    # puts [relformat $nontrans nontrans]
+
+    set deftrans [pipe {
+        TransitionPlace findAll |
+        deRef ~ |
+        relation minus $alltrans ~ |
+        relation join ~ [deRef [StateModel findAll]] |
+        relation eliminate ~ InitialState |
+        relation rename ~ DefaultTrans NewState |
+        relation update ~ dttup {[tuple extract $dttup State] eq "@"} {
+                tuple update $dttup NewState CH}
+    }]
+    # puts [relformat $deftrans deftrans]
+
+    set ntstates [pipe {
+        TransitionRule findAll |
+        deRef ~ |
+        relation rename ~ Name State |
+        relation extend ~ nttup\
+            Domain string {$domain}\
+            Model string {$className}\
+            StateNumber string {"MRT_StateCode_[tuple extract $nttup State]"}
+    }]
+    # puts [relformat $ntstates ntstates]
+
+    set places [pipe {
+        StatePlace findWhere {$Domain eq $domain && $Model eq $className} |
+        deRef ~ |
+        relation rename ~ Name State Number StateNumber |
+        relation union ~ $ntstates
+    }]
+    # puts [relformat $places places]
+    set transitions [pipe {
+        relation union $statetrans $nontrans $deftrans |
+        relation join ~ $places\
+            -using {Domain Domain Model Model NewState State} |
+        relation rename ~ StateNumber NewStateNumber |
+        relation join ~ $places |
+        relation tag ~ EventNumber -ascending Event |
+        relation eliminate ~ Domain Model
+    }]
+    # puts [relformat $transitions transitions]
+
+    set result "static MRT_StateCode const ${className}__TTAB\[\] = \{\n"
+    relation foreach transition $transitions\
+            -ascending {StateNumber EventNumber} {
+        relation assign $transition
+        append result "    $NewStateNumber, // $State - $Event -> $NewState\n"
+    }
+    append result "\} ;\n"
+
+    return $result
+}
+----
+
+[source,c]
+----
+<<generate command tests>>=
+test codegen-12.0 {
+    Generated code file with state model
+} -setup {
+    # makeFile {} codegen12.h
+    # makeFile {} codegen12.c
+    micca configure {
+        domain codegen12 {
+            class X {
+                attribute color int -default 20
+
+                statemodel {
+                    state s1 {} {
+                        printf("In s1\n") ;
+                    }
+                    transition s1 - e1 -> s2
+
+                    state s2 {} {
+                    }
+                    transition s2 - e1 -> IG
+                    transition s2 - e2 -> s3
+
+                    state s3 {} {
+                    }
+                    transition s3 - e3 -> s1
+
+                    terminal s3
+                }
+            }
+        }
+        population test codegen12 {
+            class X {
+                instance x1
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca generate
+    testConditions\
+        {[llength [fileutil::grep {X__TTAB} codegen12.c]] == 2}\
+        {[llength [fileutil::grep {X__ATAB} codegen12.c]] == 2}
+} -result {1}
+----
+
+[source,c]
+----
+<<generation code commands>>=
+proc GenerateActivityTable {smodel} {
+    variable domain
+    assignAttribute $smodel {Model className}
+
+    set result "static PtrActivityFunction const ${className}__ATAB\[\] = \{\n"
+
+    set places [pipe {
+        StatePlace findWhere {$Domain eq $domain && $Model eq $className} |
+        deRef ~
+    }]
+    relation foreach place $places -ascending Number {
+        set state [relation semijoin $place $::micca::State]
+        if {[relation isnotempty $state]} {
+            relation assign $state Name Activity
+            if {$Activity eq {}} {
+                append result "    NULL, // $Name\n"
+            } else {
+                append result "    ${className}_${Name}__ACTIVITY, // $Name\n"
+            }
+        } else {
+            set cstate [relation semijoin $place $::Micca::CreationState]
+            if {[relation isnotempty $cstate]} {
+                append result "    NULL, // [relation extract $cstate Name]\n"
+            }
+        }
+    }
+
+    append result "\} ;\n"
+}
+----
+
+[source,c]
+----
+<<generation code commands>>=
+proc GenerateTerminalStates {smodel resultVar} {
+    set tstates [findRelatedWhere $smodel ~R55 {$IsTerminal}]
+    if {[isEmptyRef $tstates]} {
+        return NULL
+    }
+    upvar 1 $resultVar result
+    variable domain
+    assignAttribute $smodel {Model className}
+    set places [pipe {
+        StatePlace findWhere {$Domain eq $domain && $Model eq $className} |
+        deRef ~
+    }]
+
+    append result "static bool const ${className}__TSTATES\[\] = \{\n"
+    relation foreach place $places -ascending Number {
+        set state [relation semijoin $place $::micca::State]
+        if {[relation isnotempty $state]} {
+            relation assign $state Name IsTerminal
+            append result "    "\
+                [expr {$IsTerminal ? "true" : "false"}]\
+                ", // $Name\n"
+        } else {
+            set cstate [relation semijoin $place $::Micca::CreationState]
+            if {[relation isnotempty $cstate]} {
+                append result "    false, // [relation extract $cstate Name]\n"
+            }
+        }
+    }
+
+    append result "\} ;\n"
+    return ${className}__TSTATES
+}
+----
+
+[source,c]
+----
+<<generation code commands>>=
+proc GenerateModelNames {smodel} {
+    variable domain
+    assignAttribute $smodel {Model className}
+
+    set states [pipe {
+        StatePlace findWhere {$Domain eq $domain && $Model eq $className} |
+        deRef ~
+    }]
+
+    append result "static char const * const ${className}__SNAMES\[\] = \{\n"
+    relation foreach state $states -ascending Number {
+        relation assign $state Name
+        append result "    \"$Name\",\n"
+    }
+    append result "\} ;\n"
+
+    set events [pipe {
+        TransitioningEvent findWhere\
+                {$Domain eq $domain && $Model eq $className} |
+        deRef ~ |
+        relation tag ~ Number -ascending Event
+    }]
+
+    append result "static char const * const ${className}__ENAMES\[\] = \{\n"
+    relation foreach event $events -ascending Number {
+        relation assign $event Event
+        append result "    \"$Event\",\n"
+    }
+    append result "\} ;\n"
+
+    return $result
+}
+----
+
+[source,c]
+----
+<<generation code commands>>=
+proc pdbDefinitions {} {
+    variable domain
+    set result [comment "Polymorphic Event Dispatch Block Definitions"]
+
+    return $result
+}
+----
+
+[source,c]
+----
+<<generation code commands>>=
+proc relationshipDefinitions {} {
+    variable domain
+    set result [comment "Relationship Description Definitions"]
+
+    return $result
+}
 ----
 
 == Helper Commands
