@@ -90,8 +90,9 @@ The second is a code file that contains all the run time data and
 
 A ``C'' compiler requires a large amount of type information in a
 specific order.
-One is required to define things in specific orders to satisfy the
-compiler.
+Generally,
+one is required to declare symbols before they are defined.
+The ordering has to be quite precise.
 One way to accomplish this is to use a template.
 The template is orgainized in the order required by the compiler
 and contains embedded commands.
@@ -99,7 +100,7 @@ When expanded the commands embedded in the template query the
 platform model and produce ``C'' code output.
 
 Most languages have template expansion libraries and Tcl is no different.
-We will use the `textutil::expander` package from _tcllib_.
+We will use the `textutil::expander` package from `tcllib`.
 We will also have use for creating nicely adjusted text blocks,
 typically as comments, and will be using `textutil::adjust` for that purpose.
 
@@ -109,6 +110,18 @@ typically as comments, and will be using `textutil::adjust` for that purpose.
 package require textutil::expander
 package require textutil::adjust
 ----
+
+Because we are using a template expansion technique to generate the code
+files,
+the code generation has the flavor of a report generator.
+Commands imbedded in the template make queries on the populated
+platform model and emit a _report_ of the query, which in this case
+are ``C'' language statements.
+Although the reports generated are intended to be consumed by a compiler
+rather than a human,
+the design of the generator is very similar to generating reports
+from a database.
+In this case the database is the platform model and the reports are ``C'' code.
 
 [source,c]
 ----
@@ -130,7 +143,7 @@ proc miccaGenerate {arglist} {
     return
 }
 ----
-<1> The template expander creates a new command so we need to delete it
+<1> The template expander creates a new command and we need to delete it
 so that there won't be any conflict the next time `micccaGenerate` is
 invoked.
 
@@ -140,6 +153,9 @@ invoked.
 <<error code formats>>=
 GENERATE_ERRORS     {encountered %d code generation errors}
 ----
+
+We set up options for the generation in a dictionary.
+The default values are given and can be overridden by those passed in.
 
 [source,c]
 ----
@@ -152,13 +168,20 @@ set options [dict create\
 set options [dict merge $options $arglist]
 ----
 
+The `textutil::expander` package creates a command that does all the
+expansion work.
+
 [source,c]
 ----
 <<miccaGenerate: set up template expansion>>=
 textutil::expander expand
-expand setbrackets %< >%
+expand setbrackets %< >% ; # <1>
 expand errmode [dict get $options expanderror]
 ----
+<1> The default way to embed commands in the template is with
+the conventional Tcl brackets ([ ]).
+Those characters are inconvenient in ``C'' so we use bracket strings
+that create less interference.
 
 We will insist that each domain have exactly one population for it.
 This is accomplished by finding all the populations associated with
@@ -196,11 +219,22 @@ if {$errcount > 0} {
 
 == Header Files
 
+The header file generated for a domain contains interfacing information.
+Typically, the header file is included by bridge code that is
+mapping the dependencies of one domain onto another.
+
+Following our usual pattern,
+we will execute the header generation commands from the template in
+a child namespace to avoid any name conflicts.
+
 [source,c]
 ----
 <<miccaGenerate: generate header files>>=
 expand evalcmd "namespace eval [namespace current]::GenHeader"
 ----
+
+The `GenHeader` namespace is a child of `::micca::@Gen@` and follows
+our usual pattern of imports, command path and contents.
 
 [source,c]
 ----
@@ -222,6 +256,9 @@ namespace eval GenHeader {
 }
 ----
 
+The template for the header file is shown below.
+Each embedded command is then shown in the following sections.
+
 [source,c]
 ----
 <<generation data>>=
@@ -241,9 +278,16 @@ set headerTemplate [string cat\
 ]
 ----
 
+The generation of the header files is accomplished by iterating
+over all the domains and placing the output of the template
+expansion into a file.
+We use some variables to provide context to the embedded expansion commands.
+
 [source,c]
 ----
 <<miccaGenerate: generate header files>>=
+variable headerTemplate
+
 forAllRefs domainRef [Domain findAll] {
     namespace upvar GenHeader\
         domain domain\
@@ -252,8 +296,6 @@ forAllRefs domainRef [Domain findAll] {
     assignAttribute $domainRef\
         {Name domain}\
         {Interface interface}
-
-    variable headerTemplate
 
     set hchan [::open $domain.h w]
     try {
@@ -572,6 +614,8 @@ namespace eval GenCode {
         ::rosea::InstCmds
     }
 
+    namespace import [namespace parent]::expand
+
     <<generation code data>>
     <<generation code commands>>
 }
@@ -582,9 +626,10 @@ namespace eval GenCode {
 <<generation data>>=
 set codeTemplate [string cat\
     %<banner>%\
+    %<optionDefines>%\
     %<prologue>%\
-    %<domainInclude>%\
     "#include \"micca_rt.h\"\n"\
+    %<domainInclude>%\
     %<forwardClassDeclarations>%\
     %<classDeclarations>%\
     %<stateParamDeclarations>%\
@@ -604,6 +649,8 @@ set codeTemplate [string cat\
 [source,c]
 ----
 <<miccaGenerate: generate code files>>=
+variable codeTemplate
+
 forAllRefs domainRef [Domain findAll] {
     namespace upvar GenCode\
         domain domain\
@@ -614,8 +661,6 @@ forAllRefs domainRef [Domain findAll] {
         {Name domain}\
         {Prologue prologue}\
         {Epilogue epilogue}
-
-    variable codeTemplate
 
     PrepareDomainProperties $domain
 
@@ -719,6 +764,24 @@ proc GetAssociationProperty {assoc prop} {
     }
 
     error "unknown property, \"$prop\", for association, \"$assoc\""
+}
+----
+
+[source,c]
+----
+<<generation code commands>>=
+proc optionDefines {} {
+    upvar #0 ::micca::@Gen@::options options
+
+    append result [comment\
+            "Preprocessor Defines for Generation Options"\
+            "Options are: \"$options\""\
+        ]
+    if {[dict get $options nonames]} {
+        append result "#define MRT_NO_NAMES\n"
+    }
+
+    return $result
 }
 ----
 
@@ -1043,17 +1106,23 @@ proc DeclareClassStructure {classRef} {
     }
 
     # Subclass container
-    # Union supertypes will contain a supclass container.
+    # Union supertypes will contain a superclass container.
     forAllRefs contRef [findRelated $compRefs {~R21 SubclassContainer}] {
         assignAttribute $contRef {Name attrName}
 
+        append result\
+            "    struct \{\n"\
+            "        MRT_SubclassCode subCode ;\n"
         set subRefs [findRelated $contRef ~R96 R44 ~R45]
-        append result "    union \{\n"
+        append result\
+            "        union \{\n"
         foreach subName [relation list [deRef $subRefs] Class] {
-            append result "        "\
+            append result "            "\
                 "[GetClassProperty $subName Declaration] $subName ;\n"
         }
-        append result "    \} $attrName ;\n"
+        append result\
+            "        \} subInst ;\n"\
+            "    \} $attrName ;\n"
     }
 
     # Target links
@@ -1925,22 +1994,6 @@ proc edbDefinitions {} {
 }
 ----
 
-typedef struct mrteventdispatchblock {
-    MRT_DispatchCount stateCount ;
-    MRT_DispatchCount eventCount ;
-    MRT_StateCode initialState ;
-    MRT_StateCode creationState ;
-    MRT_StateCode const *transitionTable ;
-    PtrActivityFunction const *activityTable ;
-    bool const *terminalStates ;
-
-#       ifndef MRT_NO_NAMES
-    char const *const *stateNames ;
-    char const *const *eventNames ;
-#       endif /* MRT_NO_NAMES */
-} MRT_edb ;
-
-
 [source,c]
 ----
 <<generation code commands>>=
@@ -1968,7 +2021,10 @@ proc GenerateTransitionTable {smodel} {
     } {} |%]
     # puts [relformat $events events]
 
-    set alltrans [relation join $states $events]
+    set alltrans [pipe {
+        relation eliminate $events Number |
+        relation join $states ~
+    }]
     # puts [relformat $alltrans alltrans]
 
     set statetrans [pipe {
@@ -2019,15 +2075,13 @@ proc GenerateTransitionTable {smodel} {
         relation join ~ $places\
             -using {Domain Domain Model Model NewState State} |
         relation rename ~ StateNumber NewStateNumber |
-        relation join ~ $places |
-        relation tag ~ EventNumber -ascending Event |
+        relation join ~ $places $events |
         relation eliminate ~ Domain Model
     }]
     # puts [relformat $transitions transitions]
 
     set result "static MRT_StateCode const ${className}__TTAB\[\] = \{\n"
-    relation foreach transition $transitions\
-            -ascending {StateNumber EventNumber} {
+    relation foreach transition $transitions -ascending {StateNumber Number} {
         relation assign $transition
         append result "    $NewStateNumber, // $State - $Event -> $NewState\n"
     }
@@ -2178,8 +2232,7 @@ proc GenerateModelNames {smodel} {
     set events [pipe {
         TransitioningEvent findWhere\
                 {$Domain eq $domain && $Model eq $className} |
-        deRef ~ |
-        relation tag ~ Number -ascending Event
+        deRef ~
     }]
 
     append result "static char const * const ${className}__ENAMES\[\] = \{\n"
@@ -2203,6 +2256,34 @@ proc pdbDefinitions {} {
     return $result
 }
 ----
+
+typedef struct mrtpolyeventmap {
+    MRT_EventCode event ;
+    MRT_EventType eventType ;
+} MRT_PolyEventMap ;
+
+typedef struct mrtgendispatchblock {
+    MRT_PolyStorageType refStorage ;
+    MRT_AttrOffset subCodeOffset ;
+    MRT_AttrOffset subInstOffset ;
+    MRT_DispatchCount subclassCount ;
+    struct mrtpolyeventmap const *eventMap ;
+
+#       ifndef MRT_NO_NAMES
+    char const *const *subclassNames ;
+#       endif /* MRT_NO_NAMES */
+} MRT_gdb ;
+
+typedef struct mrtpolydispatchblock {
+    MRT_DispatchCount eventCount ;
+    MRT_DispatchCount genCount ;
+    struct mrtgendispatchblock const *genDispatch ;
+
+#       ifndef MRT_NO_NAMES
+    char const *const *eventNames ;
+    char const *const *genNames ;
+#       endif /* MRT_NO_NAMES */
+} MRT_pdb ;
 
 [source,c]
 ----
@@ -2254,11 +2335,17 @@ proc banner {} {
 [source,c]
 ----
 <<generation helper commands>>=
-proc comment {c} {
-    string cat\
-        "/*\n"\
-        [::textutil::adjust::indent [::textutil::adjust::adjust $c] " * "]\n\
-        " */\n"
+proc comment {args} {
+    set result "/*\n"
+
+    foreach c $args {
+        append result\
+            [::textutil::adjust::indent [::textutil::adjust::adjust $c] " * "]\n
+    }
+
+    append result " */\n"
+
+    return $result
 }
 ----
 
