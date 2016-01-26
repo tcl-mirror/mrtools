@@ -163,7 +163,6 @@ The default values are given and can be overridden by those passed in.
 variable options
 set options [dict create\
     expanderror     fail\
-    nonames         false\
 ]
 set options [dict merge $options $arglist]
 ----
@@ -777,10 +776,6 @@ proc optionDefines {} {
             "Preprocessor Defines for Generation Options"\
             "Options are: \"$options\""\
         ]
-    if {[dict get $options nonames]} {
-        append result "#define MRT_NO_NAMES\n"
-    }
-
     return $result
 }
 ----
@@ -1633,13 +1628,21 @@ test codegen-10.0 {
             }
             class super {
                 polymorphic e1 f MyCount g {char *}
+                polymorphic e2
             }
             class sub1 {
                 statemodel {
                     state s1 {a MyCount b {char *}} {
                         printf("%d %s\n", a, b) ;
                     }
+
+                    state s2 {} {
+                        printf("in s2\n") ;
+                    }
+
                     transition s1 -> e1 -> s1
+                    transition s1 - e2 -> s2
+                    transition s2 - e1 -> s1
                 }
             }
             class sub2 {
@@ -1647,7 +1650,14 @@ test codegen-10.0 {
                     state s1 {a MyCount b {char *}} {
                         printf("%d %s\n", a, b) ;
                     }
+
+                    state s2 {} {
+                        printf("in s2\n") ;
+                    }
+
                     transition s1 -> e1 -> s1
+                    transition s1 - e2 -> s2
+                    transition s2 - e1 -> s1
                 }
             }
             generalization R1 super sub1 sub2
@@ -1955,9 +1965,7 @@ proc edbDefinitions {} {
         append result [GenerateActivityTable $smodel]
         set termstates [GenerateTerminalStates $smodel result]
 
-        if {![dict get $options nonames]} {
-            append result [GenerateModelNames $smodel]
-        }
+        append result [GenerateModelNames $smodel]
 
         append result "static MRT_edb const ${className}__EDB = \{\n"
 
@@ -1980,11 +1988,11 @@ proc edbDefinitions {} {
             "    .activityTable = ${className}__ATAB,\n"\
             "    .terminalStates = $termstates,\n"
 
-        if {![dict get $options nonames]} {
-            append result\
-                "    .stateNames = ${className}__SNAMES,\n"\
-                "    .eventNames = ${className}__ENAMES,\n"
-        }
+        append result\
+            "#        ifndef MRT_NO_NAMES\n"\
+            "    .stateNames = ${className}__SNAMES,\n"\
+            "    .eventNames = ${className}__ENAMES,\n"\
+            "#        endif /* MRT_NO_NAMES */\n"
 
         append result\
             "\} ;\n"
@@ -2222,7 +2230,10 @@ proc GenerateModelNames {smodel} {
         deRef ~
     }]
 
-    append result "static char const * const ${className}__SNAMES\[\] = \{\n"
+    append result\
+        "#ifndef MRT_NO_NAMES\n"\
+        "static char const * const ${className}__SNAMES\[\] = \{\n"
+
     relation foreach state $states -ascending Number {
         relation assign $state Name
         append result "    \"$Name\",\n"
@@ -2240,7 +2251,9 @@ proc GenerateModelNames {smodel} {
         relation assign $event Event
         append result "    \"$Event\",\n"
     }
-    append result "\} ;\n"
+    append result\
+        "\} ;\n"\
+        "#endif /* MRT_NO_NAMES */\n"
 
     return $result
 }
@@ -2251,39 +2264,290 @@ proc GenerateModelNames {smodel} {
 <<generation code commands>>=
 proc pdbDefinitions {} {
     variable domain
-    set result [comment "Polymorphic Event Dispatch Block Definitions"]
+
+    set subnames {}
+    set enames {}
+    set rnames {}
+    set pmaps {}
+    set gdbs {}
+    set pdbs {}
+
+    set superRefs [pipe {
+        DeferredEvent findWhere {$Domain eq $domain} |
+        findRelated % ~R86
+    } {} |%]
+    if {[isEmptyRef $superRefs]} {
+        return
+    }
+
+    set subRefs [findRelated $superRefs {~R46 ReferencedSuperclass}\
+        R36 ~R37 R47]
+    if {[isNotEmptyRef $subRefs]} {
+        set supertype mrtPolyReference
+    } else {
+        set subRefs [findRelated $superRefs {~R46 UnionSuperclass}\
+               R44 ~R45 R47]
+        set supertype mrtPolyUnion
+    }
+
+    set deferred [pipe {
+        findRelated $superRefs {R86 DeferralPath} |
+        deRef ~ |
+        relation join ~ $::micca::DeferredEvent |
+        relation eliminate ~ Domain Role |
+        relation extend ~ gtup SuperType string {$supertype} |
+        relation rename ~ Model Superclass Number SuperNumber
+    }]
+    # puts [relformat $deferred deferred]
+
+    set nonlocals [deRef [findRelated $subRefs ~R85]]
+    set polys [pipe {
+        relation join $nonlocals $::micca::DeferredEvent |
+        relation extend ~ ptup Type string {"mrtPolymorphicEvent"}
+    }]
+    # puts [relformat $polys polys]
+
+    set trans [pipe {
+        relation join $nonlocals $::micca::TransitioningEvent |
+        relation extend ~ ptup Type string {"mrtTransitionEvent"}
+    }]
+    # puts [relformat $trans trans]
+
+    set supers [pipe {
+        relation union $polys $trans |
+        relation eliminate ~ Domain Role |
+        relation join ~ $deferred |
+        relation group ~ EventMap Event SuperNumber Number Type |
+        relation group ~ SubMap Model EventMap |
+        relation group ~ Generalizations Relationship SuperType SubMap
+    }]
+    puts [relformat $supers supers]
+
+    relation foreach super $supers {
+        relation assign $super
+
+        set gdbvar ${Superclass}__GDB
+        append gdbs "static MRT_gdb $gdbvar\[\] = \{\n"
+
+        set rnamesvar ${Superclass}__RNAMES
+        append rnames "static char const *const $rnamesvar\[\] = \{\n"
+
+        relation foreach gen $Generalizations -ascending Relationship {
+            relation assign $gen
+
+            append rnames "    \"$Relationship\",\n"
+
+            set pmapvar ${Superclass}_${Relationship}__PMAP
+            append pmaps "static MRT_PolyEventMap const $pmapvar\[\] = \{\n"
+
+            set subnamesvar ${Superclass}_${Relationship}__SUBNAMES
+            append subnames\
+                "static char const *const $subnamesvar\[\] = \{\n"
+
+            relation foreach submap $SubMap -ascending Model {
+                relation assign $submap
+                append subnames "    \"$Model\", \n"
+                relation foreach eventmap $EventMap {
+                    relation assign $eventmap
+                    append pmaps\
+                        "    "\
+                        "\{.event = $Number, .eventType = $Type\},"\
+                        "// $Model.$Event\n"
+                }
+            }
+            append pmaps "\} ;\n"
+            append subnames "\} ;\n"
+
+            append gdbs\
+                "    \{\n"\
+                "        .refStorage = $SuperType,\n"\
+                "        .subCodeOffset =\
+                    offsetof([GetClassProperty $Superclass Declaration],\
+                    $Relationship.subCode),\n"\
+                "        .subInstOffset =\
+                    offsetof([GetClassProperty $Superclass Declaration],\
+                    $Relationship.subInst),\n"\
+                "        .subclassCount = [relation cardinality $SubMap],\n"\
+                "        .eventMap = $pmapvar,\n"\
+                "#            ifndef MRT_NO_NAMES\n"\
+                "        .subclassNames = $subnamesvar,\n"\
+                "#            endif /* MRT_NO_NAMES */\n"\
+                "    \},\n"
+        }
+        append rnames "\} ;\n"
+        append gdbs "\} ;\n"
+    }
+
+    set enamesvar ${Superclass}__ENAMES
+    append enames "static char const *const $enamesvar\[\] = \{\n"
+    relation foreach eventmap $EventMap {
+        relation assign $eventmap Event
+        append enames "    \"$Event\",\n"
+    }
+    append enames "\} ;\n"
+
+    append pdbs\
+        "static MRT_pdb const ${Superclass}__PDB = \{\n"\
+        "    .eventCount = [relation cardinality $SubMap],\n"\
+        "    .genCount = [relation cardinality $Generalizations],\n"\
+        "    .genDispatch = $gdbvar,\n"\
+        "#        ifndef MRT_NO_NAMES\n"\
+        "    .eventNames = $enamesvar,\n"\
+        "    .genNames = $rnamesvar,\n"\
+        "#        endif /* MRT_NO_NAMES */\n"
+
+    append pdbs "\} ;\n"
+
+    append result\
+        [comment "Polymorphic Event Dispatch Block Definitions"]\
+        "#ifndef MRT_NO_NAMES\n"\
+        $subnames $enames $rnames\
+        "#endif /* MRT_NO_NAMES */\n"\
+        $pmaps $gdbs $pdbs
 
     return $result
 }
 ----
 
-typedef struct mrtpolyeventmap {
-    MRT_EventCode event ;
-    MRT_EventType eventType ;
-} MRT_PolyEventMap ;
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-13.0 {
+    polymorphic events -- inject polymorphic event mid-level
+} -setup {
+    # makeFile {} codegen13.h
+    # makeFile {} codegen13.c
+    micca configure {
+        domain codegen13 {
+            class S {
+                polymorphic e1
+                polymorphic e2
+                polymorphic a1
+            }
+            class X {
+                polymorphic a3
+                statemodel {
+                    state s1 {} {
+                        puts("in s1") ;
+                    }
+                    transition s1 - a1 ->  s1
+                }
+            }
+            class Y {
+                attribute color int -default 20
+                statemodel {
+                    state s1 {} {
+                        puts("in s1") ;
+                    }
+                    state s2 {} {
+                        puts("in s2") ;
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s2
+                    transition s2 - a1 -> s1
+                }
+            }
+            generalization R1 -union S X Y
 
-typedef struct mrtgendispatchblock {
-    MRT_PolyStorageType refStorage ;
-    MRT_AttrOffset subCodeOffset ;
-    MRT_AttrOffset subInstOffset ;
-    MRT_DispatchCount subclassCount ;
-    struct mrtpolyeventmap const *eventMap ;
+            class F {
+                attribute color int -default 20
+                statemodel {
+                    state s1 {} {
+                        puts("in s1") ;
+                    }
+                    state s2 {} {
+                        puts("in s2") ;
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s2
+                    transition s2 - f1 -> s1
+                    transition s2 - a1 -> s2
+                }
+            }
+            class G {
+                attribute color int -default 20
+                statemodel {
+                    state s1 {} {
+                        puts("in s1") ;
+                    }
+                    state s2 {} {
+                        puts("in s2") ;
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s2
+                    transition s2 - g1 -> s1
+                    transition s2 - a1 -> s2
+                }
+            }
 
-#       ifndef MRT_NO_NAMES
-    char const *const *subclassNames ;
-#       endif /* MRT_NO_NAMES */
-} MRT_gdb ;
+            generalization R3 -union S F G
 
-typedef struct mrtpolydispatchblock {
-    MRT_DispatchCount eventCount ;
-    MRT_DispatchCount genCount ;
-    struct mrtgendispatchblock const *genDispatch ;
-
-#       ifndef MRT_NO_NAMES
-    char const *const *eventNames ;
-    char const *const *genNames ;
-#       endif /* MRT_NO_NAMES */
-} MRT_pdb ;
+            class A {
+                attribute color int -default 20
+                statemodel {
+                    state s1 {} {
+                        puts("in s1") ;
+                    }
+                    state s2 {} {
+                        puts("in s2") ;
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s1
+                    transition s1 - a3 -> s2
+                    transition s1 - a10 -> s2
+                }
+            }
+            class B {
+                attribute color int -default 20
+                statemodel {
+                    state s1 {} {
+                        puts("in s1") ;
+                    }
+                    state s2 {} {
+                        puts("in s2") ;
+                    }
+                    transition s1 - e1 -> s2
+                    transition s2 - e2 -> s1
+                    transition s2 - a3 -> s2
+                    transition s1 - a10 -> s2
+                }
+            }
+            generalization R2 -union X A B
+        }
+        population test codegen13 {
+            class S {
+                instance s1 R1 {X x1} R3 {F f1}
+                instance s2 R1 {Y y1} R3 {F f2}
+                instance s3 R1 {X x2} R3 {G g1}
+            }
+            class X {
+                instance x1 R2 {A a1}
+                instance x2 R2 {B b1}
+            }
+            class Y {
+                instance y1
+            }
+            class A {
+                instance a1
+            }
+            class B {
+                instance b1
+            }
+            class F {
+                instance f1
+                instance f2
+            }
+            class G {
+                instance g1
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca generate
+} -result {}
+----
 
 [source,c]
 ----
