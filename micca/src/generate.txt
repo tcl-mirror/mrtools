@@ -632,6 +632,7 @@ set codeTemplate [string cat\
     %<pdbDefinitions>%\
     %<classDefinitions>%\
     %<relationshipDefinitions>%\
+    %<instanceDefinitions>%\
     %<epilogue>%\
 ]
 ----
@@ -1016,7 +1017,7 @@ proc DeclareClassStructure {classRef} {
                     set refing [findRelated $srcRef R33 ~R32]
                     append result\
                         [GenDirectionalReference $attrName\
-                            {*}[readAttribute $refedRef\
+                            {*}[readAttribute $refing\
                                 Relationship Class Multiplicity]]
                 } else {
                     set srcRef [findRelated $apcRefs {~R38 SourceClass}]
@@ -1241,7 +1242,7 @@ test codegen-3.0 {
 } -body {
     micca generate
     testConditions\
-        {[llength [fileutil::grep {R1} codegen3.c]] == 9}
+        {[llength [fileutil::grep {R1} codegen3.c]] == 11}
 } -result {1}
 ----
 
@@ -1304,7 +1305,7 @@ test codegen-5.0 {
 } -body {
     micca generate
     testConditions\
-        {[llength [fileutil::grep {R1} codegen5.c]] == 8}
+        {[llength [fileutil::grep {R1} codegen5.c]] == 9}
 } -result {1}
 ----
 
@@ -2305,13 +2306,13 @@ proc pdbDefinitions {} {
         return
     }
 
-    set subRefs [findRelated $superRefs {~R46 ReferencedSuperclass}\
-        R36 ~R37 R47]
+    set subRefs [findRelated $superRefs\
+            {~R46 ReferencedSuperclass} R36 ~R37 R47]
     if {[isNotEmptyRef $subRefs]} {
         set supertype mrtPolyReference
     } else {
-        set subRefs [findRelated $superRefs {~R46 UnionSuperclass}\
-               R44 ~R45 R47]
+        set subRefs [findRelated $superRefs\
+                {~R46 UnionSuperclass} R44 ~R45 R47]
         set supertype mrtPolyUnion
     }
 
@@ -2572,6 +2573,41 @@ test codegen-13.0 {
 } -body {
     micca generate
 } -result {}
+----
+
+[source,c]
+----
+<<generate command tests>>=
+test codegen-14.0 {
+    Generated code file simple references -- non static
+} -setup {
+    # makeFile {} codegen14.h
+    # makeFile {} codegen14.c
+    micca configure {
+        domain codegen14 {
+            class X {}
+            class Y {}
+            association R1 X 1..*--1 Y
+        }
+        population codegen14 {
+            class X {
+                instance x1 R1 y1
+                instance x2 R1 y2
+                instance x3 R1 y1
+            }
+            class Y {
+                instance y1 R1 {x1 x3}
+                instance y2 R1 x2
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca generate
+    testConditions\
+        {[llength [fileutil::grep {R1_} codegen14.c]] == 4}
+} -result {1}
 ----
 
 [source,c]
@@ -3057,6 +3093,346 @@ proc MapToCardinality {cond mult} {
     }
 }
 ----
+
+[source,c]
+----
+<<generation code commands>>=
+proc instanceDefinitions {} {
+    try {
+    variable domain
+
+    set indent [string repeat { } 4]
+    set indent2 [string repeat $indent 2]
+    set indent3 [string repeat $indent 3]
+    set indent4 [string repeat $indent 4]
+
+    set classRefs [FindNonUnionSubclasses $domain]
+
+    set classes [pipe {
+        deRef $classRefs |
+        relation rename ~ Name Class Number ClassNumber
+    }]
+
+    set taggedsubclasses [pipe {
+        findRelated $classRefs {~R41 ClassRole} {~R40 Subclass} |
+        deRef % |
+        relation eliminate % Role |
+        relation tag % SubclassCode -ascending Class\
+                -within {Domain Relationship}
+    } {} |%]
+
+    set attrs [pipe {
+        findRelated $classRefs ~R20 {~R21 Attribute} |
+        deRef % |
+        relation rename % Name Component
+    } {} |%]
+
+    set refedsupers [pipe {
+        findRelated $classRefs {~R41 ClassRole} {~R40 Superclass}\
+            {~R46 ReferencedSuperclass} |
+        deRef % |
+        relation rename % Class Superclass |
+        relation eliminate % Role
+    } {} |%]
+
+    set superrefs [pipe {
+        findRelated $classRefs ~R20 {~R21 Reference}\
+            {~R23 SuperclassReference} ~R91 |
+        deRef % |
+        relation eliminate % Role |
+        relation join % $refedsupers |
+        relation rename % Relationship Component
+    } {} |%]
+
+    set refedsubs [pipe {
+        findRelated $classRefs {~R41 ClassRole} {~R40 Subclass}\
+            {~R47 ReferringSubclass} |
+        deRef % |
+        relation join % $taggedsubclasses |
+        relation rename % Class Subclass |
+        relation eliminate % Role
+    } {} |%]
+
+    set subrefs [pipe {
+        findRelated $classRefs ~R20 {~R21 Reference}\
+            {~R23 SubclassReference} ~R92 |
+        deRef % |
+        relation eliminate % Role |
+        relation join % $refedsubs |
+        relation rename % Relationship Component
+    } {} |%]
+
+    set asources [pipe {
+        findRelated $classRefs {~R41 ClassRole}\
+            {~R40 AssociationParticipantClass} {~R38 SourceClass} |
+        deRef % |
+        relation eliminate % Role Conditionality Multiplicity |
+        relation rename % Class SourceClass
+    } {} |%]
+    set atargets [pipe {
+        findRelated $classRefs {~R41 ClassRole}\
+            {~R40 AssociationParticipantClass} {~R38 TargetClass} |
+        deRef % |
+        relation eliminate % Role Conditionality Multiplicity |
+        relation rename % Class TargetClass
+    } {} |%]
+    set assctorrefs [pipe {
+        findRelated $classRefs ~R20 {~R21 Reference}\
+            {~R23 AssociatorReference} ~R93 |
+        deRef % |
+        relation eliminate % Role |
+        relation join %\
+            $asources -using {Domain Domain Relationship Relationship}\
+            $atargets -using {Domain Domain Relationship Relationship} |
+        relation rename % Relationship Component
+    } {} |%]
+
+    set sdc [pipe {
+        relation rename $::micca::SimpleReferencedClass Class RefClass |
+        relation eliminate ~ Role Conditionality |
+        relation extend ~ sdctup Multiplicity boolean {"false"}
+    }]
+    set simprefing [pipe {
+        findRelated $classRefs {~R41 ClassRole}\
+            {~R40 AssociationParticipantClass} {~R38 SimpleReferringClass} |
+        deRef % |
+        relation eliminate % Conditionality Multiplicity |
+        relation join % $sdc
+    } {} |%]
+    puts [relformat $simprefing simprefing]
+
+    set src [pipe {
+        relation rename $::micca::SimpleReferringClass Class RefClass |
+        relation eliminate ~ Role Conditionality
+    }]
+    set simprefed [pipe {
+        findRelated $classRefs {~R41 ClassRole}\
+            {~R40 AssociationParticipantClass} {~R38 SimpleReferencedClass} |
+        deRef % |
+        relation eliminate % Conditionality |
+        relation join % $src
+    } {} |%]
+    puts [relformat $simprefed simprefed]
+
+    set assocrefs [pipe {
+        findRelated $classRefs ~R20 {~R21 Reference}\
+            {~R23 AssociationReference} ~R25 R90 |
+        deRef %
+    } {} |%]
+    # puts [relformat $assocrefs assocrefs]
+
+    set simpleassocs [pipe {
+        relation union $simprefing $simprefed |
+        relation join $assocrefs ~ |
+        relation extend ~ satup IsStatic boolean {
+            [relation isnotempty [relvar restrictone ::micca::StaticAssociation\
+                Domain [tuple extract $satup Domain]\
+                Association [tuple extract $satup Relationship]]]} |
+        relation group ~ References Role Multiplicity RefClass IsStatic |
+        relation rename ~ Relationship Component
+    }]
+    puts [relformat $simpleassocs simpleassocs]
+
+    set classpops [pipe {
+        findRelated $classRefs R104 {~R101 ElementPopulation}\
+            {~R105 ClassPopulation} ~R102 |
+        deRef % |
+        relation rename % Number InstNumber |
+        relation join % $classes $::micca::ClassComponentValue |
+        ralutil::rvajoin % $attrs Attributes |
+        ralutil::rvajoin % $superrefs SuperRefs |
+        ralutil::rvajoin % $subrefs SubRefs |
+        ralutil::rvajoin % $assctorrefs AssociatorRefs |
+        ralutil::rvajoin % $simpleassocs SimpleRefs |
+        relation group % Components Component Value\
+                Attributes SuperRefs SubRefs AssociatorRefs SimpleRefs|
+        relation group % Instances Instance InstNumber Components |
+        relation eliminate % Domain
+    } {} |%]
+    puts [relformat $classpops classpops]
+
+    # HERE
+    # Add in Association Reference
+    # Add in Subclass Container
+    # Add in Link Containers
+
+    set result [comment "Instance Pool Definitions"]
+    relation foreach classpop $classpops -ascending ClassNumber {
+        relation assign $classpop
+
+        append result\
+            "static [GetClassProperty $Class Declaration] ${Class}__POOL"\
+            "\[[GetClassProperty $Class TotalInstance]\] = \{\n"
+
+        set allocNumber 0
+        relation foreach inst $Instances -ascending InstNumber {
+            relation assign $inst
+
+            set sp [pipe {
+                StateModel findById Domain $domain Model $Class |
+                findRelated ~ R58 R57
+            }]
+            set initstate [expr {[isNotEmptyRef $sp] ?\
+                [readAttribute $sp Number] : "MRT_StateCode_IG"}]
+
+            append result\
+                "$indent\{\n"\
+                "$indent2.base__INST = \{\n"\
+                "$indent3.classDesc = &${domain}__CLASSES\[$ClassNumber\],\n"\
+                "$indent3.alloc = [incr allocNumber],\n"\
+                "$indent3.currentState = $initstate,\n"\
+                "$indent3.refCount = 0,\n"\
+                "#${indent4}ifndef MRT_NO_NAMES\n"\
+                "$indent3.name = \"$Instance\"\n"\
+                "#${indent4}endif /* MRT_NO_NAMES */\n"\
+                " $indent2\},\n"
+
+            relation foreach comp $Components {
+                relation assign $comp
+                if {[relation isnotempty $Attributes]} {
+                    append result "$indent2.$Component  = $Value,\n"
+                    continue
+                }
+
+                if {[relation isnotempty $SuperRefs]} {
+                    set superclass [relation extract $SuperRefs Superclass]
+                    set superinst [pipe {
+                        ClassInstance findById Domain $domain\
+                            Class $superclass Instance $Value |
+                        readAttribute ~ Number
+                    }]
+                    append result\
+                        "$indent2.$Component = "\
+                        "&${superclass}__POOL\[$superinst\],\n"
+                    continue
+                }
+
+                if {[relation isnotempty $SubRefs]} {
+                    lassign $Value subclass subinstname
+                    set subinst [pipe {
+                        ClassInstance findById Domain $domain Class $subclass\
+                            Instance $subinstname |
+                        readAttribute ~ Number
+                    }]
+                    set subinstcode [pipe {
+                        relation restrictwith $SubRefs {$Subclass eq $subclass} |
+                        relation extract ~ SubclassCode
+                    }]
+                    append result\
+                        "$indent2.$Component = \{\n"\
+                        "$indent3.subCode = $subinstcode,\n"\
+                        "$indent3.subInst = &${subclass}__POOL\[$subinst\]\n"\
+                        "$indent2\},\n"
+                    continue
+                }
+
+                if {[relation isnotempty $AssociatorRefs]} {
+                    relation assign $AssociatorRefs
+                    # the painful reflexive case again!
+                    if {$SourceClass eq $TargetClass} {
+                        # N.B. the inversion. the target instance is the
+                        # one referenced in the forward direction
+                        set sinstname [dict get $Value backward]
+                        set tinstname [dict get $Value forward]
+                    } else {
+                        set sinstname [dict get $Value $SourceClass]
+                        set tinstname [dict get $Value $TargetClass]
+                    }
+                    set sourceinst [pipe {
+                        ClassInstance findById Domain $domain Class\
+                            $SourceClass Instance $sinstname |
+                        readAttribute ~ Number
+                    }]
+                    set targetinst [pipe {
+                        ClassInstance findById Domain $domain Class\
+                            $TargetClass Instance $tinstname |
+                        readAttribute ~ Number
+                    }]
+
+                    append result\
+                        "$indent2.$Component = \{\n"\
+                        "$indent3.forward =\
+                                &${TargetClass}__POOL\[$targetinst\],\n"\
+                        "$indent3.backward =\
+                                &${SourceClass}__POOL\[$sourceinst\],\n"\
+                        "$indent2\},\n"
+                    continue
+                }
+                if {[relation isnotempty $SimpleRefs]} {
+                    relation assign $SimpleRefs
+                    if {[relation cardinality $References] > 1} {
+                        # reflexive case
+                    } else {
+                        relation assign $References
+                        if {!$Multiplicity} {
+                            # Singular
+                            if {$Value eq {}} {
+                                set compvalue NULL
+                            } else {
+                                set inst [pipe {
+                                    ClassInstance findById Domain $domain\
+                                        Class $RefClass Instance $Value |
+                                    readAttribute ~ Number
+                                }]
+                                set compvalue &${RefClass}__POOL\[$inst\]
+                            }
+                            append result\
+                                "$indent2.$Component = $compvalue,\n"
+                        } elseif {$IsStatic} {
+                            # Static multiple
+                            # HERE need to emit the constant array and
+                            # then refer to it.
+                        } else {
+                            # Dynamic multiple
+                            if {[llength $Value] == 0} {
+                                set nextvalue\
+                                    &${Class}__POOL\[$InstNumber\].$Component
+                                set prevvalue $nextvalue
+                            } else {
+                                set nextinst [pipe {
+                                    ClassInstance findById Domain $domain\
+                                        Class $RefClass Instance\
+                                        [lindex $Value 0] |
+                                    readAttribute ~ Number
+                                }]
+                                set nextvalue\
+                            &${RefClass}__POOL\[$nextinst\].${Component}__LINKS
+                                set previnst [pipe {
+                                    ClassInstance findById Domain $domain\
+                                        Class $RefClass Instance\
+                                        [lindex $Value end] |
+                                    readAttribute ~ Number
+                                }]
+                                set prevvalue\
+                            &${RefClass}__POOL\[$previnst\].${Component}__LINKS
+                            }
+                            append result\
+                                "$indent2.$Component = \{\n"\
+                                "$indent3.next = $nextvalue,\n"\
+                                "$indent3.prev = $prevvalue,\n"\
+                                "$indent2\},\n"
+                        }
+                    }
+                    continue
+                }
+            }
+
+            append result "$indent\},\n"
+        }
+
+        append result "\} ;\n"
+    }
+
+    return $result
+
+
+    } on error {} {
+        puts $::errorInfo
+    }
+}
+----
+
+
 
 == Helper Commands
 
