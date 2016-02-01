@@ -77,7 +77,7 @@ namespace eval ::rosea {
     
     namespace ensemble create
 
-    variable version 1.6.2
+    variable version 1.6.3
 
     logger::initNamespace [namespace current]
 
@@ -2272,12 +2272,12 @@ namespace eval ::rosea {
             # We use the class commands to delete the old subclass instance and create
             # the new one. This will make sure that if the subclass has a state model
             # that the initial state is set correctly.
-            relvar eval {
-                ::rosea::InstCmds::delete $instref
-                set ref [::rosea::ClassCmds::create ${domns}::$subclass\
-                        {*}[dict merge $args $refedvalues]]
-            }
-            return $ref
+            # N.B. this is _not_ done in a relvar transaction. The transaction
+            # boundaries should be set by the current thread of control or domain
+            # operation.
+            ::rosea::InstCmds::delete $instref
+            return [::rosea::ClassCmds::create ${domns}::$subclass\
+                    {*}[dict merge $args $refedvalues]]
         }
         proc signalAssigner {rname event args} {
             SplitRelvarName $rname domain relationship
