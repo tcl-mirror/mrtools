@@ -1414,6 +1414,12 @@ proc generalization {name args} {
         SubclassContainer create Domain $DomainName Class $super Name $name ; # <1>
         ClassComponent create Domain $DomainName Class $super Name $name
         foreach sub $args {
+            set usubRef [UnionSubclass findWhere {$Domain eq $DomainName &&\
+                $Class eq $sub}] ; # <2>
+            if {[isNotEmptyRef $usubRef]} {
+                tailcall DeclError UNION_SUBCLASS_EXISTS $sub\
+                    [readAttribute $usubRef Relationship]
+            }
             dict set subtuple Class $sub
             UnionSubclass create {*}$subtuple
         }
@@ -1435,16 +1441,24 @@ we create the container as a class component in the superclass.
 This is done here since we have the information and the R96 relationship is
 unconditional.
 Union superclasses always have a subclass container.
+<2> A union subclass cannot be a subclass of two independent generalizations.
+This is just another way of saying that a component of a ``C'' structure
+cannot be a component of a different ``C'' structure at the same time.
+If a subclass is to be a subclass in multiple generalizations,
+only one can be a union subclass and the others must be reference subclasses.
 
 (((error code,TOO_FEW_SUBCLASSES)))
 (((error code,SUPER_AS_SUBCLASS)))
 (((error code,DUPLICATE_SUBCLASS)))
+(((error code,UNION_SUBCLASS_EXISTS)))
 [source,tcl]
 ----
 <<error code formats>>=
 TOO_FEW_SUBCLASSES  {at least 2 subclasses must be specified, got %d}
 SUPER_AS_SUBCLASS   {super class, "%s", cannot be included in subclasses, "%s"}
 DUPLICATE_SUBCLASS  {subclass set contains a duplicate subclass name, "%s"}
+UNION_SUBCLASS_EXISTS {subclass, "%s", is already a union subclass for\
+                    relationship, "%s"}
 ----
 
 [float]
@@ -1531,35 +1545,18 @@ these restrictions do not apply.
 But there are situations where the inclusion of the subclass as part of the
 structure of the superclass instance means a certain configuration cannot
 be supported.
-Here we check the following:
-
-* A union subclass cannot be a subclass of two independent generalizations.
+We have already seen that a union subclass cannot be a subclass of two
+independent generalizations.
 This is just another way of saying that a component of a ``C'' structure
 cannot be a component of a different ``C'' structure at the same time.
 If a subclass is to be a subclass in multiple generalizations,
 only one can be a union subclass and the others must be reference subclasses.
+
+Here we check the following:
+
 * Creation events cannot be sent to union subclasses.
 There is no independent storage for union subclasses as it is contained
 in the storage allocated to the superclass.
-
-[source,c]
-----
-<<domain: union subclass semantics>>=
-set multiunions [pipe {
-    UnionSubclass findWhere {$Domain eq $name} |
-    deRef ~ |
-    relation group ~ Relationships Relationship Role |
-    relation restrictwith ~ {[relation cardinality $Relationships] > 1}
-}]
-relation foreach multiunion $multiunions {
-    relation assign $multiunion
-    log::error "In domain, \"$Domain\", union subclass, \"$Class\",\
-        participates in multiple union generalizations,\
-        \"[join [relation list $Relationships Relationship] {, }]\":\
-        this is not allowed for union subclasses"
-    incr errcount
-}
-----
 
 [source,c]
 ----
@@ -1609,7 +1606,7 @@ test union-subclasses-1.0 {
             generalization R2 -union super2 sub1 sub3
         }
     }
-} -result {encountered 1 configuration script errors} -returnCodes error
+} -result {encountered 2 configuration script errors} -returnCodes error
 ----
 
 [source,tcl]
@@ -5020,7 +5017,7 @@ set missing [pipe {
 }] ; # <2>
 if {[relation isnotempty $missing]} {
     set elements [relation list $missing Name]
-    log::error "in population, \"$name\", for domain, \"$domain\",\
+    log::error "for domain population, \"$domain\",\
         the following elements are missing any population values:\
         [join $elements {, }]"
     incr errcount
@@ -5084,7 +5081,7 @@ set noinsts [pipe {
 }] ; # <1>
 
 if {[relation isnotempty $noinsts]} {
-    log::error "in population, \"$name\", for domain, \"$domain\",\
+    log::error "for domain population, \"$domain\",\
         the following classes have no defined instances and a zero allocation:\
         [join [relation list $noinsts Class] {, }]"
     incr errcount
@@ -5195,7 +5192,7 @@ if {[relation isnotempty $superrefs]} {
         relation minus $superrefs ~
     }]
 
-    # Look for superclasses that are reference multiple times.
+    # Look for superclasses that are referenced multiple times.
     set multirefs [pipe {
         relation group $superrefs SubRefs Subclass Subinstance |
         relation restrictwith ~ {[relation cardinality $SubRefs] > 1}
@@ -5554,6 +5551,45 @@ set unionsupers [pipe {
         Component Relationship
 }]
 CheckSubclassReferences $unionsupers $::micca::UnionSubclass $popinsts
+
+set usupers [pipe {
+    FindUltimateSuperclasses $domain |
+    findRelated % {~R46 UnionSuperclass}
+} {} |%]
+# puts [relformat [deRef $usupers] usupers]
+
+while {[isNotEmptyRef $usupers]} {
+    set subrefs [pipe {
+        deRef $usupers |
+        relation eliminate ~ Role |
+        relation rename ~ Relationship Component |
+        relation join ~ $popvalues $::micca::ClassInstance |
+        relation rename ~ Class Superclass Instance SuperInstance |
+        relation extend ~ srtup\
+            Class string {[lindex [tuple extract $srtup Value] 0]}\
+            Instance string {[lindex [tuple extract $srtup Value] 1]} |
+        relation project ~ Domain Class Instance Number
+    }]
+    # puts [relformat $subrefs subrefs]
+
+    # relvar updateper does not update identifying attributes and
+    # Number is a secondary identifier.
+    # So we have to do it the hard way.
+    relation foreach subref $subrefs {
+        relation assign $subref
+        relvar updateone ::micca::ClassInstance srtup [list\
+            Domain $Domain Class $Class Instance $Instance] {
+            tuple update $srtup Number $Number}
+    }
+
+    set usupers [pipe {
+        findRelated $usupers R44 ~R45 |
+        deRef % |
+        relation semijoin % $::micca::UnionSuperclass\
+            -using {Domain Domain Class Class} |
+        ::rosea::Helpers::ToRef ::micca::UnionSuperclass %
+    } {} |%]
+}
 ----
 
 [source,tcl]
@@ -7570,6 +7606,12 @@ relvar insert Config_DataError {
     RefType             notrefto
     Format              {in domain, \"$Domain\", class, \"$Class\",\
                          component, \"$Name\", failed to be completed created}
+} {
+    Relationship        R41
+    RefClass            Relationship
+    RefType             notrefed
+    Format              {in domain, \"$Domain\", relationship, \"$Name\",\
+                         failed to be completed created}
 } {
     Relationship        R70
     RefClass            TransitionPlace
