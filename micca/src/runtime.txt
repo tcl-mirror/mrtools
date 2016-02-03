@@ -418,16 +418,20 @@ that may occur when an event is dispatched.
 
 All the behavior of data management and execution sequencing is
 completely determined by the values contained in the data structures
-supplied to the various functions of the mechanisms.
+supplied to the various functions of the run time.
 This is distinct from some software architecture mechanisms that
 use _ad hoc_ generated code from a model compiler to implement
-some capabilities and being completely data driven and separately
-compilable is a design goal of the run time.
+some capabilities.
+Being completely data driven and separately compilable is a design goal of the
+run time.
 
 Since the behavior of all instances of a given class is the same,
 each class has a data structure that contains all the class invariant
 information.
 
+First, we consider class attributes.
+We will have need to obtain attribute values in a generic way
+and so need some offset and size information.
 
 [source,c]
 ----
@@ -449,18 +453,9 @@ typedef struct mrtattribute {
 `name`::
     The name of the attribute.
 
-When generically describing classes,
-the subclasses of union based generalizations pose a special situation.
-All other class instances are stored in an array.
-Union subclasses are stored in the structure of their related
-superclass.
-The essential information for a union subclass is the class of its
-ultimate superclass and the offset from the beginning of the
-superclass to where the instance is located.
-Note that a union subclass can be subject to repeated generalization
-of another union subclass.
-The ultimate superclass is the class at the top of the generalization
-hierarchy.
+To manage all the aspects of class instances,
+we need information on memory allocation, event dispatch, relationships
+in which the instances participate and many other pieces of information.
 
 [source,c]
 ----
@@ -517,6 +512,19 @@ typedef struct mrtclass {
 `name`::
     A pointer to a `NUL` terminated string containing the name of the class.
 
+When generically describing classes,
+the subclasses of union based generalizations pose a special situation.
+All other class instances are stored in an array.
+Union subclasses are stored in the structure of their related
+superclass.
+The essential information for a union subclass is the class of its
+ultimate superclass and the offset from the beginning of the
+superclass to where the instance is located.
+Note that a union subclass can be subject to repeated generalization
+of another union subclass.
+The ultimate superclass is the class at the top of the generalization
+hierarchy.
+
 In the next section,
 the instance allocation block is described as we continue to define
 how data is managed by the run time.
@@ -535,8 +543,8 @@ an event.
 
 Creating initial instances is handled during code generation using the
 population data specified when the domain is configured.
-The code generator arranges for initial instances to be initializers
-of the class storage array.
+The code generator arranges for initial instance values to be inserted as
+initializers of the class storage array.
 In this section,
 we are going to discuss synchronous instance creation.
 This is instance creation by a direct function invocation and when
@@ -557,8 +565,8 @@ class instance memory pool.
 [source,c]
 ----
 <<mrt interface aggregate types>>=
-typedef void (*InstCtor)(MRT_Instance *) ;
-typedef void (*InstDtor)(MRT_Instance *) ;
+typedef void (*InstCtor)(void *) ;
+typedef void (*InstDtor)(void *) ;
 ----
 
 [source,c]
@@ -612,8 +620,8 @@ typedef struct mrtinstallocblock {
 Instance creation and deletion also supports a very simplified notion of
 construction and destruction for the instances.
 This is no where near as complicated or full featured as something in C++.
-Constructors and destructors take no arguments other than a pointer to the
-instance.
+Constructors and destructors take no arguments but are implicitly supplied a
+pointer to the instance when invoked.
 
 Constructors and destructors are primarily useful for when the instance has a
 more complicated data structure as an attribute,
@@ -623,6 +631,9 @@ the preferred method is to do that with an instance based operation
 or as part of a state activity for an asynchronously created instance.
 
 === Finding Instance Memory
+
+Before we can create an instance,
+we need to find memory for it.
 
 [source,c]
 ----
@@ -638,8 +649,8 @@ mrtInstFindSlot(
 
 `mrtInstFindSlot` searchs for unused instance memory in the memory pool
 associated with the class described by `classDesc`.
-Returns a pointer to the allocated memory if successful.
-Returns `NULL` if no memory is available.
+It returns a pointer to the allocated memory if successful and
+`NULL` if no memory is available.
 
 [float]
 ==== Implementation
@@ -656,9 +667,7 @@ mrtInstFindSlot(
 {
     assert(classDesc != NULL) ;
     MRT_iab *iab = classDesc->iab ;
-    if (iab == NULL) {
-        return NULL ;
-    }
+    assert(iab != NULL) ;
     assert(iab->storageLast < iab->storageFinish) ;
     /*
      * Search for an empty slot in the pool. Start at the next location after
@@ -671,13 +680,9 @@ mrtInstFindSlot(
         // Empty
     }
     /*
-     * Check if we ended up on a slot that is not allocated.
+     * Check if we ended up on a slot that is free.
      */
-    if (inst->alloc != 0) { // <1>
-        return NULL ;
-    }
-
-    return inst ;
+    return inst->alloc == 0 ? inst : NULL ; // <1>
 
 }
 ----
@@ -759,12 +764,6 @@ mrt_CreateInstance(
 {
     assert(classDesc != NULL) ;
 
-#       ifndef NDEBUG
-    if (classDesc->edb) {
-        assert(initialState < classDesc->edb->stateCount) ;
-    }
-#       endif /* NDEBUG */
-
     /*
      * Search for an empty slot in the pool.
      */
@@ -782,6 +781,37 @@ mrt_CreateInstance(
      */
     iab->storageLast = inst ;
     /*
+     * Initialize the memory for the instance.
+     */
+    mrtInitializeInstance(inst, classDesc, initialState) ;
+
+    return inst ;
+}
+----
+
+==== Initializing Instance Memory
+
+Once we have identified the memory for an instance,
+we can make is ready to use.
+This involves zeroing out the memory and then initialzing the
+members of the `MRT_Instance` structure.
+Any link list references must be initialized to empty and
+the constructor is run if there is one.
+
+[source,c]
+----
+<<mrt static functions>>=
+static void
+mrtInitializeInstance(
+    MRT_Instance *inst,
+    MRT_Class const *classDesc,
+    MRT_StateCode initialState)
+{
+    assert(inst != NULL) ;
+    assert(classDesc != NULL) ;
+
+    MRT_iab *iab = classDesc->iab ;
+    /*
      * Start with a zeroed out memory space.
      */
     memset(inst, 0, iab->instanceSize) ;
@@ -791,6 +821,8 @@ mrt_CreateInstance(
      */
     inst->alloc = mrtIncrAllocCounter(iab) ;
     if (classDesc->edb != NULL) {
+        assert(initialState < classDesc->edb->stateCount) ;
+
         inst->currentState = (initialState == MRT_StateCode_IG ||
             initialState >= classDesc->edb->stateCount) ?
                 classDesc->edb->initialState : initialState ; // <1>
@@ -811,9 +843,7 @@ mrt_CreateInstance(
     if (iab->construct) {
         iab->construct(inst) ;
     }
-    mrtMarkTransaction(classDesc->classRels, classDesc->relCount) ;
-
-    return inst ;
+    mrtMarkTransaction(classDesc->classRels, classDesc->relCount) ; // <3>
 }
 ----
 <1> We use `MRT_StateCode_IG` as a special value to indicate that
@@ -823,6 +853,9 @@ them the same.
 <2> If a class does not have a state model, then we ignore the
 value passed in to the function and set the current state to ignored.
 This is a convenient value for such a situation.
+<3> Creating an instance means it must be evaluated for referential
+integrity at the end of the data transaction.
+This is discussed in the next chapter.
 
 One other important point here.
 There is a counter in the IAB that is incremented each time an
@@ -837,7 +870,6 @@ The increment has one little catch.
 The counter is signed and we use the positive and negative values
 differently.
 Here we want to make sure the value remains positive.
-
 
 [source,c]
 ----
@@ -950,7 +982,8 @@ this is what `micca` supports.
 * Integrity constraints implied by the associations and generalizations
 supplied in the configuration DSL will be checked at run time.
 * Violations of referential integrity will result in a fatal system error.
-There is no support for rolling back data values to a known good state.
+There is no support for rolling back data values to a known good state
+or ignoring the error and proceeding anyway.
 * Integrity constraints are checked at the end of transactions on the
 data model.
 The duration of the transaction is not under direct control,
@@ -1020,7 +1053,7 @@ can be encoded in four values.
 ----
 <<mrt interface aggregate types>>=
 typedef enum {
-    mrtAtMostOne,
+    mrtAtMostOne = 0,
     mrtExactlyOne,
     mrtZeroOrMore,
     mrtOneOrMore
@@ -1364,7 +1397,7 @@ The later phrase of this rule implies that there is a _thread of control_
 which determines the boundary of when data consistency is checked.
 We will describe how threads of control work later.
 For now,
-we are concerned data transactions as a means of deciding when
+we are concerned with data transactions as a means of deciding when
 data integrity is to be verified.
 
 Each time a relationship is manipulated, by:
@@ -1430,8 +1463,18 @@ marked relationships to eliminate any duplicate mark.
 
 [source,c]
 ----
+<<mrt forward references>>=
+static
+void
+mrtMarkTransaction(
+    MRT_Relationship const * const *rel,
+    unsigned relCount) ;
+----
+
+[source,c]
+----
 <<mrt static functions>>=
-static inline
+static
 void
 mrtMarkTransaction(
     MRT_Relationship const * const *rel,
@@ -1482,14 +1525,14 @@ mrtEndTransaction(void)
 
 At the end of a transaction on the data model,
 `mrtEndTransaction` iterates across the set of saved relationship
-descriptors and check each relationship to make sure the data model
+descriptors and checks each relationship to make sure the data model
 is in a consistent state.
 The design approach is to use the `refCount` member of each instance
 as a place to store how many times the instance is referred to by
 the other participant in the relationship.
-Then knowing the cardinality of the relationship we can evaluate
-the `refCount` values to determine if referential integrity has been
-maintained.
+Knowing the cardinality of the relationship,
+we can evaluate the `refCount` values to determine if referential integrity has
+been maintained.
 
 The overall steps are:
 
@@ -2852,11 +2895,7 @@ MRT_SubclassCode *supercode = (MRT_SubclassCode *)
 *supercode = subclassRole->subCode ;
 MRT_Instance *subInst = (MRT_Instance *)
         ((uintptr_t)super + gen->superclass.subInstOffset) ;
-subInst->classDesc = newSubclass ;
-subInst->alloc = mrtIncrAllocCounter(newSubclass->iab) ;
-subInst->currentState = newSubclass->edb ?
-        newSubclass->edb->initialState : MRT_StateCode_IG ;
-subInst->refCount = 0 ;
+mrtInitializeInstance(subInst, newSubclass, MRT_StateCode_IG) ;
 ----
 
 === Linked List Operations
@@ -4537,7 +4576,7 @@ typedef struct mrteventdispatchblock {
     MRT_StateCode initialState ;
     MRT_StateCode creationState ;
     MRT_StateCode const *transitionTable ;
-    PtrActivityFunction const *activityTable ;
+    MRT_PtrActivityFunction const *activityTable ;
     bool const *terminalStates ;
 
 #       ifndef MRT_NO_NAMES
@@ -4601,8 +4640,8 @@ with each state.
 [source,c]
 ----
 <<mrt interface simple types>>=
-typedef void ActivityFunction(void *const, void const *const) ;
-typedef ActivityFunction *PtrActivityFunction ;
+typedef void MRT_ActivityFunction(void *const, void const *const) ;
+typedef MRT_ActivityFunction *MRT_PtrActivityFunction ;
 ----
 
 Since Moore state machines associate the activity with the state,
@@ -4703,7 +4742,7 @@ mrtDispatchTransitionEvent(
         /*
          * Invoke the state activity if there is one.
          */
-        PtrActivityFunction activity = edb->activityTable[newState] ;
+        MRT_PtrActivityFunction activity = edb->activityTable[newState] ;
         if (activity) {
             activity(targetInst, &ecb->eventParameters) ;
         }

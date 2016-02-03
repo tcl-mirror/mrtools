@@ -518,6 +518,8 @@ proc portalIds {} {
     set result [comment "Numeric encoding of classes, attributes and\
             instances used by the portal functions"]
     set classRefs [Class findWhere {$Domain eq $domain}]
+    append result "#define [string toupper ${domain}_CLASSCOUNT]\
+            [refMultiplicity $classRefs]\n"
     forAllRefs classRef $classRefs {
         assignAttribute $classRef
         append result [comment "Class: $Name"]
@@ -525,6 +527,8 @@ proc portalIds {} {
         append result "#define $classid $Number\n"
 
         set attrRefs [findRelated $classRef ~R20 {~R21 Attribute}]
+        append result "#define [string toupper ${Domain}_${Name}_ATTRCOUNT]\
+                [refMultiplicity $attrRefs]\n"
         set attrNumber -1
         relation foreach attr [deRef $attrRefs] -ascending Name {
             relation assign $attr {Name attrName}
@@ -533,10 +537,56 @@ proc portalIds {} {
         }
 
         set instRefs [findRelated $classRef ~R20 ~R103]
+        set usubRef [findRelated $classRef {~R41 ClassRole} {~R40 Subclass}\
+                {~R47 UnionSubclass}]
+        if {[isEmptyRef $usubRef]} {
+            append result "#define [string toupper ${Domain}_${Name}_INSTCOUNT]\
+                    [refMultiplicity $instRefs]\n"
+        }
         relation foreach inst [deRef $instRefs] -ascending Number {
             relation assign $inst Instance {Number InstNumber}
             set instid [string toupper ${Domain}_${Name}_${Instance}_INSTID]
             append result "#define $instid $InstNumber\n"
+        }
+    }
+
+    append result [comment "Numeric encoding of event numbers\
+            used by the portal functions"]
+    set tevents [pipe {
+        TransitioningEvent findWhere {$Domain eq $domain} |
+        deRef ~ |
+        relation eliminate ~ Domain |
+        relation group ~ Events Event Number
+    }]
+    relation foreach tevent $tevents -ascending Model {
+        relation assign $tevent
+        append result [comment "Class: $Model"]
+        append result "#define [string toupper ${domain}_${Model}_EVENTCOUNT]\
+            [relation cardinality $Events]\n"
+        relation foreach event $Events -ascending Number {
+            relation assign $event
+            append result "#define\
+                [string toupper ${domain}_${Model}_${Event}_EVENT] $Number\n"
+        }
+    }
+
+    append result [comment "Numeric encoding of polymorphic event numbers\
+            used by the portal functions"]
+    set pevents [pipe {
+        DeferredEvent findWhere {$Domain eq $domain} |
+        deRef ~ |
+        relation eliminate ~ Domain |
+        relation group ~ Events Event Number
+    }]
+    relation foreach pevent $pevents -ascending Model {
+        relation assign $pevent
+        append result [comment "Class: $Model"]
+        append result "#define [string toupper ${domain}_${Model}_POLYEVENTCOUNT]\
+            [relation cardinality $Events]\n"
+        relation foreach event $Events -ascending Number {
+            relation assign $event
+            append result "#define\
+                [string toupper ${domain}_${Model}_${Event}_POLYEVENT] $Number\n"
         }
     }
 
@@ -617,6 +667,14 @@ set codeTemplate [string cat\
     %<banner>%\
     %<prologue>%\
     "#include \"micca_rt.h\"\n"\
+    "#ifdef MRT_INSTRUMENT\n"\
+    "    #ifndef MRT_INSTRUMENT_ENTRY\n"\
+    "        #define MRT_INSTRUMENT_ENTRY\
+            printf(\"%s: %s %d\\n\", __func__, __FILE__, __LINE__) ;\n"\
+    "    #endif /* MRT_INSTRUMENT_ENTRY */\n"\
+    "#else\n"\
+    "    #define MRT_INSTRUMENT_ENTRY\n"\
+    "#endif /* MRT_INSTRUMENT */\n"\
     %<domainInclude>%\
     %<forwardClassDeclarations>%\
     %<classDeclarations>%\
@@ -633,6 +691,7 @@ set codeTemplate [string cat\
     %<classDefinitions>%\
     %<relationshipDefinitions>%\
     %<instanceDefinitions>%\
+    %<activityDefinitions>%\
     %<epilogue>%\
 ]
 ----
@@ -1262,7 +1321,7 @@ test codegen-3.0 {
 } -body {
     micca generate
     testConditions\
-        {[llength [fileutil::grep {R1} codegen3.c]] == 23}
+        {[llength [fileutil::grep {R1} codegen3.c]] == 27}
 } -result {1}
 ----
 
@@ -1325,7 +1384,7 @@ test codegen-5.0 {
 } -body {
     micca generate
     testConditions\
-        {[llength [fileutil::grep {R1} codegen5.c]] == 19}
+        {[llength [fileutil::grep {R1} codegen5.c]] == 23}
 } -result {1}
 ----
 
@@ -2207,7 +2266,7 @@ proc GenerateActivityTable {smodel} {
     variable domain
     assignAttribute $smodel {Model className}
 
-    set result "static PtrActivityFunction const ${className}__ATAB\[\] = \{\n"
+    set result "static MRT_PtrActivityFunction const ${className}__ATAB\[\] = \{\n"
 
     set places [pipe {
         StatePlace findWhere {$Domain eq $domain && $Model eq $className} |
@@ -2669,7 +2728,7 @@ test codegen-15.0 {
 } -body {
     micca generate
     testConditions\
-        {[llength [fileutil::grep {R1_} codegen15.c]] == 5}
+        {[llength [fileutil::grep {R1_} codegen15.c]] == 7}
 } -result {1}
 ----
 
@@ -3163,6 +3222,9 @@ proc MapToCardinality {cond mult} {
 proc instanceDefinitions {} {
     try {
     variable domain
+    variable staticMultiRefs
+
+    set staticMultiRefs [comment "Multiple Static Reference Definitions"]
 
     set indent [string repeat { } 4]
     set indent2 [string repeat $indent 2]
@@ -3187,7 +3249,7 @@ proc instanceDefinitions {} {
         append result "\} ;\n"
     }
 
-    return $result
+    return [string cat $staticMultiRefs $result]
 
 
     } on error {} {
@@ -3545,6 +3607,77 @@ proc GenInstanceInitializers {className classNumber inst} {
 }
 ----
 
+[source,c]
+----
+<<generation code commands>>=
+proc activityDefinitions {} {
+    variable domain
+    set result {}
+
+    set classes [pipe {
+        State findWhere {$Domain eq $domain && $Activity ne {}} |
+        deRef ~ |
+        relation eliminate ~ Domain IsTerminal |
+        relation group ~ States Name Activity PSigID
+    }]
+    # puts [relformat $classes classes]
+
+    if {[relation isnotempty $classes]} {
+        append result [comment "State Activities Definitions"]
+
+        relation foreach class $classes -ascending Model {
+            relation assign $class
+            append result "#define MRT_CLASSNAME \"$Model\"\n"
+            relation foreach state $States {
+                relation assign $state
+                append result\
+                    "static void ${Model}_${Name}__ACTIVITY\(\n"\
+                    "    void *const s__,\n"\
+                    "    void const *const p__)\n"\
+                    "\{\n"\
+                    "        #define MRT_STATENAME \"$Name\"\n"\
+                    "    MRT_INSTRUMENT_ENTRY\n\n"\
+                    "    [GetClassProperty $Model Reference] const self = s__ ;\n"
+                if {$PSigID ne {}} {
+                    set params [pipe {
+                        ParameterSignature findById Domain $domain PSigID $PSigID |
+                        findRelated % ~R79 |
+                        deRef % |
+                        relation join % $::micca::Argument |
+                        relation project % Name Position DataType |
+                        relation extend % ptup Decl string {
+                            [typeCheck composeDeclaration\
+                                [tuple extract $ptup DataType]\
+                                [tuple extract $ptup Name]]}
+                    } {} |%]
+                    # puts [relformat $params params]
+
+                    append result "    struct \{\n"
+                    relation foreach param $params -ascending Position {
+                        relation assign $param Decl
+                        append result "        $Decl ;\n"
+                    }
+                    append result "    \} const *const pp__ = p__ ;\n"
+                    relation foreach param $params -ascending Position {
+                        relation assign $param {Name pname} Decl
+                        append result "    $Decl = pp__->$pname ;\n"
+                    }
+                }
+                # HERE --- need to template expand the code
+                append result "\n[indentCode $Activity]"
+
+                append result \n\
+                    "        #undef MRT_STATENAME\n"\
+                    "\}\n"
+            }
+            append result "#undef MRT_CLASSNAME\n"
+        }
+    }
+
+    return $result
+}
+----
+
 == Helper Commands
 
 [source,c]
@@ -3660,14 +3793,12 @@ proc GenReflexiveReference {domainName className instnum component ref refvalue}
             [GenInstanceAddress $domainName $RefClass $inst]}]
         set result ".$dir = $compvalue,\n"
     } elseif {$IsStatic} {
-        # Static multiple
-        # HERE need to emit the constant array and
-        # then refer to it.
-        set refs ${className}_${instnum}_${component}__${ltype}REFS
+        set refvar ${className}_${instnum}_${component}__${ltype}REFS
+        GenStaticReferenceBlock $domainName $RefClass $refvalue $refvar
         set result [string cat\
             ".$dir = \{\n"\
-            "    .count = COUNTOF($refs),\n"\
-            "    .references = $refs\n"\
+            "    .count = COUNTOF($refvar),\n"\
+            "    .references = $refvar\n"\
             "\},\n"\
         ]
     } else {
@@ -3700,6 +3831,24 @@ proc GenReflexiveReference {domainName className instnum component ref refvalue}
 [source,c]
 ----
 <<generation helper commands>>=
+proc GenStaticReferenceBlock {domainName refClass classes varName} {
+    upvar #0 ::micca::@Gen@::GenCode::staticMultiRefs staticMultiRefs
+
+    append staticMultiRefs\
+        "static [GetClassProperty $refClass Declaration] * const "\
+        "$varName\[\] = \{\n"
+    foreach refinst $classes {
+        append staticMultiRefs\
+            "    "\
+            [GenInstanceAddress $domainName $refClass $refinst],\n
+    }
+    append staticMultiRefs "\} ;\n"
+}
+----
+
+[source,c]
+----
+<<generation helper commands>>=
 proc GenNonReflexiveReference {domainName className instnum component ref\
         refvalue} {
     relation assign $ref
@@ -3712,14 +3861,12 @@ proc GenNonReflexiveReference {domainName className instnum component ref\
             [GenInstanceAddress $domainName $RefClass $refvalue]}]
         set result ".$component = $compvalue,\n"
     } elseif {$IsStatic} {
-        # Static multiple
-        # HERE need to emit the constant array and
-        # then refer to it.
-        set refs ${className}_${instnum}_${component}__${ltype}REFS
+        set refvar ${className}_${instnum}_${component}__${ltype}REFS
+        GenStaticReferenceBlock $domainName $RefClass $refvalue $refvar
         set result [string cat\
             ".$component = \{\n"\
-            "    .count = COUNTOF($refs),\n"\
-            "    .references = $refs\n"\
+            "    .count = COUNTOF($refvar),\n"\
+            "    .references = $refvar\n"\
             "\},\n"\
         ]
     } else {
