@@ -24,7 +24,6 @@ vpath %.html $(DOCDIR)
 vpath %.test $(TESTDIR)
 vpath %.uxf $(IMAGEDIR)
 vpath %.tcl $(CODEDIR)/tcl
-vpath %.c $(POSIXDIR)
 
 DOCSRC 	=\
 	micca.aweb\
@@ -68,9 +67,9 @@ TCLSRC	=\
      	$(patsubst %.aweb,%.tcl,$(DOCSRC))\
 	$(NULL)
 
-POSIXH	= $(POSIXDIR)/micca_rt.h
-POSIXC	= $(POSIXDIR)/micca_rt.c
-POSIXOBJ = $(POSIXDIR)/micca_rt.o
+POSIXH	= micca_rt.h
+POSIXC	= micca_rt.c
+POSIXOBJ = micca_rt.o
 
 PDF 	=\
      	$(DOCDIR)/$(patsubst %.aweb,%.pdf,$(DOCSRC))\

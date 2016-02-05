@@ -469,7 +469,7 @@ typedef struct mrtclass {
     unsigned attrCount ;
     MRT_Attribute const *classAttrs ;
     unsigned instCount ;
-    struct mrtunionsuperclassrole const *containment ;
+    struct mrtsuperclassrole const *containment ;
 
 #       ifndef MRT_NO_NAMES
     char const *name ;
@@ -1196,36 +1196,17 @@ struct mrtclassassociation {
 ==== Reference Generalizations
 
 For generalization relationships implemented as references,
-the superclass implements its reference to a subclass using the following
+the superclass implements its reference to a subclass by holding a
+simple pointer to the subclass instance.
+It is possible for the superclass to determine the type of the
+related subclass by simply following the reference to the subclass
+and then examining the `classDesc` member of the instance.
 data structure.
 
 [source,c]
 ----
 <<mrt interface aggregate types>>=
-typedef struct mrtsuperclassref {
-    MRT_SubclassCode subCode ;
-    void *subInst ;
-} MRT_SuperclassRef ;
-----
-
-`subCode`::
-    An encoding of the type of the subclass to which the superclass instance
-    is related.
-    Subclasses are encoded using small, zero-based integers.
-    This information allows the superclass instance to determine if
-    the traversal of the generalization relationships to a particular
-    subclass type yields an instance or is empty.
-`subInst`::
-    A pointer to the subclass instance that is related to the superclass
-    instance.
-
-The information needed to describe the role of the superclass in a
-reference generalization is:
-
-[source,c]
-----
-<<mrt interface aggregate types>>=
-struct mrtrefsuperclassrole {
+struct mrtsuperclassrole {
     MRT_Class const *classDesc ;
     MRT_AttrOffset storageOffset ;
 } ;
@@ -1237,7 +1218,7 @@ struct mrtrefsuperclassrole {
     The offset in bytes from the beginning of a reference superclass
     instance to where the reference to its related subclass is stored.
     The structure member found at `storageOffset` from the beginning of
-    the instance is of type `MRT_SuperclassRef`.
+    the instance is of type `MRT_Instance`.
 
 The information needed to describe the role of the subclass in a
 reference generalization is:
@@ -1248,7 +1229,6 @@ reference generalization is:
 struct mrtrefsubclassrole {
     MRT_Class const *classDesc ;
     MRT_AttrOffset storageOffset ;
-    MRT_SubclassCode subCode ;
 } ;
 ----
 
@@ -1259,8 +1239,6 @@ struct mrtrefsubclassrole {
     instance to where the reference to its related superclass is stored.
     The structure member found at `storageOffset` from the beginning of
     the instance is a pointer to the superclass instance.
-`subCode`::
-    The numerical encoding of the subclass type.
 
 A reference generalization relationship can be described by its
 superclass role information and the set of subclass roles for the
@@ -1272,7 +1250,7 @@ array.
 ----
 <<mrt interface aggregate types>>=
 struct mrtrefgeneralization {
-    struct mrtrefsuperclassrole superclass ;
+    struct mrtsuperclassrole superclass ;
     unsigned subclassCount ;
     struct mrtrefsubclassrole const *subclasses ;
 } ;
@@ -1282,49 +1260,18 @@ struct mrtrefgeneralization {
 
 A union generalization results in subclass instances being held as a union in
 the superclass instance structure.
-This requires slightly different role information.
-
-[source,c]
-----
-<<mrt interface aggregate types>>=
-struct mrtunionsuperclassrole {
-    MRT_Class const *classDesc ;
-    MRT_AttrOffset subCodeOffset ;
-    MRT_AttrOffset subInstOffset ;
-} ;
-----
-
-`classDesc`::
-    A pointer to the class data for the participant.
-`subCodeOffset`::
-    The offset in bytes from the beginning of a union superclass
-    to where the subclass code for the related subclass instance is stored.
-    The structure member at this offset is of type, `MRT_SubclassCode`.
-`subInstOffset`::
-    The offset in bytes from the beginning of a union superclass
-    to the subclass instance union.
-    The structure member at this offset is the union of
-    all the subclass structures that participate in the relationship.
+From the superclass perspective,
+the information needed to describe where the subclass is stored is
+the same as for a reference supertype.
+The only difference is that `storageOffset` is an offset to the
+union holding the subclass rather than a reference pointer to a subclass.
 
 Subclass instances held in union generalizations do not have a
 pointer back to their related superclasses.
 The related superclass can be determined by pointer arithmetic
-(_i.e._ subtracting `subInstOffset` from the subclass instance pointer).
-So the role information for a union subclass omits this information.
-
-[source,c]
-----
-<<mrt interface aggregate types>>=
-struct mrtunionsubclassrole {
-    MRT_Class const *classDesc ;
-    MRT_SubclassCode subCode ;
-} ;
-----
-
-`classDesc`::
-    A pointer to the class data for the participant.
-`subCode`::
-    The numerical encoding of the subclass type.
+(_i.e._ subtracting `storageOffset` from the subclass instance pointer).
+So the role information for a union subclass is nothing more than
+a pointer to its class descriptor
 
 Similar to the reference generalization,
 the union generalization information consists of that for the
@@ -1334,9 +1281,9 @@ superclass an a set of subclass role information values.
 ----
 <<mrt interface aggregate types>>=
 struct mrtuniongeneralization {
-    struct mrtunionsuperclassrole superclass ;
+    struct mrtsuperclassrole superclass ;
     unsigned subclassCount ;
-    struct mrtunionsubclassrole const *subclasses ;
+    MRT_Class const * const *subclasses ;
 } ;
 ----
 
@@ -1368,8 +1315,8 @@ typedef struct mrtrelationship {
 `relType`::
     A value to indicate the type of the relationship.
 `relInfo`::
-    A union of the various types of relationship information
-    giving information that describes the details of the relationship.
+    A union of the various types of relationship information structures
+    that describes the details of the relationship.
     The union must be interpreted according to the value of the `relType`
     member.
 `name`::
@@ -1706,11 +1653,8 @@ for (unsigned subcount = gen->subclassCount ; subcount != 0 && result ;
 
 When a generalization is stored in a union,
 there are no reference pointers.
-However, we can still verify that the subcode field has a valid value.
-This check is needed since unrelating a union generalization sets this
-field to an invalid value.
-We can also check each subclass instance to insure that its `alloc` field
-is set correctly.
+However, we can still verify that the subclass instance is actually
+allocated.
 
 [source,c]
 ----
@@ -1723,14 +1667,8 @@ for (MRT_Instance *inst = (MRT_Instance *)super->storageStart ;
         inst < (MRT_Instance *)super->storageFinish ;
         inst = (MRT_Instance *)((uintptr_t)inst + super->instanceSize)) {
     if (inst->alloc > 0) {
-        MRT_SubclassCode *subCode = (MRT_SubclassCode *)
-                ((uintptr_t)inst + gen->superclass.subCodeOffset) ;
-        if (*subCode >= gen->subclassCount) {
-            result = false ;
-            break ;
-        }
         MRT_Instance *subInst = (MRT_Instance *)
-                ((uintptr_t)inst + gen->superclass.subInstOffset) ;
+                ((uintptr_t)inst + gen->superclass.storageOffset) ;
         if (subInst->alloc <= 0) {
             result = false ;
             break ;
@@ -2168,13 +2106,9 @@ mrtCountClassAssocRefs(
 
 In a reference type generalization,
 all of the references are always singular.
-There are two differences.
-First, we must verify the subclass code contained in the superclass.
-This code would have been set to an invalid number when a superclass
-was unrelated.
-Also, we must iterate across all the subclasses
-of the generalization in order to count the references that the subclasses
-make back to the superclass.
+However,
+we must iterate across all the subclasses of the generalization in order to
+count the references that the subclasses make back to the superclass.
 
 [source,c]
 ----
@@ -2196,16 +2130,13 @@ mrtCountGenRefs(
             inst < (MRT_Instance *)super->storageFinish ;
             inst = (MRT_Instance *)((uintptr_t)inst + super->instanceSize)) {
         if (inst->alloc > 0) {
-            MRT_SuperclassRef *superRef = (MRT_SuperclassRef *)
+            MRT_Instance *subInst = *(MRT_Instance **)
                     ((uintptr_t)inst + gen->superclass.storageOffset) ;
-            if (superRef->subCode < gen->subclassCount) {
-                MRT_iab *sub = gen->subclasses[superRef->subCode].classDesc->iab ;
-                MRT_Instance *subInst = (MRT_Instance *)superRef->subInst ;
-                if ((void *)subInst >= sub->storageStart &&
-                        (void *)subInst < sub->storageFinish &&
-                        subInst->alloc > 0) {
-                    subInst->refCount += 1 ;
-                }
+            MRT_iab *subiab = subInst->classDesc->iab ;
+            if ((void *)subInst >= subiab->storageStart &&
+                    (void *)subInst < subiab->storageFinish &&
+                    subInst->alloc > 0) {
+                subInst->refCount += 1 ;
             }
         }
     }
@@ -2499,25 +2430,22 @@ First we have to find the subclass type of the subclass instance
 <<mrt_Relate: link reference generalization>>=
 struct mrtrefgeneralization const *gen = &rel->relInfo.refGeneralization ;
 
-struct mrtrefsubclassrole const *subclassRole =
-    mrtFindRefGenSubclassRole(((MRT_Instance *)source)->classDesc,
-            gen->subclasses, gen->subclassCount) ;
-
-if (subclassRole == NULL) {
+MRT_Class const *superclassClass = ((MRT_Instance *)target)->classDesc ;
+if (gen->superclass.classDesc != superclassClass) {
     mrtFatalError(mrtRelationshipLinkage) ;
 }
 
-if (gen->superclass.classDesc != ((MRT_Instance *)target)->classDesc) {
-    mrtFatalError(mrtRelationshipLinkage) ;
-}
+MRT_Class const *subclassClass = ((MRT_Instance *)source)->classDesc ;
+int subclassCode = mrtFindRefGenSubclassCode(subclassClass, gen->subclasses,
+        gen->subclassCount) ;
 
-void **subref = (void **)((uintptr_t)source + subclassRole->storageOffset) ;
+void **superref =
+    (void **)((uintptr_t)target + gen->superclass.storageOffset) ;
+*superref = source ;
+
+void **subref = (void **)((uintptr_t)source +
+        gen->subclasses[subclassCode].storageOffset) ;
 *subref = target ;
-
-MRT_SuperclassRef *superref = (MRT_SuperclassRef *)
-        ((uintptr_t)target + gen->superclass.storageOffset) ;
-superref->subCode = subclassRole->subCode ;
-superref->subInst = source ;
 ----
 
 Finding the participating subclass of the generalization is a linear search
@@ -2526,46 +2454,36 @@ of the subclass roles in the relationship description.
 [source,c]
 ----
 <<mrt static functions>>=
-struct mrtrefsubclassrole const *
-mrtFindRefGenSubclassRole(
+int
+mrtFindRefGenSubclassCode(
     MRT_Class const *subclassClass,
     struct mrtrefsubclassrole const *subclasses,
     unsigned count)
 {
-    for ( ; count != 0 ; --count, ++subclasses) {
+    int subcode ;
+
+    for (subcode = 0 ; subcode < count ; ++subcode, ++subclasses) {
         if (subclassClass == subclasses->classDesc) {
-            return subclasses ;
+            return subcode ;
         }
     }
 
-    return NULL ;
+    mrtFatalError(mrtRelationshipLinkage) ;
+
+    return -1 ;
 }
 ----
 
 For generalizations stored in a union,
-there are no reference pointers but we must update the
-subclass encoding to reflect the newly related subclass type.
+there are no reference pointers.
+Subclass instances of a union generalization cannot be created apart
+from their superclass.
+It is an error to attempt to relate across a union generalization.
 
 [source,c]
 ----
 <<mrt_Relate: link union generalization>>=
-struct mrtuniongeneralization const *gen = &rel->relInfo.unionGeneralization ;
-
-struct mrtunionsubclassrole const *subclassRole =
-    mrtFindUnionGenSubclassRole(((MRT_Instance *)source)->classDesc,
-            gen->subclasses, gen->subclassCount) ;
-
-if (subclassRole == NULL) {
-    mrtFatalError(mrtRelationshipLinkage) ;
-}
-
-if (gen->superclass.classDesc != ((MRT_Instance *)target)->classDesc) {
-    mrtFatalError(mrtRelationshipLinkage) ;
-}
-
-MRT_SubclassCode *supercode = (MRT_SubclassCode *)
-        ((uintptr_t)target + gen->superclass.subCodeOffset) ;
-*supercode = subclassRole->subCode ;
+mrtFatalError(mrtRelationshipLinkage) ;
 ----
 
 Similar to reference generalizations,
@@ -2574,19 +2492,23 @@ we also need to search union generalization subclasses for a role match.
 [source,c]
 ----
 <<mrt static functions>>=
-struct mrtunionsubclassrole const *
-mrtFindUnionGenSubclassRole(
+int
+mrtFindUnionGenSubclassCode(
     MRT_Class const *subclassClass,
-    struct mrtunionsubclassrole const *subclasses,
+    MRT_Class const * const *subclasses,
     unsigned count)
 {
-    for ( ; count != 0 ; --count, ++subclasses) {
-        if (subclassClass == subclasses->classDesc) {
-            return subclasses ;
+    int subcode ;
+
+    for (subcode = 0 ; subcode < count ; ++subcode, ++subclasses) {
+        if (subclassClass == *subclasses) {
+            return subcode ;
         }
     }
 
-    return NULL ;
+    mrtFatalError(mrtRelationshipLinkage) ;
+
+    return -1 ;
 }
 ----
 
@@ -2762,48 +2684,28 @@ void **bref = (void **)((uintptr_t)associator + assoc->associator.backwardOffset
 <<mrt_Unrelate: unlink reference generalization>>=
 struct mrtrefgeneralization const *gen = &rel->relInfo.refGeneralization ;
 
-struct mrtrefsubclassrole const *subclassRole =
-    mrtFindRefGenSubclassRole(((MRT_Instance *)source)->classDesc,
-            gen->subclasses, gen->subclassCount) ;
-
-if (subclassRole == NULL) {
+MRT_Class const *superclassClass = ((MRT_Instance *)target)->classDesc ;
+if (gen->superclass.classDesc != superclassClass) {
     mrtFatalError(mrtRelationshipLinkage) ;
 }
 
-if (gen->superclass.classDesc != ((MRT_Instance *)target)->classDesc) {
-    mrtFatalError(mrtRelationshipLinkage) ;
-}
+MRT_Class const *subclassClass = ((MRT_Instance *)source)->classDesc ;
+int subclassCode = mrtFindRefGenSubclassCode(subclassClass, gen->subclasses,
+        gen->subclassCount) ;
 
-MRT_SuperclassRef *superref = (MRT_SuperclassRef *)
-        ((uintptr_t)target + gen->superclass.storageOffset) ;
-superref->subCode = gen->subclassCount ;
-superref->subInst = NULL ;
+void **superref =
+    (void **)((uintptr_t)target + gen->superclass.storageOffset) ;
+*superref = NULL ;
 
-MRT_Instance **subref = (MRT_Instance **)
-        ((uintptr_t)source + subclassRole->storageOffset) ;
+void **subref = (void **)((uintptr_t)source +
+        gen->subclasses[subclassCode].storageOffset) ;
 *subref = NULL ;
 ----
 
 [source,c]
 ----
 <<mrt_Unrelate: unlink union generalization>>=
-struct mrtuniongeneralization const *gen = &rel->relInfo.unionGeneralization ;
-
-struct mrtunionsubclassrole const *subclassRole =
-    mrtFindUnionGenSubclassRole(((MRT_Instance *)source)->classDesc,
-            gen->subclasses, gen->subclassCount) ;
-
-if (subclassRole == NULL) {
-    mrtFatalError(mrtRelationshipLinkage) ;
-}
-
-if (gen->superclass.classDesc != ((MRT_Instance *)target)->classDesc) {
-    mrtFatalError(mrtRelationshipLinkage) ;
-}
-
-MRT_SubclassCode *supercode = (MRT_SubclassCode *)
-        ((uintptr_t)target + gen->superclass.subCodeOffset) ;
-*supercode = gen->subclassCount ;
+mrtFatalError(mrtRelationshipLinkage) ;
 ----
 
 === Reclassifying Subclasses
@@ -2811,7 +2713,7 @@ MRT_SubclassCode *supercode = (MRT_SubclassCode *)
 [source,c]
 ----
 <<mrt external interfaces>>=
-extern void *
+extern MRT_Instance *
 mrt_Reclassify(
     MRT_Relationship const *rel,
     void *super,
@@ -2821,7 +2723,7 @@ mrt_Reclassify(
 [source,c]
 ----
 <<mrt external functions>>=
-void *
+MRT_Instance *
 mrt_Reclassify(
     MRT_Relationship const *rel,
     void *super,
@@ -2831,9 +2733,9 @@ mrt_Reclassify(
         return NULL ;
     }
 
-    mrtMarkTransaction(&rel, 1) ;
+    MRT_Instance *newSubInst = NULL ;
 
-    unsigned subcount ;
+    mrtMarkTransaction(&rel, 1) ;
 
     if (rel->relType == mrtRefGeneralization) {
         <<mrt_Reclassify: reclassify reference generalization>>
@@ -2843,7 +2745,7 @@ mrt_Reclassify(
         mrtFatalError(mrtRelationshipLinkage) ;
     }
 
-    return NULL ;
+    return newSubInst ;
 }
 ----
 
@@ -2852,25 +2754,24 @@ mrt_Reclassify(
 <<mrt_Reclassify: reclassify reference generalization>>=
 struct mrtrefgeneralization const *gen = &rel->relInfo.refGeneralization ;
 
-struct mrtrefsubclassrole const *subclassRole =
-    mrtFindRefGenSubclassRole(newSubclass, gen->subclasses, gen->subclassCount) ;
-
-if (subclassRole == NULL) {
+MRT_Class const *superclassClass = ((MRT_Instance *)super)->classDesc ;
+if (gen->superclass.classDesc != superclassClass) {
     mrtFatalError(mrtRelationshipLinkage) ;
 }
 
-if (gen->superclass.classDesc != ((MRT_Instance *)super)->classDesc) {
-    mrtFatalError(mrtRelationshipLinkage) ;
-}
+int subclassCode = mrtFindRefGenSubclassCode(newSubclass, gen->subclasses,
+        gen->subclassCount) ;
 
-MRT_SuperclassRef *superref = (MRT_SuperclassRef *)
-        ((uintptr_t)super + gen->superclass.storageOffset) ;
-mrt_DeleteInstance(superref->subInst) ;
-superref->subInst = mrt_CreateInstance(newSubclass, MRT_StateCode_IG) ;
-superref->subCode = subclassRole->subCode ;
+MRT_Instance **superref =
+    (MRT_Instance **)((uintptr_t)super + gen->superclass.storageOffset) ;
+MRT_Instance *oldsubinst = *superref ;
+mrt_DeleteInstance(oldsubinst) ;
 
-MRT_Instance **subref = (MRT_Instance **)
-        ((uintptr_t)superref->subInst + subclassRole->storageOffset) ;
+newSubInst = mrt_CreateInstance(newSubclass, MRT_StateCode_IG) ;
+*superref = newSubInst ;
+
+MRT_Instance **subref = (MRT_Instance **)((uintptr_t)newSubInst +
+        gen->subclasses[subclassCode].storageOffset) ;
 *subref = super ;
 ----
 
@@ -2879,23 +2780,16 @@ MRT_Instance **subref = (MRT_Instance **)
 <<mrt_Reclassify: reclassify union generalization>>=
 struct mrtuniongeneralization const *gen = &rel->relInfo.unionGeneralization ;
 
-struct mrtunionsubclassrole const *subclassRole =
-    mrtFindUnionGenSubclassRole(newSubclass, gen->subclasses, gen->subclassCount) ;
-
-if (subclassRole == NULL) {
+MRT_Class const *superclassClass = ((MRT_Instance *)super)->classDesc ;
+if (gen->superclass.classDesc != superclassClass) {
     mrtFatalError(mrtRelationshipLinkage) ;
 }
 
-if (gen->superclass.classDesc != ((MRT_Instance *)super)->classDesc) {
-    mrtFatalError(mrtRelationshipLinkage) ;
-}
+int subclassCode = mrtFindUnionGenSubclassCode(newSubclass, gen->subclasses,
+        gen->subclassCount) ;
 
-MRT_SubclassCode *supercode = (MRT_SubclassCode *)
-        ((uintptr_t)super + gen->superclass.subCodeOffset) ;
-*supercode = subclassRole->subCode ;
-MRT_Instance *subInst = (MRT_Instance *)
-        ((uintptr_t)super + gen->superclass.subInstOffset) ;
-mrtInitializeInstance(subInst, newSubclass, MRT_StateCode_IG) ;
+newSubInst = (MRT_Instance *)((uintptr_t)super + gen->superclass.storageOffset) ;
+mrtInitializeInstance(newSubInst, newSubclass, MRT_StateCode_IG) ;
 ----
 
 === Linked List Operations
@@ -4852,28 +4746,6 @@ then the superclass instances will contain an instance pointer to a subtype.
 If the generalization relationship is stored as a union,
 then the superclass structure will a member that is a union of the data types
 of all the subtypes of the generalization hierarchy.
-This distinction is an attribute of the class and is encoded in an
-enumerated data type.
-
-[source,c]
-----
-<<mrt interface simple types>>=
-typedef enum {
-    mrtPolyReference,
-    mrtPolyUnion
-} MRT_PolyStorageType ;
-----
-
-It is also necessary to store in the superclass instance some encoding
-of the subclass to which it is currently related.
-This is just a simple zero based, sequential number that is associated
-with the subclasss of the hierarchy.
-
-[source,c]
-----
-<<mrt interface simple types>>=
-typedef uint8_t MRT_SubclassCode ;
-----
 
 As we will see,
 if we can locate where in the superclass instance structure
@@ -4907,46 +4779,25 @@ The data structure required for this is given by:
 ----
 <<mrt interface aggregate types>>=
 typedef struct mrtgendispatchblock {
-    MRT_PolyStorageType refStorage ;
-    MRT_AttrOffset subCodeOffset ;
-    MRT_AttrOffset subInstOffset ;
-    MRT_DispatchCount subclassCount ;
+    struct mrtrelationship const *relship ;
     struct mrtpolyeventmap const *eventMap ;
-
-#       ifndef MRT_NO_NAMES
-    char const *const *subclassNames ;
-#       endif /* MRT_NO_NAMES */
 } MRT_gdb ;
 ----
 
-`refStorage`::
-    The `refStorage` member determines if the generalization
-    relationship is stored in reference form or in union form.
-`subCodeOffset`::
-    The `subCodeOffset` member holds the byte offset from
-    the beginning of the instance structure where the encoding
-    for the currently related subclass is held.
-`subInstOffset`::
-    The `subInstOffset` member holds the byte offset from
-    the beginning of the instance structure where either a pointer
-    to a subclass is stored or the union for the subclasss is located.
-`subclassCount`::
-    The `subclassCount` member holds the number of subclasses defined for this
-    generalization relationship.
-    This value is used for run-time checks.
+`relship`::
+    A pointer to the relationship description for the relationship
+    across which the polymorphic event will be dispatched.
 `eventMap`::
     The `eventMap` member is a pointer to the mapping
     of polymorphic events for the generalization.
     This mapping is indexed in major order by subclass code and in
     minor order by polymorphic event number.
-`subclassNames`::
-    A pointer to an array of names of the subclasses of generalization.
-    The array is of length, `subclassCount`.
 
 A key realization here is that as we are mapping along a generalization
-a given polymorphic event may be mapped into a normal event where it
-will be consumed by the state machine of the class or
-it may be delegated further down the hierarchy.
+relationship,
+a given polymorphic event may be mapped into a normal event where it will be
+consumed by the state machine of the class or it may be delegated further down
+the hierarchy.
 To be further delegated implies that a polymorphic event will be mapped
 into yet another polymorphic event to be further mapped in a subsequent
 dispatch.
@@ -4964,8 +4815,8 @@ typedef struct mrtpolyeventmap {
 
 Now we can tie it all together.
 A superclass class that has associated polymorphic events must
-supply a Polymorphic Dispatch Block (PDB) to direct the mechanisms
-as to how to perform the mapping of polymorphic events to normal events.
+supply a Polymorphic Dispatch Block (PDB) to direct the run time
+as to how to perform the mapping of polymorphic events to transitioning events.
 
 [source,c]
 ----
@@ -5011,6 +4862,9 @@ static void
 mrtDispatchPolymorphicEvent(
     MRT_Ecb *ecb)
 {
+    assert(ecb != NULL) ;
+    assert(ecb->targetInst != NULL) ;
+
     MRT_pdb const *pdb = ecb->targetInst->classDesc->pdb ;
 
     assert(pdb != NULL) ;
@@ -5025,45 +4879,55 @@ mrtDispatchPolymorphicEvent(
      */
     MRT_EventCode origEvent = ecb->eventNumber ;
     MRT_Instance *origTarget = ecb->targetInst ;
+    MRT_Class const *targetClass = origTarget->classDesc ;
     /*
      * Each generalization that originates at the superclass has an event
      * generated down that generalization to one of the subclasss.
      */
     MRT_gdb const *sdb = pdb->genDispatch ;
     for (unsigned gnum = 0 ; gnum < pdb->genCount ; ++sdb, ++gnum) {
-        MRT_SubclassCode type = *(MRT_SubclassCode *)
-                ((uintptr_t)origTarget + sdb->subCodeOffset) ;
+        MRT_Relationship const *rel = sdb->relship ;
+        int subclassCode ;
 
-        assert(type < sdb->subclassCount) ;
-        MRT_PolyEventMap const *pem = sdb->eventMap +
-                (type * pdb->eventCount + origEvent) ;
-
-#           ifndef MRT_NO_TRACE
-        /*
-         * Trace the transition.
-         */
-        mrtTracePolyEvent(origEvent, ecb->sourceInst, ecb->targetInst,
-                type, gnum, pem->event, pem->eventType) ;
-#           endif /* MRT_NO_TRACE */
-
-        ecb->eventNumber = pem->event ;
-        ecb->eventType = pem->eventType ;
-
-        void *subTypeRef = (void *)((uintptr_t)ecb->targetInst +
-                sdb->subInstOffset) ;
-        ecb->targetInst = sdb->refStorage == mrtPolyReference ?
+        if (rel->relType == mrtRefGeneralization) {
+            struct mrtrefgeneralization const *gen = &rel->relInfo.refGeneralization ;
+            subclassCode = mrtFindRefGenSubclassCode(targetClass, gen->subclasses,
+                gen->subclassCount) ;
+            assert(subclassCode >= 0) ;
             /*
              * When the generalization is implemented via a pointer, we need an
              * extra level of indirection to fetch the address of the subclass.
              */
-            *(MRT_Instance **)subTypeRef :
+            ecb->targetInst =
+                *(MRT_Instance **)((uintptr_t)origTarget + gen->superclass.storageOffset) ;
+        } else if (rel->relType == mrtUnionGeneralization) {
+            struct mrtuniongeneralization const *gen = &rel->relInfo.unionGeneralization ;
+            subclassCode = mrtFindUnionGenSubclassCode(targetClass, gen->subclasses,
+                gen->subclassCount) ;
+            assert(subclassCode >= 0) ;
             /*
              * When the generalization is implemented by a union, we need only
              * point to the address of the subclass as it is contained in the
              * superclass.
              */
-            (MRT_Instance *)subTypeRef ;
+            ecb->targetInst =
+                (MRT_Instance *)((uintptr_t)origTarget + gen->superclass.storageOffset) ;
+        } else {
+            mrtFatalError(mrtRelationshipLinkage) ;
+        }
+        MRT_PolyEventMap const *pem = sdb->eventMap +
+                (subclassCode * pdb->eventCount + origEvent) ;
 
+#           ifndef MRT_NO_TRACE
+        /*
+         * Trace the transition.
+         */
+        mrtTracePolyEvent(origEvent, ecb->sourceInst, origTarget,
+                subclassCode, gnum, pem->event, pem->eventType) ;
+#           endif /* MRT_NO_TRACE */
+
+        ecb->eventNumber = pem->event ;
+        ecb->eventType = pem->eventType ;
         ecb->alloc = ecb->targetInst->alloc ;
         assert(ecb->alloc != 0) ;
 
@@ -5388,10 +5252,10 @@ mrtPortalGetInstRef(
             if (pclass->containment) { // <1>
                 MRT_Class const *usuper ;
                 MRT_AttrOffset subInstOffset = 0 ;
-                struct mrtunionsuperclassrole const *next = pclass->containment ;
+                struct mrtsuperclassrole const *next = pclass->containment ;
                 do {
                     usuper = next->classDesc ;
-                    subInstOffset += next->subInstOffset ;
+                    subInstOffset += next->storageOffset ;
                     next = next->classDesc->containment ;
                 } while (next != NULL) ;
 
@@ -6402,6 +6266,12 @@ there are three distinct sets of information generated when
 an event is dispatched.
 There is information common to all events and information
 specific to each event type.
+
+[source,c]
+----
+<<mrt interface simple types>>=
+typedef uint8_t MRT_SubclassCode ;
+----
 
 [source,c]
 ----
@@ -7860,7 +7730,21 @@ mrtPrintTraceInfo(
                 traceInfo->info.transitionTrace.newState]) ;
         break ;
 
-    case mrtPolymorphicEvent:
+    case mrtPolymorphicEvent: {
+        MRT_Relationship const *rel = traceInfo->targetInst->classDesc->pdb->
+                genDispatch[traceInfo->info.polyTrace.genNumber].relship ;
+        char const *subname ;
+        if (rel->relType == mrtRefGeneralization) {
+            subname = rel->relInfo.refGeneralization.
+                subclasses[traceInfo->info.polyTrace.subcode].classDesc->name ;
+        } else if (rel->relType == mrtUnionGeneralization) {
+            subname = rel->relInfo.unionGeneralization.
+                subclasses[traceInfo->info.polyTrace.subcode]->name ;
+        } else {
+            printf("%s: bad relationship type in polymorphic event, %d\n",
+                mrtTimestamp(), rel->relType) ;
+            break ;
+        }
         printf("%s: Polymorphic: %s.%s - %s -> %s.%s: %s ==> %s(%u) %s\n",
             mrtTimestamp(), sourceClassName, sourceName,
             traceInfo->targetInst->classDesc->pdb->eventNames[
@@ -7870,9 +7754,8 @@ mrtPrintTraceInfo(
                 traceInfo->info.polyTrace.genNumber],
             eventTypeNames[traceInfo->info.polyTrace.mappedType],
             traceInfo->info.polyTrace.mappedEvent,
-            traceInfo->targetInst->classDesc->pdb->genDispatch[
-                traceInfo->info.polyTrace.genNumber].subclassNames[
-                traceInfo->info.polyTrace.subcode]) ;
+            subname) ;
+    }
         break ;
 
     case mrtCreationEvent:
