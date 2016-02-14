@@ -77,7 +77,7 @@ namespace eval ::rosea {
     
     namespace ensemble create
 
-    variable version 1.6.3
+    variable version 1.6.4
 
     logger::initNamespace [namespace current]
 
@@ -1304,6 +1304,8 @@ namespace eval ::rosea {
             UNKNOWN_ASSIGNER    {unknown assigner instance, "%s", for relationship, "%s"}
             UNKNOWN_LINKAGE {unknown relationship, "%s", for class, "%s"}
             PATH_ERROR      {relationship, "%s", from "%s" to "%s", does not end at "%s"}
+            GEN_PATH_ERROR  {navigating from superclass, "%s", along generalization "%s",\
+                            does not have "%s" as a subclass}
             ARG_ERROR           {attribute updates must be name / value pairs, got "%s"}
             ID_UPDATE           {cannot update identifying attributes, "%s"}
             UNKNOWN_ATTRIBUTE   {unknown attribute, "%s"}
@@ -1827,7 +1829,7 @@ namespace eval ::rosea {
                     set partdst [relvar restrictone ${domain}::__Arch_PartitionDst\
                         Name $lname SrcClass $class DstClass $dst]
                     if {[relation isempty $partdst]} {
-                        tailcall DeclError PATH_ERROR $lname $class $DstClass $dst
+                        tailcall DeclError GEN_PATH_ERROR $class $lname $dst
                     }
                     relation assign $partdst DstClass Attrs
                     set related [eval $relatedQuery]
