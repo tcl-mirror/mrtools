@@ -357,7 +357,7 @@ proc domain {name body} {
             <<domain: union subclass semantics>>
         }
     } on error {result opts} {
-        # puts $::errorInfo
+        puts $::errorInfo
         HandleConfigError $result
     }
 }
@@ -930,23 +930,31 @@ proc association {name args} {
     }
 
     set associator {}
+    set isstatic false
+    set cmdargs $args
     while {1} {
-        set arg [lindex $args 0]
+        set arg [lindex $cmdargs 0]
 
         if {$arg eq "-associator"} {
-            set associator [lindex $args 1]
-            set args [lrange $args 2 end]
+            set associator [lindex $cmdargs 1]
+            set cmdargs [lrange $cmdargs 2 end]
+        } elseif {$arg eq "-static"} {
+            set isstatic true
+            set cmdargs [lrange $cmdargs 1 end]
+        } elseif {$arg eq "-dynamic"} {
+            set isstatic false
+            set cmdargs [lrange $cmdargs 1 end]
         } elseif {$arg eq "--"} {
             break
-            set args [lrange $args 1 end]
+            set cmdargs [lrange $cmdargs 1 end]
         } else {
             break
         }
     }
-    if {[llength $args] < 3 || [llength $args] > 4} {
+    if {[llength $cmdargs] < 3 || [llength $cmdargs] > 4} {
         tailcall DeclError ASSOC_OPTIONS $args
     }
-    lassign $args source spec target script
+    lassign $cmdargs source spec target script
 
     # Obtain references to the domain name
     variable DomainName
@@ -966,7 +974,21 @@ proc association {name args} {
     # is what this command defines.
     Relationship create {*}$reltuple\
         Number [GenNumber $DomainName Relationship [list $DomainName]]
-    Association create {*}$reltuple
+    Association create {*}$reltuple IsStatic $isstatic
+
+    # Set up tuple values for later use.
+    set sourcetuple [list\
+        Domain          $DomainName\
+        Class           $source\
+        Relationship    $name\
+        Role            source\
+    ]
+    set targettuple [list\
+        Domain          $DomainName\
+        Class           $target\
+        Relationship    $name\
+        Role            target\
+    ]
 
     # Populate the type of association we are dealing with.
     if {$associator eq {}} {
@@ -997,7 +1019,8 @@ proc association {name args} {
 TILDE_NAME {names beginning with the tilde character are not allowed\
     in this context, "%s"}
 ASSOC_OPTIONS {association options error, expected\
-    "?-associator <class>? source spec target ?script?", got "%s"}
+    "?-associator <class> -static -dynamic? source spec target ?script?",\
+    got "%s"}
 ----
 
 Here we use the data that we supplied above to make sure the
@@ -1044,78 +1067,52 @@ perform a series of inserts into the platform data model.
 [source,tcl]
 ----
 <<association: populate simple association>>=
+
 SimpleAssociation create {*}$reltuple
 
-SimpleReferringClass create\
-    Domain          $DomainName\
-    Class           $source\
-    Relationship    $name\
-    Role            source\
-    Conditionality  $ReferringCond\
-    Multiplicity    $ReferringMult
-AssociationParticipantClass create\
-    Domain          $DomainName\
-    Class           $source\
-    Relationship    $name\
-    Role            source
-ClassRole create\
-    Domain          $DomainName\
-    Class           $source\
-    Relationship    $name\
-    Role            source
-DirectionalReference create\
-    Domain          $DomainName\
-    Class           $source\
-    Name            $name\
-    Role            source
-AssociationReference create\
-    Domain          $DomainName\
-    Class           $source\
-    Name            $name
-Reference create\
-    Domain          $DomainName\
-    Class           $source\
-    Name            $name
-ClassComponent create\
-    Domain          $DomainName\
-    Class           $source\
-    Name            $name
+SimpleReferringClass create {*}$sourcetuple\
+        Conditionality  $ReferringCond\
+        Multiplicity    $ReferringMult
+ClassRole create {*}$sourcetuple
 
-SimpleReferencedClass create\
+set poptuple [list\
     Domain          $DomainName\
-    Class           $target\
-    Relationship    $name\
-    Role            target\
-    Conditionality  $ReferencedCond
-AssociationParticipantClass create\
-    Domain          $DomainName\
-    Class           $target\
-    Relationship    $name\
-    Role            target
-ClassRole create\
-    Domain          $DomainName\
-    Class           $target\
-    Relationship    $name\
-    Role            target
-DirectionalReference create\
-    Domain          $DomainName\
-    Class           $target\
+    Class           $source\
     Name            $name\
-    Role            target
-if {$source ne $target} {
-    AssociationReference create\
-        Domain          $DomainName\
-        Class           $target\
-        Name            $name
-    Reference create\
-        Domain          $DomainName\
-        Class           $target\
-        Name            $name
-    ClassComponent create\
-        Domain          $DomainName\
-        Class           $target\
-        Name            $name
+]
+AssociationReference create {*}$poptuple
+Reference create {*}$poptuple
+PopulatedComponent create {*}$poptuple
+ClassComponent create {*}$poptuple
+
+SimpleReferencedClass create {*}$targettuple Conditionality $ReferencedCond
+DestinationClass create {*}$targettuple
+ClassRole create {*}$targettuple
+
+set gentuple [list\
+    Domain          $DomainName\
+    Class           $target\
+    Name            ${name}__BACK\
+]
+ComplementaryReference create {*}$gentuple
+BackwardReference create {*}$gentuple Relationship $name
+if {!$ReferringMult} {
+    SingularReference create {*}$gentuple
+} elseif {$isstatic} {
+    ArrayReference create {*}$gentuple
+} else {
+    LinkReference create {*}$gentuple
+    set conttuple [list\
+        Domain      $DomainName\
+        Class       $source\
+        Name        ${name}__BLINKS\
+    ]
+    LinkContainer create {*}$conttuple LinkClass $target LinkComp ${name}__BACK
+    GeneratedComponent create {*}$conttuple
+    ClassComponent create {*}$conttuple
 }
+GeneratedComponent create {*}$gentuple
+ClassComponent create {*}$gentuple
 ----
 
 For class based associations we have a few more class instances to create
@@ -1126,100 +1123,85 @@ as we populate that branch of the `micca` platform model.
 <<association: populate class based association>>=
 ClassBasedAssociation create {*}$reltuple
 
-SourceClass create\
-    Domain          $DomainName\
-    Class           $source\
-    Relationship    $name\
-    Role            source\
-    Conditionality  $ReferringCond\
-    Multiplicity    $ReferringMult
-AssociationParticipantClass create\
-    Domain          $DomainName\
-    Class           $source\
-    Relationship    $name\
-    Role            source
-ClassRole create\
-    Domain          $DomainName\
-    Class           $source\
-    Relationship    $name\
-    Role            source
-DirectionalReference create\
-    Domain          $DomainName\
-    Class           $source\
-    Name            $name\
-    Role            source
-AssociationReference create\
-    Domain          $DomainName\
-    Class           $source\
-    Name            $name
-Reference create\
-    Domain          $DomainName\
-    Class           $source\
-    Name            $name
-ClassComponent create\
-    Domain          $DomainName\
-    Class           $source\
-    Name            $name
+SourceClass create {*}$sourcetuple\
+        Conditionality  $ReferringCond\
+        Multiplicity    $ReferringMult
+ClassRole create {*}$sourcetuple
 
-TargetClass create\
+set srccomp [list\
     Domain          $DomainName\
-    Class           $target\
-    Relationship    $name\
-    Role            target\
+    Class           $source\
+    Name            ${name}__FORW\
+]
+ComplementaryReference create {*}$srccomp
+ForwardReference create {*}$srccomp Relationship $name
+if {!$ReferencedMult} {
+    SingularReference create {*}$srccomp
+} elseif {$isstatic} {
+    ArrayReference create {*}$srccomp
+} else {
+    LinkReference create {*}$srccomp
+    set conttuple [list\
+        Domain      $DomainName\
+        Class       $associator\
+        Name        ${name}__FLINKS\
+    ]
+    LinkContainer create {*}$conttuple LinkClass $source LinkComp ${name}__FORW
+    GeneratedComponent create {*}$conttuple
+    ClassComponent create {*}$conttuple
+}
+GeneratedComponent create {*}$srccomp
+ClassComponent create {*}$srccomp
+
+TargetClass create {*}$targettuple\
     Conditionality  $ReferencedCond\
     Multiplicity    $ReferencedMult
-AssociationParticipantClass create\
-    Domain          $DomainName\
-    Class           $target\
-    Relationship    $name\
-    Role            target
-ClassRole create\
-    Domain          $DomainName\
-    Class           $target\
-    Relationship    $name\
-    Role            target
-DirectionalReference create\
-    Domain          $DomainName\
-    Class           $target\
-    Name            $name\
-    Role            target
-if {$source ne $target} {
-    AssociationReference create\
-        Domain          $DomainName\
-        Class           $target\
-        Name            $name
-    Reference create\
-        Domain          $DomainName\
-        Class           $target\
-        Name            $name
-    ClassComponent create\
-        Domain          $DomainName\
-        Class           $target\
-        Name            $name
-}
+DestinationClass create {*}$targettuple
+ClassRole create {*}$targettuple
 
-AssociatorClass create\
+set trgcomp [list\
+    Domain          $DomainName\
+    Class           $target\
+    Name            ${name}__BACK\
+]
+ComplementaryReference create {*}$trgcomp
+BackwardReference create {*}$trgcomp Relationship $name
+if {!$ReferringMult} {
+    SingularReference create {*}$trgcomp
+} elseif {$isstatic} {
+    ArrayReference create {*}$trgcomp
+} else {
+    LinkReference create {*}$trgcomp
+    set conttuple [list\
+        Domain      $DomainName\
+        Class       $associator\
+        Name        ${name}__BLINKS\
+    ]
+    LinkContainer create {*}$conttuple LinkClass $target LinkComp ${name}__BACK
+    GeneratedComponent create {*}$conttuple
+    ClassComponent create {*}$conttuple
+}
+GeneratedComponent create {*}$trgcomp
+ClassComponent create {*}$trgcomp
+
+set assoctuple [list\
     Domain          $DomainName\
     Class           $associator\
     Relationship    $name\
-    Role            associator
-ClassRole create\
+    Role            associator\
+]
+set assoccomp [list\
     Domain          $DomainName\
     Class           $associator\
-    Relationship    $name\
-    Role            associator
-AssociatorReference create\
-    Domain          $DomainName\
-    Class           $associator\
-    Name            $name
-Reference create\
-    Domain          $DomainName\
-    Class           $associator\
-    Name            $name
-ClassComponent create\
-    Domain          $DomainName\
-    Class           $associator\
-    Name            $name
+    Name            $name\
+]
+
+AssociatorClass create {*}$assoctuple
+ClassRole create {*}$assoctuple
+AssociatorReference create {*}$assoccomp
+Reference create {*}$assoccomp
+PopulatedComponent create {*}$assoccomp
+ClassComponent create {*}$assoccomp
 ----
 
 [float]
@@ -1398,24 +1380,23 @@ proc generalization {name args} {
         ReferenceGeneralization create {*}$reltuple
         ReferencedSuperclass create {*}$supertuple
         SubclassReference create {*}$reftuple
-        Reference create {*}$reftuple
+        GeneratedComponent create {*}$reftuple
         ClassComponent create {*}$reftuple
+
         foreach sub $args {
             dict set subtuple Class $sub
             ReferringSubclass create {*}$subtuple
-            dict set reftuple Class $sub
-            SuperclassReference create {*}$reftuple
-            Reference create {*}$reftuple
-            ClassComponent create {*}$reftuple
         }
     } elseif {$type eq "union"} {
         UnionGeneralization create {*}$reltuple
         UnionSuperclass create {*}$supertuple
-        SubclassContainer create Domain $DomainName Class $super Name $name ; # <1>
-        ClassComponent create Domain $DomainName Class $super Name $name
+        SubclassContainer create {*}$reftuple
+        GeneratedComponent create {*}$reftuple
+        ClassComponent create {*}$reftuple
+
         foreach sub $args {
             set usubRef [UnionSubclass findWhere {$Domain eq $DomainName &&\
-                $Class eq $sub}] ; # <2>
+                $Class eq $sub}] ; # <1>
             if {[isNotEmptyRef $usubRef]} {
                 tailcall DeclError UNION_SUBCLASS_EXISTS $sub\
                     [readAttribute $usubRef Relationship]
@@ -1431,17 +1412,17 @@ proc generalization {name args} {
         dict set subtuple Class $sub
         Subclass create {*}$subtuple
         ClassRole create {*}$subtuple
+        dict set reftuple Class $sub
+        SuperclassReference create {*}$reftuple
+        Reference create {*}$reftuple
+        PopulatedComponent create {*}$reftuple
+        ClassComponent create {*}$reftuple
     }
 
     return
 }
 ----
-<1> For union based subclass storage,
-we create the container as a class component in the superclass.
-This is done here since we have the information and the R96 relationship is
-unconditional.
-Union superclasses always have a subclass container.
-<2> A union subclass cannot be a subclass of two independent generalizations.
+<1> A union subclass cannot be a subclass of two independent generalizations.
 This is just another way of saying that a component of a ``C'' structure
 cannot be a component of a different ``C'' structure at the same time.
 If a subclass is to be a subclass in multiple generalizations,
@@ -1955,15 +1936,14 @@ proc attribute {name type args} {
     upvar #0 [namespace parent]::DomainName DomainName
     variable ClassName
 
-    Attribute create\
+    set attrtuple [list\
         Domain      $DomainName\
         Class       $ClassName\
         Name        $name\
-        DataType    $type
-    ClassComponent create\
-        Domain      $DomainName\
-        Class       $ClassName\
-        Name        $name
+    ]
+    Attribute create {*}$attrtuple DataType $type
+    PopulatedComponent create {*}$attrtuple
+    ClassComponent create {*}$attrtuple
 
     if {[llength $args] > 2} {
         tailcall DeclError ATTRIBUTE_OPTIONS $args
@@ -2287,11 +2267,8 @@ proc PropagatePolyEvents {super} {
         # generalization. We find that out by querying the ClassRole for all
         # the other relationships the subclass participates in and then
         # filtering those where it serves as a Superclass.
-        set multigens [pipe {
-            ClassRole findWhere {$Domain eq $subDomain &&\
-                $Class eq $subClass && $Relationship ne $subRelationship} |
-            findRelated % {~R40 Superclass}
-        } {} |%]
+        set multigens [Superclass findWhere {$Domain eq $subDomain &&\
+                $Class eq $subClass && $Relationship ne $subRelationship}]
 
         # Iterate over the deferred events
         forAllRefs defrdevent $defrdevents {
@@ -4928,34 +4905,48 @@ proc population {domain script} {
     set popref [Population create Domain $domain]
 
     try {
-        ral relvar eval {
+        ral relvar transaction begin
+        try {
             ConfigEvaluate [namespace current]::PopDef $script
+
+            # At this point the population is complete and we can begin the
+            # processing to validate that the population is correct.
+
+            # First, we need the set of class component values and class
+            # instances that are part of the population of this domain.
+            set popinstrefs [ClassInstance findWhere {$Domain eq $domain}]
+            set popinsts [deRef $popinstrefs]
+            puts [relformat $popinsts popinsts]
+            set popvalues [pipe {
+                findRelated $popinstrefs {R103 ClassComponentValue} |
+                deRef ~
+            }]
+            puts [relformat $popvalues popvalues]
+
+            <<population: check completeness>>
+            <<population: check class populations>>
+            <<population: check reference values>>
+
+            if {$errcount != 0} {
+                ral relvar transaction rollback
+                return
+            }
+
+            # Once we like the populated values supplied by the user
+            # we can use them to set the values of the generated
+            # class components.
+            <<population: set generated component values>>
+        } on error {result opts} {
+            ral relvar transaction rollback
+            return -options $opts $result
         }
+        ral relvar transaction end
     } on error {result} {
         puts $::errorInfo
         HandleConfigError $result
         return
     }
 
-    # At this point the population is complete and we can begin the processing
-    # to validate that the population is correct.
-
-    # First, we need the set of class component values and class instances that
-    # are part of the population of this domain.
-    set popvalues [pipe {
-        ClassComponentValue findWhere {$Domain eq $domain} |
-        deRef ~
-    }]
-    # puts [relformat $popvalues popvalues]
-    set popinsts [pipe {
-        ClassInstance findWhere {$Domain eq $domain} |
-        deRef ~
-    }]
-    # puts [relformat $popinsts popinsts]
-
-    <<population: check completeness>>
-    <<population: check class populations>>
-    <<population: check reference values>>
 }
 ----
 
@@ -5143,494 +5134,251 @@ and make sure they were specified correctly.
 [source,tcl]
 ----
 <<population: check reference values>>=
-<<population: check superclass references>>
-<<population: check subclass references>>
-<<population: check union subclass references>>
-<<population: check associator references>>
 <<population: check association references>>
+<<population: check associator references>>
+<<population: check superclass references>>
 ----
 
-==== Checking Superclass Reference Values
-
-When a subclass makes a reference to its superclass,
-we must make sure that the superclass instance actually exists.
+==== Checking Association Reference Values
 
 [source,tcl]
 ----
-<<population: check superclass references>>=
-set superrefs [pipe {
-    relation semijoin $::micca::ReferringSubclass $popvalues\
-        -using {Domain Domain Class Class Relationship Component} |
-    relation rename ~ Class Subclass Instance Subinstance Value Instance\
-        Component Relationship |
-    relation join ~ $::micca::ReferencedSuperclass\
-        -using {Domain Domain Relationship Relationship} |
-    relation eliminate ~ Role
-}] ; # <1>
-
-if {[relation isnotempty $superrefs]} {
-    # puts [relformat $superrefs superrefs]
-
-    # Find references to superclasses that are *not* in the population.
-    set badsuperrefs [pipe {
-        ralutil::rvajoin $superrefs $popinsts ValueMatch |
-        relation restrictwith ~ {[relation isempty $ValueMatch]}
-    }]
-    # puts [relformat $badsuperrefs badsuperrefs]
-    relation foreach badsuperref $badsuperrefs {
-        relation assign $badsuperref
-        log::error "for domain population, \"$Domain\",\
-            subclass instance, \"$Subclass.$Subinstance\", references\
-            superclass instance, \"$Class.$Instance\" across,\
-            \"$Relationship\", but $Instance does not exist"
-        incr errcount
-    }
-
-    # Subtract out the bad references so we can proceed.
-    set superrefs [pipe {
-        relation eliminate $badsuperrefs ValueMatch |
-        relation minus $superrefs ~
-    }]
-
-    # Look for superclasses that are referenced multiple times.
-    set multirefs [pipe {
-        relation group $superrefs SubRefs Subclass Subinstance |
-        relation restrictwith ~ {[relation cardinality $SubRefs] > 1}
-    }]
-    # puts [relformat $multirefs multirefs]
-    relation foreach multiref $multirefs {
-        relation assign $multiref
-        relation foreach sref $SubRefs {
-            relation assign $sref
-            lappend screfs $Subclass.$Subinstance
-        }
-        log::error "for domain population, \"$Domain\",\
-            superclass instance, \"$Class.$Instance\", is referenced by\
-            multiple subclass instances, \"[join $screfs {, }]\" across,\
-            \"$Relationship\": this violates the referential integrity of\
-            generalizations"
-        incr errcount
-    }
-
-    # Find the superclasses that are not referenced by any subclass instance.
-    # No need to remove the multirefs from consideration, that can create
-    # false positives.
-    set unrefsupers [pipe {
-        relation join $::micca::ReferencedSuperclass $popinsts |
-        relation eliminate ~ Number Role |
-        ralutil::rvajoin ~ $superrefs RefedSupers |
-        relation restrictwith ~ {[relation isempty $RefedSupers]}
-    }]
-    # puts [relformat $unrefsupers unrefsupers]
-    relation foreach unrefsuper $unrefsupers {
-        relation assign $unrefsuper
-        log::error "for domain population, \"$Domain\",\
-            superclass instance, \"$Class.$Instance\", is not referenced\
-            by any subclass across \"$Relationship\":\
-            this violates the referential integrity of generalizations"
-        incr errcount
-    }
-}
-----
-<1> Queries such as this are much easier to follow if you have the
-class diagram graphic handy.
-The general form of this query is used several times, so we will explain
-this one in detail.
-. Find the class component values that are related to a Referring Subclass,
-which the role of a class in a generalization that makes a reference
-to a superclass.
-. Rename some attributes in preparation for doing the next join operation.
-. Join to include the name of the Referenced Superclass to which the
-subclass must refer.
-. Discard the *Role* attribute, as it is not needed.
-. Find the superclass instances that match the reference of the subclass.
-. Look for those subclasses where there was no match. These are the
-ones that are in error.
-
-[source,tcl]
-----
-<<config command tests>>=
-test populate-4.4 {
-    bad superclass reference
-} -setup {
-} -cleanup {
-    cleanupDomain
-} -body {
-    micca configure {
-        domain bar {
-            class super {
-            }
-            class sub1 {
-            }
-            class sub2 {
-            }
-
-            generalization R1 super sub1 sub2
-        }
-
-        population bar {
-            class super {
-                instance super1 R1 {sub1 fred1}
-                instance super2 R1 {sub2 alice1} ; # super2 is never referenced
-            }
-            class sub1 {
-                instance fred1 R1 super1
-            }
-            class sub2 {
-                instance alice1 R1 super3 ; # There is no "super3" instance.
-            }
-        }
-    }
-} -result {encountered 2 configuration script errors} -returnCodes error
-----
-
-[source,tcl]
-----
-<<config command tests>>=
-test populate-4.17 {
-    multiple superclass reference
-} -setup {
-} -cleanup {
-    cleanupDomain
-} -body {
-    micca configure {
-        domain bar {
-            class super {
-            }
-            class sub1 {
-            }
-            class sub2 {
-            }
-
-            generalization R1 super sub1 sub2
-        }
-
-        population bar {
-            class super {
-                instance super1 R1 {sub1 fred1}
-                instance super2 R1 {sub2 alice1} ; # not referenced by subclass
-            }
-            class sub1 {
-                instance fred1 R1 super1
-            }
-            class sub2 {
-                instance alice1 R1 super1 ; # Multiple reference to super1
-            }
-        }
-    }
-} -result {encountered 2 configuration script errors} -returnCodes error
-----
-
-==== Checking Subclass Reference Values
-
-When a superclass instance refers to its subclass,
-the population value is a list of the form `{<subclass> <instance>}`,
-where <subclass> must be one of the subclasses of the generalization
-and <instance> must be an instance of <subclass>.
-Here we check both conditions.
-
-[source,tcl]
-----
-<<population: check subclass references>>=
-set refedsupers [pipe {
-    relation semijoin $::micca::ReferencedSuperclass $popvalues\
-        -using {Domain Domain Class Class Relationship Component} |
-    relation rename ~ Class Superclass Instance Superinstance\
-        Component Relationship
-}] ; # <1>
-CheckSubclassReferences $refedsupers $::micca::ReferringSubclass $popinsts
-----
-<1> Find the component values that are values for Referenced Superclasses
-
-[source,tcl]
-----
-<<helper commands>>=
-proc CheckSubclassReferences {supers subs insts} {
-    if {[relation isempty $supers]} {
-        return
-    }
-    # puts [relformat $supers supers]
-
-    upvar #0 ::micca::@Config@::errcount errcount
-
-    # First check for any values that are *not* two element lists.
-    # These are of the wrong format.
-    set badvalues [relation restrictwith $supers {[llength $Value] != 2}] ; # <1>
-    # puts [relformat $badvalues badvalues]
-    relation foreach badvalue $badvalues {
-        relation assign $badvalue
-        log::error "for domain population, \"$Domain\",\
-            instance, \"$SuperClass.$SuperInstance\", has a bad format for the\
-            value of the subclass reference along, \"$Relationship\":\
-            expected a two element list, got, \"$Value\""
-        incr errcount
-    }
-
-    # Turn the value list elements into attributes of their own.
-    set supers [pipe {
-        relation minus $supers $badvalues |
-        relation extend ~ rstup\
-            Class string {[lindex [tuple extract $rstup Value] 0]}\
-            Instance string {[lindex [tuple extract $rstup Value] 1]} |
-        relation eliminate ~ Value
-    }] ; # <2>
-    # puts [relformat $supers supers]
-
-    set nonparts [pipe {
-        ralutil::rvajoin $supers $subs ClassMatch |
-        relation restrictwith ~ {[relation isempty $ClassMatch]}
-    }] ; # <3>
-    # puts [relformat $nonparts nonparts]
-    relation foreach nonpart $nonparts {
-        relation assign $nonpart
-        log::error "for domain population, \"$Domain\",\
-            superclass instance, \"$Superclass.$Superinstance\", references\
-            subclass instance, \"$Class.$Instance\" across,\
-            \"$Relationship\", but $Class is not a subclass of $Relationship"
-        incr errcount
-    }
-
-    set supers [pipe {
-        relation eliminate $nonparts ClassMatch |
-        relation minus $supers ~
-    }]
-    # puts [relformat $supers supers]
-
-    set badrefs [pipe {
-        ralutil::rvajoin $supers $insts InstanceMatch |
-        relation restrictwith ~ {[relation isempty $InstanceMatch]}
-    }] ; # <4>
-    # puts [relformat $badrefs badrefs]
-    relation foreach badref $badrefs {
-        relation assign $badref
-        log::error "for domain population, \"$Domain\",\
-            superclass instance, \"$Superclass.$Superinstance\", references\
-            subclass instance, \"$Class.$Instance\" across,\
-            \"$Relationship\", but $Instance does not exist"
-        incr errcount
-    }
-
-    # Check that no subclass is referenced more than once.
-    set multirefs [pipe {
-        relation eliminate $badrefs InstanceMatch |
-        relation minus $supers ~ |
-        relation group ~ SuperRefs Superinstance |
-        relation restrictwith ~ {[relation cardinality $SuperRefs] > 1}
-    }]
-    # puts [relformat $multirefs multirefs]
-    relation foreach multiref $multirefs {
-        relation assign $multiref
-        log::error "for domain population, \"$Domain\",\
-            superclass, \"$Superclass\", instances,\
-            \"[join [relation list $SuperRefs Superinstance] {, }]\",\
-            all reference subclass instance, \"$Class.$Instance\" across,\
-            \"$Relationship\": this violates the referential integrity of\
-            generalizations"
-        incr errcount
-    }
-
-    # Check that every subclass is referenced.
-    set unrefsubs [pipe {
-        relation join $subs $insts |
-        relation eliminate ~ Number Role |
-        ralutil::rvajoin ~ $supers RefedSubs |
-        relation restrictwith ~ {[relation isempty $RefedSubs]}
-    }]
-    # puts [relformat $unrefsubs unrefsubs]
-    relation foreach unrefsub $unrefsubs {
-        relation assign $unrefsub
-        log::error "for domain population, \"$Domain\",\
-            subclass instance, \"$Class.$Instance\", is not referenced\
-            by any superclass across \"$Relationship\":\
-            this violates the referential integrity of generalizations"
-        incr errcount
-    }
-}
-----
-<1> Check the format of the populated value.
-We need a two element list of the form: `{<subclass name> <instance name>}`
-<2> First, remove the tuples with a bad value format.
-They have already been handled.
-Expand the value to make the subclass and instance explicit attributes.
-This has the effect of turning the values in the two element list into
-separate attributes.
-<3> Check that the subclass reference is to a class that is actually a
-subclass for the relationship.
-<4> Check that the subclass reference actually refers to an existing instance.
-We have to subtract out the non participants since they will fail to
-make an instance match also and we don't want to double count that.
-
-[source,tcl]
-----
-<<config command tests>>=
-test populate-4.5 {
-    bad subclass reference
-} -setup {
-} -cleanup {
-    cleanupDomain
-} -body {
-    micca configure {
-        domain bar {
-            class super {
-            }
-            class sub1 {
-            }
-            class sub2 {
-            }
-
-            generalization R1 super sub1 sub2
-        }
-
-        population bar {
-            class super {
-                instance super1 R1 {sub1 fred1}
-                instance super2 R1 {sub2 alice2} ; # there is no alice2
-                instance super3 R1 {sub3 foo} ; # there is no sub3, not reference
-            }
-            class sub1 {
-                instance fred1 R1 super1
-            }
-            class sub2 {
-                instance alice1 R1 super2 ; # not referenced
-            }
-        }
-    }
-} -result {encountered 4 configuration script errors} -returnCodes error
-----
-
-[source,tcl]
-----
-<<config command tests>>=
-test populate-4.15 {
-    multiple subclass reference
-} -setup {
-} -cleanup {
-    cleanupDomain
-} -body {
-    micca configure {
-        domain bar {
-            class super {
-            }
-            class sub1 {
-            }
-            class sub2 {
-            }
-
-            generalization R1 super sub1 sub2
-        }
-
-        population bar {
-            class super {
-                instance super1 R1 {sub1 fred1}
-                instance super2 R1 {sub2 alice1}
-                instance super3 R1 {sub1 fred1} ; # multiple fred1, not referenced
-            }
-            class sub1 {
-                instance fred1 R1 super1
-            }
-            class sub2 {
-                instance alice1 R1 super2
-            }
-        }
-    }
-} -result {encountered 2 configuration script errors} -returnCodes error
-----
-
-==== Checking Union Subclass Reference Values
-
-Union superclasses must also be checked to insure that they
-make the correct references to subclasses.
-
-[source,tcl]
-----
-<<population: check union subclass references>>=
-set unionsupers [pipe {
-    relation semijoin $::micca::UnionSuperclass $popvalues\
-        -using {Domain Domain Class Class Relationship Component} |
-    relation rename ~ Class Superclass Instance Superinstance\
-        Component Relationship
+<<population: check association references>>=
+set simprefs [pipe {
+    relation eliminate $::micca::SimpleReferringClass Role |
+    relation rename ~ Class ReferringClass\
+        Conditionality ReferringCond Multiplicity ReferringMult|
+    relation join ~ $::micca::SimpleReferencedClass |
+    relation eliminate ~ Role |
+    relation rename ~ Class ReferencedClass Conditionality ReferencedCond\
+        Relationship Component |
+    relation join ~ $popvalues -using\
+        {Domain Domain ReferringClass Class Component Component} |
+    relation rename ~ Instance ReferringInstance Value ReferencedInstance |
+    relation restrictwith ~ {$ReferencedInstance ne "@nil@"}
 }]
-CheckSubclassReferences $unionsupers $::micca::UnionSubclass $popinsts
+# puts [relformat $simprefs simprefs]
 
-set usupers [pipe {
-    FindUltimateSuperclasses $domain |
-    findRelated % {~R46 UnionSuperclass}
-} {} |%]
-# puts [relformat [deRef $usupers] usupers]
-
-while {[isNotEmptyRef $usupers]} {
-    set subrefs [pipe {
-        deRef $usupers |
-        relation eliminate ~ Role |
-        relation rename ~ Relationship Component |
-        relation join ~ $popvalues $::micca::ClassInstance |
-        relation rename ~ Class Superclass Instance SuperInstance |
-        relation extend ~ srtup\
-            Class string {[lindex [tuple extract $srtup Value] 0]}\
-            Instance string {[lindex [tuple extract $srtup Value] 1]} |
-        relation project ~ Domain Class Instance Number
-    }]
-    # puts [relformat $subrefs subrefs]
-
-    # relvar updateper does not update identifying attributes and
-    # Number is a secondary identifier.
-    # So we have to do it the hard way.
-    relation foreach subref $subrefs {
-        relation assign $subref
-        relvar updateone ::micca::ClassInstance srtup [list\
-            Domain $Domain Class $Class Instance $Instance] {
-            tuple update $srtup Number $Number}
-    }
-
-    set usupers [pipe {
-        findRelated $usupers R44 ~R45 |
-        deRef % |
-        relation semijoin % $::micca::UnionSuperclass\
-            -using {Domain Domain Class Class} |
-        ::rosea::Helpers::ToRef ::micca::UnionSuperclass %
-    } {} |%]
+# References to non-existent instances
+set badrefs [pipe {
+    relation rename $simprefs ReferencedClass Class ReferencedInstance Instance |
+    ralutil::rvajoin ~ $popinsts Instances |
+    relation restrictwith ~ {[relation cardinality $Instances] == 0}
+}]
+# puts [relformat $badrefs badrefs]
+relation foreach badref $badrefs {
+    relation assign $badref
+    log::error "for domain population, $Domain,\
+        instance, $ReferringClass.$ReferringInstance, references\
+        instance, $Class.$Instance across,\
+        $Component, but $Class.$Instance does not exist"
+    incr errcount
 }
+
+# Subtract out bad references
+set simprefs [pipe {
+    relation eliminate $badrefs Instances |
+    relation rename ~ Class ReferencedClass Instance ReferencedInstance |
+    relation minus $simprefs ~
+}]
+# puts [relformat $simprefs simprefs]
+
+# Checking referenced multiplicity
+set refedmults [pipe {
+    relation eliminate $simprefs ReferringCond ReferencedCond |
+    relation group ~ ReferringInstances ReferringInstance |
+    relation restrictwith ~ {!$ReferringMult &&\
+        [relation cardinality $ReferringInstances] > 1}
+}]
+# puts [relformat $refedmults refedmults]
+relation foreach refedmult $refedmults {
+    relation assign $refedmult
+    log::error "for domain population, $Domain,\
+        relationship, $Component, is singular from\
+        $ReferringClass to $ReferencedClass, but instance, $ReferencedInstance,\
+        is referred to by multiple instances:\
+        [join [relation list $ReferringInstances] {, }]"
+    incr errcount
+}
+
+# Checking referenced conditionality
+set refingconds [pipe {
+    relation eliminate $simprefs ReferringInstance ReferringMult |
+    relation rename ~ ReferencedInstance Instance |
+    relation group ~ RefedInstances Instance |
+    relation rename ~ ReferencedClass Class |
+    ralutil::rvajoin ~ [relation eliminate $popinsts Number] Instances |
+    relation restrictwith ~\
+        {!$ReferringCond && [relation is $RefedInstances != $Instances]}
+}]
+# puts [relformat $refingconds refingconds]
+
+relation foreach refingcond $refingconds {
+    relation assign $refingcond
+    set notrefed [relation minus $Instances $RefedInstances]
+    log::error "for domain population, $Domain,\
+        relationship, $Component, is unconditional from\
+        $Class to $ReferringClass, but the\
+        \"[join [relation list $notrefed] {, }]\" instance(s) of $Class\
+        is(are) not refered to by any instance of $ReferringClass"
+    incr errcount
+}
+
 ----
 
 [source,tcl]
 ----
 <<config command tests>>=
-test populate-4.14 {
-    bad union subclass reference
+test simpleassociation-1.0 {
+    refer to non-existant instance
 } -setup {
 } -cleanup {
     cleanupDomain
 } -body {
     micca configure {
         domain bar {
-            class super {
-                attribute s_id int
+            class X {
             }
-            class sub1 {
-                attribute temp int -default 25
+            class Y {
             }
-            class sub2 {
-                attribute color int -default 25
-            }
-
-            generalization R1 -union super sub1 sub2
+            association R1 X 1--1 Y
         }
 
         population bar {
-            class super {
-                instance super1 s_id 20 R1 {sub1 fred1}
-                instance super2 s_id 40 R1 {sub2 alice2} ; # there is no alice2
-                instance super3 s_id 40 R1 {sub3 foo} ; # there is no sub3
+            class X {
+                instance x1 R1 y1
+                instance x2 R1 y2   ; # y2 does not exist
             }
-            class sub1 {
-                instance fred1
-            }
-            class sub2 {
-                instance alice1 ; # never referenced by a superclass instance
+            class Y {
+                instance y1
             }
         }
     }
-} -result {encountered 3 configuration script errors} -returnCodes error
+} -result {encountered 1 configuration script errors} -returnCodes error
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test simpleassociation-2.0 {
+    multiple reference
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain bar {
+            class X {
+            }
+            class Y {
+            }
+            association R1 X 1--1 Y
+        }
+
+        population bar {
+            class X {
+                instance x1 R1 y1
+                instance x2 R1 y1
+            }
+            class Y {
+                instance y1
+            }
+        }
+    }
+} -result {encountered 1 configuration script errors} -returnCodes error
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test simpleassociation-3.0 {
+    unconditional reference
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain bar {
+            class X {
+            }
+            class Y {
+            }
+            association R1 X 1..*--1 Y
+        }
+
+        population bar {
+            class X {
+                instance x1 R1 y1
+                instance x2 R1 y2
+            }
+            class Y {
+                instance y1
+                instance y2
+                instance y3 ; # not referenced
+            }
+        }
+    }
+} -result {encountered 1 configuration script errors} -returnCodes error
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test simpleassociation-4.0 {
+    unconditional reference
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain bar {
+            class X {
+            }
+            class Y {
+            }
+            association R1 X 1..*--0..1 Y
+        }
+
+        population bar {
+            class X {
+                instance x1 R1 y1
+                instance x2 R1 y2
+                instance x3
+            }
+            class Y {
+                instance y1
+                instance y2
+                instance y3
+            }
+        }
+    }
+} -result {encountered 1 configuration script errors} -returnCodes error
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test simpleassociation-5.0 {
+    refer to non-existant instance in reflexive association
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain bar {
+            class X {
+            }
+            association R1 X 0..1--0..1 X
+        }
+
+        population bar {
+            class X {
+                instance x1 R1 y2
+                instance x2 R1 x1
+            }
+        }
+    }
+} -result {encountered 1 configuration script errors} -returnCodes error
 ----
 
 ==== Checking Associator Reference Values
@@ -5877,11 +5625,11 @@ test populate-4.6 {
                 instance a3 R1 {Z x2 Q y2} ; # neither Z nor Q participate in R1
             }
             class X {
-                instance x1 R1 a1
-                instance x2 R1 a2
+                instance x1
+                instance x2
             }
             class Y {
-                instance y1 R1 a1
+                instance y1
             }
 
             class B {
@@ -5889,11 +5637,11 @@ test populate-4.6 {
                 instance b2 R2 {Q q1 R r2}
             }
             class Q {
-                instance q1 R2 {b1 b2}
+                instance q1
             }
             class R {
-                instance r1 R2 b1
-                instance r2 R2 b2
+                instance r1
+                instance r2
             }
         }
     }
@@ -5925,59 +5673,262 @@ test populate-4.7 {
                 instance a2 R1 {forward y2 backward y3} ; # y2, y3 don't exist
             }
             class X {
-                instance x1 R1 a1
-                instance x2 R1 a2
+                instance x1
+                instance x2
             }
         }
     }
 } -result {encountered 2 configuration script errors} -returnCodes error
 ----
 
-==== Checking Association Reference Values
+==== Checking Superclass Reference Values
 
-Association References are common and have the most different variances
-the manner of reference.
-There are four subclasses for *R38* in the platform model and we
-will include code to check each one.
+When a subclass makes a reference to its superclass,
+we must make sure that the superclass instance actually exists.
 
 [source,tcl]
 ----
-<<population: check association references>>=
-<<population: check simple referring references>>
-<<population: check simple referenced references>>
-<<population: check source references>>
-<<population: check target references>>
-----
-
-[float]
-==== Checking Simple Referring Reference Values
-
-[source,tcl]
-----
-<<population: check simple referring references>>=
-set simprefs [pipe {
-    relation semijoin $::micca::SimpleReferringClass $popvalues\
+<<population: check superclass references>>=
+set superrefs [pipe {
+    relation semijoin $::micca::Subclass $popvalues\
         -using {Domain Domain Class Class Relationship Component} |
-    relation rename ~ Class Referringclass Instance Referringinstance\
-        Value Instance Component Relationship |
-    relation join ~ $::micca::SimpleReferencedClass\
+    relation rename ~ Class Subclass Instance Subinstance Value Instance\
+        Component Relationship |
+    relation join ~ $::micca::Superclass\
         -using {Domain Domain Relationship Relationship} |
-    relation eliminate ~ Role |
-    relation extend ~ stup Multiplicity boolean {"false"}
-}]
+    relation eliminate ~ Role
+}] ; # <1>
 
-set simpreflex [relation restrictwith $simprefs {$Referringclass eq $Class}]
-# puts [relformat $simpreflex simpreflex]
-CheckNonReflexiveReferences [relation minus $simprefs $simpreflex] $popinsts
+if {[relation isnotempty $superrefs]} {
+    puts [relformat $superrefs superrefs]
 
-set forwreflex [pipe {
-    relation restrictwith $::micca::DirectionalReference {
-        $Domain eq $domain && $Role eq "source"
-    } |
-    relation semijoin ~ $simpreflex\
-        -using {Domain Domain Class Class Name Relationship}
-}]
-CheckReflexiveReferences $forwreflex forward $popinsts
+    # Find references to superclasses that are *not* in the population.
+    set badsuperrefs [pipe {
+        ralutil::rvajoin $superrefs $popinsts ValueMatch |
+        relation restrictwith ~ {[relation isempty $ValueMatch]}
+    }]
+    # puts [relformat $badsuperrefs badsuperrefs]
+    relation foreach badsuperref $badsuperrefs {
+        relation assign $badsuperref
+        log::error "for domain population, \"$Domain\",\
+            subclass instance, \"$Subclass.$Subinstance\", references\
+            superclass instance, \"$Class.$Instance\" across,\
+            \"$Relationship\", but $Instance does not exist"
+        incr errcount
+    }
+
+    # Subtract out the bad references so we can proceed.
+    set superrefs [pipe {
+        relation eliminate $badsuperrefs ValueMatch |
+        relation minus $superrefs ~
+    }]
+
+    # Look for superclasses that are referenced multiple times.
+    set multirefs [pipe {
+        relation group $superrefs SubRefs Subclass Subinstance |
+        relation restrictwith ~ {[relation cardinality $SubRefs] > 1}
+    }]
+    # puts [relformat $multirefs multirefs]
+    relation foreach multiref $multirefs {
+        relation assign $multiref
+        relation foreach sref $SubRefs {
+            relation assign $sref
+            lappend screfs $Subclass.$Subinstance
+        }
+        log::error "for domain population, \"$Domain\",\
+            superclass instance, \"$Class.$Instance\", is referenced by\
+            multiple subclass instances, \"[join $screfs {, }]\" across,\
+            \"$Relationship\": this violates the referential integrity of\
+            generalizations"
+        incr errcount
+    }
+
+    # Find the superclasses that are not referenced by any subclass instance.
+    # No need to remove the multirefs from consideration, that can create
+    # false positives.
+    set unrefsupers [pipe {
+        relation join $::micca::Superclass $popinsts |
+        relation eliminate ~ Number Role |
+        ralutil::rvajoin ~ $superrefs RefedSupers |
+        relation restrictwith ~ {[relation isempty $RefedSupers]}
+    }]
+    # puts [relformat $unrefsupers unrefsupers]
+    relation foreach unrefsuper $unrefsupers {
+        relation assign $unrefsuper
+        log::error "for domain population, \"$Domain\",\
+            superclass instance, \"$Class.$Instance\", is not referenced\
+            by any subclass across \"$Relationship\":\
+            this violates the referential integrity of generalizations"
+        incr errcount
+    }
+}
+----
+<1> Queries such as this are much easier to follow if you have the
+class diagram graphic handy.
+The general form of this query is used several times, so we will explain
+this one in detail.
+. Find the class component values that are related to a Referring Subclass,
+which the role of a class in a generalization that makes a reference
+to a superclass.
+. Rename some attributes in preparation for doing the next join operation.
+. Join to include the name of the Referenced Superclass to which the
+subclass must refer.
+. Discard the *Role* attribute, as it is not needed.
+. Find the superclass instances that match the reference of the subclass.
+. Look for those subclasses where there was no match. These are the
+ones that are in error.
+
+[source,tcl]
+----
+<<config command tests>>=
+test populate-4.4 {
+    bad superclass reference
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain bar {
+            class super {
+            }
+            class sub1 {
+            }
+            class sub2 {
+            }
+
+            generalization R1 super sub1 sub2
+        }
+
+        population bar {
+            class super {
+                instance super1
+                instance super2 ; # super2 is never referenced
+            }
+            class sub1 {
+                instance fred1 R1 super1
+            }
+            class sub2 {
+                instance alice1 R1 super3 ; # There is no "super3" instance.
+            }
+        }
+    }
+} -result {encountered 2 configuration script errors} -returnCodes error
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test populate-4.17 {
+    multiple superclass reference
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain bar {
+            class super {
+            }
+            class sub1 {
+            }
+            class sub2 {
+            }
+
+            generalization R1 super sub1 sub2
+        }
+
+        population bar {
+            class super {
+                instance super1
+                instance super2 ; # not referenced by subclass
+            }
+            class sub1 {
+                instance fred1 R1 super1
+            }
+            class sub2 {
+                instance alice1 R1 super1 ; # Multiple reference to super1
+            }
+        }
+    }
+} -result {encountered 2 configuration script errors} -returnCodes error
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test populate-4.5 {
+    bad subclass reference
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain bar {
+            class super {
+            }
+            class sub1 {
+            }
+            class sub2 {
+            }
+
+            generalization R1 super sub1 sub2
+        }
+
+        population bar {
+            class super {
+                instance super1
+                instance super2
+                instance super3
+            }
+            class sub1 {
+                instance sub1 R1 super1
+            }
+            class sub2 {
+                instance sub2 R1 super2
+            }
+            # super3 not referenced
+        }
+    }
+} -result {encountered 1 configuration script errors} -returnCodes error
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test populate-4.15 {
+    multiple superclass reference
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain bar {
+            class super {
+            }
+            class sub1 {
+            }
+            class sub2 {
+            }
+
+            generalization R1 super sub1 sub2
+        }
+
+        population bar {
+            class super {
+                instance super1
+                instance super2
+                instance super3
+            }
+            class sub1 {
+                instance fred1 R1 super1
+            }
+            class sub2 {
+                instance alice1 R1 super1 ; # Multiple super 1 references
+            }
+            # super2 not referenced
+            # super3 not referenced
+        }
+    }
+} -result {encountered 3 configuration script errors} -returnCodes error
 ----
 
 [float]
@@ -6180,8 +6131,19 @@ test populate-4.8 {
             }
             class Y {
             }
-
             association R1 X 1..*--1 Y
+
+            class A {
+            }
+            class B {
+            }
+            association R2 A 0..*--0..1 B
+
+            class C {
+            }
+            class D {
+            }
+            association R3 C 1..*--1 D
         }
 
         population bar {
@@ -6191,41 +6153,28 @@ test populate-4.8 {
                 instance x3         ; # nil reference not allowed
             }
             class Y {
-                instance y1 R1 {x1 x2}
+                instance y1
+            }
+            class A {
+                instance a1 R2 b1
+                instance a2 R2 b1
+                instance a3
+            }
+            class B {
+                instance b1
+                instance b2
+            }
+            class C {
+                instance c1 R3 d1
+                instance c2 R3 d1
+            }
+            class D {
+                instance d1
+                instance d2 ; # d2 never referenced
             }
         }
     }
-} -result {encountered 2 configuration script errors} -returnCodes error
-----
-
-[float]
-==== Checking Simple Referenced Reference Values
-
-[source,tcl]
-----
-<<population: check simple referenced references>>=
-set refedrefs [pipe {
-    relation semijoin $::micca::SimpleReferencedClass $popvalues\
-        -using {Domain Domain Class Class Relationship Component} |
-    relation rename ~ Class Referringclass Instance Referringinstance\
-        Value Instance Component Relationship |
-    relation join ~ $::micca::SimpleReferringClass\
-        -using {Domain Domain Relationship Relationship} |
-    relation eliminate ~ Role
-}]
-
-set simpreflex [relation restrictwith $refedrefs {$Referringclass eq $Class}]
-# puts [relformat $simpreflex simpreflex]
-CheckNonReflexiveReferences [relation minus $refedrefs $simpreflex] $popinsts
-
-set backreflex [pipe {
-    relation restrictwith $::micca::DirectionalReference {
-        $Domain eq $domain && $Role eq "target"
-    } |
-    relation semijoin ~ $simpreflex\
-        -using {Domain Domain Class Class Name Relationship}
-}]
-CheckReflexiveReferences $backreflex backward $popinsts
+} -result {encountered 3 configuration script errors} -returnCodes error
 ----
 
 [source,tcl]
@@ -6249,48 +6198,28 @@ test populate-4.9 {
             class Z {
             }
 
-            association R2 Z 0..1--1 Y
+            association R2 Z 1--1 Y
         }
 
         population bar {
             class X {
-                instance x1 R1 y1 ; # fails since y1 is also faulty
+                instance x1 R1 y1
                 instance x2 R1 y2
                 instance x3 R1 y3
             }
             class Y {
-                instance y1             ; # nil reference not allowed
-                instance y2 R1 {x1 x2} R2 {z1 z2} ; # mult ref R2
-                instance y3 R1 {x3 x4}  ; # x4 does not exist
+                instance y1
+                instance y2
+                instance y3
             }
             class Z {
                 instance z1 R2 y2
                 instance z2 R2 y3
             }
+            # No y1 reference by a Z instance
         }
     }
-} -result {encountered 4 configuration script errors} -returnCodes error
-----
-
-[float]
-==== Checking Source Reference Values
-
-[source,tcl]
-----
-<<population: check source references>>=
-set sourcerefs [pipe {
-    relation semijoin $::micca::SourceClass $popvalues\
-        -using {Domain Domain Class Class Relationship Component} |
-    relation rename ~ Class Referringclass Instance Referringinstance\
-        Value Instance Component Relationship |
-    relation join ~ $::micca::TargetClass\
-        -using {Domain Domain Relationship Relationship} |
-    relation eliminate ~ Class Role |
-    relation join ~ $::micca::AssociatorClass\
-        -using {Domain Domain Relationship Relationship} |
-    relation eliminate ~ Role
-}]
-CheckNonReflexiveReferences $sourcerefs $popinsts
+} -result {encountered 1 configuration script errors} -returnCodes error
 ----
 
 [source,tcl]
@@ -6320,39 +6249,18 @@ test populate-4.10 {
                 instance a2 R1 {X x2 Y y2}
             }
             class X {
-                instance x1 R1 a1
-                instance x2 R1 {a1 a2}  ; # singular relationship
+                instance x1
+                instance x2
                 instance x3
-                instance x4 R1 a3       ; # no instance a3
+                instance x4
             }
             class Y {
-                instance y1 R1 a1
-                instance y2 R1 a2
+                instance y1
+                instance y2
             }
         }
     }
 } -result {encountered 2 configuration script errors} -returnCodes error
-----
-
-[float]
-==== Checking Target Reference Values
-
-[source,tcl]
-----
-<<population: check target references>>=
-set targetrefs [pipe {
-    relation semijoin $::micca::TargetClass $popvalues\
-        -using {Domain Domain Class Class Relationship Component} |
-    relation rename ~ Class Referringclass Instance Referringinstance\
-        Value Instance Component Relationship |
-    relation join ~ $::micca::SourceClass\
-        -using {Domain Domain Relationship Relationship} |
-    relation eliminate ~ Class Role |
-    relation join ~ $::micca::AssociatorClass\
-        -using {Domain Domain Relationship Relationship} |
-    relation eliminate ~ Role
-}]
-CheckNonReflexiveReferences $targetrefs $popinsts
 ----
 
 [source,tcl]
@@ -6383,13 +6291,13 @@ test populate-4.11 {
                 instance a3 R1 {X x2 Y y2}
             }
             class X {
-                instance x1 R1 {a1 a2}
-                instance x2 R1 a3
-                instance x3 R1 a4       ; # no a4
+                instance x1
+                instance x2
+                instance x3
             }
             class Y {
-                instance y1 R1 a1
-                instance y2 R1 {a2 a3}
+                instance y1
+                instance y2
                 instance y3             ; # nil not allowed
             }
         }
@@ -6416,16 +6324,16 @@ test populate-4.12 {
 
         population bar {
             class X {
-                instance x1 R1 {forward x2 backward {}}
-                instance x2 R1 {forward {} backward x1}
+                instance x1 R1 x2
+                instance x2 R1 x3
                 instance x3
-                instance x4 R1 {forward {x1 x2} backward {}} ; # multi
-                instance x5 R1 {forward {x3}}               ; # no backward
-                instance x6 R1 {forward {y1}} ; # no backward, no instance y1
+                instance x4 R1 x2 ; # multiple references to x2
+                instance x5 R1 x3 ; # multiple references to x3
+                instance x6 R1 y1 ; # no y1
             }
         }
     }
-} -result {encountered 4 configuration script errors} -returnCodes error
+} -result {encountered 3 configuration script errors} -returnCodes error
 ----
 
 [source,tcl]
@@ -6456,6 +6364,152 @@ test populate-4.13 {
         }
     }
 } -result {encountered 4 configuration script errors} -returnCodes error
+----
+
+[source,tcl]
+----
+<<population: set generated component values>>=
+set gencomps [GeneratedComponent findWhere {$Domain eq $domain}]
+
+<<population: set complementary reference values>>
+<<population: set link container values>>
+<<population: set subclass reference values>>
+<<population: set subclass container values>>
+----
+
+Subclass references are made by reference superclasses.
+We must look for superclass references made by reference subclasses to find
+the compute the subclass reference made by the superclass.
+[source,tcl]
+----
+<<population: set subclass reference values>>=
+set rsupercomps [pipe {
+    ReferringSubclass findWhere {$Domain eq $domain} |
+    findRelated % R47 R40 R41 ~R20 {~R25 PopulatedComponent} {~R21 Reference}\
+        {~R23 SuperclassReference} R23 R21 R25 {~R103 ClassComponentValue} |
+    deRef % |
+    relation join %\
+        $::micca::ReferenceGeneralization -using {Domain Domain Component Name}\
+        [relation rename $::micca::ReferencedSuperclass Class Superclass]\
+        -using {Domain Domain Component Relationship} |
+    relation extend % rstup NewValue string {
+        [list [tuple extract $rstup Class] [tuple extract $rstup Instance]]} |
+    relation eliminate % Class Instance Role |
+    relation rename % Superclass Class Value Instance NewValue Value
+} {} |%]
+puts [relformat $rsupercomps rsupercomps]
+
+foreach subref [relation body $rsupercomps] {
+    ClassComponentValue create {*}$subref
+}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test subclassref-1.0 {
+    generated components for subclass reference
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain bar {
+            class super {
+            }
+            class sub1 {
+            }
+            class sub2 {
+            }
+
+            generalization R1 super sub1 sub2
+        }
+
+        population bar {
+            class super {
+                instance super1
+                instance super2
+            }
+            class sub1 {
+                instance fred1 R1 super1
+            }
+            class sub2 {
+                instance alice1 R1 super2
+            }
+        }
+    }
+    log::debug [formatMiccaClass ClassComponentValue]
+    testConditions\
+        {[refMultiplicity [ClassComponentValue findAll]] == 4}
+} -result {1}
+----
+
+Subclass containers are used by union superclasses and are the
+union superclass counterpart of a subclass reference by a referenced
+superclass.
+We use similar query.
+[source,tcl]
+----
+<<population: set subclass container values>>=
+set usupercomps [pipe {
+    UnionSubclass findWhere {$Domain eq $domain} |
+    findRelated % R47 R40 R41 ~R20 {~R25 PopulatedComponent} {~R21 Reference}\
+        {~R23 SuperclassReference} R23 R21 R25 {~R103 ClassComponentValue} |
+    deRef % |
+    relation join %\
+        $::micca::UnionGeneralization -using {Domain Domain Component Name}\
+        [relation rename $::micca::UnionSuperclass Class Superclass]\
+        -using {Domain Domain Component Relationship} |
+    relation extend % rstup NewValue string {
+        [list [tuple extract $rstup Class] [tuple extract $rstup Instance]]} |
+    relation eliminate % Class Instance Role |
+    relation rename % Superclass Class Value Instance NewValue Value
+} {} |%]
+puts [relformat $usupercomps usupercomps]
+
+foreach subcont [relation body $usupercomps] {
+    ClassComponentValue create {*}$subcont
+}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test subcontainer-1.0 {
+    generated components for subclass container
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain bar {
+            class super {
+            }
+            class sub1 {
+            }
+            class sub2 {
+            }
+
+            generalization R1 -union super sub1 sub2
+        }
+
+        population bar {
+            class super {
+                instance super1
+                instance super2
+            }
+            class sub1 {
+                instance fred1 R1 super1
+            }
+            class sub2 {
+                instance alice1 R1 super2
+            }
+        }
+    }
+    log::debug [formatMiccaClass ClassComponentValue]
+    testConditions\
+        {[refMultiplicity [ClassComponentValue findAll]] == 4}
+} -result {1}
 ----
 
 === Class
@@ -6571,40 +6625,6 @@ proc allocate {{size 0}} {
 }
 ----
 
-=== Static Associations
-
-*****
-`static` ?_association1_ _association2_ ...?
-
-`associationN`::
-    The name of an association that is to be marked as static.
-    A static association does not change its references during run time
-    (_i.e._ there are not relate or unrelated operations on it during
-    run time).
-    This information is used by the code generator to make choices about
-    the data structure used to store reference pointers.
-
-The `static` command declares that an association does not change
-during run time.
-*****
-
-[float]
-==== Implementation
-
-[source,tcl]
-----
-<<population config commands>>=
-proc static {args} {
-    variable DomainName
-
-    foreach assocName $args {
-        StaticAssociation create\
-            Domain $DomainName\
-            Association $assocName
-    }
-}
-----
-
 === Specifying Instance Values
 
 Instances are populated according to their class components.
@@ -6712,7 +6732,6 @@ proc instance {name args} {
         Number [GenNumber $DomainName ClassInstance [list $DomainName $ClassName]]
 
     <<instance: set values from arguments>>
-
     <<instance: set remaining defaulted values>>
 
     return
@@ -6750,57 +6769,30 @@ proc FindRequiredComponents {domain class} {
     # i.e. they could have a nil reference, which is the default if they
     # are not explicitly initialized.
     # Start with all the Association Participant Classes.
-    set assocpart [AssociationParticipantClass findWhere\
-        {$Domain eq $domain && $Class eq $class}]
     # Notice that we must traverse to the referenced side to pick
     # up the right conditionality attribute.
     set condrefing [pipe {
-        findRelatedWhere $assocpart {{~R38 SimpleReferringClass} R32 ~R33}\
-            {$Conditionality} |
-        findRelated % R33 ~R32
+        SimpleReferringClass findWhere {$Domain eq $domain && $Class eq $class} |
+        findRelatedWhere % {R32 ~R33} {$Conditionality} |
+        findRelated % R33 ~R32 R90 R23 R21
     } {} |%]
 
-    set condrefed [pipe {
-        findRelatedWhere $assocpart {{~R38 SimpleReferencedClass} R33 ~R32}\
-            {$Conditionality} |
-        findRelated % R32 ~R33
-    } {} |%]
-
-    set condsrc [pipe {
-        findRelatedWhere $assocpart {{~R38 SourceClass} R34 ~R35}\
-            {$Conditionality} |
-        findRelated % R35 ~R34
-    } {} |%]
-
-    set condtarget [pipe {
-        findRelatedWhere $assocpart {{~R38 TargetClass} R35 ~R34}\
-            {$Conditionality} |
-        findRelated % R34 ~R35
-    } {} |%]
-
-    # All the component names for the class
-    set compnames [ClassComponent findWhere\
-        {$Domain eq $domain && $Class eq $class}]
     # The attributes that have default values
     set defcomps [pipe {
         DefaultValue findWhere {$Domain eq $domain && $Class eq $class} |
         findRelated ~ R22 R21
     }]
 
-    # Union all the conditional references and find the corresponding
-    # class components.
-    # Subtract that from the total set and then subtract the default attributes.
-    set settable [pipe {
-        refUnion [findRelated $condrefing R38] [findRelated $condrefed R38] |
-        refUnion % [findRelated $condsrc R38] |
-        refUnion % [findRelated $condtarget R38] |
-        findRelated % ~R90 R25 R23 R21 |
-        refMinus $compnames % |
-        refMinus % $defcomps |
-        deRef % |
-        relation project % Name |
-        relation list % Name
-    } {} |%]
+    # Subtract from the set of populated components the components
+    # that can be defaulted.
+    return [pipe {
+        PopulatedComponent findWhere {$Domain eq $domain && $Class eq $class} |
+        refMinus ~ $condrefing |
+        refMinus ~ $defcomps |
+        deRef ~ |
+        relation project ~ Name |
+        relation list ~ Name
+    }]
 }
 ----
 
@@ -6839,7 +6831,7 @@ foreach compname $defaultcomps {
 <<helper commands>>=
 proc FindRemainingComponents {domain class except} {
     return [pipe {
-        ClassComponent findWhere {$Domain eq $domain && $Class eq $class\
+        PopulatedComponent findWhere {$Domain eq $domain && $Class eq $class\
                 && $Name ni $except} |
         deRef ~ |
         relation list ~ Name
@@ -6859,28 +6851,29 @@ for the attribute or is the _nil_ reference value.
 ----
 <<helper commands>>=
 proc ResolveInitialValue {domain class component value} {
+    set compref [PopulatedComponent findById\
+        Domain $domain\
+        Class $class\
+        Name $component]
+    if {[isEmptyRef $compref]} {
+        error "component, \"$component\", is not a component that can be\
+            populated"
+    }
     if {$value eq "-"} {
-        set compref [ClassComponent findById\
-            Domain $domain\
-            Class $class\
-            Name $component]
-        if {[isNotEmptyRef $compref]} {
-            # Check for default attribute value
-            set attrref [findRelated $compref {~R21 Attribute}]
-            if {[isNotEmptyRef $attrref]} {
-                set defref [findRelated $attrref ~R22]
-                if {[isNotEmptyRef $defref]} {
-                    return [readAttribute $defref Value]
-                }
-                error "attribute $component does not have a default value"
+        # Check for default attribute value
+        set attrref [findRelated $compref {~R21 Attribute}]
+        if {[isNotEmptyRef $attrref]} {
+            set defref [findRelated $attrref ~R22]
+            if {[isNotEmptyRef $defref]} {
+                return [readAttribute $defref Value]
             }
-            # Check for an association reference we can set to nil
-            set refref [findRelated $compref {~R21 Reference}\
-                    {~R23 AssociationReference}]
-            if {[isNotEmptyRef $refref]} {
-                return @nil@
-            }
-            error "component, \"$component\", cannot be set to a default value"
+            error "attribute $component does not have a default value"
+        }
+        # Check for an association reference we can set to nil
+        set refref [findRelated $compref {~R21 Reference}\
+                {~R23 AssociationReference}]
+        if {[isNotEmptyRef $refref]} {
+            return @nil@
         }
     } else {
         set value [subst -nocommands -novariables $value]
@@ -6910,7 +6903,7 @@ test populate-1.0 {
             class c2 {
                 attribute c2_id int
             }
-            association R1 c1 1..*--1 c2
+            association R1 -static c1 1..*--1 c2
         }
 
         population foo {
@@ -6919,9 +6912,8 @@ test populate-1.0 {
                 instance chuck2 c1_id 7 R1 fred1
             }
             class c2 {
-                instance fred1 c2_id 20 R1 {chuck1 chuck2}
+                instance fred1 c2_id 20
             }
-            static R1
         }
     }
     log::debug [formatMiccaClass ClassPopulation]
@@ -6962,7 +6954,7 @@ test populate-1.1 {
                 instance chuck2 c1_id 7 ; # leave off R1 ==> set to nil
             }
             class c2 {
-                instance fred1 c2_id 20 R1 {chuck1 chuck2}
+                instance fred1 c2_id 20
             }
         }
     }
@@ -7004,11 +6996,11 @@ test populate-1.2 {
                 instance chuck3 R1 fred1 ; # missing c1_id and color
             }
             class c2 {
-                instance fred1 c2_id 20 R1 {chuck1 chuck2}
+                instance fred1 c2_id 20
             }
         }
     }
-} -result {encountered 3 configuration script errors} -returnCodes error
+} -result {encountered 2 configuration script errors} -returnCodes error
 ----
 
 === Tables of Instance Values
@@ -7081,7 +7073,6 @@ proc table {heading args} {
         dict set insttuple Instance $instname ; # <2>
 
         <<table: set values from arguments>>
-
         <<table: set remaining defaulted values>>
     }
 
@@ -7169,8 +7160,8 @@ test populate-2.0 {
                 chuck2  {7          fred1}
             }
             class c2 {
-                table       {c2_id      R1}\
-                fred1       {20         {chuck1 chuck2}}
+                table       {c2_id}\
+                fred1       {20}
             }
         }
     }
@@ -7214,8 +7205,8 @@ test populate-2.1 {
                 chuck3  {7          -}
             }
             class c2 {
-                table       {c2_id      R1}\
-                fred1       {20         {chuck1 chuck2 chuck3}}
+                table       {c2_id}\
+                fred1       {20}
             }
         }
     }
@@ -7388,9 +7379,9 @@ test populate-3.0 {
 
         population foo {
             class clerk {
-                instance fred R2 shoes
-                instance alice R2 mens
-                instance john R2 housewares
+                instance fred
+                instance alice
+                instance john
             }
             class client {
                 allocate 10
@@ -7553,6 +7544,8 @@ if {[string match {is not referenced*} $phrase]} {
     set reftype notrefed
 } elseif {[string match {references no*} $phrase]} {
     set reftype refnone
+} elseif {[string match {is referenced by multiple*} $phrase]} {
+    set reftype refedmult
 } elseif {[string match {*to by multiple*} $phrase]} {
     set reftype multrefed
 } elseif {[string match {is not referred to*} $phrase]} {
@@ -7649,6 +7642,13 @@ relvar insert Config_DataError {
                          instance, \"$Instance\" sets the value of\
                          \"$Component\" to \"$Value\",\
                          but $Component is not a known element of $Class"}
+} {
+    Relationship        R103
+    RefClass            ClassInstance
+    RefType             notrefed
+    Format              {for domain population, \"$Domain\", class, \"$Class\",\
+                         instance, \"$Instance\" does not have any class\
+                         components}
 }
 ----
 
