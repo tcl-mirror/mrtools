@@ -4836,10 +4836,12 @@ specified as initializers for those class storage arrays.
 The ``C'' language then guarantees that initializer values are in
 place before `main` begins execution.
 This usually requires much less memory space than having initialiation code to
-create the initial instances and that code is executed only once.
+create the initial instances and having that code executed only once.
+So, we will specify the initial instance population in data
+rather than procedurally.
 
-In our population scheme, we allow for several populations to be defined
-for a domain.
+We will insist that there be a population for a domain before
+code is generated for it.
 In practice,
 development of a domain will usually entail creating multiple populations
 for both testing and deployment.
@@ -4868,12 +4870,11 @@ namespace eval PopDef {
 
 === Population
 
-The `population` command gives a collection of class component values a
-name.
+The `population` command gives values to the class components of the domain.
 The complete domain population must be given by the invocation of `population`.
 
 *****
-`population` _name_ _domain_ _script_
+`population` _domain_ _script_
 
 `domain`::
     The name of the domain to which the population applies.
@@ -4887,6 +4888,19 @@ the classes and assigners in _domain_.
 
 [float]
 ==== Implementation
+
+The implementation of the `population` procedure follows our general pattern.
+The supplied script is evaluated in a namespace where the population commands
+will resolve without further qualification.
+
+However,
+there are two important other steps required for the initial instance
+population.
+
+. We must check that the specified population is correct and complete.
+. There are a number of class components whose values are derived from
+those specified in the population commands and we must calculate those
+values in preparation for code generation.
 
 (((micca,Config,population)))
 [source,tcl]
@@ -4912,29 +4926,16 @@ proc population {domain script} {
             # At this point the population is complete and we can begin the
             # processing to validate that the population is correct.
 
-            # First, we need the set of class component values and class
-            # instances that are part of the population of this domain.
-            set popinstrefs [ClassInstance findWhere {$Domain eq $domain}]
-            set popinsts [deRef $popinstrefs]
-            puts [relformat $popinsts popinsts]
-            set popvalues [pipe {
-                findRelated $popinstrefs {R103 ClassComponentValue} |
-                deRef ~
-            }]
-            puts [relformat $popvalues popvalues]
-
-            <<population: check completeness>>
-            <<population: check class populations>>
-            <<population: check reference values>>
+            <<population: verify population integrity>>
 
             if {$errcount != 0} {
                 ral relvar transaction rollback
                 return
             }
 
-            # Once we like the populated values supplied by the user
-            # we can use them to set the values of the generated
-            # class components.
+            # Once we like the populated values supplied by the user we can use
+            # them to set the values of the generated class components.
+
             <<population: set generated component values>>
         } on error {result opts} {
             ral relvar transaction rollback
@@ -4950,10 +4951,10 @@ proc population {domain script} {
 }
 ----
 
-==== Validating a Population
+==== Verifying Population Integrity
 
 Once a population has been gather by the `population` command,
-we perform some validation on the population to make sure it
+we perform some verification on the population to make sure it
 is correct and we will be able to proceed to code generations.
 We inspect several factors:
 
@@ -4969,7 +4970,7 @@ then make the final decision about reference storage.
 that the references themselves are correct and that there is no referential
 integrity problems with the initial instance population.
 
-There is a substantial amount of code required to perform this validation.
+There is a substantial amount of code required to perform this verification.
 This is the result of the many different types of references that are
 supported and the fact that the value of class component is taken
 as a simple string.
@@ -4980,6 +4981,16 @@ advantage of referential integrity and other declarative means to
 insure correctness.
 Hence, there will be a lot of code.
 
+We verify the population in three steps.
+
+[source,tcl]
+----
+<<population: verify population integrity>>=
+<<population: check completeness>>
+<<population: check class populations>>
+<<population: check reference values>>
+----
+
 ==== Checking Completeness
 
 Value Elements in the platform model are the entities that can have
@@ -4989,7 +5000,15 @@ Population in the Population.
 These are the missing elements that were not included in the population.
 The only type of class that can be missing is a union subclass.
 These classes do not have a storage pool of their own and so can be missing.
-and for which we will generate warning messages.
+Note that instances of union superclasses must have corresponding related
+union subclasses,
+so we will insist that referential integrity is preserved.
+But if all the relation instance of a union superclass happen to exclude
+a particular union subclass, then that is not an error.
+The case for reference subclasses is different.
+Since they have memory allocated for them, we will insist that there be
+space for at least one instance or else it would not be possible for
+a reference superclass to be related to that particular reference subclass.
 
 [source,tcl]
 ----
@@ -5007,18 +5026,25 @@ set missing [pipe {
     relation minus ~ $usubs
 }] ; # <2>
 if {[relation isnotempty $missing]} {
-    set elements [relation list $missing Name]
-    log::error "for domain population, \"$domain\",\
-        the following elements are missing any population values:\
-        [join $elements {, }]"
-    incr errcount
+    tailcall DeclError MISSING_POPULATION domain\
+        [join [relation list $missing Name] {, }]
 }
 ----
 <1> Arrange for the union subclasses to have a header that is compatible
 with the Value Element heading.
+We will want to do a subtraction operation in the next step and need
+a compatible heading.
 <2> Here we are looking for the Value Elements that are _unrelated_
-to the population. They are the ones that have do not appear.
+to the population. They are the ones for which no values were specified.
 We subtract off the union subclasses so they are not diagnosed as missing.
+
+(((error code,MISSING_POPULATION)))
+[source,tcl]
+----
+<<error code formats>>=
+MISSING_POPULATION    {for domain population, "%s", the following elements\
+                       are missing any population values: "%s"}
+----
 
 [source,tcl]
 ----
@@ -5064,6 +5090,17 @@ the ``C'' compiler will not let us declare an array variable with 0 elements.
 [source,tcl]
 ----
 <<population: check class populations>>=
+# First, we need the set of class component values and class
+# instances that are part of the population of this domain.
+set popinstrefs [ClassInstance findWhere {$Domain eq $domain}]
+set popinsts [deRef $popinstrefs]
+puts [relformat $popinsts popinsts]
+set popvalues [pipe {
+    findRelated $popinstrefs {R103 ClassComponentValue} |
+    deRef ~
+}]
+
+puts [relformat $popvalues popvalues]
 set noinsts [pipe {
     ClassPopulation findWhere {$Domain eq $domain && $Allocation == 0} |
     deRef ~ |
@@ -7187,7 +7224,7 @@ set backrefs [pipe {
     relation rename ~ ReferencedClass Class Value Instance NewValues Value |
     relation eliminate ~ Instances
 }]
-puts [relformat $backrefs backrefs]
+# puts [relformat $backrefs backrefs]
 
 foreach backref [relation body $backrefs] {
     set values [dict get $backref Value]
@@ -7208,10 +7245,9 @@ foreach backref [relation body $backrefs] {
         [dict get $backref Instance]\
         [dict get $backref Component]\
     ]
-    set next $terminus
+    set prev $terminus
     for {set value [lindex $values $valueindex]} {$value ne {}}\
             {set value [lindex $values [incr valueindex]]} {
-        set prev $next
         if {$valueindex < [llength $values] - 1} {
             set next [list\
                 $refing\
@@ -7227,6 +7263,11 @@ foreach backref [relation body $backrefs] {
             Instance $value\
             Component ${relship}__BLINKS\
             Value [dict create next $next prev $prev]
+        set prev [list\
+            $refing\
+            $value\
+            ${relship}__BLINKS\
+        ]
     }
 }
 
@@ -7238,7 +7279,7 @@ set nilbackrefs [pipe {
     relation semiminus $backrefs % |
     relation join % [relation eliminate $backrefs Instance Value]
 } {} |%]
-puts [relformat $nilbackrefs nilbackrefs]
+# puts [relformat $nilbackrefs nilbackrefs]
 
 foreach nilbackref [relation body $nilbackrefs] {
     ClassComponentValue create\
@@ -7296,6 +7337,389 @@ test linkbackref-1.0 {
     log::debug [formatMiccaClass ClassComponentValue]
     testConditions\
         {[refMultiplicity [ClassComponentValue findAll]] == 10}
+} -result {1}
+----
+
+[source,tcl]
+----
+<<population: set link target class values>>=
+set trgclass [findRelated $linkbackrefs {~R38 TargetClass}]
+
+set backrefs [pipe {
+    deRef $trgclass |
+    relation eliminate ~ Role Conditionality Multiplicity |
+    relation rename ~ Class TargetClass |
+    relation join ~ $::micca::AssociatorClass |
+    relation rename ~ Class ReferringClass |
+    relation eliminate ~ Role |
+    relation join ~ $::micca::SourceClass |
+    relation rename ~ Class SourceClass |
+    relation eliminate ~ Role Conditionality Multiplicity |
+    relation join ~ $popvalues -using\
+        {Domain Domain Relationship Component ReferringClass Class}
+}]
+# puts [relformat $backrefs backrefs]
+
+# Non-recursive
+set nrtrgbackrefs [pipe {
+    relation restrictwith $backrefs {$SourceClass ne $TargetClass} |
+    relation extend ~ tbtup NewValue string {[dict get\
+        [tuple extract $tbtup Value] [tuple extract $tbtup TargetClass]]}
+}]
+# puts [relformat $nrtrgbackrefs nrtrgbackrefs]
+
+# Recursive
+set rtrgbackrefs [pipe {
+    relation restrictwith $backrefs {$SourceClass eq $TargetClass} |
+    relation extend ~ tbtup NewValue string {[dict get\
+        [tuple extract $tbtup Value] forward]}
+}]
+# puts [relformat $rtrgbackrefs rtrgbackrefs]
+
+set backrefs [pipe {
+    relation union $nrtrgbackrefs $rtrgbackrefs |
+    relation eliminate ~ SourceClass Value |
+    relation group ~ Instances Instance |
+    relation extend ~ tbtup\
+        NewValues string {[relation list [tuple extract $tbtup Instances]]}\
+        Component string {"[tuple extract $tbtup Relationship]__BACK"} |
+    relation eliminate ~ Instances |
+    relation rename ~ TargetClass Class NewValue Instance NewValues Value
+}]
+# puts [relformat $backrefs backrefs]
+
+foreach backref [relation body $backrefs] {
+    set values [dict get $backref Value]
+    set relship [dict get $backref Relationship]
+    set refing [dict get $backref ReferringClass]
+    set next [list $refing [lindex $values 0] ${relship}__BLINKS]
+    set prev [list $refing [lindex $values end] ${relship}__BLINKS]
+    ClassComponentValue create\
+        Domain [dict get $backref Domain]\
+        Class [dict get $backref Class]\
+        Instance [dict get $backref Instance]\
+        Component [dict get $backref Component]\
+        Value [dict create next $next prev $prev]
+
+    set valueindex 0
+    set terminus [list\
+        [dict get $backref Class]\
+        [dict get $backref Instance]\
+        [dict get $backref Component]\
+    ]
+    set prev $terminus
+    for {set value [lindex $values $valueindex]} {$value ne {}}\
+            {set value [lindex $values [incr valueindex]]} {
+        if {$valueindex < [llength $values] - 1} {
+            set next [list\
+                $refing\
+                [lindex $values $valueindex+1]\
+                ${relship}__BLINKS\
+            ]
+        } else {
+            set next $terminus
+        }
+        ClassComponentValue create\
+            Domain [dict get $backref Domain]\
+            Class $refing\
+            Instance $value\
+            Component ${relship}__BLINKS\
+            Value [dict create next $next prev $prev]
+        set prev [list\
+            $refing\
+            $value\
+            ${relship}__BLINKS\
+        ]
+    }
+}
+
+set nilbackrefs [pipe {
+    findRelated $trgclass R38 R40 R41 R104 {~R101 ElementPopulation}\
+        {~R105 ClassPopulation} ~R102 |
+    deRef % |
+    relation eliminate % Number |
+    relation semiminus $backrefs % |
+    relation join % [relation eliminate $backrefs Instance Value]
+} {} |%]
+# puts [relformat $nilbackrefs nilbackrefs]
+
+foreach nilbackref [relation body $nilbackrefs] {
+    ClassComponentValue create\
+        Domain [dict get $nilbackref Domain]\
+        Class [dict get $nilbackref Class]\
+        Instance [dict get $nilbackref Instance]\
+        Component [dict get $nilbackref Component]\
+        Value [dict create\
+            next [list\
+                [dict get $nilbackref Class]\
+                [dict get $nilbackref Instance]\
+                [dict get $nilbackref Component]\
+           ]\
+            prev [list\
+                [dict get $nilbackref Class]\
+                [dict get $nilbackref Instance]\
+                [dict get $nilbackref Component]\
+            ]\
+        ]
+}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test linkbackref-2.0 {
+    Class based association target link reference
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain foo {
+            class A {
+            }
+            class X {
+            }
+            class Y {
+            }
+            association R1 -associator A X 0..*--0..1 Y
+        }
+
+        population foo {
+            class A {
+                instance a1 R1 {X x1 Y y1}
+                instance a2 R1 {X x2 Y y1}
+                instance a3 R1 {X x3 Y y2}
+            }
+            class X {
+                instance x1
+                instance x2
+                instance x3
+                instance x4
+            }
+            class Y {
+                instance y1
+                instance y2
+                instance y3
+            }
+        }
+    }
+    log::debug [formatMiccaClass ClassComponentValue]
+    testConditions\
+        {[refMultiplicity [ClassComponentValue findAll]] == 13}
+} -result {1}
+----
+
+[source,tcl]
+----
+<<population: set link source class values>>=
+set srcclass [pipe {
+    LinkReference findWhere {$Domain eq $domain} |
+    findRelated % R26 {~R28 ForwardReference} ~R95
+} {} |%]
+
+set forwrefs [pipe {
+    deRef $srcclass |
+    relation eliminate ~ Role Conditionality Multiplicity |
+    relation rename ~ Class SourceClass |
+    relation join ~ $::micca::AssociatorClass |
+    relation rename ~ Class ReferringClass |
+    relation eliminate ~ Role |
+    relation join ~ $::micca::TargetClass |
+    relation rename ~ Class TargetClass |
+    relation eliminate ~ Role Conditionality Multiplicity |
+    relation join ~ $popvalues -using\
+        {Domain Domain Relationship Component ReferringClass Class}
+}]
+puts [relformat $forwrefs forwrefs]
+
+# Non-recursive
+set nrsrcforwrefs [pipe {
+    relation restrictwith $forwrefs {$SourceClass ne $TargetClass} |
+    relation extend ~ tbtup NewValue string {[dict get\
+        [tuple extract $tbtup Value] [tuple extract $tbtup SourceClass]]}
+}]
+puts [relformat $nrsrcforwrefs nrsrcforwrefs]
+
+# Recursive
+set rsrcforwrefs [pipe {
+    relation restrictwith $forwrefs {$SourceClass eq $TargetClass} |
+    relation extend ~ tbtup NewValue string {[dict get\
+        [tuple extract $tbtup Value] backward]}
+}]
+puts [relformat $rsrcforwrefs rsrcforwrefs]
+
+set forwrefs [pipe {
+    relation union $nrsrcforwrefs $rsrcforwrefs |
+    relation eliminate ~ TargetClass Value |
+    relation group ~ Instances Instance |
+    relation extend ~ tbtup\
+        NewValues string {[relation list [tuple extract $tbtup Instances]]}\
+        Component string {"[tuple extract $tbtup Relationship]__FORW"} |
+    relation eliminate ~ Instances |
+    relation rename ~ SourceClass Class NewValue Instance NewValues Value
+}]
+puts [relformat $forwrefs forwrefs]
+
+foreach forwref [relation body $forwrefs] {
+    set values [dict get $forwref Value]
+    set relship [dict get $forwref Relationship]
+    set refing [dict get $forwref ReferringClass]
+    set next [list $refing [lindex $values 0] ${relship}__FLINKS]
+    set prev [list $refing [lindex $values end] ${relship}__FLINKS]
+    ClassComponentValue create\
+        Domain [dict get $forwref Domain]\
+        Class [dict get $forwref Class]\
+        Instance [dict get $forwref Instance]\
+        Component [dict get $forwref Component]\
+        Value [dict create next $next prev $prev]
+
+    set valueindex 0
+    set terminus [list\
+        [dict get $forwref Class]\
+        [dict get $forwref Instance]\
+        [dict get $forwref Component]\
+    ]
+    set prev $terminus
+    for {set value [lindex $values $valueindex]} {$value ne {}}\
+            {set value [lindex $values [incr valueindex]]} {
+        if {$valueindex < [llength $values] - 1} {
+            set next [list\
+                $refing\
+                [lindex $values $valueindex+1]\
+                ${relship}__FLINKS\
+            ]
+        } else {
+            set next $terminus
+        }
+        ClassComponentValue create\
+            Domain [dict get $forwref Domain]\
+            Class $refing\
+            Instance $value\
+            Component ${relship}__FLINKS\
+            Value [dict create next $next prev $prev]
+        set prev [list\
+            $refing\
+            $value\
+            ${relship}__BLINKS\
+        ]
+    }
+}
+
+set nilforwrefs [pipe {
+    findRelated $srcclass R40 R41 R104 {~R101 ElementPopulation}\
+        {~R105 ClassPopulation} ~R102 |
+    deRef % |
+    relation eliminate % Number |
+    relation semiminus $forwrefs % |
+    relation join % [relation eliminate $forwrefs Instance Value]
+} {} |%]
+puts [relformat $nilforwrefs nilforwrefs]
+
+foreach nilforwref [relation body $nilforwrefs] {
+    ClassComponentValue create\
+        Domain [dict get $nilforwref Domain]\
+        Class [dict get $nilforwref Class]\
+        Instance [dict get $nilforwref Instance]\
+        Component [dict get $nilforwref Component]\
+        Value [dict create\
+            next [list\
+                [dict get $nilforwref Class]\
+                [dict get $nilforwref Instance]\
+                [dict get $nilforwref Component]\
+           ]\
+            prev [list\
+                [dict get $nilforwref Class]\
+                [dict get $nilforwref Instance]\
+                [dict get $nilforwref Component]\
+            ]\
+        ]
+}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test linkforwref-1.0 {
+    Class based association link forward references
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain foo {
+            class A {
+            }
+            class X {
+            }
+            class Y {
+            }
+            association R1 -associator A X 0..*--0..* Y
+        }
+
+        population foo {
+            class A {
+                instance a1 R1 {X x1 Y y1}
+                instance a2 R1 {X x2 Y y1}
+                instance a3 R1 {X x3 Y y2}
+                instance a4 R1 {X x1 Y y2}
+                instance a5 R1 {X x1 Y y3}
+            }
+            class X {
+                instance x1
+                instance x2
+                instance x3
+                instance x4
+            }
+            class Y {
+                instance y1
+                instance y2
+                instance y3
+                instance y4
+            }
+        }
+    }
+    log::debug [formatMiccaClass ClassComponentValue]
+    testConditions\
+        {[refMultiplicity [ClassComponentValue findAll]] == 23}
+} -result {1}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test linkforwref-1.1 {
+    Class based association link forward reference -- reflexive
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain foo {
+            class A {
+            }
+            class X {
+            }
+            association R1 -associator A X 0..*--0..* X
+        }
+
+        population foo {
+            class A {
+                instance a1 R1 {backward x1 forward x2}
+                instance a2 R1 {backward x2 forward x3}
+                instance a3 R1 {backward x3 forward x2}
+                instance a4 R1 {backward x1 forward x3}
+            }
+            class X {
+                instance x1
+                instance x2
+                instance x3
+                instance x4
+            }
+        }
+    }
+    log::debug [formatMiccaClass ClassComponentValue]
+    testConditions\
+        {[refMultiplicity [ClassComponentValue findAll]] == 20}
 } -result {1}
 ----
 
@@ -7886,7 +8310,7 @@ test populate-1.1 {
     testConditions\
         {[refMultiplicity [ClassPopulation findAll]] == 2}\
         {[refMultiplicity [ClassInstance findAll]] == 3}\
-        {[refMultiplicity [ClassComponentValue findAll]] == 8}
+        {[refMultiplicity [ClassComponentValue findAll]] == 9}
 } -result {1}
 ----
 
@@ -8093,7 +8517,7 @@ test populate-2.0 {
     testConditions\
         {[refMultiplicity [ClassPopulation findAll]] == 2}\
         {[refMultiplicity [ClassInstance findAll]] == 3}\
-        {[refMultiplicity [ClassComponentValue findAll]] == 6}
+        {[refMultiplicity [ClassComponentValue findAll]] == 8}
 } -result {1}
 ----
 
@@ -8138,7 +8562,7 @@ test populate-2.1 {
     testConditions\
         {[refMultiplicity [ClassPopulation findAll]] == 2}\
         {[refMultiplicity [ClassInstance findAll]] == 4}\
-        {[refMultiplicity [ClassComponentValue findAll]] == 11}
+        {[refMultiplicity [ClassComponentValue findAll]] == 13}
 } -result {1}
 ----
 
