@@ -4964,14 +4964,15 @@ that can have values.
 of initial instances or an allocation greater than 0 or both.
 Since union subclasses are stored within their superclass,
 they do not have a separate storage pool.
-* At the end of population, we know which associations are static and can
-then make the final decision about reference storage.
-* All initial instances have their references defined so we can make sure
-that the references themselves are correct and that there is no referential
-integrity problems with the initial instance population.
+* We know which associations are static and can
+make the final decision about reference storage.
+* All initial instances that make references to other class instances
+have their references specified so we can make sure that the references
+themselves are correct and that there is no referential integrity problems with
+the initial instance population.
 
 There is a substantial amount of code required to perform this verification.
-This is the result of the many different types of references that are
+This is the result of the different types of references that are
 supported and the fact that the value of class component is taken
 as a simple string.
 The format and content of an initial value string depends upon the
@@ -5003,7 +5004,7 @@ These classes do not have a storage pool of their own and so can be missing.
 Note that instances of union superclasses must have corresponding related
 union subclasses,
 so we will insist that referential integrity is preserved.
-But if all the relation instance of a union superclass happen to exclude
+But if all the related instances of a union superclass happen to exclude
 a particular union subclass, then that is not an error.
 The case for reference subclasses is different.
 Since they have memory allocated for them, we will insist that there be
@@ -5026,7 +5027,7 @@ set missing [pipe {
     relation minus ~ $usubs
 }] ; # <2>
 if {[relation isnotempty $missing]} {
-    tailcall DeclError MISSING_POPULATION domain\
+    tailcall DeclError MISSING_POPULATION $domain\
         [join [relation list $missing Name] {, }]
 }
 ----
@@ -5109,10 +5110,8 @@ set noinsts [pipe {
 }] ; # <1>
 
 if {[relation isnotempty $noinsts]} {
-    log::error "for domain population, \"$domain\",\
-        the following classes have no defined instances and a zero allocation:\
-        [join [relation list $noinsts Class] {, }]"
-    incr errcount
+    tailcall DeclError NO_INSTANCES $domain\
+        [join [relation list $noinsts Class] {, }]
 }
 ----
 <1> The `rvajoin` command performs the relational equivalent of
@@ -5126,6 +5125,14 @@ is empty, indicating that there were no matching instances in the population.
 We will see this construct often in the population validation
 code as we frequently are looking for when there are _no_ matches within
 a set.
+
+(((error code,NO_INSTANCES)))
+[source,tcl]
+----
+<<error code formats>>=
+NO_INSTANCES    {for domain population, "%s", the following classes have no\
+                defined instances and a zero allocation: "%s"}
+----
 
 [source,tcl]
 ----
@@ -5167,6 +5174,7 @@ simply strings that must refer to instances names of the proper
 class.
 We need to go though all the values for the various types of references
 and make sure they were specified correctly.
+There are three distince types of references in the platform model.
 
 [source,tcl]
 ----
@@ -5178,11 +5186,23 @@ and make sure they were specified correctly.
 
 ==== Checking Association Reference Values
 
+When a class is the referring class in a simple association,
+the corresponding class component for the association is the
+name of an instance in the referenced class.
+
+The first step in the check is to assemble a relation value whose
+heading has the the information we need.
+This information will include the classes that participate in the
+association as well as the value of the reference from the referring
+class to the referenced class.
+
 [source,tcl]
 ----
 <<population: check association references>>=
 set simprefs [pipe {
-    relation eliminate $::micca::SimpleReferringClass Role |
+    SimpleReferringClass findWhere {$Domain eq $domain} |
+    deRef ~ |
+    relation eliminate ~ Role |
     relation rename ~ Class ReferringClass\
         Conditionality ReferringCond Multiplicity ReferringMult|
     relation join ~ $::micca::SimpleReferencedClass |
@@ -5195,73 +5215,40 @@ set simprefs [pipe {
     relation restrictwith ~ {$ReferencedInstance ne "@nil@"}
 }]
 # puts [relformat $simprefs simprefs]
+----
 
-# References to non-existent instances
+Note that we have excluded `nil` references.
+The population code insures that unconditional reference components are
+given a value.
+
+[float]
+==== Checking Referenced Instances
+
+First we check for references to instances that do not exist.
+
+[source,tcl]
+----
+<<population: check association references>>=
 set badrefs [pipe {
     relation rename $simprefs ReferencedClass Class ReferencedInstance Instance |
     ralutil::rvajoin ~ $popinsts Instances |
     relation restrictwith ~ {[relation cardinality $Instances] == 0}
-}]
+}] ; # <1>
 # puts [relformat $badrefs badrefs]
 relation foreach badref $badrefs {
     relation assign $badref
     log::error "for domain population, $Domain,\
-        instance, $ReferringClass.$ReferringInstance, references\
+        instance, $ReferringClass.$ReferringInstance, refers to\
         instance, $Class.$Instance across,\
         $Component, but $Class.$Instance does not exist"
     incr errcount
 }
-
-# Subtract out bad references
-set simprefs [pipe {
-    relation eliminate $badrefs Instances |
-    relation rename ~ Class ReferencedClass Instance ReferencedInstance |
-    relation minus $simprefs ~
-}]
-# puts [relformat $simprefs simprefs]
-
-# Checking referenced multiplicity
-set refedmults [pipe {
-    relation eliminate $simprefs ReferringCond ReferencedCond |
-    relation group ~ ReferringInstances ReferringInstance |
-    relation restrictwith ~ {!$ReferringMult &&\
-        [relation cardinality $ReferringInstances] > 1}
-}]
-# puts [relformat $refedmults refedmults]
-relation foreach refedmult $refedmults {
-    relation assign $refedmult
-    log::error "for domain population, $Domain,\
-        relationship, $Component, is singular from\
-        $ReferringClass to $ReferencedClass, but instance, $ReferencedInstance,\
-        is referred to by multiple instances:\
-        [join [relation list $ReferringInstances] {, }]"
-    incr errcount
-}
-
-# Checking referenced conditionality
-set refingconds [pipe {
-    relation eliminate $simprefs ReferringInstance ReferringMult |
-    relation rename ~ ReferencedInstance Instance |
-    relation group ~ RefedInstances Instance |
-    relation rename ~ ReferencedClass Class |
-    ralutil::rvajoin ~ [relation eliminate $popinsts Number] Instances |
-    relation restrictwith ~\
-        {!$ReferringCond && [relation is $RefedInstances != $Instances]}
-}]
-# puts [relformat $refingconds refingconds]
-
-relation foreach refingcond $refingconds {
-    relation assign $refingcond
-    set notrefed [relation minus $Instances $RefedInstances]
-    log::error "for domain population, $Domain,\
-        relationship, $Component, is unconditional from\
-        $Class to $ReferringClass, but the\
-        \"[join [relation list $notrefed] {, }]\" instance(s) of $Class\
-        is(are) not refered to by any instance of $ReferringClass"
-    incr errcount
-}
-
 ----
+<1> We join against the instances to determine the matches for
+the `ReferencedClass` and `ReferencedInstance`.
+If there is no match, then the relation valued attribute will have
+a cardinality of zero and we have found a reference to an instance
+that does not exist.
 
 [source,tcl]
 ----
@@ -5297,6 +5284,95 @@ test simpleassociation-1.0 {
 [source,tcl]
 ----
 <<config command tests>>=
+test simpleassociation-1.1 {
+    refer to non-existant instance -- reflexive association
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain bar {
+            class X {
+            }
+            association R1 X 0..1--0..1 X
+        }
+
+        population bar {
+            class X {
+                instance x1 R1 y2
+                instance x2 R1 x1
+            }
+        }
+    }
+} -result {encountered 1 configuration script errors} -returnCodes error
+----
+
+[float]
+==== Removing Bad References
+
+We subtract out the bad references so that we can continue the checking.
+To do the subtraction, we need a compatible heading and that takes
+a bit of manipulation of names and the effects of the `rvajoin`.
+
+[source,tcl]
+----
+<<population: check association references>>=
+# Subtract out bad references
+set simprefs [pipe {
+    relation eliminate $badrefs Instances |
+    relation rename ~ Class ReferencedClass Instance ReferencedInstance |
+    relation minus $simprefs ~
+}]
+# puts [relformat $simprefs simprefs]
+----
+
+[float]
+==== Checking Referenced Multiplicity
+
+For a simple association,
+the referring class always refers to either _exactly one_ instance or
+_at most one_ instance.
+The conditionality of the reference is handled in the population code
+by insisting that a value be given for the class component that represents
+the association reference.
+
+It remains to check the multiplicity and conditionality of the
+referenced class in the association.
+For the multiplicity,
+we need to count the number of times an instance of the
+referenced class shows up as a reference by the referring class.
+If that number is greater than one,
+the we insist the association be multiple on the referring side.
+
+[source,tcl]
+----
+<<population: check association references>>=
+set refedmults [pipe {
+    relation eliminate $simprefs ReferringCond ReferencedCond |
+    relation group ~ ReferringInstances ReferringInstance |
+    relation restrictwith ~ {!$ReferringMult &&\
+        [relation cardinality $ReferringInstances] > 1}
+}] ; # <1>
+# puts [relformat $refedmults refedmults]
+relation foreach refedmult $refedmults {
+    relation assign $refedmult
+    log::error "for domain population, $Domain,\
+        relationship, $Component, is singular from\
+        $ReferringClass to $ReferencedClass, but instance, $ReferencedInstance,\
+        is referred to by multiple instances:\
+        [join [relation list $ReferringInstances] {, }]"
+    incr errcount
+}
+----
+<1> By grouping the `ReferringInstance` attribute,
+we are computing the set of instances of the referring class that
+reference the same instance of the referenced class.
+This is allowed to be greater than one only if multiplicity is true
+on the referring side.
+
+[source,tcl]
+----
+<<config command tests>>=
 test simpleassociation-2.0 {
     multiple reference
 } -setup {
@@ -5315,7 +5391,7 @@ test simpleassociation-2.0 {
         population bar {
             class X {
                 instance x1 R1 y1
-                instance x2 R1 y1
+                instance x2 R1 y1 ; # y1 referred to multiple times
             }
             class Y {
                 instance y1
@@ -5325,11 +5401,61 @@ test simpleassociation-2.0 {
 } -result {encountered 1 configuration script errors} -returnCodes error
 ----
 
+[float]
+==== Checking Referenced Conditionality
+
+Checking the conditionality of the references requires a slightly
+different strategy.
+Here we are interested in determining if all the instances of
+the referenced class in the association are actually referred to by
+some instance of the referring class.
+If not all the instances of the referenced class show up,
+then the association must be conditional on the referring side.
+
+The strategy for this query is to group the referenced instances as
+a relation valued attribute.
+Then we can perform an `rvajoin` against the instances in the population
+to determine the total set of referenced instances.
+The relation valued attributes from these two operation must be equal
+if the association is unconditional on the referring side,
+_i.e._ unconditionality implies that all possible instances of the
+referenced class appear as an actual reference by the referring class
+instances.
+There is a minor complication in the query since to compare the two
+relation values they must have the same heading, so some juggling of the
+attribute names is required.
+
+[source,tcl]
+----
+<<population: check association references>>=
+set refingconds [pipe {
+    relation project $simprefs Domain Component ReferringClass ReferringCond\
+        ReferencedClass ReferencedInstance |
+    relation rename ~ ReferencedClass Class ReferencedInstance Instance |
+    relation group ~ ReferencedInstances Instance |
+    ralutil::rvajoin ~ [relation eliminate $popinsts Number] Instances |
+    relation restrictwith ~\
+        {!$ReferringCond && [relation is $ReferencedInstances != $Instances]}
+}]
+# puts [relformat $refingconds refingconds]
+
+relation foreach refingcond $refingconds {
+    relation assign $refingcond
+    set notrefed [relation minus $Instances $ReferencedInstances]
+    log::error "for domain population, $Domain,\
+        relationship, $Component, is unconditional from\
+        $Class to $ReferringClass, but the\
+        \"[join [relation list $notrefed] {, }]\" instance(s) of $Class\
+        is(are) not referred to by any instance of $ReferringClass"
+    incr errcount
+}
+----
+
 [source,tcl]
 ----
 <<config command tests>>=
 test simpleassociation-3.0 {
-    unconditional reference
+    unconditional reference -- many to one
 } -setup {
 } -cleanup {
     cleanupDomain
@@ -5362,7 +5488,7 @@ test simpleassociation-3.0 {
 ----
 <<config command tests>>=
 test simpleassociation-4.0 {
-    unconditional reference
+    unconditional reference -- many to at most one
 } -setup {
 } -cleanup {
     cleanupDomain
@@ -5380,38 +5506,12 @@ test simpleassociation-4.0 {
             class X {
                 instance x1 R1 y1
                 instance x2 R1 y2
-                instance x3
+                instance x3 ; # nil reference okay here
             }
             class Y {
                 instance y1
                 instance y2
-                instance y3
-            }
-        }
-    }
-} -result {encountered 1 configuration script errors} -returnCodes error
-----
-
-[source,tcl]
-----
-<<config command tests>>=
-test simpleassociation-5.0 {
-    refer to non-existant instance in reflexive association
-} -setup {
-} -cleanup {
-    cleanupDomain
-} -body {
-    micca configure {
-        domain bar {
-            class X {
-            }
-            association R1 X 0..1--0..1 X
-        }
-
-        population bar {
-            class X {
-                instance x1 R1 y2
-                instance x2 R1 x1
+                instance y3 ; # not referenced
             }
         }
     }
@@ -5420,13 +5520,11 @@ test simpleassociation-5.0 {
 
 ==== Checking Associator Reference Values
 
-The associator class in a class based association always has a
-corresponding associator reference.
-The reference is always to both classes that participate in the
-association.
-Since there is a one-to-one correspondence between associator class
+The associator class in a class based association always makes
+unconditional references to each of the participants in the association.
+Since there is a one-to-one correspondence between the associator class
 instances and instances of the association itself,
-the references by an associator class cannot be empty.
+the references by an associator class cannot be `nil`.
 There are a couple of complications when dealing with associator
 references.
 First, we are dealing with references to two classes and do not
@@ -5451,177 +5549,352 @@ in its forward direction and <otherinstance> is that reached when traversing
 in the backward direction (reflexivity means we cannot determine direction
 from the class names alone).
 
+We start with a query that is analogous to the one for simple associations.
+We gather all the information together in one relation value.
+In the case of class based association, we have information for
+the associator class and both participants.
+
 [source,tcl]
 ----
 <<population: check associator references>>=
 set assocs [pipe {
-    relation semijoin $::micca::AssociatorClass $popvalues\
-        -using {Domain Domain Class Class Relationship Component} |
-    relation rename ~ Class Assocclass Instance Associnstance\
-        Component Relationship |
-    relation join ~ $::micca::SourceClass\
-        -using {Domain Domain Relationship Relationship} |
-    relation eliminate ~ Role Conditionality Multiplicity |
-    relation rename ~ Class SourceClass |
-    relation join ~ $::micca::TargetClass\
-        -using {Domain Domain Relationship Relationship} |
-    relation eliminate ~ Role Conditionality Multiplicity |
-    relation rename ~ Class TargetClass
-}] ; # <1>
+    AssociatorClass findWhere {$Domain eq $domain} |
+    deRef ~ |
+    relation eliminate ~ Role |
+    relation rename ~ Class AssocClass |
+    relation join ~ $::micca::SourceClass |
+    relation eliminate ~ Role |
+    relation rename ~ Class SourceClass Conditionality SourceCond\
+            Multiplicity SourceMult |
+    relation join ~ $::micca::TargetClass |
+    relation eliminate ~ Role |
+    relation rename ~ Class TargetClass Conditionality TargetCond\
+            Multiplicity TargetMult Relationship Component |
+    relation join ~ $popvalues -using\
+        {Domain Domain AssocClass Class Component Component} |
+    relation rename ~ Instance AssocInstance
+}]
 # puts [relformat $assocs assocs]
+----
 
-set reflexive [relation restrictwith $assocs {$SourceClass eq $TargetClass}] ; # <2> 
+We first check that the class component value is a proper four element list
+as is required for associative references.
 
-set assocs [relation minus $assocs $reflexive]
-
-set badvalues [relation restrictwith $assocs {[llength $Value] != 4}] ; # <3>
+[source,tcl]
+----
+<<population: check associator references>>=
+set badvalues [relation restrictwith $assocs {[llength $Value] != 4}]
 relation foreach badvalue $badvalues {
     relation assign $badvalue
     log::error "for domain population, \"$Domain\",\
         instance, \"$AssocClass.$AssocInstance\", has a bad format for the\
-        value of the associative reference for, \"$Relationship\":\
+        value of the associative reference for, \"$Component\":\
         expected a four element list, got, \"$Value\""
     incr errcount
 }
+----
 
+To continue checking,
+we subtract out the references with badly formatted values.
+
+[source,tcl]
+----
+<<population: check associator references>>=
 set assocs [relation minus $assocs $badvalues]
-# puts [relformat $assocs assocs]
+----
 
-set nonparts [relation restrictwith $assocs\
-    {([lindex $Value 0] ne $SourceClass && [lindex $Value 0] ne $TargetClass) ||\
-    ([lindex $Value 2] ne $SourceClass && [lindex $Value 2] ne $TargetClass)}] ; # <4>
+Next we examine values for the non-reflexive associations.
+For the non-reflexive case the value forms a four element list
+consisting of class name/instance name pairs.
+The class names must match the names of the association participants.
 
+[source,tcl]
+----
+<<population: check associator references>>=
+set nrassocs [relation restrictwith $assocs {$SourceClass ne $TargetClass}]
+
+set nonparts [relation restrictwith $nrassocs {![::struct::set equal\
+        [list [lindex $Value 0] [lindex $Value 2]]\
+        [list $SourceClass $TargetClass]]}]
 # puts [relformat $nonparts nonparts]
 relation foreach nonpart $nonparts {
     relation assign $nonpart
-    foreach {class instance} $Value {
-        if {$class ne $SourceClass && $class ne $TargetClass} {
-            log::error "for domain population,\
-                \"$Domain\", associator instance,\
-                \"$Assocclass.$Associnstance\", references\
-                class instance, \"$class.$instance\" across,\
-                \"$Relationship\", but $class does not participate in\
-                $Relationship"
-            incr errcount
+    lassign $Value oneclass oneinst otherclass otherinst
+    if {$oneclass eq $otherclass} {
+        log::error "for domain population, \"$Domain\",\
+            associator instance, \"$AssocClass.$AssocInstance\",
+            the reference value, \"$Value\", duplicates the reference\
+            to class, \"$oneclass\""
+        incr errcount
+    } else {
+        set refedclasses [list $SourceClass $TargetClass]
+        foreach {class instance} $Value {
+            if {![::struct::set contains $refedclasses $class]} {
+                log::error "for domain population, \"$Domain\",\
+                    associator instance, \"$AssocClass.$AssocInstance\",\
+                    references class instance, \"$class.$instance\" across,\
+                    \"$Component\", but $class does not participate in\
+                    $Component"
+                incr errcount
+            }
         }
     }
 }
 
-set assocs [relation minus $assocs $nonparts]
+set nrassocs [relation minus $nrassocs $nonparts]
+----
 
-set dupparts [relation restrictwith $assocs\
-        {[lindex $Value 0] eq [lindex $Value 2]}] ; # <5>
-# puts [relformat $dupparts dupparts]
-relation foreach duppart $dupparts {
-    relation assign $duppart
-    log::error "for domain population, \"$Domain\",\
-        associator instance, \"$Assocclass.$Associnstance\", both
-        references refer to the same class, \"[lindex $Value 0]\""
-    incr errcount
-}
+Now we expand the `Value` attribute into separate attributes for
+the two references.
+We will do the same for reflexive associations later and
+this will make it easier both to join the code flow back together
+and to examine the references in both directions.
 
-set assocs [pipe {
-    relation minus $assocs $dupparts |
-    relation eliminate ~ SourceClass TargetClass
-}] ; # <6>
-
-set onerefs [relation extend $assocs otup\
-        Class string {[lindex [tuple extract $otup Value] 0]}\
-        Instance string {[lindex [tuple extract $otup Value] 1]}] ; # <7>
-set otherrefs [relation extend $assocs otup\
-        Class string {[lindex [tuple extract $otup Value] 2]}\
-        Instance string {[lindex [tuple extract $otup Value] 3]}]
-
-# Find the references for which there are no instances
-set badrefs [pipe {
-    relation union $onerefs $otherrefs |
-    relation eliminate ~ Value |
-    ralutil::rvajoin ~ $popinsts ValueMatch |
-    relation restrictwith ~ {[relation isempty $ValueMatch]}
+[source,tcl]
+----
+<<population: check associator references>>=
+set nrassocs [pipe {
+    relation extend $nrassocs nrtup\
+        TargetInstance string {[dict get [tuple extract $nrtup Value]\
+            [tuple extract $nrtup TargetClass]]}\
+        SourceInstance string {[dict get [tuple extract $nrtup Value]\
+            [tuple extract $nrtup SourceClass]]} |
+    relation eliminate ~ Value
 }]
-# puts [relformat $badrefs badrefs]
-relation foreach badref $badrefs {
-    relation assign $badref
-    log::error "for domain population, \"$Domain\",\
-        associator instance, \"$Assocclass.$Associnstance\", references\
-        instance, \"$Class.$Instance\" across,\
-        \"$Relationship\", but $Instance does not exist"
-    incr errcount
-}
+----
 
-# Now deal with reflexive case. The initial value for the reflexive
-# case has a different format and we must be mindful that all the
-# references are to the same class.
+Now we do the corresponding checks for reflexive associations.
 
-# puts [relformat $reflexive reflexive]
+[source,tcl]
+----
+<<population: check associator references>>=
+set rassocs [relation restrictwith $assocs {$SourceClass eq $TargetClass}]
 
-set badvalues [relation restrictwith $reflexive\
-    {[llength $Value] != 4 ||\
-    ![struct::set equal [dict keys $Value] {forward backward}]}] ; # <8>
-relation foreach badvalue $badvalues {
-    relation assign $badvalue
+set baddirs [relation restrictwith $rassocs\
+    {![struct::set equal [dict keys $Value] {forward backward}]}]
+relation foreach baddir $baddirs {
+    relation assign $baddir
     log::error "for domain population, \"$Domain\",\
         instance, \"$AssocClass.$AssocInstance\", has a bad format for the\
-        value of component, \"$Relationship\": expected a four element list\
+        value of component, \"$Component\": expected a dictionary\
         with \"forward\" and \"backward\" keys, got, \"$Value\""
     incr errcount
 }
 
-set reflexive [pipe {
-    relation minus $reflexive $badvalues |
-    relation eliminate ~ TargetClass |
-    relation rename ~ SourceClass Class
-}] ; # <9>
+set rassocs [relation minus $rassocs $baddirs]
+----
 
-set forwrefs [relation extend $reflexive rtup\
-        Instance string {[lindex [tuple extract $rtup Value] 1]}] ; # <10>
-set backrefs [relation extend $reflexive rtup\
-        Instance string {[lindex [tuple extract $rtup Value] 3]}]
+And we can expand the reflexive value into separate attributes.
 
-set badrefs [pipe {
-    relation union $forwrefs $backrefs |
-    relation eliminate ~ Value |
-    ralutil::rvajoin ~ $popinsts ValueMatch |
-    relation restrictwith ~ {[relation isempty $ValueMatch]}
-}] ; # <11>
+[source,tcl]
+----
+<<population: check associator references>>=
+set rassocs [pipe {
+    relation extend $rassocs rtup\
+        TargetInstance string {[dict get [tuple extract $rtup Value] forward]}\
+        SourceInstance string {[dict get [tuple extract $rtup Value] backward]} |
+    relation eliminate ~ Value
+}]
+----
+
+After expanding the `Value` attribute appropriately,
+the headings for the non-reflexive and reflexive cases are the same
+and so we can combine them back together for the remainder of the
+processing.
+
+[source,tcl]
+----
+<<population: check associator references>>=
+set assocs [relation union $nrassocs $rassocs]
+# puts [relformat $assocs assocs]
+----
+
+[float]
+==== Checking Associator References
+
+At this point we know the associator component values are of the proper
+format and have split the value into separate attributes.
+This makes it easier to check whether the associator references are to
+actual instances.
+
+[source,tcl]
+----
+<<population: check associator references>>=
+set badsrcrefs [pipe {
+    relation rename $assocs SourceClass Class SourceInstance Instance |
+    relation project ~ Domain Class Component Instance AssocClass AssocInstance |
+    ralutil::rvajoin ~ $popinsts Instances |
+    relation restrictwith ~ {[relation cardinality $Instances] == 0}
+}]
+set badtrgrefs [pipe {
+    relation rename $assocs TargetClass Class TargetInstance Instance |
+    relation project ~ Domain Class Component Instance AssocClass AssocInstance |
+    ralutil::rvajoin ~ $popinsts Instances |
+    relation restrictwith ~ {[relation cardinality $Instances] == 0}
+}]
+
+set badrefs [relation union $badsrcrefs $badtrgrefs]
 # puts [relformat $badrefs badrefs]
 relation foreach badref $badrefs {
     relation assign $badref
-    log::error "for domain population, \"$Domain\",\
-        associator instance, \"$Assocclass.$Associnstance\", references\
-        instance, \"$Class.$Instance\" across,\
-        \"$Relationship\", but $Instance does not exist"
+    log::error "for domain population, $Domain,\
+        instance, $AssocClass.$AssocInstance, refers to\
+        instance, $Class.$Instance across,\
+        $Component, but $Class.$Instance does not exist"
     incr errcount
 }
 ----
-<1> Find the component values that are values for Associator Classes.
-We continue to join in other information so as to obtain one big
-whacking relation that has all the information in it we need.
-In particular we need to know what the Source Class and Target Class
-are for the association.
-These will be the classes which the initial instance references must specify.
-<2> Separate out the reflexive case. We will treat them later.
-<3> Check that the format of the initial value.
-<4> Check that the initial value does not refer to classes *not* in the
-relationship.
-<5> Check that reference value is non-reflexive.
-<6> Now that we are sure that the initial value refers to the correct classes,
-we can get rid of the source and target class attributes.
-<7> Expand out the initial value to individual attributes. This turns the
-elements of the initial value list into attributes.
-Note that we do this for each pair in the initial value and then
-union the results together.
-<8> Find badly formatted initial values. We still want a four element list,
-except now it must be of the form of a dictionary with keys of
-`forward` and `backward`.
-<9> Juggle some names around to coalesce source and target class names.
-<10> Expand out the initial value to individual attributes. This is just
-like the non-reflexive case, except we are only interested in the
-instance names since the class name is determined already.
-<11> Union the forward and backword references and get rid of the *Value*
-attribute as it is no longer needed.
-Using the, by now, familiar `rvajoin` we can find any non-matching
+
+[float]
+==== Removing Bad References
+
+To continue checking,
+we will remove any bad references.
+Since we have modified the heading in the `badsrcrefs` and `badtrgrefs`
+relations, we will use the `semiminus` operation to find the
+good references.
+
+[source,tcl]
+----
+<<population: check associator references>>=
+set assocs [pipe {
+    relation semiminus $badsrcrefs $assocs -using\
+        {Domain Domain Component Component AssocClass AssocClass\
+        AssocInstance AssocInstance Class SourceClass Instance SourceInstance} |
+    relation semiminus $badtrgrefs ~ -using\
+        {Domain Domain Component Component AssocClass AssocClass\
+        AssocInstance AssocInstance Class TargetClass Instance TargetInstance}
+}]
+# puts [relformat $assocs assocs]
+----
+
+[float]
+==== Checking Duplicate Associator References
+
+The references made by an instance of an associator class must be unique,
+_i.e._ you have an associator class instance that makes references to
+the same two instances.
+
+[source,tcl]
+----
+<<population: check associator references>>=
+set duprefs [pipe {
+    relation project $assocs Domain Component AssocClass AssocInstance\
+        SourceClass SourceInstance TargetClass TargetInstance |
+    relation group ~ References AssocInstance |
+    relation restrictwith ~ {[relation cardinality $References] > 1}
+}]
+# puts [relformat $duprefs duprefs]
+relation foreach dupref $duprefs {
+    relation assign $dupref
+    log::error "for domain population, $Domain,\
+        associative class, $AssocClass, instances,\
+        [join [relation list $References] {, }],\
+        all refer to both $SourceClass.$SourceInstance and\
+        $TargetClass.$TargetInstance across, $Component:\
+        associative class reference pairs must be unique"
+    incr errcount
+}
+----
+
+[float]
+==== Checking Associative Multiplicity
+
+We can now check the referential integrity of the class based association
 references.
+The pattern of the query is analogous to the one we used for simple
+associations.
+We want to count the number of times an instance of a Source Class or
+Target Class is referenced by the Associator Class.
+We then compare that to the multiplicity specified for the association.
+Note,
+the inversion of the multiplicity from source to target.
+We have seen this before with class based association.
+If you count the number of associator instances that refer to a particular
+source class instance it is the target side multiplicity that determine
+if that is allowed, and _vice versa_.
+
+[source,tcl]
+----
+<<population: check associator references>>=
+set srcreftos [pipe {
+    relation project $assocs Domain Component AssocClass AssocInstance\
+        SourceClass SourceInstance TargetMult |
+    relation rename ~ SourceClass Class SourceInstance Instance\
+        TargetMult Multiplicity |
+    relation group ~ AssocInstances AssocInstance
+}]
+# puts [relformat $srcreftos srcreftos]
+
+set trgreftos [pipe {
+    relation project $assocs Domain Component AssocClass AssocInstance\
+        TargetClass TargetInstance SourceMult |
+    relation rename ~ TargetClass Class TargetInstance Instance\
+        SourceMult Multiplicity |
+    relation group ~ AssocInstances AssocInstance
+}]
+# puts [relformat $trgreftos trgreftos]
+
+set reftos [pipe {
+    relation union $srcreftos $trgreftos |
+    relation restrictwith ~ {!$Multiplicity &&\
+        [relation cardinality $AssocInstances] > 1}
+}]
+# puts [relformat $reftos reftos]
+relation foreach refto $reftos {
+    relation assign $refto
+    log::error "for domain population, $Domain,\
+        class based association, $Component, is singular to, $Class,\
+        but instance, $Instance,\
+        is referred to multiple times by associative class, $AssocClass,\
+        instances: [join [relation list $AssocInstances] {, }]"
+    incr errcount
+}
+----
+
+[float]
+==== Checking Associative Conditionality
+
+[source,tcl]
+----
+<<population: check associator references>>=
+set srcconds [pipe {
+    relation project $assocs Domain Component AssocClass\
+            SourceClass SourceInstance TargetCond |
+    relation rename ~ SourceClass Class SourceInstance Instance\
+            TargetCond Conditionality |
+    relation group ~ ReferencedInstances Instance |
+    ralutil::rvajoin ~ [relation eliminate $popinsts Number] Instances
+}]
+# puts [relformat $srcconds srcconds]
+
+set trgconds [pipe {
+    relation project $assocs Domain Component AssocClass\
+            TargetClass TargetInstance SourceCond |
+    relation rename ~ TargetClass Class TargetInstance Instance\
+            SourceCond Conditionality |
+    relation group ~ ReferencedInstances Instance |
+    ralutil::rvajoin ~ [relation eliminate $popinsts Number] Instances
+}]
+# puts [relformat $trgconds trgconds]
+
+set badconds [pipe {
+    relation union $srcconds $trgconds |
+    relation restrictwith ~ {!$Conditionality &&\
+            [relation is $ReferencedInstances != $Instances]}
+}]
+# puts [relformat $badconds badconds]
+relation foreach badcond $badconds {
+    relation assign $badcond
+    set notrefed [relation minus $Instances $ReferencedInstances]
+    log::error "for domain population, $Domain,\
+        class based association, $Component, requires all instances of $Class\
+        to be referenced, but the \"[join [relation list $notrefed] {, }]\"\
+        instance(s) of $Class is(are) not referenced by any instance\
+        of $AssocClass"
+    incr errcount
+}
+----
 
 [source,tcl]
 ----
@@ -5682,7 +5955,7 @@ test populate-4.6 {
             }
         }
     }
-} -result {encountered 3 configuration script errors} -returnCodes error
+} -result {encountered 4 configuration script errors} -returnCodes error
 ----
 
 [source,tcl]
@@ -5710,12 +5983,56 @@ test populate-4.7 {
                 instance a2 R1 {forward y2 backward y3} ; # y2, y3 don't exist
             }
             class X {
-                instance x1
-                instance x2
+                instance x1 ; # x1 not referenced in the forward direction
+                instance x2 ; # x2 not referenced in the backward direction
             }
         }
     }
-} -result {encountered 2 configuration script errors} -returnCodes error
+} -result {encountered 4 configuration script errors} -returnCodes error
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test populate-4.8 {
+    class based association -- bad multiplicity, duplicate reference
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain bar {
+            class A {
+                attribute date int -default 0
+            }
+            class X {
+                attribute temp int -default 25
+            }
+            class Y {
+                attribute color int -default 25
+            }
+
+            association R1 -associator A X 1--1 Y
+        }
+
+        population bar {
+            class A {
+                instance a1 R1 {X x1 Y y1}
+                instance a2 R1 {X x2 Y y1} ; # y1 referenced multiple times
+                instance a3 R1 {X x1 Y y2} ; # x1 referenced multiple times
+                instance a4 R1 {X x1 Y y1} ; # duplicate reference
+            }
+            class X {
+                instance x1
+                instance x2
+            }
+            class Y {
+                instance y1
+                instance y2
+            }
+        }
+    }
+} -result {encountered 3 configuration script errors} -returnCodes error
 ----
 
 ==== Checking Superclass Reference Values
@@ -6263,7 +6580,7 @@ test populate-4.9 {
 ----
 <<config command tests>>=
 test populate-4.10 {
-    bad source class reference
+    missing target class reference
 } -setup {
 } -cleanup {
     cleanupDomain
@@ -6294,10 +6611,11 @@ test populate-4.10 {
             class Y {
                 instance y1
                 instance y2
+                instance y3 ; # y3 not referenced
             }
         }
     }
-} -result {encountered 2 configuration script errors} -returnCodes error
+} -result {encountered 1 configuration script errors} -returnCodes error
 ----
 
 [source,tcl]
@@ -6335,11 +6653,11 @@ test populate-4.11 {
             class Y {
                 instance y1
                 instance y2
-                instance y3             ; # nil not allowed
+                instance y3             ; # y3 is not referenced
             }
         }
     }
-} -result {encountered 2 configuration script errors} -returnCodes error
+} -result {encountered 1 configuration script errors} -returnCodes error
 ----
 
 [source,tcl]
@@ -7530,7 +7848,7 @@ set forwrefs [pipe {
     relation join ~ $popvalues -using\
         {Domain Domain Relationship Component ReferringClass Class}
 }]
-puts [relformat $forwrefs forwrefs]
+# puts [relformat $forwrefs forwrefs]
 
 # Non-recursive
 set nrsrcforwrefs [pipe {
@@ -7538,7 +7856,7 @@ set nrsrcforwrefs [pipe {
     relation extend ~ tbtup NewValue string {[dict get\
         [tuple extract $tbtup Value] [tuple extract $tbtup SourceClass]]}
 }]
-puts [relformat $nrsrcforwrefs nrsrcforwrefs]
+# puts [relformat $nrsrcforwrefs nrsrcforwrefs]
 
 # Recursive
 set rsrcforwrefs [pipe {
@@ -7546,7 +7864,7 @@ set rsrcforwrefs [pipe {
     relation extend ~ tbtup NewValue string {[dict get\
         [tuple extract $tbtup Value] backward]}
 }]
-puts [relformat $rsrcforwrefs rsrcforwrefs]
+# puts [relformat $rsrcforwrefs rsrcforwrefs]
 
 set forwrefs [pipe {
     relation union $nrsrcforwrefs $rsrcforwrefs |
@@ -7558,7 +7876,7 @@ set forwrefs [pipe {
     relation eliminate ~ Instances |
     relation rename ~ SourceClass Class NewValue Instance NewValues Value
 }]
-puts [relformat $forwrefs forwrefs]
+# puts [relformat $forwrefs forwrefs]
 
 foreach forwref [relation body $forwrefs] {
     set values [dict get $forwref Value]
@@ -7613,7 +7931,7 @@ set nilforwrefs [pipe {
     relation semiminus $forwrefs % |
     relation join % [relation eliminate $forwrefs Instance Value]
 } {} |%]
-puts [relformat $nilforwrefs nilforwrefs]
+# puts [relformat $nilforwrefs nilforwrefs]
 
 foreach nilforwref [relation body $nilforwrefs] {
     ClassComponentValue create\
