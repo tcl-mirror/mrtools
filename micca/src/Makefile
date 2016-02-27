@@ -107,7 +107,7 @@ DBLATEX_PARAMS =\
 	index.numbered=0\
 	doc.publisher.show=0\
 	doc.lot.show=figure,table\
-	toc.section.depth=1\
+	toc.section.depth=2\
 	doc.section.depth=0\
 	$(NULL)
 
