@@ -163,6 +163,7 @@ The default values are given and can be overridden by those passed in.
 variable options
 set options [dict create\
     expanderror     fail\
+    stubexternalops false\
 ]
 set options [dict merge $options $arglist]
 ----
@@ -261,6 +262,7 @@ set headerTemplate [string cat\
     "#include <stdbool.h>\n"\
     %<typeAliases>%\
     %<domainOpDeclarations>%\
+    %<externalOpDeclarations>%\
     %<eventParamDeclarations>%\
     %<portalIds>%\
     "#endif /* %<headerFileGuard>% */"\
@@ -449,7 +451,7 @@ proc domainOpDeclarations {} {
 
     set result {}
     if {[isNotEmptyRef $opRefs]} {
-        append result [comment "External Declarations for Domain Operations"]
+        append result [comment "Domain Operations External Declarations"]
 
         forAllRefs opRef $opRefs {
             assignAttribute $opRef
@@ -507,6 +509,37 @@ test headergen-3.0 {
     micca generate
     llength [fileutil::grep {extern int header3_op[0-9]} header3.h]
 } -result {2}
+----
+
+[source,c]
+----
+<<generation header commands>>=
+proc externalOpDeclarations {} {
+    variable domain
+    set opRefs [ExternalOperation findWhere {$Domain eq $domain}]
+
+    set result {}
+    if {[isNotEmptyRef $opRefs]} {
+        append result [comment "External Operations Declarations"]
+
+        forAllRefs opRef $opRefs {
+            assignAttribute $opRef
+            if {$Comment ne {}} {
+                append result [comment $Comment]
+            }
+            append result "extern $ReturnDataType " $Domain _ $Name __EOP \(
+
+            set params [pipe {
+                findRelated $opRef ~R11 |
+                deRef % |
+                relation list % DataType -ascending Number |
+                join % {, }
+            } {} |%]
+            append result $params "\) ;\n"
+        }
+    }
+    return $result
+}
 ----
 
 [source,c]
@@ -680,6 +713,7 @@ set codeTemplate [string cat\
     %<forwardClassDeclarations>%\
     %<forwardRelationshipDeclaration>%\
     %<classDeclarations>%\
+    %<assignerDeclarations>%\
     %<stateParamDeclarations>%\
     %<operationDeclarations>%\
     %<ctorDeclarations>%\
@@ -691,9 +725,17 @@ set codeTemplate [string cat\
     %<edbDefinitions>%\
     %<pdbDefinitions>%\
     %<classDefinitions>%\
+    %<assignerDefinitions>%\
     %<relationshipDefinitions>%\
-    %<instanceDefinitions>%\
+    %<classInstanceDefinitions>%\
+    %<assignerInstanceDefinitions>%\
+    %<operationDefinitions>%\
+    %<ctorDefinitions>%\
+    %<dtorDefinitions>%\
     %<activityDefinitions>%\
+    %<domainCtorDefinition>%\
+    %<domainOpDefinitions>%\
+    %<externalOpDefinitions>%\
     %<epilogue>%\
 ]
 ----
@@ -821,24 +863,6 @@ proc prologue {} {
             [comment "Domain Prologue Begin"]\
             [indentCode [string trim $prologue \n] 0]\
             [comment "Domain Prologue End"]
-    }
-
-    return $result
-}
-----
-
-[source,c]
-----
-<<generation code commands>>=
-proc epilogue {} {
-    variable epilogue
-
-    set result {}
-    if {$epilogue ne {}} {
-        append result\
-            [comment "Domain Epilogue Begin"]\
-            [indentCode [string trim $epilogue \n] 0]\
-            [comment "Domain Epilogue End"]
     }
 
     return $result
@@ -1167,6 +1191,44 @@ proc FindReferencedClass {compRef} {
 
 [source,c]
 ----
+<<generation code commands>>=
+proc assignerDeclarations {} {
+    variable domain
+    set result {}
+
+    set singles [SingleAssigner findWhere {$Domain eq $domain}]
+    if {[isNotEmptyRef $singles]} {
+        append result [comment "Single Assigner Structure Declarations"]
+
+        forAllRefs assigner $singles {
+            assignAttribute $assigner
+            append result\
+                "struct $Association \{\n"\
+                "    MRT_Instance base__INST ;\n"\
+                "\} ;\n"
+        }
+    }
+
+    set multis [MultipleAssigner findWhere {$Domain eq $domain}]
+    if {[isNotEmptyRef $multis]} {
+        append result [comment "Multiple Assigner Structure Declarations"]
+
+        forAllRefs assigner $multis {
+            assignAttribute $assigner
+            append result\
+                "struct $Association \{\n"\
+                "    MRT_Instance base__INST ;\n"\
+                "    [GetClassProperty $Class Reference] idinstance ;\n"\
+                "\} ;\n"
+        }
+    }
+
+    return $result
+}
+----
+
+[source,c]
+----
 <<generate command tests>>=
 test codegen-2.0 {
     Generated code file supertype and subtype references
@@ -1245,19 +1307,19 @@ test codegen-3.0 {
 [source,c]
 ----
 <<generate command tests>>=
-test codegen-3.1 {
+test codegen-20.0 {
     Generated code file associative class references
 } -setup {
-    # makeFile {} codegen3_1.h
-    # makeFile {} codegen3_1.c
+    # makeFile {} codegen20.h
+    # makeFile {} codegen20.c
     micca configure {
-        domain codegen3_1 {
+        domain codegen20 {
             class A {}
             class X {}
             class Y {}
             association R1 -associator A X 0..1--0..1 Y
         }
-        population codegen3_1 {
+        population codegen20 {
             class A {
                 instance fred1 R1 {X x1 Y y1}
                 instance fred2 R1 {X x2 Y y2}
@@ -1277,7 +1339,7 @@ test codegen-3.1 {
 } -body {
     micca generate
     testConditions\
-        {[llength [fileutil::grep {R1} codegen3_1.c]] == 18}
+        {[llength [fileutil::grep {R1} codegen20.c]] == 18}
 } -result {1}
 ----
 
@@ -1346,20 +1408,18 @@ test codegen-5.0 {
 [source,c]
 ----
 <<generate command tests>>=
-test codegen-5.1 {
+test codegen-21.0 {
     Generated code file reflexive associative class references -- static
 } -setup {
-    # makeFile {} codegen5_1.h
-    # makeFile {} codegen5_1.c
-    #
-    # HERE, not generating correct reflexive FORW and BACK
+    # makeFile {} codegen21.h
+    # makeFile {} codegen21.c
     micca configure {
-        domain codegen5_1 {
+        domain codegen21 {
             class A {}
             class X {}
             association R1 -static -associator A X 0..*--0..* X
         }
-        population codegen5_1 {
+        population codegen21 {
             class A {
                 instance a1 R1 {forward x2 backward x1}
             }
@@ -1374,7 +1434,7 @@ test codegen-5.1 {
 } -body {
     micca generate
     testConditions\
-        {[llength [fileutil::grep {R1} codegen5_1.c]] == 18}
+        {[llength [fileutil::grep {R1} codegen21.c]] == 18}
 } -result {1}
 ----
 
@@ -1558,6 +1618,118 @@ test codegen-9.0 {
     micca generate
     testConditions\
         {[llength [fileutil::grep {LINKS} codegen9.c]] == 13}
+} -result {1}
+----
+
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-22.0 {
+    Generate a single assigner
+} -setup {
+    # makeFile {} codegen22.h
+    # makeFile {} codegen22.c
+    micca configure {
+        domain codegen22 {
+            class clerk {}
+            class client {}
+            association R1 clerk 0..1--0..1 client {
+                statemodel {
+                    defaulttrans IG
+
+                    state waitingForClerk {} {
+                    }
+                    transition waitingForClerk - clerkReady -> waitingForClient
+
+                    state waitingForClient {} {
+                    }
+                    transition waitingForClient - clientReady -> assigningClerk
+
+                    state assigningClerk {} {
+                    }
+                    transition assigningClerk - clerkAssigned -> waitingForClerk
+                }
+            }
+        }
+        population codegen22 {
+            class clerk {
+                allocate 2
+            }
+            class client {
+                allocate 3
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca generate
+    testConditions\
+        {[llength [fileutil::grep {R1__POOL} codegen22.c]] == 1}
+} -result {1}
+----
+
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-23.0 {
+    Generate a multi assigner
+} -setup {
+    # makeFile {} codegen23.h
+    # makeFile {} codegen23.c
+    micca configure {
+        domain codegen23 {
+            class clerk {}
+            class client {}
+            association R1 clerk 0..1--0..1 client {
+                identifyby department
+                statemodel {
+                    defaulttrans IG
+
+                    state waitingForClerk {} {
+                    }
+                    transition waitingForClerk - clerkReady -> waitingForClient
+
+                    state waitingForClient {} {
+                    }
+                    transition waitingForClient - clientReady -> assigningClerk
+
+                    state assigningClerk {} {
+                    }
+                    transition assigningClerk - clerkAssigned -> waitingForClerk
+                }
+            }
+            class department {}
+            association R2 department 1..*--1 clerk
+        }
+        population codegen23 {
+            class department {
+                instance mens R2 fred
+                instance children R2 fred
+                instance womens R2 alice
+                instance sports R2 biff
+            }
+            class clerk {
+                instance fred
+                instance alice
+                instance biff
+            }
+            class client {
+                allocate 3
+            }
+            assigner R1 {
+                instance mens mens
+                instance children children
+                instance womens womens
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca generate
+    testConditions\
+        {[llength [fileutil::grep {R1__POOL} codegen23.c]] == 5}
 } -result {1}
 ----
 
@@ -1765,7 +1937,7 @@ proc operationDeclarations {} {
     }]
 
     if {[relation isnotempty $ops]} {
-        append result [comment "Class Operations Forward Declarations"]
+        append result [comment "Operation Forward Declarations"]
         relation foreach op $ops {
             relation assign $op
             append result\
@@ -1804,7 +1976,7 @@ test codegen-11.0 {
                 }
 
                 instop void addColor {amount int} {
-                    self->color += amount
+                    self->color += amount ;
                 }
             }
         }
@@ -1819,8 +1991,8 @@ test codegen-11.0 {
 } -body {
     micca generate
     testConditions\
-        {[llength [fileutil::grep {X_count} codegen11.c]] == 1}\
-        {[llength [fileutil::grep {X_addColor} codegen11.c]] == 1}
+        {[llength [fileutil::grep {X_count} codegen11.c]] == 2}\
+        {[llength [fileutil::grep {X_addColor} codegen11.c]] == 2}
 } -result {1}
 ----
 
@@ -1837,9 +2009,7 @@ proc ctorDeclarations {} {
         forAllRefs ctor $ctors {
             assignAttribute $ctor {Class className}
             append result\
-                "static void ${className}__CTOR\("\
-                [GetClassProperty $className Reference]\
-                "\) ; \n"
+                "static void ${className}__CTOR\(void *const) ;\n"
         }
     }
 
@@ -1860,9 +2030,7 @@ proc dtorDeclarations {} {
         forAllRefs dtor $dtors {
             assignAttribute $dtor {Class className}
             append result\
-                "static void ${className}__DTOR\("\
-                [GetClassProperty $className Reference]\
-                "\) ; \n"
+                "static void ${className}__DTOR\(void *const) ;\n"
         }
     }
 
@@ -1924,6 +2092,14 @@ proc storageDeclarations {} {
                 [GetClassProperty $className StorageVariable]\
                 "\[[GetClassProperty $className TotalInstance]\] ;\n"
         }
+    }
+
+    set multis [MultipleAssigner findWhere {$Domain eq $domain}]
+    forAllRefs multi $multis {
+        set total [refMultiplicity [findRelated $multi R54 ~R20 ~R103]]
+        assignAttribute $multi Association
+        append result "static struct ${Association}\
+            ${Association}__POOL\[$total\] ;\n"
     }
 
     return $result
@@ -1992,6 +2168,26 @@ proc iabDefinitions {} {
     }]
     forAllRefs classRef $unionRefs {
         append result [DefineIABMembers $classRef true]
+    }
+
+    set multis [MultipleAssigner findWhere {$Domain eq $domain}]
+    forAllRefs multi $multis {
+        set total [refMultiplicity [findRelated $multi R54 ~R20 ~R103]]
+        set initial [refMultiplicity [findRelated $multi ~R106]]
+
+        assignAttribute $multi
+        append result\
+            "static MRT_iab ${Association}__IAB = \{\n"\
+            "    .storageStart = &${Association}__POOL\[0\],\n"\
+            "    .storageFinish = &${Association}__POOL\[$total\],\n"\
+            "    .storageLast = &${Association}__POOL\[[expr {$total - 1}]\],\n"\
+            "    .alloc = [expr {$initial + 1}],\n"\
+            "    .instanceSize = sizeof\(struct ${Association}\),\n"\
+            "    .construct = NULL,\n"\
+            "    .destruct = NULL,\n"\
+            "    .linkCount = 0,\n"\
+            "    .linkOffsets = NULL\n"\
+            "\} ;\n"
     }
 
     return $result
@@ -2913,6 +3109,64 @@ proc classDefinitions {} {
 }
 ----
 
+[source,c]
+----
+<<generation code commands>>=
+proc assignerDefinitions {} {
+    variable domain
+    set result {}
+
+    set assignerRefs [SingleAssigner findWhere {$Domain eq $domain}]
+    if {[isNotEmptyRef $assignerRefs]} {
+        append result [comment "Single Assigner Description Definitions"]
+        forAllRefs assigner $assignerRefs {
+            assignAttribute $assigner
+            append result\
+                "static MRT_Class const ${Association}__CLASS = \{\n"\
+                "    .iab = NULL,\n"\
+                "    .edb = &${Association}__EDB,\n"\
+                "    .pdb = NULL,\n"\
+                "    .relCount = 0,\n"\
+                "    .classRels = NULL,\n"\
+                "    .attrCount = 0,\n"\
+                "    .classAttrs = NULL,\n"\
+                "    .instCount = 1,\n"\
+                "    .containment = NULL,\n"\
+                "        #ifndef MRT_NO_NAMES\n"\
+                "    .name = ${Association}__NAME,\n"\
+                "        #endif /* MRT_NO_NAMES */\n"\
+                "\} ;\n"
+        }
+    }
+
+    set assignerRefs [MultipleAssigner findWhere {$Domain eq $domain}]
+    if {[isNotEmptyRef $assignerRefs]} {
+        append result [comment "Multiple Assigner Description Definitions"]
+        forAllRefs assigner $assignerRefs {
+            assignAttribute $assigner
+            set instRefs [findRelated $assigner ~R106]
+            append result\
+                "static MRT_Class const ${Association}__CLASS = \{\n"\
+                "    .iab = &${Association}__IAB,\n"\
+                "    .edb = &${Association}__EDB,\n"\
+                "    .pdb = NULL,\n"\
+                "    .relCount = 0,\n"\
+                "    .classRels = NULL,\n"\
+                "    .attrCount = 0,\n"\
+                "    .classAttrs = NULL,\n"\
+                "    .instCount = [refMultiplicity $instRefs],\n"\
+                "    .containment = NULL,\n"\
+                "        #ifndef MRT_NO_NAMES\n"\
+                "    .name = ${Association}__NAME,\n"\
+                "        #endif /* MRT_NO_NAMES */\n"\
+                "\} ;\n"
+        }
+    }
+
+    return $result
+}
+----
+
 ----
 <<generation code commands>>=
 proc relationshipDefinitions {} {
@@ -3216,7 +3470,7 @@ proc MapToCardinality {cond mult} {
 [source,c]
 ----
 <<generation code commands>>=
-proc instanceDefinitions {} {
+proc classInstanceDefinitions {} {
     variable domain
     variable staticMultiRefs {}
 
@@ -3578,14 +3832,224 @@ proc GenInstanceInitializers {className classNumber inst} {
                 "$indent2\},\n"
             continue
         }
-
-        # HERE, continue on with other generated components.
     }
 
     append result "$indent\},\n"
 
     return $result
 }
+----
+
+[source,c]
+----
+<<generation code commands>>=
+proc assignerInstanceDefinitions {} {
+    variable domain
+    set result {}
+
+    set singles [SingleAssigner findWhere {$Domain eq $domain}]
+    if {[isNotEmptyRef $singles]} {
+        append result [comment "Single Assigner Structure Declarations"]
+
+        forAllRefs assigner $singles {
+            set initstate [pipe {
+                findRelated $assigner R53 R50 R58 R57 |
+                readAttribute ~ Number
+            }]
+            assignAttribute $assigner
+            append result\
+                "static struct $Association ${Association}__POOL\[1\] = \{\n"\
+                "    \{\n"\
+                "        .base__INST = \{\n"\
+                "            .classDesc = &${Association}__CLASS,\n"\
+                "            .alloc = 1,\n"\
+                "            .currentState = $initstate,\n"\
+                "            .refCount = 0,\n"\
+                "                #ifndef MRT_NO_NAMES\n"\
+                "            .name = ${Association}__NAME\n"\
+                "                #endif /* MRT_NO_NAMES */\n"\
+                "        \}\n"\
+                "    \}\n"\
+                "\} ;\n"
+        }
+    }
+
+    set multis [MultipleAssigner findWhere {$Domain eq $domain}]
+    if {[isNotEmptyRef $multis]} {
+        append result [comment "Multiple Assigner Structure Declarations"]
+        forAllRefs multi $multis {
+            assignAttribute $multi {Association assoc}
+            set initstate [pipe {
+                findRelated $multi R53 R50 R58 R57 |
+                readAttribute ~ Number
+            }]
+            set multiinsts [findRelated $multi ~R106]
+            set totalinsts [refMultiplicity [findRelated $multi R54 ~R20 ~R103]]
+
+            append result "static struct $assoc\
+                    ${assoc}__POOL\[$totalinsts\] = \{\n"
+            forAllRefs assigner $multiinsts {
+                assignAttribute $assigner
+                set allocnum 0
+                append result\
+                    "    \[$Number\] = \{\n"\
+                    "        .base__INST = \{\n"\
+                    "            .classDesc = &${Association}__CLASS,\n"\
+                    "            .alloc = [incr allocnum],\n"\
+                    "            .currentState = $initstate,\n"\
+                    "            .refCount = 0,\n"\
+                    "                #ifndef MRT_NO_NAMES\n"\
+                    "            .name = \"$Instance\"\n"\
+                    "                #endif /* MRT_NO_NAMES */\n"\
+                    "        \},\n"\
+                    "        .idinstance = [GenInstanceAddress $domain $IdClass\
+                            $IdInstance]\n"\
+                    "    \},\n"\
+            }
+            append result "\} ;\n"
+        }
+    }
+
+    return $result
+}
+----
+
+[source,c]
+----
+<<generation code commands>>=
+proc operationDefinitions {} {
+    variable domain
+    set result {}
+
+    set ops [pipe {
+        Operation findWhere {$Domain eq $domain} |
+        deRef ~ |
+        relation rename ~ Name Operation |
+        ralutil::rvajoin ~ $::micca::OperationParameter Parameters
+    }]
+
+    if {[relation isnotempty $ops]} {
+        append result [comment "Operation Definitions"]
+        relation foreach op $ops {
+            relation assign $op
+            append result\
+                "static $ReturnDataType\n${Class}_$Operation"
+
+            if {[relation isempty $Parameters]} {
+                append result "\(void\)\n"
+            } else {
+                relation foreach param $Parameters -ascending Number {
+                    relation assign $param
+                    append pdecls\
+                        [typeCheck composeDeclaration $DataType $Name]\
+                        ,\n
+                }
+                set pdecls [string trimright $pdecls ",\n"]\)\n
+                append result\
+                    "\(\n"\
+                    [indentCode $pdecls]
+            }
+
+            # HERE --- need to template expand the code
+            append result\
+                "\{\n"\
+                [indentCode $Body]\
+                "\}\n"
+        }
+    }
+
+    return $result
+}
+----
+
+[source,c]
+----
+<<generation code commands>>=
+proc ctorDefinitions {} {
+    return [TorDefinitions Constructor]
+}
+----
+
+[source,c]
+----
+<<generation code commands>>=
+proc dtorDefinitions {} {
+    return [TorDefinitions Destructor]
+}
+----
+
+[source,c]
+----
+<<generation code commands>>=
+proc TorDefinitions {which} {
+    variable domain
+    set suffixmap [dict create\
+        Constructor CTOR\
+        Destructor DTOR\
+    ]
+    set result {}
+
+    set tors [$which findWhere {$Domain eq $domain}]
+
+    if {[isNotEmptyRef $tors]} {
+        append result [comment "$which Definitions"]
+        forAllRefs tor $tors {
+            assignAttribute $tor
+            # HERE --- need to template expand the code
+            append result\
+                "static void\n${Class}__[dict get $suffixmap $which]\(\n"\
+                "    void *const s__\)\n"\
+                "\{\n"\
+                [indentCode [string cat\
+                    "[GetClassProperty $Class Reference]const self = s__ ;\n"\
+                    $Body]]\
+                "\}\n"
+        }
+    }
+
+    return $result
+}
+----
+
+[source,c]
+----
+<<generate command tests>>=
+test codegen-17.0 {
+    Generated code file with constructor and destructor
+} -setup {
+    # makeFile {} codegen17.h
+    # makeFile {} codegen17.c
+    micca configure {
+        domain codegen17 {
+            domainop void initialize {} {
+                codegen17__INIT() ;
+            }
+
+            class X {
+                attribute color int -default 20
+
+                constructor {
+                    self->color += 20 ;
+                }
+                destructor {
+                    self->color -= 20 ;
+                }
+            }
+        }
+        population codegen17 {
+            class X {
+                instance x1
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca generate
+    testConditions\
+        {[llength [fileutil::grep {CTOR} codegen17.c]] == 4}\
+        {[llength [fileutil::grep {DTOR} codegen17.c]] == 3}
+} -result {1}
 ----
 
 [source,c]
@@ -3653,6 +4117,236 @@ proc activityDefinitions {} {
             }
             append result "#undef MRT_CLASSNAME\n"
         }
+    }
+
+    return $result
+}
+----
+
+[source,c]
+----
+<<generation code commands>>=
+proc domainCtorDefinition {} {
+    variable domain
+    set result {}
+
+    set ctorinsts [pipe {
+        Constructor findWhere {$Domain eq $domain} |
+        deRef ~ |
+        relation eliminate ~ Body |
+        relation join ~ $::micca::ClassInstance |
+        relation group ~ Instances Instance Number
+    }]
+
+    if {[relation isnotempty $ctorinsts]} {
+        append result [comment "Definition of Function to Construct\
+            Initial Instances"]
+        relation foreach ctorinst $ctorinsts {
+            relation assign $ctorinst
+            relation foreach instance $Instances -ascending Number {
+                relation assign $instance
+                append invocations\
+                    "${Class}__CTOR\("\
+                    [GenInstanceAddress $domain $Class $Instance]\
+                    "\) ;\n"
+            }
+        }
+        append result\
+            "static void\n${domain}__INIT\(void\)\n"\
+            "\{\n"\
+            [indentCode $invocations]\
+            "\}\n"
+    }
+
+    return $result
+}
+----
+
+[source,c]
+----
+<<generation code commands>>=
+proc domainOpDefinitions {} {
+    variable domain
+    set result {}
+
+    set ops [pipe {
+        DomainOperation findWhere {$Domain eq $domain} |
+        deRef ~ |
+        relation rename ~ Name Operation |
+        ralutil::rvajoin ~ $::micca::DomainOperationParameter Parameters
+    }]
+
+    if {[relation isnotempty $ops]} {
+        append result [comment "Domain Operation Definitions"]
+        relation foreach op $ops {
+            relation assign $op
+            append result\
+                "$ReturnDataType\n${domain}_$Operation"
+
+            if {[relation isempty $Parameters]} {
+                append result "\(void\)\n"
+            } else {
+                relation foreach param $Parameters -ascending Number {
+                    relation assign $param
+                    append pdecls\
+                        [typeCheck composeDeclaration $DataType $Name]\
+                        ,\n
+                }
+                set pdecls [string trimright $pdecls ",\n"]\)\n
+                append result\
+                    "\(\n"\
+                    [indentCode $pdecls]
+            }
+
+            # HERE --- need to template expand the code
+            append result\
+                "\{\n"\
+                [indentCode $Body]\
+                "\}\n"
+        }
+    }
+
+    return $result
+}
+----
+
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-18.0 {
+    Define a domain operation
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -setup {
+    # makeFile {} codegen18.h
+    # makeFile {} codegen18.c
+    micca configure {
+        domain codegen18 {
+            domainop void color {a int b {char *const}} {
+                printf("a = %d, b = %s", a, b) ;
+            }
+
+            class X {
+                attribute color int -default 10
+            }
+        }
+        population codegen18 {
+            class X {
+                instance x1
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca generate
+    testConditions\
+        {[llength [fileutil::grep {codegen18_color} codegen18.c]] == 1}
+} -result {1}
+----
+
+[source,c]
+----
+<<generation code commands>>=
+proc externalOpDefinitions {} {
+    upvar #0 [namespace parent]::options options
+    if {![dict get $options stubexternalops]} {
+        return
+    }
+
+    variable domain
+    set result {}
+
+    set ops [pipe {
+        ExternalOperation findWhere {$Domain eq $domain} |
+        deRef ~ |
+        relation rename ~ Name Operation |
+        ralutil::rvajoin ~ $::micca::ExternalOperationParameter Parameters
+    }]
+
+    if {[relation isnotempty $ops]} {
+        append result [comment "External Operation Stub Definitions"]
+        relation foreach op $ops {
+            relation assign $op
+            append result\
+                "$ReturnDataType\n${domain}_${Operation}__EOP"
+
+            if {[relation isempty $Parameters]} {
+                append result "\(void\)\n"
+            } else {
+                relation foreach param $Parameters -ascending Number {
+                    relation assign $param
+                    append pdecls\
+                        [typeCheck composeDeclaration $DataType $Name]\
+                        ,\n
+                }
+                set pdecls [string trimright $pdecls ",\n"]\)\n
+                append result\
+                    "\(\n"\
+                    [indentCode $pdecls]
+            }
+
+            # HERE --- need to template expand the code
+            append result\
+                "\{\n"\
+                [indentCode $Body]\
+                "\}\n"
+        }
+    }
+
+    return $result
+}
+----
+
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-19.0 {
+    Define a domain operation
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -setup {
+    # makeFile {} codegen19.h
+    # makeFile {} codegen19.c
+    micca configure {
+        domain codegen19 {
+            externalop void color {a int b {char *const}} {
+                printf("a = %d, b = %s", a, b) ;
+            }
+
+            class X {
+                attribute color int -default 10
+            }
+        }
+        population codegen19 {
+            class X {
+                instance x1
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca generate stubexternalops true
+    testConditions\
+        {[llength [fileutil::grep {codegen19_color__EOP} codegen19.c]] == 1}
+} -result {1}
+----
+
+[source,c]
+----
+<<generation code commands>>=
+proc epilogue {} {
+    variable epilogue
+
+    set result {}
+    if {$epilogue ne {}} {
+        append result\
+            [comment "Domain Epilogue Begin"]\
+            [indentCode [string trim $epilogue \n] 0]\
+            [comment "Domain Epilogue End"]
     }
 
     return $result
