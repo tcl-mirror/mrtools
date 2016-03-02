@@ -17,7 +17,7 @@ we show how ``C'' code is generated to implement the domain.
 This is the fourth and final major section of the `micca` translation
 scheme.
 We have already seen the platform specific model and how it captures
-the properties of a domain.
+the properties of a domain implementation.
 The `micca` domain specific language is used to populate the platform
 model.
 The `micca` run time translates model level actions into ``C'' level
@@ -96,7 +96,8 @@ The ordering has to be quite precise.
 One way to accomplish this is to use a template.
 The template is orgainized in the order required by the compiler
 and contains embedded commands.
-When expanded the commands embedded in the template query the
+When expanded,
+the commands embedded in the template query the
 platform model and produce ``C'' code output.
 
 Most languages have template expansion libraries and Tcl is no different.
@@ -113,10 +114,10 @@ package require textutil::adjust
 
 Because we are using a template expansion technique to generate the code
 files,
-the code generation has the flavor of a report generator.
+the implementation of code generation has the flavor of a report generator.
 Commands imbedded in the template make queries on the populated
 platform model and emit a _report_ of the query, which in this case
-are ``C'' language statements.
+is a set of ``C'' language statements.
 Although the reports generated are intended to be consumed by a compiler
 rather than a human,
 the design of the generator is very similar to generating reports
@@ -210,7 +211,8 @@ if {$errcount > 0} {
 == Header Files
 
 The header file generated for a domain contains interfacing information.
-Typically, the header file is included by bridge code that is
+The header file is included in the generated ``C'' code file and,
+typically, is included by bridge code that is
 mapping the dependencies of one domain onto another.
 
 Following our usual pattern,
@@ -292,7 +294,7 @@ forAllRefs domainRef [Domain findAll] {
     try {
         puts $hchan [expand expand $headerTemplate]
     } on error {result opts} {
-        puts $::errorInfo
+        # puts $::errorInfo
         return -options $opts $result
     } finally {
         chan close $hchan
@@ -302,6 +304,15 @@ forAllRefs domainRef [Domain findAll] {
 }
 ----
 
+The commands embedded in the template all follow a similar pattern.
+The return values of the commands are placed in the output of the
+template expansion.
+
+=== Header File Guard
+
+The generated header file includes definitions of preprocessor symbols
+to prevent the header file from being included multiple times.
+
 [source,c]
 ----
 <<generation header commands>>=
@@ -310,6 +321,11 @@ proc headerFileGuard {} {
     return [string toupper [string trim $domain]]_H_
 }
 ----
+
+=== Domain Interface
+
+The contents of the domain interface values is placed first in the
+generated header.
 
 [source,c]
 ----
@@ -327,6 +343,9 @@ proc interface {} {
     return $result
 }
 ----
+
+[float]
+==== Tests
 
 [source,c]
 ----
@@ -358,26 +377,52 @@ test headergen-1.0 {
 } -result {1}
 ----
 
+=== Type Aliases
+
+The domain configuration can contain type aliases.
+Normally,
+the type alias information is placed in the generated code file.
+However, if a type alias name is used in a context where it would be
+exposed outside of the domain,
+_e.g._ as a parameter to a domain operation,
+then the type alias definition is placed in the generated header file.
+There are three circumstances where a type is needed external to the domain:
+
+. As the return type or parameter type of a domain operation.
+. As the return type or parameter type of an external operation.
+. As an argument to an event (as events can be tunneled into the domain).
+
 [source,c]
 ----
 <<generation header commands>>=
 proc typeAliases {} {
     variable domain
+
+    set domRef [Domain findWhere {$Name eq $domain}]
     set aliases [pipe {
-        TypeAlias findWhere {$Domain eq $domain} |
-        deRef ~ |
-        relation list ~ TypeName
-    }]
+        findRelated $domRef ~R7 |
+        deRef % |
+        relation list % TypeName
+    } {} |%]
+    # Domain operations
     set doRefs [pipe {
-        DomainOperation findWhere {$Domain eq $domain &&\
-                $ReturnDataType in $aliases} |
+        findRelatedWhere $domRef ~R5 {$ReturnDataType in $aliases} |
         findRelated % R5 ~R7
     } {} |%]
     set dopRefs [pipe {
-        DomainOperationParameter findWhere {$Domain eq $domain &&\
-                $DataType in $aliases} |
+        findRelatedWhere $domRef {~R5 ~R6} {$DataType in $aliases} |
         findRelated % R6 R5 ~R7
     } {} |%]
+    # External operations
+    set eoRefs [pipe {
+        findRelatedWhere $domRef ~R10 {$ReturnDataType in $aliases} |
+        findRelated % R10 ~R7
+    } {} |%]
+    set eopRefs [pipe {
+        findRelatedWhere $domRef {~R10 ~R11} {$DataType in $aliases} |
+        findRelated % R11 R10 ~R7
+    } {} |%]
+    # Event arguments
     set argRefs [pipe {
         Argument findWhere {$Domain eq $domain && $DataType in $aliases} |
         deRef ~ |
@@ -386,7 +431,10 @@ proc typeAliases {} {
         ::rosea::Helpers::ToRef ::micca::TypeAlias ~
     }]
 
+    # Union all the different refs together.
     set taRefs [refUnion $doRefs $dopRefs]
+    set taRefs [refUnion $taRefs $eoRefs]
+    set taRefs [refUnion $taRefs $eopRefs]
     set taRefs [refUnion $taRefs $argRefs]
     set result {}
     if {[isNotEmptyRef $taRefs]} {
@@ -403,6 +451,9 @@ proc typeAliases {} {
     return $result
 }
 ----
+
+[float]
+==== Tests
 
 [source,c]
 ----
@@ -442,6 +493,18 @@ test headergen-2.0 {
 } -result {2}
 ----
 
+=== Domain Operation Declarations
+
+``C'' language programs tend to be composed of _declarations_ and
+_definitions_.
+A declaration makes symbol names and types known to the compile.
+A definition associates allocates specific data or code statements
+to a symbol.
+Header files contain a lot of declarations.
+Here we start with declarations for the domain operations.
+Domain operations are just ordinary ``C'' functions but are given
+external scope.
+
 [source,c]
 ----
 <<generation header commands>>=
@@ -451,27 +514,46 @@ proc domainOpDeclarations {} {
 
     set result {}
     if {[isNotEmptyRef $opRefs]} {
-        append result [comment "Domain Operations External Declarations"]
-
-        forAllRefs opRef $opRefs {
-            assignAttribute $opRef
-            if {$Comment ne {}} {
-                append result [comment $Comment]
-            }
-            append result "extern $ReturnDataType " $Domain _ $Name \(
-
-            set params [pipe {
-                findRelated $opRef ~R6 |
-                deRef % |
-                relation list % DataType -ascending Number |
-                join % {, }
-            } {} |%]
-            append result $params "\) ;\n"
-        }
+        append result\
+            [comment "Domain Operations External Declarations"]\
+            [GenOperationDeclarations $opRefs ~R6]
     }
     return $result
 }
 ----
+
+[source,c]
+----
+<<generation helper commands>>=
+proc GenOperationDeclarations {opRefs paramRel} {
+    set result {}
+
+    set params [deRef [findRelated $opRefs $paramRel]]
+    set ops [pipe {
+        deRef $opRefs |
+        relation rename ~ Name Operation |
+        relation join ~ $params |
+        relation group ~ Parameters Name Number DataType
+    }]
+
+    relation foreach op $ops {
+        relation assign $op
+        if {$Comment ne {}} {
+            append result [comment $Comment]
+        }
+        append result\
+            "extern $ReturnDataType "\
+            $Domain _ $Operation \(\
+            [join [relation list $Parameters DataType] {, }]\
+            "\) ;\n"
+    }
+
+    return $result
+}
+----
+
+[float]
+==== Tests
 
 [source,c]
 ----
@@ -511,6 +593,11 @@ test headergen-3.0 {
 } -result {2}
 ----
 
+=== External Operation Declarations
+
+The declarations for external operations follows the same pattern as
+for domain operations.
+
 [source,c]
 ----
 <<generation header commands>>=
@@ -520,27 +607,15 @@ proc externalOpDeclarations {} {
 
     set result {}
     if {[isNotEmptyRef $opRefs]} {
-        append result [comment "External Operations Declarations"]
-
-        forAllRefs opRef $opRefs {
-            assignAttribute $opRef
-            if {$Comment ne {}} {
-                append result [comment $Comment]
-            }
-            append result "extern $ReturnDataType " $Domain _ $Name __EOP \(
-
-            set params [pipe {
-                findRelated $opRef ~R11 |
-                deRef % |
-                relation list % DataType -ascending Number |
-                join % {, }
-            } {} |%]
-            append result $params "\) ;\n"
-        }
+        append result\
+            [comment "External Operations Declarations"]\
+            [GenOperationDeclarations $opRefs ~R11]
     }
     return $result
 }
 ----
+
+=== Portal Function Constants
 
 [source,c]
 ----
