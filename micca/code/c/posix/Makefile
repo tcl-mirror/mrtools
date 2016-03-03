@@ -11,7 +11,7 @@
 
 MICCADIR = ../../../src
 
-CFLAGS	= -std=c11 -g -L$(HOME)/local/lib
+CFLAGS	= -std=c11 -g -L$(HOME)/local/lib -Wall
 CPPFLAGS = -D_POSIX_C_SOURCE=200112L -D_ISOC11_SOURCE
 
 DOCSRC 	=\

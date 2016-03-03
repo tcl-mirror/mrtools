@@ -1900,7 +1900,7 @@ proc eventParamDeclarations {} {
             relation foreach event $Events {
                 relation assign $event
                 append result\
-                    "struct ${domain}_${Model}_${Event}_EventParams \{\n"
+                    "struct ${domain}_${Model}_${Event}__EPARAMS \{\n"
                 relation foreach param $Params -ascending Position {
                     relation assign $param DataType Name
                     append result\
@@ -1930,7 +1930,7 @@ proc eventParamDeclarations {} {
             relation foreach event $Events {
                 relation assign $event
                 append result\
-                    "struct ${domain}_${Model}_${Event}_PolyEventParams \{\n"
+                    "struct ${domain}_${Model}_${Event}__PEPARAMS \{\n"
                 relation foreach param $Params -ascending Position {
                     relation assign $param DataType Name
                     append result\
@@ -1966,7 +1966,7 @@ proc stateParamDeclarations {} {
         append result [comment "State Parameter Structure Declarations"]
         relation foreach statearg $stateargs -ascending {Model State} {
             relation assign $statearg
-            append result "struct ${Model}_${State}_StateParams \{\n"
+            append result "struct ${Model}_${State}__SPARAMS \{\n"
             relation foreach param $Params -ascending Position {
                 relation assign $param DataType Name
                 append result\
@@ -2058,8 +2058,8 @@ test codegen-10.0 {
 } -body {
     micca generate
     testConditions\
-        {[llength [fileutil::grep {_EventParams} codegen10.h]] == 3}\
-        {[llength [fileutil::grep {_PolyEventParams} codegen10.h]] == 1}
+        {[llength [fileutil::grep {__EPARAMS} codegen10.h]] == 3}\
+        {[llength [fileutil::grep {__PEPARAMS} codegen10.h]] == 1}
 } -result {1}
 ----
 
@@ -4225,28 +4225,16 @@ proc activityDefinitions {} {
                     "    MRT_INSTRUMENT_ENTRY\n\n"\
                     "    [GetClassProperty $Model Reference] const self = s__ ;\n"
                 if {$PSigID ne {}} {
+                    set signame ${Model}_${Name}__SPARAMS
+                    append result\
+                        "    struct $signame const *const pp__ = p__ ;\n"
                     set params [pipe {
                         ParameterSignature findById Domain $domain PSigID $PSigID |
-                        findRelated % ~R79 |
-                        deRef % |
-                        relation join % $::micca::Argument |
-                        relation project % Name Position DataType |
-                        relation extend % ptup Decl string {
-                            [typeCheck composeDeclaration\
-                                [tuple extract $ptup DataType]\
-                                [tuple extract $ptup Name]]}
-                    } {} |%]
-                    # puts [relformat $params params]
-
-                    append result "    struct \{\n"
+                        FindParamsFromSig ~
+                    }]
                     relation foreach param $params -ascending Position {
-                        relation assign $param Decl
-                        append result "        $Decl ;\n"
-                    }
-                    append result "    \} const *const pp__ = p__ ;\n"
-                    relation foreach param $params -ascending Position {
-                        relation assign $param {Name pname} Decl
-                        append result "    $Decl = pp__->$pname ;\n"
+                        relation assign $param {Name pname} Declaration
+                        append result "    $Declaration = pp__->$pname ;\n"
                     }
                 }
                 # HERE --- need to template expand the code
@@ -4262,6 +4250,22 @@ proc activityDefinitions {} {
     }
 
     return $result
+}
+----
+
+[source,c]
+----
+<<generation helper commands>>=
+proc FindParamsFromSig {psigRef} {
+    return [pipe {
+        findRelated $psigRef ~R79 |
+        deRef % |
+        relation join % $::micca::Argument |
+        relation extend % ptup Declaration string {\
+            [typeCheck composeDeclaration\
+                [tuple extract $ptup DataType]\
+                [tuple extract $ptup Name]]}
+    } {} |%]
 }
 ----
 
@@ -4509,6 +4513,7 @@ namespace eval Helpers {
         ::micca
         ::rosea::InstCmds
     }
+    namespace import ::micca::@Config@::Helpers::typeCheck
 
     <<generation helper data>>
     <<generation helper commands>>
@@ -4685,11 +4690,7 @@ proc ExpandActivity {class body hasSelf} {
             InsertSymbol Name self Ctype [GetClassProperty $class Reference]\
                 Type Reference Class $class
         }
-        return [pipe {
-            textutil::adjust::undent $body |
-            activity expand ~ |
-            textutil::adjust::indent ~ "    "
-        }]
+        return [textutil::adjust::indent [activity expand $body] "    "]
     } on error {} {
         puts $::errorInfo
     } finally {
@@ -4768,11 +4769,8 @@ proc signal {instref event args} {
         }
 
         set psig [findRelated $eventRef R69]
-        set params [findRelated $psig ~R79]
-        set required [pipe {
-            deRef $params |
-            relation list ~ Name
-        }]
+        set params [FindParamsFromSig $psig]
+        set required [relation list $params Name]
         set supplied [dict keys $args]
         if {![::struct::set equal $required $supplied]} {
             log::error "event, $event, requires parameters,\
@@ -4783,32 +4781,19 @@ proc signal {instref event args} {
         }
 
         set result {}
-        set sourceinst [expr {[LookUpSymbol self] eq {} ?\
-            "NULL" : "(MRT_Instance *)self"}]
+        set sourceinst [expr {[LookUpSymbol self] eq {} ? "NULL" : "self"}]
         set ecbvar [CreateTempSymbol Ctype {MRT_ecb *} Type ECB Class $Class]
         append result "MRT_ecb *$ecbvar = mrt_NewEvent($eventNum,\
-            $eventType, (MRT_Instance *)$instref, $sourceinst) ;\n"
-        if {[isNotEmptyRef $params]} {
-            assignAttribute $psig PSigID
-            set eparamsname psig__$PSigID
-            append result "struct $eparamsname \{\n"
-            set pargs [pipe {
-                deRef $params |
-                relation join $::micca::Argument
-            }]
-            relation foreach parg $pargs -ascending Position {
-                relation assign $parg Name DataType
-                append result "    "\
-                    [typeCheck composeDeclaration $DataType $Name]\
-                    " ;\n"
-            }
-            append result "\}"
+            $eventType, $instref, $sourceinst) ;\n"
+        if {[relation isnotempty $params]} {
+            set eparamsname ${domain}_${Class}_${event}__EPARAMS
             set ptrparams [CreateTempSymbol Ctype "struct *$eparamsname"\
                 Type EventParams Class $Class]
-            append result " *const $ptrparams = (struct $eparamsname *)"\
-                "$ecbvar->eventParameters ;\n"
-            relation foreach parg $pargs -ascending Position {
-                relation assign $parg Name
+            append result\
+                "struct $eparamsname *const $ptrparams =\n"\
+                "    (struct $eparamsname *)$ecbvar->eventParameters ;\n"
+            relation foreach param $params -ascending Position {
+                relation assign $param Name
                 append result "$ptrparams->$Name = [dict get $args $Name] ;\n"
             }
         }
