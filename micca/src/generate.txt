@@ -2232,8 +2232,8 @@ proc activityDeclarations {} {
             relation foreach state $States {
                 relation assign $state
                 append result "static void ${Model}_${Name}__ACTIVITY\("\
-                    "void *const s__, "\
-                    "void const *const p__) ;\n"
+                    "void *const s__SELF, "\
+                    "void const *const p__PARAMS) ;\n"
             }
         }
     }
@@ -4171,10 +4171,10 @@ proc TorDefinitions {which} {
             # HERE --- need to template expand the code
             append result\
                 "static void\n${Class}__[dict get $suffixmap $which]\(\n"\
-                "    void *const s__\)\n"\
+                "    void *const s__SELF\)\n"\
                 "\{\n"\
                 [indentCode [string cat\
-                    "[GetClassProperty $Class Reference]const self = s__ ;\n"\
+                    "[GetClassProperty $Class Reference]const self = s__SELF ;\n"\
                     $Body]]\
                 "\}\n"
         }
@@ -4250,28 +4250,26 @@ proc activityDefinitions {} {
                 relation assign $state
                 append result\
                     "static void ${Model}_${Name}__ACTIVITY\(\n"\
-                    "    void *const s__,\n"\
-                    "    void const *const p__)\n"\
+                    "    void *const s__SELF,\n"\
+                    "    void const *const p__PARAMS)\n"\
                     "\{\n"\
                     "        #define MRT_STATENAME \"$Name\"\n"\
-                    "    MRT_INSTRUMENT_ENTRY\n\n"\
-                    "    [GetClassProperty $Model Reference] const self = s__ ;\n"
+                    "    MRT_INSTRUMENT_ENTRY\n"\
+                    "    [GetClassProperty $Model Reference] const self = s__SELF ;\n"
                 if {$PSigID ne {}} {
                     set signame ${Model}_${Name}__SPARAMS
                     append result\
-                        "    struct $signame const *const pp__ = p__ ;\n"
+                        "    struct $signame const *const pp__PARAMS = p__PARAMS ;\n"
                     set params [pipe {
                         ParameterSignature findById Domain $domain PSigID $PSigID |
                         FindParamsFromSig ~
                     }]
                     relation foreach param $params -ascending Position {
                         relation assign $param {Name pname} Declaration
-                        append result "    $Declaration = pp__->$pname ;\n"
+                        append result "    $Declaration = pp__PARAMS->$pname ;\n"
                     }
                 }
-                # HERE --- need to template expand the code
-                append result\
-                    "\n[ExpandActivity $Model $Activity true]"
+                append result [ExpandActivity $Model $Activity true]
 
                 append result \n\
                     "        #undef MRT_STATENAME\n"\
@@ -4659,6 +4657,7 @@ namespace eval GenActivity {
     actexpand setbrackets %< >%
     actexpand evalcmd "namespace eval [namespace current]"
     actexpand errmode fail
+    actexpand textcmd ProcessCodeLines
 
     <<generation activity data>>
     <<generation activity commands>>
@@ -4703,13 +4702,43 @@ proc InsertSymbol {args} {
 
 proc CreateTempSymbol {args} {
     variable symcounter
-    set name t__[incr symcounter]
+    set name t__T[incr symcounter]
     InsertSymbol Name $name {*}$args
     return $name
 }
 
 proc DeleteSymbol {name} {
     return [relvar deleteone Symbol Name $name]
+}
+
+proc ProcessCodeLines {text} {
+    variable level
+
+    # puts "text = \"$text\""
+    set newlines [list]
+
+    foreach line [split $text \n] {
+        if {[string is space $line]} {
+            if {[llength $newlines] != 0 && [lindex $newlines end] ne {}} {
+                lappend newlines {}
+            }
+        } else {
+            if {[string first "\}" $line] != -1} {
+                incr level -1
+            }
+            if {[regsub -- {\A\s+} $line {} newline] != 0} {
+                set line [string repeat { } [expr {$level * 4}]]$newline
+            }
+            if {[string first "\{" $line] != -1} {
+                incr level 1
+            }
+            lappend newlines $line
+        }
+    }
+    set newtext [join $newlines \n]
+    # puts "newtext = \"$newtext\""
+
+    return $newtext
 }
 ----
 
@@ -4835,13 +4864,14 @@ proc PopContext {context args} {
         upvar 1 $varname cvar
         set cvar [actexpand cget $varname]
     }
-    return [string trim [actexpand cpop $context]]\n
+    return [actexpand cpop $context]
 }
 
 proc IndentToLevel {code} {
     variable level
+    # indent seems to swallow a trailing new line
     return [::textutil::adjust::indent $code\
-        [string repeat { } [expr {$level * 4}]]]
+        [string repeat { } [expr {$level * 4}]]]\n
 }
 
 proc PushLevel {{by 1}} {
@@ -4870,14 +4900,14 @@ proc end {} {
             }
             append result [IndentToLevel $update]
             PopLevel
-            append result "\n\} /* %<[info level 0]>% */\n"
+            append result "\} /* %<[info level 0]>% */\n"
         }
         ForEachClassInstance {
             set result [PopContext $context]
             PopLevel
             append result [IndentToLevel "\}\n"]
             PopLevel
-            append result "\n\} /* %<[info level 0]>% */\n"
+            append result "\}\n/* %<[info level 0]>% */\n"
         }
         default {
             error "unknown context, \"$context\""
@@ -4903,20 +4933,18 @@ proc ForEachClassInstance {className instref} {
     set ref [GetClassProperty $className Reference]
     InsertSymbol Name $instref Ctype $ref Type Reference Class $className
     set classnum [GetClassProperty $className Number]
-    set classDesc [CreateTempSymbol Ctype {MRT_Class const *} Type ClassRef\
-            Class $className]
-    append result "MRT_Class const *const $classDesc =\
-            &${domain}__CLASSES\[$classnum\] ;\n"
+    set iab [CreateTempSymbol Ctype {MRT_iab *} Type IAB Class $className]
+    append result "MRT_iab *const $iab = ${domain}__CLASSES\[$classnum\].iab ;\n"
     set iter [CreateTempSymbol Ctype {void *} Type Pointer Class $className]
     append result\
-        "for (void *$iter = $classDesc->iab->storageStart ;\n"\
-        "        $iter < $classDesc->iab->storageFinish ;\n"\
-        "        $iter = (void *)((uintptr_t)$iter + $classDesc->iab->instanceSize)) "\
+        "for (void *$iter = $iab->storageStart ; "\
+        "$iter < $iab->storageFinish ;\n"\
+        "        $iter = (void *)((uintptr_t)$iter + $iab->instanceSize)) "\
         "\{\n"
 
     PushLevel
     append heading\
-        "$ref $instref = ($ref)$iter ;\n"\
+        "$ref$instref = $iter ;\n"\
         "if ($instref->base__INST.alloc > 0) \{\n"
 
     append result [IndentToLevel $heading]
