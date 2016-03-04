@@ -928,22 +928,50 @@ proc PrepareDomainProperties {domain} {
         relation rename % Class Name
     } {} |%]
 
-    set assigners [pipe {
-        AssignerStateModel findWhere {$Domain eq $domain} |
+    set sassigners [pipe {
+        SingleAssigner findWhere {$Domain eq $domain} |
         deRef ~ |
         relation project ~ Association |
-        relation rename ~ Association Name
-    }]
-
-    set ClassProperties [pipe {
-        deRef $classRefs |
-        relation project ~ Name |
-        relation union ~ $assigners |
+        relation rename ~ Association Name |
+        relation tag ~ Number -ascending Name |
         relation extend ~ stup\
             Declaration string {"struct [tuple extract $stup Name]"}\
             Reference string {"struct [tuple extract $stup Name] *"}\
-            StorageVariable string {"struct [tuple extract $stup Name]\
-                [tuple extract $stup Name]__POOL"} |
+            StorageVariable string {"[tuple extract $stup Name]__POOL"}\
+            Allocation int {0}\
+            InitialInstance int {1}\
+            TotalInstance int {1}
+    }]
+    set massigners [pipe {
+        MultipleAssigner findWhere {$Domain eq $domain} |
+        deRef ~ |
+        relation tag ~ AssignerNumber -ascending Association |
+        ralutil::rvajoin ~ $::micca::MultipleAssignerInstance Instances |
+        ralutil::rvajoin ~ $::micca::ClassInstance Allocations |
+        relation extend ~ stup\
+            Declaration string {"struct [tuple extract $stup Association]"}\
+            Reference string {"struct [tuple extract $stup Association] *"}\
+            StorageVariable string {"[tuple extract $stup Association]__POOL"}\
+            Allocation int\
+                {[relation cardinality [tuple extract $stup Allocations]]}\
+            InitialInstance int\
+                {[relation cardinality [tuple extract $stup Instances]]}\
+            TotalInstance int\
+                {[relation cardinality [tuple extract $stup Allocations]] +\
+                [relation cardinality [tuple extract $stup Instances]]} |
+            relation eliminate ~ Domain Class Allocations Instances |
+            relation rename ~ Association Name AssignerNumber Number
+    }]
+    # puts [relformat $massigners massigners]
+
+    set ClassProperties [pipe {
+        deRef $classRefs |
+        relation project ~ Name Number |
+        relation rename ~ Number ClassNumber |
+        relation extend ~ stup\
+            Declaration string {"struct [tuple extract $stup Name]"}\
+            Reference string {"struct [tuple extract $stup Name] *"}\
+            StorageVariable string {"[tuple extract $stup Name]__POOL"} |
         ralutil::rvajoin ~ $allocs Allocations |
         relation extend ~ atup Allocation int {
             [relation isempty [tuple extract $atup Allocations]] ?\
@@ -957,8 +985,11 @@ proc PrepareDomainProperties {domain} {
             TotalInstance int {
                 [relation cardinality [tuple extract $itup Instances]] +
                 [tuple extract $itup Allocation]} |
-        relation eliminate ~ Instances
+        relation eliminate ~ Instances |
+        relation rename ~ ClassNumber Number |
+        relation union ~ $sassigners $massigners
     }]
+    # puts [relformat $ClassProperties ClassProperties]
 
     variable AssocProperties
 
@@ -2229,7 +2260,7 @@ proc storageDeclarations {} {
             assignAttribute $cpop {Allocation allocation} {Class className}
             set insts [refMultiplicity [findRelated $cpop ~R102]]
             set total [expr {$allocation + $insts}]
-            append result "static "\
+            append result "static struct $className "\
                 [GetClassProperty $className StorageVariable]\
                 "\[[GetClassProperty $className TotalInstance]\] ;\n"
         }
@@ -3623,7 +3654,8 @@ proc classInstanceDefinitions {} {
         relation assign $classpop
 
         append result\
-            "static [GetClassProperty $Class StorageVariable]"\
+            "static struct $Class "\
+            [GetClassProperty $Class StorageVariable]\
             "\[[GetClassProperty $Class TotalInstance]\] = \{\n"
 
         relation foreach inst $Instances -ascending InstNumber {
@@ -4623,10 +4655,10 @@ namespace eval GenActivity {
     }
     upvar #0 ::micca::@Gen@::errcount errcount
 
-    textutil::expander activity
-    activity setbrackets %< >%
-    activity evalcmd "namespace eval [namespace current]"
-    activity errmode fail
+    textutil::expander actexpand
+    actexpand setbrackets %< >%
+    actexpand evalcmd "namespace eval [namespace current]"
+    actexpand errmode fail
 
     <<generation activity data>>
     <<generation activity commands>>
@@ -4690,7 +4722,8 @@ proc ExpandActivity {class body hasSelf} {
             InsertSymbol Name self Ctype [GetClassProperty $class Reference]\
                 Type Reference Class $class
         }
-        return [textutil::adjust::indent [activity expand $body] "    "]
+        variable level 0
+        return [textutil::adjust::indent [actexpand expand $body] "    "]
     } on error {} {
         puts $::errorInfo
     } finally {
@@ -4717,6 +4750,182 @@ proc readAttribute {instref attr} {
             named, $attr"
     }
     return "$instref->$attr"
+}
+----
+
+[source,c]
+----
+<<generation activity commands>>=
+proc withAttribute {instref args} {
+    variable domain
+
+    set sym [CheckSymbol $instref]
+    if {$sym eq {}} {
+        return
+    }
+    set className [dict get $sym Class]
+
+    if {[llength $args] == 0} {
+        # look up the attributes of the class
+        set attrNames [pipe {
+            Attribute findWhere {$Domain eq $domain && $Class eq $className} |
+            deRef ~ |
+            relation list ~ Name
+        }]
+        set varNames $attrNames
+    } else {
+        set attrNames [list]
+        set varNames [list]
+        foreach attr $args {
+            set l [llength $attr]
+            if {$l == 1} {
+                lappend $attrNames $attr
+                lappend $varNames $attr
+            } elseif {$l == 2} {
+                set var [lindex $attr 1]
+                if {[::struct::set contains $varNames $var]} {
+                    error "duplicate variable name, \"$var\""
+                }
+                lappend $attrNames [lindex $attr 0]
+                lappend $varNames $var
+            } else {
+                error "bad format for attribute name, \"$attr\""
+            }
+        }
+    }
+
+    set result "\{ /* %<[info level 0]>% */\n"
+    PushLevel
+
+    foreach attr $attrNames var $varNames {
+        set attrRef [Attribute findById Domain $domain Class $className\
+            Name $attr]
+        if {[isEmptyRef $attrRef]} {
+            error "class, $className, does not have an attribute named,\
+                \"$attr\""
+        }
+        assignAttribute $attrRef DataType
+        set varDecl [typeCheck composeDeclaration $DataType $attr]
+        append setup "$varDecl = $instref->$attr ;\n"
+    }
+    append result [IndentToLevel $setup]
+
+    PushContext withAttribute\
+        instref $instref\
+        attrNames $attrNames\
+        varNames $varNames
+
+
+    return $result
+}
+----
+
+[source,c]
+----
+<<generation activity commands>>=
+proc PushContext {context args} {
+    actexpand cpush $context
+    foreach {var value} $args {
+        actexpand cset $var $value
+    }
+}
+
+proc PopContext {context args} {
+    foreach varname $args {
+        upvar 1 $varname cvar
+        set cvar [actexpand cget $varname]
+    }
+    return [string trim [actexpand cpop $context]]\n
+}
+
+proc IndentToLevel {code} {
+    variable level
+    return [::textutil::adjust::indent $code\
+        [string repeat { } [expr {$level * 4}]]]
+}
+
+proc PushLevel {{by 1}} {
+    variable level
+    incr level $by
+}
+
+proc PopLevel {{by -1}} {
+    variable level
+    incr level $by
+}
+----
+
+[source,c]
+----
+<<generation activity commands>>=
+proc end {} {
+    set result {}
+
+    set context [actexpand cname]
+    switch -exact -- $context {
+        withAttribute {
+            set result [PopContext $context instref attrNames varNames]
+            foreach attr $attrNames var $varNames {
+                append update "$instref->$attr = $var ;\n"
+            }
+            append result [IndentToLevel $update]
+            PopLevel
+            append result "\n\} /* %<[info level 0]>% */\n"
+        }
+        ForEachClassInstance {
+            set result [PopContext $context]
+            PopLevel
+            append result [IndentToLevel "\}\n"]
+            PopLevel
+            append result "\n\} /* %<[info level 0]>% */\n"
+        }
+        default {
+            error "unknown context, \"$context\""
+        }
+    }
+
+    return $result
+}
+----
+
+[source,c]
+----
+<<generation activity commands>>=
+proc ForEachClassInstance {className instref} {
+    variable domain
+
+    set sym [LookUpSymbol $instref]
+    if {$sym ne {}} {
+        error "instance reference variable, \"$instref\", already exists"
+    }
+    set result "/* %<[info level 0]>% */\n"
+
+    set ref [GetClassProperty $className Reference]
+    InsertSymbol Name $instref Ctype $ref Type Reference Class $className
+    set classnum [GetClassProperty $className Number]
+    set classDesc [CreateTempSymbol Ctype {MRT_Class const *} Type ClassRef\
+            Class $className]
+    append result "MRT_Class const *const $classDesc =\
+            &${domain}__CLASSES\[$classnum\] ;\n"
+    set iter [CreateTempSymbol Ctype {void *} Type Pointer Class $className]
+    append result\
+        "for (void *$iter = $classDesc->iab->storageStart ;\n"\
+        "        $iter < $classDesc->iab->storageFinish ;\n"\
+        "        $iter = (void *)((uintptr_t)$iter + $classDesc->iab->instanceSize)) "\
+        "\{\n"
+
+    PushLevel
+    append heading\
+        "$ref $instref = ($ref)$iter ;\n"\
+        "if ($instref->base__INST.alloc > 0) \{\n"
+
+    append result [IndentToLevel $heading]
+
+    PushLevel
+    PushContext ForEachClassInstance\
+        instref $instref
+
+    return $result
 }
 ----
 
@@ -4815,19 +5024,42 @@ test codegen-24.0 {
         domain codegen24 {
             class X {
                 attribute color int -default 20
+                attribute temp int -default 40
+                attribute size int -default 50
 
                 statemodel {
                     state s1 {a int} {
                         printf("color = %d\n", %<readAttribute self color>%) ;
                         %<signal self e1 a 20>%
+                        %<withAttribute self>%
+                            color += 10 ;
+                            temp += 20 ;
+                            size -= 2 ;
+                        %<end>%
                     }
                     transition s1 - e1 -> s1
+                    transition s1 - e2 -> s2
+                    state s2 {} {
+                        %<ForEachClassInstance Y ys>%
+                            if (%<readAttribute ys sign>%) {
+                                printf("true\n") ;
+                            }
+                        %<end>%
+                    }
+                    transition s2 - e1 -> s1
                 }
+            }
+            class Y {
+                attribute sign bool -default true
             }
         }
         population codegen24 {
             class X {
                 instance x1
+            }
+            class Y {
+                instance y1
+                instance y2 sign false
             }
         }
     }
@@ -4836,6 +5068,6 @@ test codegen-24.0 {
 } -body {
     micca generate
     testConditions\
-        {[llength [fileutil::grep {self->color} codegen24.c]] == 1}
+        {[llength [fileutil::grep {self->color} codegen24.c]] == 3}
 } -result {1}
 ----
