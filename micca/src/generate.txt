@@ -65,7 +65,7 @@ namespace eval @Gen@ {
     <<tclral imports>>
 
     <<generation helpers namespace>>
-    <<generation activity namespace>>
+    <<generation support namespace>>
     <<generation header namespace>>
     <<generation code namespace>>
 
@@ -153,7 +153,7 @@ invoked.
 [source,tcl]
 ----
 <<error code formats>>=
-GENERATE_ERRORS     {encountered %d code generation errors}
+GENERATE_ERRORS     {encountered %d code generation error(s)}
 ----
 
 We set up options for the generation in a dictionary.
@@ -286,7 +286,7 @@ forAllRefs domainRef [Domain findAll] {
     namespace upvar GenHeader\
         domain domain\
         interface interface
-    namespace upvar GenActivity\
+    namespace upvar GenSupport\
         domain thisdomain
 
     assignAttribute $domainRef\
@@ -820,7 +820,7 @@ namespace eval GenCode {
     }
 
     namespace import [namespace parent]::expand
-    namespace import [namespace parent]::GenActivity::ExpandActivity
+    namespace import [namespace parent]::GenSupport::ExpandActivity
 
     <<generation code data>>
     <<generation code commands>>
@@ -890,6 +890,7 @@ forAllRefs domainRef [Domain findAll] {
         {Epilogue epilogue}
 
     PrepareDomainProperties $domain
+    CreateActivityCommands $domain
 
     set cchan [::open $domain.c w]
     try {
@@ -899,6 +900,7 @@ forAllRefs domainRef [Domain findAll] {
         return -options $opts $result
     } finally {
         chan close $cchan
+        namespace delete GenActivity
     }
 }
 ----
@@ -1021,6 +1023,121 @@ proc GetAssociationProperty {assoc prop} {
 
     error "unknown property, \"$prop\", for association, \"$assoc\""
 }
+
+proc GetClassDescriptor {domain className} {
+    return ${domain}__CLASSES\[[GetClassProperty $className Number]\]
+}
+----
+
+Create the ensemble commands that are used when activities are template
+expanded.
+
+[source,c]
+----
+<<generation commands>>=
+proc CreateActivityCommands {domain} {
+    namespace eval GenActivity {
+        logger::initNamespace [namespace current]
+    }
+
+    set currns [namespace current]
+    set actns ${currns}::GenActivity
+    set suppns ${currns}::GenSupport
+
+    <<CreateActivityCommands: union subclass classes>>
+    <<CreateActivityCommands: non-union subclass classes>>
+    <<CreateActivityCommands: relationships>>
+    <<CreateActivityCommands: assigners>>
+    <<CreateActivityCommands: instances>>
+
+    interp alias {} end {} ${suppns}::End
+}
+----
+
+[source,c]
+----
+<<CreateActivityCommands: union subclass classes>>=
+set usubRefs [pipe {
+    UnionSubclass findWhere {$Domain eq $domain} |
+    findRelated ~ R47 R40 R41
+}]
+
+set usubnames [pipe {
+    deRef $usubRefs |
+    relation list ~ Name
+}]
+
+set cmdmap [dict create]
+foreach usubname $usubnames {
+    set cmdmap [dict create\
+        foreachInstance [list ${suppns}::ClassForeachUSubInstance $usubname]\
+        declareReference [list ${suppns}::ClassDeclareReference $usubname]\
+    ]
+    namespace ensemble create\
+        -command ${actns}::$usubname\
+        -map $cmdmap
+}
+----
+
+[source,c]
+----
+<<CreateActivityCommands: non-union subclass classes>>=
+set nuClassRefs [pipe {
+    Class findWhere {$Domain eq $domain} |
+    refMinus ~ $usubRefs
+}]
+
+set classInfo [pipe {
+    deRef $nuClassRefs |
+    ralutil::rvajoin ~ [relation rename $::micca::StateModel Model Name]\
+        StateModels |
+    relation extend ~ itup HasStateModel boolean {
+        [relation isnotempty [tuple extract $itup StateModels]]} |
+    relation dict ~ Name HasStateModel
+}]
+# HERE, deal with creation events
+# createasync [list ${suppns}::ClassCreateAsync $class]\
+
+set cmdmap [dict create]
+foreach {class hassm} $classInfo {
+    set cmdmap [dict create\
+        create [list ${suppns}::ClassCreate $class]\
+        foreachInstance [list ${suppns}::ClassForeachInstance $class]\
+        declareReference [list ${suppns}::ClassDeclareReference $class]\
+    ]
+    if {$hassm} {
+        dict set cmdmap createin [list ${suppns}::ClassCreateIn $class]
+    }
+    namespace ensemble create\
+        -command ${actns}::$class\
+        -map $cmdmap
+}
+----
+
+[source,c]
+----
+<<CreateActivityCommands: relationships>>=
+----
+
+[source,c]
+----
+<<CreateActivityCommands: assigners>>=
+----
+
+[source,c]
+----
+<<CreateActivityCommands: instances>>=
+set cmdmap [dict create\
+    attribute ${suppns}::InstanceAttribute\
+    withAttribute ${suppns}::InstanceWithAttribute\
+    assignAttribute ${suppns}::InstanceAssignAttribute\
+    signal ${suppns}::InstanceSignal\
+    delete ${suppns}::InstanceDelete\
+]
+namespace ensemble create\
+    -command ${actns}::instance\
+    -parameters instref\
+    -map $cmdmap
 ----
 
 [source,c]
@@ -4123,11 +4240,11 @@ proc operationDefinitions {} {
                     [indentCode $pdecls]
             }
 
-            # HERE --- need to template expand the code
             append result\
                 "\{\n"\
-                [indentCode $Body]\
-                "\}\n"
+                "    MRT_INSTRUMENT_ENTRY\n"\
+                [ExpandActivity $Body [expr {$IsInstance ? $Class : {}}]]\
+                "\n\}\n"
         }
     }
 
@@ -4168,15 +4285,17 @@ proc TorDefinitions {which} {
         append result [comment "$which Definitions"]
         forAllRefs tor $tors {
             assignAttribute $tor
-            # HERE --- need to template expand the code
             append result\
                 "static void\n${Class}__[dict get $suffixmap $which]\(\n"\
                 "    void *const s__SELF\)\n"\
                 "\{\n"\
-                [indentCode [string cat\
-                    "[GetClassProperty $Class Reference]const self = s__SELF ;\n"\
-                    $Body]]\
-                "\}\n"
+                [string cat\
+                    "    MRT_INSTRUMENT_ENTRY\n"\
+                    "    [GetClassProperty $Class Reference]const self =\
+                            s__SELF ;\n"\
+                    [ExpandActivity $Body $Class]\
+                ]\
+                "\n\}\n"
         }
     }
 
@@ -4269,7 +4388,7 @@ proc activityDefinitions {} {
                         append result "    $Declaration = pp__PARAMS->$pname ;\n"
                     }
                 }
-                append result [ExpandActivity $Model $Activity true]
+                append result [ExpandActivity $Activity $Model]
 
                 append result \n\
                     "        #undef MRT_STATENAME\n"\
@@ -4374,11 +4493,11 @@ proc domainOpDefinitions {} {
                     [indentCode $pdecls]
             }
 
-            # HERE --- need to template expand the code
             append result\
                 "\{\n"\
-                [indentCode $Body]\
-                "\}\n"
+                "    MRT_INSTRUMENT_ENTRY\n"\
+                [ExpandActivity $Body]\
+                "\n\}\n"
         }
     }
 
@@ -4463,10 +4582,9 @@ proc externalOpDefinitions {} {
                     [indentCode $pdecls]
             }
 
-            # HERE --- need to template expand the code
             append result\
                 "\{\n"\
-                [indentCode $Body]\
+                [ExpandActivity $Body]\
                 "\}\n"
         }
     }
@@ -4527,6 +4645,1063 @@ proc epilogue {} {
 
     return $result
 }
+----
+
+== Interfacing Domain Code to the Run Time
+
+Interfacing Domain Code to the Run Time
+
+[source,c]
+----
+<<generation support namespace>>=
+namespace eval GenSupport {
+    logger::initNamespace [namespace current]
+
+    <<tclral imports>>
+    namespace import ::ral::relvar
+
+    namespace export ExpandActivity
+
+    namespace path {
+        ::micca
+        ::micca::@Gen@::Helpers
+        ::micca::@Config@::Helpers
+        ::rosea::InstCmds
+    }
+    upvar #0 ::micca::@Gen@::errcount errcount
+
+    textutil::expander actexpand
+    actexpand setbrackets %< >%
+    actexpand evalcmd "namespace eval [namespace parent]::GenActivity"
+    actexpand errmode fail
+    actexpand textcmd [namespace current]::ProcessCodeLines
+
+    <<generation support data>>
+    <<generation support commands>>
+}
+----
+
+=== Symbol Table
+
+[source,c]
+----
+<<generation support data>>=
+relvar create Symbol {
+    Name string
+    Ctype string
+    Type string
+    Class string
+} Name
+----
+
+[source,c]
+----
+<<generation support commands>>=
+proc LookUpSymbol {name} {
+    set sym [relvar restrictone Symbol Name $name]
+    return [expr {[relation isempty $sym] ?\
+        {} : [tuple get [relation tuple $sym]]}]
+}
+
+proc CheckSymbol {name} {
+    set sym [LookUpSymbol $name]
+    if {$sym eq {}} {
+        error "unknown symbol, $name"
+    }
+    return $sym
+}
+
+proc InsertSymbol {args} {
+    try {
+        set sym [relvar insert Symbol $args]
+        return [tuple get [relation tuple $sym]]
+    } trap {RAL relvar insert DUPLICATE_TUPLE*} {result} {
+        error "duplicate symbol, [dict get $args Name], $result"
+    } on error {result opts} {
+        return -options $opts $result
+    }
+}
+
+proc CreateTempSymbol {args} {
+    variable symcounter
+    set name t__T[incr symcounter]
+    InsertSymbol Name $name {*}$args
+    return $name
+}
+
+proc CreateTempRefSymbol {className} {
+    set reftype [GetClassProperty $className Reference]
+    set symName [CreateTempSymbol Ctype $reftype Type Reference Class $className]
+    return [list $reftype $symName]
+}
+
+proc CreateRefSymbol {className varName} {
+    set ref [GetClassProperty $className Reference]
+    InsertSymbol Name $varName Ctype $ref Type Reference Class $className
+    return "$ref$varName"
+}
+
+proc DeleteSymbol {name} {
+    return [relvar deleteone Symbol Name $name]
+}
+
+proc ProcessCodeLines {text} {
+    variable block
+
+    # puts "text = \"$text\""
+    set newlines [list]
+
+    foreach line [split $text \n] {
+        if {[string is space $line]} {
+            if {[llength $newlines] != 0 && [lindex $newlines end] ne {}} {
+                lappend newlines {}
+            }
+        } else {
+            if {[string first "\}" $line] != -1} {
+                incr block -1
+            }
+            if {[regsub -- {\A\s+} $line {} newline] != 0} {
+                set line [string repeat { } [expr {$block * 4}]]$newline
+            }
+            if {[string first "\{" $line] != -1} {
+                incr block 1
+            }
+            lappend newlines $line
+        }
+    }
+    set newtext [join $newlines \n]
+    # puts "newtext = \"$newtext\""
+
+    return $newtext
+}
+----
+
+=== Template Expansion of Activity Code
+
+[source,c]
+----
+<<generation support commands>>=
+proc ExpandActivity {body {class {}}} {
+    try {
+        if {$class ne {}} {
+            InsertSymbol Name self Ctype [GetClassProperty $class Reference]\
+                Type Reference Class $class
+        }
+        variable block 0
+        return [textutil::adjust::indent [actexpand expand $body] "    "]
+    } on error {result} {
+        # puts $::errorInfo
+        log::error $result
+        variable errcount
+        incr errcount
+        set msg [pipe {
+            split $result \n |
+            lrange ~ 1 2 |
+            string map [list \" {}] ~ |
+            join ~
+        }]
+        return "#error \"$msg\""
+    } finally {
+        relvar set Symbol [relation emptyof [relvar set Symbol]]
+    }
+}
+----
+
+[source,c]
+----
+<<generation support commands>>=
+proc PushContext {context args} {
+    actexpand cpush $context
+    foreach {var value} $args {
+        actexpand cset $var $value
+    }
+}
+
+proc PopContext {context args} {
+    foreach varname $args {
+        upvar 1 $varname cvar
+        set cvar [actexpand cget $varname]
+    }
+    return [actexpand cpop $context]
+}
+
+proc IndentToBlock {code} {
+    variable block
+    # indent seems to swallow a trailing new line
+    return [::textutil::adjust::indent $code\
+        [string repeat { } [expr {$block * 4}]]]\n
+}
+
+proc PushBlock {{by 1}} {
+    variable block
+    incr block $by
+}
+
+proc PopBlock {{by -1}} {
+    variable block
+    incr block $by
+}
+
+proc GetBlock {} {
+    variable block
+    return $block
+}
+----
+
+[source,c]
+----
+<<generation support commands>>=
+proc End {} {
+    set result {}
+
+    set context [actexpand cname]
+    switch -exact -- $context {
+        withAttribute {
+            set result [PopContext $context instref attrNames varNames]
+            foreach attr $attrNames var $varNames {
+                append update "$instref->$attr = $var ;\n"
+            }
+            append result [IndentToBlock $update]
+            PopBlock
+            append result "\}\n"
+        }
+        ClassForeachInstance -
+        ClassForeachUSubInstance {
+            set result [PopContext $context depth]
+            for {set i 0} {$i < $depth} {incr i} {
+                PopBlock
+                append result [IndentToBlock "\}\n"]
+            }
+        }
+        default {
+            error "unknown context, \"$context\""
+        }
+    }
+    append result "/* %<end>% */\n"
+
+    return $result
+}
+----
+
+=== Instance Commands
+
+[source,c]
+----
+<<generation support commands>>=
+proc InstanceAttribute {instref attr} {
+    variable domain
+
+    set sym [CheckSymbol $instref]
+    if {$sym eq {}} {
+        return
+    }
+    set attrRef [Attribute findById Domain $domain Class [dict get $sym Class]\
+            Name $attr]
+    if {[isEmptyRef $attrRef]} {
+        error "instance reference, $instref, refers to an instance of\
+            class, [dict get $sym Class], which does not have an attribute\
+            named, $attr"
+    }
+    return "$instref->$attr"
+}
+----
+
+[source,c]
+----
+<<generation support commands>>=
+proc InstanceWithAttribute {instref args} {
+    variable domain
+
+    lassign [ParseAttrVars $instref $args] attrNames varNames dataTypes
+
+    append result\
+        "/* %<instance $instref withAttribute $args>% */\n"\
+        "\{\n"
+    PushBlock
+
+    foreach attr $attrNames var $varNames type $dataTypes {
+        set varDecl [typeCheck composeDeclaration $type $var]
+        append setup "$varDecl = $instref->$attr ;\n"
+    }
+    append result [IndentToBlock $setup]
+
+    PushContext withAttribute\
+        instref $instref\
+        attrNames $attrNames\
+        varNames $varNames
+
+
+    return $result
+}
+----
+
+[source,c]
+----
+<<generation support commands>>=
+proc ParseAttrVars {instref attrvars} {
+    variable domain
+
+    set sym [CheckSymbol $instref]
+    if {$sym eq {}} {
+        return
+    }
+    set className [dict get $sym Class]
+
+    if {[llength $attrvars] == 0} {
+        # look up the attributes of the class
+        set attrs [pipe {
+            Attribute findWhere {$Domain eq $domain && $Class eq $className} |
+            deRef ~ |
+            relation project ~ Name DataType
+        }]
+        set attrNames [relation list $attrs Name -ascending Name]
+        set varNames $attrNames
+        set dataTypes [relation list $attrs DataType -ascending Name]
+    } else {
+        set attrNames [list]
+        set varNames [list]
+        foreach attrvar $attrvars {
+            set l [llength $attrvar]
+            if {$l < 1 || $l > 2} {
+                error "bad format for attribute name /variable name pair,\
+                        \"$attrvar\""
+            }
+            set attrName [lindex $attrvar 0]
+            set attrRef [Attribute findById Domain $domain Class $className\
+                Name $attrName]
+            if {[isEmptyRef $attrRef]} {
+                error "class, $className, does not have an attribute named,\
+                    \"$attrName\""
+            }
+            lappend attrNames $attrName
+            lappend dataTypes [readAttribute $attrRef DataType]
+            if {$l == 1} {
+                set varName $attrName
+            } elseif {$l == 2} {
+                set varName [lindex $attrvar 1]
+                if {[::struct::set contains $varNames $varName]} {
+                    error "duplicate variable name, \"$varName\""
+                }
+            }
+            lappend varNames $varName
+        }
+    }
+    return [list $attrNames $varNames $dataTypes]
+}
+----
+
+[source,c]
+----
+<<generation support commands>>=
+proc InstanceAssignAttribute {instref args} {
+    variable domain
+
+    lassign [ParseAttrVars $instref $args] attrNames varNames dataTypes
+
+    set result "/* %<instance $instref assignAttribute $args>% */\n"
+
+    foreach attr $attrNames var $varNames type $dataTypes {
+        set varDecl [typeCheck composeDeclaration $type $var]
+        append result "$varDecl = $instref->$attr ;\n"
+    }
+
+    return [IndentToBlock $result]
+}
+----
+
+=== Class Commands
+
+[source,c]
+----
+<<generation support commands>>=
+proc ClassCreate {className instref args} {
+    set attrvalues [GetAttrInitialValues $className $args]
+
+    set refdecl [CreateRefSymbol $className $instref]
+    variable domain
+    set classDesc [GetClassDescriptor $domain $className]
+    append result\
+        "/* %<$className create $instref $args>% */\n"\
+        "$refdecl = mrt_CreateInstance(&$classDesc, MRT_StateCode_IG) ;\n"
+    foreach {attrName attrValue} $attrvalues {
+        append result "$instref->$attrName = $attrValue ;\n"
+    }
+
+    return $result
+}
+----
+
+[source,c]
+----
+<<generation support commands>>=
+proc ClassCreateIn {className instref state args} {
+    set attrvalues [GetAttrInitialValues $className $args]
+
+    set refdecl [CreateRefSymbol $className $instref]
+    variable domain
+    set classDesc [GetClassDescriptor $domain $className]
+    set statenum [GetStateNumber $domain $className $state]
+    append result\
+        "/* %<$className createin $instref $state $args>% */\n"\
+        "$refdecl = mrt_CreateInstance(&$classDesc, $statenum) ;\n"
+    foreach {attrName attrValue} $attrvalues {
+        append result "$instref->$attrName = $attrValue ;\n"
+    }
+
+    return $result
+}
+----
+
+[source,c]
+----
+<<generation support commands>>=
+proc GetAttrInitialValues {className attrvalues} {
+    if {[llength $attrvalues] % 2 != 0} {
+        error "attribute names / values must be given in pairs,\
+            got: \"$attrvalues\""
+    }
+    set required [FindRequiredAttributes $className]
+    set defaulted [FindDefaultedAttributes $className]
+    set supplied [dict keys $attrvalues]
+
+    set missing [::struct::set difference $required $supplied]
+    if {![::struct::set empty $missing]} {
+        error "values for attributes, \"[join $missing {, }]\", must be\
+            provided"
+    }
+    set all [::struct::set union $required [dict keys $defaulted]]
+    set extra [::struct::set difference $supplied $all]
+    if {![::struct::set empty $extra]} {
+        error "class, $className, has no attribute(s) named,\
+            \"[join $extra {, }]\""
+    }
+
+    return [dict merge $defaulted $attrvalues]
+}
+----
+
+[source,c]
+----
+<<generation support commands>>=
+proc GetStateNumber {domain className state} {
+    set stateRef [StatePlace findById Domain $domain Model $className\
+            Name $state]
+    if {[isEmptyRef $stateRef]} {
+        error "class, $className, has no state named, $state"
+    }
+    return [readAttribute $stateRef Number]
+}
+----
+
+[source,c]
+----
+<<generation support commands>>=
+proc FindRequiredAttributes {className} {
+    variable domain
+    return [pipe {
+        DefaultValue findWhere {$Domain eq $domain && $Class eq $className} |
+        deRef ~ |
+        relation semiminus ~ $::micca::Attribute -using\
+            {Domain Domain Class Class Attribute Name} |
+        relation list ~ Name
+    }]
+}
+
+proc FindDefaultedAttributes {className} {
+    variable domain
+    return [pipe {
+        DefaultValue findWhere {$Domain eq $domain && $Class eq $className} |
+        deRef ~ |
+        relation dict ~ Attribute Value
+    }]
+}
+----
+
+[source,c]
+----
+<<generate command tests>>=
+test codegen-26.0 {
+    Generated code file instance creation
+} -setup {
+    # makeFile {} codegen26.h
+    # makeFile {} codegen26.c
+    micca configure {
+        domain codegen26 {
+            class X {
+                attribute color int -default 20
+                attribute temp int
+            }
+            domainop void newX {} {
+                %<X create newx color 30 temp 22>%
+                printf("%d\n", %<instance newx attribute color>%) ;
+            }
+        }
+        population codegen26 {
+            class X {
+                allocate 4
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca generate
+    testConditions\
+        {[llength [fileutil::grep {mrt_CreateInstance} codegen26.c]] == 1}
+} -result {1}
+----
+
+[source,c]
+----
+<<generate command tests>>=
+test codegen-26.1 {
+    Generated code file instance creation -- bad arguments to create
+} -setup {
+    makeFile {} codegen26_1.h
+    makeFile {} codegen26_1.c
+    micca configure {
+        domain codegen26_1 {
+            class X {
+                attribute color int -default 20
+                attribute temp int
+            }
+            domainop void newX {} {
+                %<X create newx 30>% // need name / value pairs
+            }
+        }
+        population codegen26_1 {
+            class X {
+                allocate 4
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca generate
+} -result {encountered 1 code generation error(s)} -returnCodes error
+----
+
+[source,c]
+----
+<<generate command tests>>=
+test codegen-26.2 {
+    Generated code file instance creation -- missing attribute
+} -setup {
+    makeFile {} codegen26_2.h
+    makeFile {} codegen26_2.c
+    micca configure {
+        domain codegen26_2 {
+            class X {
+                attribute color int -default 20
+                attribute temp int
+            }
+            domainop void newX {} {
+                %<X create newx>% // missing attribute, temp
+            }
+        }
+        population codegen26_2 {
+            class X {
+                allocate 4
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca generate
+} -result {encountered 1 code generation error(s)} -returnCodes error
+----
+
+[source,c]
+----
+<<generate command tests>>=
+test codegen-26.3 {
+    Generated code file instance creation -- extra attribute
+} -setup {
+    makeFile {} codegen26_3.h
+    makeFile {} codegen26_3.c
+    micca configure {
+        domain codegen26_3 {
+            class X {
+                attribute color int -default 20
+                attribute temp int
+            }
+            domainop void newX {} {
+                %<X create newx temp 20 size 30>% // no attribute, size
+            }
+        }
+        population codegen26_3 {
+            class X {
+                allocate 4
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca generate
+} -result {encountered 1 code generation error(s)} -returnCodes error
+----
+
+[source,c]
+----
+<<generate command tests>>=
+test codegen-27.0 {
+    Generated code file instance creation in a given state
+} -setup {
+    # makeFile {} codegen27.h
+    # makeFile {} codegen27.c
+    micca configure {
+        domain codegen27 {
+            class X {
+                attribute color int -default 20
+            }
+
+            class X {
+                statemodel {
+                    state s1 {} {
+                        printf("in s1\n") ;
+                    }
+                    state s2 {} {
+                        printf("in s2\n") ;
+                    }
+                    transition s1 - e1 -> s2
+                    transition s2 - e2 -> s1
+                }
+            }
+            domainop void newX {} {
+                %<X createin newx s2 color 30>%
+                printf("%d\n", %<instance newx attribute color>%) ;
+            }
+        }
+        population codegen27 {
+            class X {
+                allocate 4
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca generate
+    testConditions\
+        {[llength [fileutil::grep {mrt_CreateInstance} codegen27.c]] == 1}
+} -result {1}
+----
+
+[source,c]
+----
+<<generate command tests>>=
+test codegen-27.1 {
+    Generated code file instance creation in a given state -- bad state
+} -setup {
+    makeFile {} codegen27_1.h
+    makeFile {} codegen27_1.c
+    micca configure {
+        domain codegen27_1 {
+            class X {
+                attribute color int -default 20
+            }
+
+            class X {
+                statemodel {
+                    state s1 {} {
+                        printf("in s1\n") ;
+                    }
+                    state s2 {} {
+                        printf("in s2\n") ;
+                    }
+                    transition s1 - e1 -> s2
+                    transition s2 - e2 -> s1
+                }
+            }
+            domainop void newX {} {
+                %<X createin newx s3>%
+                printf("%d\n", %<instance newx attribute color>%) ;
+            }
+        }
+        population codegen27_1 {
+            class X {
+                allocate 4
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca generate
+} -result {encountered 1 code generation error(s)} -returnCodes error
+----
+
+[source,c]
+----
+<<generation support commands>>=
+proc ClassCreateAsync {className event eventparams args} {
+}
+----
+
+[source,c]
+----
+<<generation support commands>>=
+proc ClassDeclareReference {className varName} {
+    return [IndentToBlock [CreateRefSymbol $className $varName]]
+}
+----
+
+[source,c]
+----
+<<generation support commands>>=
+proc ClassForeachInstance {className instref} {
+    variable domain
+
+    set sym [LookUpSymbol $instref]
+    if {$sym ne {}} {
+        error "instance reference variable, \"$instref\", already exists"
+    }
+    set result "/* %<$className foreachInstance $instref>% */\n"
+
+    set instrefDecl [CreateRefSymbol $className $instref]
+    set iab [CreateTempSymbol Ctype {MRT_iab *} Type IAB Class $className]
+    set iter [CreateTempSymbol Ctype {void *} Type Pointer Class $className]
+
+    set startlevel [GetBlock]
+
+    append result\
+        "MRT_iab *const $iab = [GetClassDescriptor $domain $className].iab ;\n"\
+        "for (void *$iter = $iab->storageStart ; "\
+        "$iter < $iab->storageFinish ;\n"\
+        "        $iter = (void *)((uintptr_t)$iter + $iab->instanceSize)) "\
+        "\{\n"
+    PushBlock
+
+    append result [IndentToBlock [string cat\
+        "$instrefDecl = $iter ;\n"\
+        "if ($instref->base__INST.alloc > 0) \{\n"\
+    ]]
+    PushBlock
+
+    PushContext ClassForeachInstance depth [expr {[GetBlock] - $startlevel}]
+
+    return $result
+}
+----
+
+Union subclasses require a different strategy.
+Since they do not have their storage pool,
+we must iterate over the storage of the ultimate union superclass,
+traverse the relationship down to the subclass and verify that the
+subclass is of the correct type.
+
+[source,c]
+----
+<<generation support commands>>=
+proc ClassForeachUSubInstance {className instref} {
+    variable domain
+
+    set sym [LookUpSymbol $instref]
+    if {$sym ne {}} {
+        error "instance reference variable, \"$instref\", already exists"
+    }
+    set result "/* %<$className foreachInstance $instref>% */\n"
+
+    set relpath [FindUnionSuperPath $className]
+
+    set relpath [lassign $relpath superName relName subName]
+    set iab [CreateTempSymbol Ctype {MRT_iab *const} Type IAB Class $superName]
+    set iter [CreateTempSymbol Ctype {void *} Type Pointer Class $superName]
+
+    set startlevel [GetBlock]
+
+    append result\
+        "MRT_iab *const $iab = [GetClassDescriptor $domain $superName].iab ;\n"\
+        "for (void *$iter = $iab->storageStart ; "\
+        "$iter < $iab->storageFinish ;\n"\
+        "        $iter = (void *)((uintptr_t)$iter + $iab->instanceSize)) "\
+        "\{\n"
+    PushBlock
+
+    lassign [CreateTempRefSymbol $superName] superType superVar
+    lassign [CreateTempRefSymbol $subName] subType subVar
+    set subDesc [GetClassDescriptor $domain $subName]
+
+    append result [IndentToBlock [string cat\
+        "$superType$superVar = $iter ;\n"\
+        "if ($superVar->base__INST.alloc > 0) \{\n"
+    ]]
+    PushBlock
+
+    append result [IndentToBlock [string cat\
+        "$subType$subVar = &$superVar->$relName.$subName ;\n"\
+        "if ($subVar->base__INST.classDesc == &$subDesc &&\n"\
+        "        $subVar->base__INST.alloc > 0) \{\n"
+    ]]
+    PushBlock
+
+    foreach {superName relName subName} $relpath {
+        set prevSubVar $subVar
+        lassign [CreateTempRefSymbol $superName] superType superVar
+        lassign [CreateTempRefSymbol $subName] subType subVar
+        set subDesc [GetClassDescriptor $domain $subName]
+        append result [IndentToBlock [string cat\
+            "$subType$subVar = &$prevSubVar->$relName.$subName ;\n"\
+            "if ($subVar->base__INST.classDesc == &$subDesc &&\n"\
+            "        $subVar->base__INST.alloc > 0) \{\n"
+        ]]
+        PushBlock
+    }
+    set refDecl [CreateRefSymbol $subName $instref]
+    append result [IndentToBlock "$refDecl = $subVar ;\n"]
+
+    PushContext ClassForeachUSubInstance\
+        depth [expr {[GetBlock] - $startlevel}]
+
+    return $result
+}
+----
+
+Find the path upward from a union subclass to its ultimate superclass.
+Path is returned in the order of ultimate superclass downward
+and consists of triples of superclass name, relationship, subclass name.
+
+[source,c]
+----
+<<generation support commands>>=
+proc FindUnionSuperPath {className} {
+    variable domain
+    set subclassRef [UnionSubclass findWhere {$Domain eq $domain &&\
+        $Class eq $className}]
+    set path {}
+    while {[isNotEmptyRef $subclassRef]} {
+        assignAttribute $subclassRef {Relationship relName} {Class subName}
+        set superclassRef [findRelated $subclassRef R45 ~R44]
+        assignAttribute $superclassRef {Class superName}
+        set path [linsert $path 0 $superName $relName $subName]
+        set subclassRef [pipe {
+            deRef $superclassRef |
+            relation semijoin ~ $::micca::UnionSubclass -using\
+                {Domain Domain Class Class} |
+            ::rosea::Helpers::ToRef ::micca::UnionSubclass ~
+        }]
+    }
+    return $path
+}
+----
+
+[source,c]
+----
+<<generation support commands>>=
+proc InstanceDelete {instref} {
+    set sym [CheckSymbol $instref]
+    if {$sym eq {}} {
+        return
+    }
+    return mrt_DeleteInstance($instref)
+}
+----
+
+[source,c]
+----
+<<generation support commands>>=
+proc InstanceSignal {instref event args} {
+    variable domain
+
+    if {[llength $args] % 2 != 0} {
+        error "event parameters must be given as name / value pairs, got:\
+            \"$args\""
+    }
+    set target [CheckSymbol $instref]
+    if {$target eq {}} {
+        return
+    }
+
+    dict with target {
+        set eventRef [Event findById Domain $domain Model $Class Event $event]
+        if {[isEmptyRef $eventRef]} {
+            error "event, $event, is not a known event for class, $Class"
+        }
+
+        set transRef [findRelated $eventRef {~R80 TransitioningEvent}]
+        if {[isNotEmptyRef $transRef]} {
+            assignAttribute $transRef {Number eventNum}
+            set eventType mrtTransitionEvent
+        } else {
+            set deferredRef [findRelated $eventRef {~R80 DeferredEvent}
+            assignAttribute $deferredRef {Number eventNum}
+            set eventType mrtPolymorphicEvent
+        }
+
+        set psig [findRelated $eventRef R69]
+        set params [FindParamsFromSig $psig]
+        set required [relation list $params Name]
+        set supplied [dict keys $args]
+        if {![::struct::set equal $required $supplied]} {
+            error "event, $event, requires parameters,\
+                \"[join $required {, }]\", got:\
+                \"[join $supplied {, }]\""
+        }
+
+        set result {}
+        set sourceinst [expr {[LookUpSymbol self] eq {} ? "NULL" : "self"}]
+        set ecbvar [CreateTempSymbol Ctype {MRT_ecb *} Type ECB Class $Class]
+        append result "MRT_ecb *$ecbvar = mrt_NewEvent($eventNum,\
+            $eventType, $instref, $sourceinst) ;\n"
+        if {[relation isnotempty $params]} {
+            set eparamsname ${domain}_${Class}_${event}__EPARAMS
+            set ptrparams [CreateTempSymbol Ctype "struct *$eparamsname"\
+                Type EventParams Class $Class]
+            append result\
+                "struct $eparamsname *const $ptrparams =\n"\
+                "    (struct $eparamsname *)$ecbvar->eventParameters ;\n"
+            relation foreach param $params -ascending Position {
+                relation assign $param Name
+                append result "$ptrparams->$Name = [dict get $args $Name] ;\n"
+            }
+        }
+        append result "mrt_PostEvent($ecbvar) ;\n"
+    }
+    return $result
+}
+----
+
+[source,c]
+----
+<<generate command tests>>=
+test codegen-24.0 {
+    Generated code file with state model
+} -setup {
+    # makeFile {} codegen24.h
+    # makeFile {} codegen24.c
+    micca configure {
+        domain codegen24 {
+            class X {
+                attribute color int -default 20
+                attribute temp int -default 40
+                attribute size int -default 50
+
+                statemodel {
+                    state s1 {a int} {
+                        printf("color = %d\n", %<instance self attribute color>%) ;
+                        %<instance self signal e1 a 20>%
+                        %<instance self withAttribute>%
+                            color += 10 ;
+                            temp += 20 ;
+                            size -= 2 ;
+                        %<end>%
+                        %<instance self withAttribute {temp t} {size s}>%
+                            t -= 20 ;
+                            s += 2 ;
+                        %<end>%
+                    }
+                    transition s1 - e1 -> s1
+                    transition s1 - e2 -> s2
+                    state s2 {} {
+                        %<Y foreachInstance ys>%
+                            if (%<instance ys attribute sign>%) {
+                                %<instance ys assignAttribute cost>%
+                                cost *= 100 ;
+                                printf("%d\n", cost) ;
+                            }
+                        %<end>%
+                    }
+                    transition s2 - e1 -> s1
+                }
+            }
+            class Y {
+                attribute sign bool -default true
+                attribute cost int -default 10
+            }
+        }
+        population codegen24 {
+            class X {
+                instance x1
+            }
+            class Y {
+                instance y1
+                instance y2 sign false
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca generate
+    testConditions\
+        {[llength [fileutil::grep {self->color} codegen24.c]] == 3}
+} -result {1}
+----
+
+[source,c]
+----
+<<generate command tests>>=
+test codegen-25.0 {
+    Generated code file union subclasses
+} -setup {
+    # makeFile {} codegen25.h
+    # makeFile {} codegen25.c
+    micca configure {
+        domain codegen25 {
+            class A {}
+            class B {}
+            class X {
+                attribute color int -default 20
+                attribute temp int -default 40
+                attribute size int -default 50
+
+            }
+            generalization R1 -union A B X
+
+            class Y {
+                attribute sign bool -default true
+                attribute cost int -default 10
+
+                statemodel {
+                    state s1 {} {
+                        %<Z foreachInstance zref>%
+                            printf("%d\n", %<instance zref attribute plus>%) ;
+                        %<end>%
+                    }
+                    transition s1 - e1 -> s1
+                }
+            }
+            class Z {
+                attribute magnitude bool -default false
+                attribute plus int -default 42
+            }
+
+            generalization R2 -union X Y Z
+        }
+        population codegen25 {
+            class A {
+                instance a1
+                instance a2
+                instance a3
+                instance a4
+            }
+            class B {
+                instance b1 R1 a1
+            }
+            class X {
+                instance x1 R1 a2
+                instance x2 R1 a3
+                instance x3 R1 a4
+            }
+            class Y {
+                instance y1 R2 x1
+            }
+            class Z {
+                instance z1 R2 x2
+                instance z2 R2 x3
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca generate
+    testConditions\
+        {[llength [fileutil::grep {->base__INST} codegen25.c]] == 5}
+} -result {1}
 ----
 
 == Helper Commands
@@ -4628,713 +5803,4 @@ proc GenInstanceAddress {domainName className instName} {
         Number]
     return &${storageClass}__POOL\[$instNumber\]$path
 }
-----
-
-== Interfacing Domain Code to the Run Time
-
-Interfacing Domain Code to the Run Time
-
-[source,c]
-----
-<<generation activity namespace>>=
-namespace eval GenActivity {
-    logger::initNamespace [namespace current]
-
-    <<tclral imports>>
-    namespace import ::ral::relvar
-
-    namespace export ExpandActivity
-
-    namespace path {
-        ::micca
-        ::micca::@Gen@::Helpers
-        ::micca::@Config@::Helpers
-        ::rosea::InstCmds
-    }
-    upvar #0 ::micca::@Gen@::errcount errcount
-
-    textutil::expander actexpand
-    actexpand setbrackets %< >%
-    actexpand evalcmd "namespace eval [namespace current]"
-    actexpand errmode fail
-    actexpand textcmd ProcessCodeLines
-
-    <<generation activity data>>
-    <<generation activity commands>>
-}
-----
-
-=== Symbol Table
-
-[source,c]
-----
-<<generation activity data>>=
-relvar create Symbol {
-    Name string
-    Ctype string
-    Type string
-    Class string
-} Name
-----
-
-[source,c]
-----
-<<generation activity commands>>=
-proc LookUpSymbol {name} {
-    set sym [relvar restrictone Symbol Name $name]
-    return [expr {[relation isempty $sym] ?\
-        {} : [tuple get [relation tuple $sym]]}]
-}
-
-proc CheckSymbol {name} {
-    set sym [LookUpSymbol $name]
-    if {$sym eq {}} {
-        log::error "unknown symbol, $name"
-        variable errcount
-        incr errcount
-    }
-    return $sym
-}
-
-proc InsertSymbol {args} {
-    relvar insert Symbol $args
-}
-
-proc CreateTempSymbol {args} {
-    variable symcounter
-    set name t__T[incr symcounter]
-    InsertSymbol Name $name {*}$args
-    return $name
-}
-
-proc CreateTempRefSymbol {className} {
-    set reftype [GetClassProperty $className Reference]
-    set symName [CreateTempSymbol Ctype $reftype Type Reference Class $className]
-    return [list $reftype $symName]
-}
-
-proc DeleteSymbol {name} {
-    return [relvar deleteone Symbol Name $name]
-}
-
-proc ProcessCodeLines {text} {
-    variable block
-
-    # puts "text = \"$text\""
-    set newlines [list]
-
-    foreach line [split $text \n] {
-        if {[string is space $line]} {
-            if {[llength $newlines] != 0 && [lindex $newlines end] ne {}} {
-                lappend newlines {}
-            }
-        } else {
-            if {[string first "\}" $line] != -1} {
-                incr block -1
-            }
-            if {[regsub -- {\A\s+} $line {} newline] != 0} {
-                set line [string repeat { } [expr {$block * 4}]]$newline
-            }
-            if {[string first "\{" $line] != -1} {
-                incr block 1
-            }
-            lappend newlines $line
-        }
-    }
-    set newtext [join $newlines \n]
-    # puts "newtext = \"$newtext\""
-
-    return $newtext
-}
-----
-
-[source,c]
-----
-<<generation activity commands>>=
-proc ExpandActivity {class body hasSelf} {
-    try {
-        if {$hasSelf} {
-            InsertSymbol Name self Ctype [GetClassProperty $class Reference]\
-                Type Reference Class $class
-        }
-        variable block 0
-        return [textutil::adjust::indent [actexpand expand $body] "    "]
-    } on error {} {
-        puts $::errorInfo
-    } finally {
-        relvar set Symbol [relation emptyof [relvar set Symbol]]
-    }
-}
-----
-
-[source,c]
-----
-<<generation activity commands>>=
-proc instAttribute {instref attr} {
-    variable domain
-
-    set sym [CheckSymbol $instref]
-    if {$sym eq {}} {
-        return
-    }
-    set attrRef [Attribute findById Domain $domain Class [dict get $sym Class]\
-            Name $attr]
-    if {[isEmptyRef $attrRef]} {
-        error "instance reference, $instref, refers to an instance of\
-            class, [dict get $sym Class], which does not have an attribute\
-            named, $attr"
-    }
-    return "$instref->$attr"
-}
-----
-
-[source,c]
-----
-<<generation activity commands>>=
-proc withInstAttribute {instref args} {
-    variable domain
-
-    lassign [ParseAttrVars $instref $args] attrNames varNames dataTypes
-
-    set result "\{ /* %<[info level 0]>% */\n"
-    PushBlock
-
-    foreach attr $attrNames var $varNames type $dataTypes {
-        set varDecl [typeCheck composeDeclaration $type $var]
-        append setup "$varDecl = $instref->$attr ;\n"
-    }
-    append result [IndentToBlock $setup]
-
-    PushContext withAttribute\
-        instref $instref\
-        attrNames $attrNames\
-        varNames $varNames
-
-
-    return $result
-}
-----
-
-[source,c]
-----
-<<generation activity commands>>=
-proc ParseAttrVars {instref attrvars} {
-    variable domain
-
-    set sym [CheckSymbol $instref]
-    if {$sym eq {}} {
-        return
-    }
-    set className [dict get $sym Class]
-
-    if {[llength $attrvars] == 0} {
-        # look up the attributes of the class
-        set attrs [pipe {
-            Attribute findWhere {$Domain eq $domain && $Class eq $className} |
-            deRef ~ |
-            relation project ~ Name DataType
-        }]
-        set attrNames [relation list $attrs Name -ascending Name]
-        set varNames $attrNames
-        set dataTypes [relation list $attrs DataType -ascending Name]
-    } else {
-        set attrNames [list]
-        set varNames [list]
-        foreach attrvar $attrvars {
-            set l [llength $attrvar]
-            if {$l < 1 || $l > 2} {
-                error "bad format for attribute name /variable name pair,\
-                        \"$attrvar\""
-            }
-            set attrName [lindex $attrvar 0]
-            set attrRef [Attribute findById Domain $domain Class $className\
-                Name $attrName]
-            if {[isEmptyRef $attrRef]} {
-                error "class, $className, does not have an attribute named,\
-                    \"$attrName\""
-            }
-            lappend attrNames $attrName
-            lappend dataTypes [readAttribute $attrRef DataType]
-            if {$l == 1} {
-                set varName $attrName
-            } elseif {$l == 2} {
-                set varName [lindex $attrvar 1]
-                if {[::struct::set contains $varNames $varName]} {
-                    error "duplicate variable name, \"$varName\""
-                }
-            }
-            lappend varNames $varName
-        }
-    }
-    return [list $attrNames $varNames $dataTypes]
-}
-----
-
-[source,c]
-----
-<<generation activity commands>>=
-proc assignInstAttribute {instref args} {
-    variable domain
-
-    lassign [ParseAttrVars $instref $args] attrNames varNames dataTypes
-
-    set result "/* %<[info level 0]>% */\n"
-
-    foreach attr $attrNames var $varNames type $dataTypes {
-        set varDecl [typeCheck composeDeclaration $type $var]
-        append result "$varDecl = $instref->$attr ;\n"
-    }
-
-    return [IndentToBlock $result]
-}
-----
-
-[source,c]
-----
-<<generation activity commands>>=
-proc PushContext {context args} {
-    actexpand cpush $context
-    foreach {var value} $args {
-        actexpand cset $var $value
-    }
-}
-
-proc PopContext {context args} {
-    foreach varname $args {
-        upvar 1 $varname cvar
-        set cvar [actexpand cget $varname]
-    }
-    return [actexpand cpop $context]
-}
-
-proc IndentToBlock {code} {
-    variable block
-    # indent seems to swallow a trailing new line
-    return [::textutil::adjust::indent $code\
-        [string repeat { } [expr {$block * 4}]]]\n
-}
-
-proc PushBlock {{by 1}} {
-    variable block
-    incr block $by
-}
-
-proc PopBlock {{by -1}} {
-    variable block
-    incr block $by
-}
-
-proc GetBlock {} {
-    variable block
-    return $block
-}
-----
-
-[source,c]
-----
-<<generation activity commands>>=
-proc end {} {
-    set result {}
-
-    set context [actexpand cname]
-    switch -exact -- $context {
-        withAttribute {
-            set result [PopContext $context instref attrNames varNames]
-            foreach attr $attrNames var $varNames {
-                append update "$instref->$attr = $var ;\n"
-            }
-            append result [IndentToBlock $update]
-            PopBlock
-            append result "\} /* %<[info level 0]>% */\n"
-        }
-        ForEachClassInstance -
-        ForEachUnionSubClassInstance {
-            set result [PopContext $context depth]
-            for {set i 0} {$i < $depth} {incr i} {
-                PopBlock
-                append result [IndentToBlock "\}\n"]
-            }
-            append result "/* %<[info level 0]>% */\n"
-        }
-        default {
-            error "unknown context, \"$context\""
-        }
-    }
-
-    return $result
-}
-----
-
-[source,c]
-----
-<<generation activity commands>>=
-proc InstRefDeclOfClass {className varName} {
-    set ref [GetClassProperty $className Reference]
-    InsertSymbol Name $varName Ctype $ref Type Reference Class $className
-    return "$ref$varName"
-}
-----
-
-[source,c]
-----
-<<generation activity commands>>=
-proc ForEachClassInstance {className instref} {
-    variable domain
-
-    set sym [LookUpSymbol $instref]
-    if {$sym ne {}} {
-        error "instance reference variable, \"$instref\", already exists"
-    }
-    set result "/* %<[info level 0]>% */\n"
-
-    set instrefDecl [InstRefDeclOfClass $className $instref]
-    set iab [CreateTempSymbol Ctype {MRT_iab *} Type IAB Class $className]
-    set iter [CreateTempSymbol Ctype {void *} Type Pointer Class $className]
-    set classnum [GetClassProperty $className Number]
-
-    set startlevel [GetBlock]
-
-    append result\
-        "MRT_iab *const $iab = ${domain}__CLASSES\[$classnum\].iab ;\n"\
-        "for (void *$iter = $iab->storageStart ; "\
-        "$iter < $iab->storageFinish ;\n"\
-        "        $iter = (void *)((uintptr_t)$iter + $iab->instanceSize)) "\
-        "\{\n"
-    PushBlock
-
-    append result [IndentToBlock [string cat\
-        "$instrefDecl = $iter ;\n"\
-        "if ($instref->base__INST.alloc > 0) \{\n"\
-    ]]
-    PushBlock
-
-    PushContext ForEachClassInstance depth [expr {[GetBlock] - $startlevel}]
-
-    return $result
-}
-----
-
-Union subclasses require a different strategy.
-Since they do not have their storage pool,
-we must iterate over the storage of the ultimate union superclass,
-traverse the relationship down to the subclass and verify that the
-subclass is of the correct type.
-
-[source,c]
-----
-<<generation activity commands>>=
-proc ForEachUnionSubClassInstance {className instref} {
-    variable domain
-
-    set sym [LookUpSymbol $instref]
-    if {$sym ne {}} {
-        error "instance reference variable, \"$instref\", already exists"
-    }
-    set result "/* %<[info level 0]>% */\n"
-
-    set relpath [FindUnionSuperPath $className]
-
-    set relpath [lassign $relpath superName relName subName]
-    set supernum [GetClassProperty $superName Number]
-    set iab [CreateTempSymbol Ctype {MRT_iab *} Type IAB Class $superName]
-    set iter [CreateTempSymbol Ctype {void *} Type Pointer Class $superName]
-
-    set startlevel [GetBlock]
-
-    append result\
-        "MRT_iab *const $iab = ${domain}__CLASSES\[$supernum\].iab ;\n"\
-        "for (void *$iter = $iab->storageStart ; "\
-        "$iter < $iab->storageFinish ;\n"\
-        "        $iter = (void *)((uintptr_t)$iter + $iab->instanceSize)) "\
-        "\{\n"
-    PushBlock
-
-    lassign [CreateTempRefSymbol $superName] superType superVar
-    lassign [CreateTempRefSymbol $subName] subType subVar
-    set subDesc &${domain}__CLASSES\[[GetClassProperty $subName Number]\]
-
-    append result [IndentToBlock [string cat\
-        "$superType$superVar = $iter ;\n"\
-        "if ($superVar->base__INST.alloc > 0) \{\n"
-    ]]
-    PushBlock
-
-    append result [IndentToBlock [string cat\
-        "$subType$subVar = &$superVar->$relName.$subName ;\n"\
-        "if ($subVar->base__INST.classDesc == $subDesc &&\n"\
-        "        $subVar->base__INST.alloc > 0) \{\n"
-    ]]
-    PushBlock
-
-    foreach {superName relName subName} $relpath {
-        set prevSubVar $subVar
-        lassign [CreateTempRefSymbol $superName] superType superVar
-        lassign [CreateTempRefSymbol $subName] subType subVar
-        set subDesc &${domain}__CLASSES\[[GetClassProperty $subName Number]\]
-        append result [IndentToBlock [string cat\
-            "$subType$subVar = &$prevSubVar->$relName.$subName ;\n"\
-            "if ($subVar->base__INST.classDesc == $subDesc &&\n"\
-            "        $subVar->base__INST.alloc > 0) \{\n"
-        ]]
-        PushBlock
-    }
-    set refDecl [InstRefDeclOfClass $subName $instref]
-    append result [IndentToBlock "$refDecl = $subVar ;\n"]
-
-    PushContext ForEachUnionSubClassInstance\
-        depth [expr {[GetBlock] - $startlevel}]
-
-    return $result
-}
-----
-
-Find the path upward from a union subclass to its ultimate superclass.
-Path is returned in the order of ultimate superclass downward
-and consists of triples of superclass name, relationship, subclass name.
-
-[source,c]
-----
-<<generation activity commands>>=
-proc FindUnionSuperPath {className} {
-    variable domain
-    set subclassRef [UnionSubclass findWhere {$Domain eq $domain &&\
-        $Class eq $className}]
-    set path {}
-    while {[isNotEmptyRef $subclassRef]} {
-        assignAttribute $subclassRef {Relationship relName} {Class subName}
-        set superclassRef [findRelated $subclassRef R45 ~R44]
-        assignAttribute $superclassRef {Class superName}
-        set path [linsert $path 0 $superName $relName $subName]
-        set subclassRef [pipe {
-            deRef $superclassRef |
-            relation semijoin ~ $::micca::UnionSubclass -using\
-                {Domain Domain Class Class} |
-            ::rosea::Helpers::ToRef ::micca::UnionSubclass ~
-        }]
-    }
-    return $path
-}
-----
-
-[source,c]
-----
-<<generation activity commands>>=
-proc delete {instref} {
-    set sym [CheckSymbol $instref]
-    if {$sym eq {}} {
-        return
-    }
-    return mrt_DeleteInstance($instref)
-}
-----
-
-[source,c]
-----
-<<generation activity commands>>=
-proc signal {instref event args} {
-    variable domain
-    variable errcount
-
-    if {[llength $args] % 2 != 0} {
-        log::error "event parameters must be given as name / value pairs, got:\
-            \"$args\""
-        incr errcount
-        return
-    }
-    set target [CheckSymbol $instref]
-    if {$target eq {}} {
-        return
-    }
-
-    dict with target {
-        set eventRef [Event findById Domain $domain Model $Class Event $event]
-        if {[isEmptyRef $eventRef]} {
-            log::error "event, $event, is not a known event for class, $Class"
-            incr errcount
-            return
-        }
-
-        set transRef [findRelated $eventRef {~R80 TransitioningEvent}]
-        if {[isNotEmptyRef $transRef]} {
-            assignAttribute $transRef {Number eventNum}
-            set eventType mrtTransitionEvent
-        } else {
-            set deferredRef [findRelated $eventRef {~R80 DeferredEvent}
-            assignAttribute $deferredRef {Number eventNum}
-            set eventType mrtPolymorphicEvent
-        }
-
-        set psig [findRelated $eventRef R69]
-        set params [FindParamsFromSig $psig]
-        set required [relation list $params Name]
-        set supplied [dict keys $args]
-        if {![::struct::set equal $required $supplied]} {
-            log::error "event, $event, requires parameters,\
-                \"[join $required {, }]\", got:\
-                \"[join $supplied {, }]\""
-            incr errcount
-            return
-        }
-
-        set result {}
-        set sourceinst [expr {[LookUpSymbol self] eq {} ? "NULL" : "self"}]
-        set ecbvar [CreateTempSymbol Ctype {MRT_ecb *} Type ECB Class $Class]
-        append result "MRT_ecb *$ecbvar = mrt_NewEvent($eventNum,\
-            $eventType, $instref, $sourceinst) ;\n"
-        if {[relation isnotempty $params]} {
-            set eparamsname ${domain}_${Class}_${event}__EPARAMS
-            set ptrparams [CreateTempSymbol Ctype "struct *$eparamsname"\
-                Type EventParams Class $Class]
-            append result\
-                "struct $eparamsname *const $ptrparams =\n"\
-                "    (struct $eparamsname *)$ecbvar->eventParameters ;\n"
-            relation foreach param $params -ascending Position {
-                relation assign $param Name
-                append result "$ptrparams->$Name = [dict get $args $Name] ;\n"
-            }
-        }
-        append result "mrt_PostEvent($ecbvar) ;\n"
-    }
-    return $result
-}
-----
-
-[source,c]
-----
-<<generate command tests>>=
-test codegen-24.0 {
-    Generated code file with state model
-} -setup {
-    # makeFile {} codegen24.h
-    # makeFile {} codegen24.c
-    micca configure {
-        domain codegen24 {
-            class X {
-                attribute color int -default 20
-                attribute temp int -default 40
-                attribute size int -default 50
-
-                statemodel {
-                    state s1 {a int} {
-                        printf("color = %d\n", %<instAttribute self color>%) ;
-                        %<signal self e1 a 20>%
-                        %<withInstAttribute self>%
-                            color += 10 ;
-                            temp += 20 ;
-                            size -= 2 ;
-                        %<end>%
-                        %<withInstAttribute self {temp t} {size s}>%
-                            t -= 20 ;
-                            s += 2 ;
-                        %<end>%
-                    }
-                    transition s1 - e1 -> s1
-                    transition s1 - e2 -> s2
-                    state s2 {} {
-                        %<ForEachClassInstance Y ys>%
-                            if (%<instAttribute ys sign>%) {
-                                %<assignInstAttribute ys cost>%
-                                cost *= 100 ;
-                                printf("%d\n", cost) ;
-                            }
-                        %<end>%
-                    }
-                    transition s2 - e1 -> s1
-                }
-            }
-            class Y {
-                attribute sign bool -default true
-                attribute cost int -default 10
-            }
-        }
-        population codegen24 {
-            class X {
-                instance x1
-            }
-            class Y {
-                instance y1
-                instance y2 sign false
-            }
-        }
-    }
-} -cleanup {
-    cleanupDomain
-} -body {
-    micca generate
-    testConditions\
-        {[llength [fileutil::grep {self->color} codegen24.c]] == 3}
-} -result {1}
-----
-
-[source,c]
-----
-<<generate command tests>>=
-test codegen-25.0 {
-    Generated code file union subclasses
-} -setup {
-    # makeFile {} codegen25.h
-    # makeFile {} codegen25.c
-    micca configure {
-        domain codegen25 {
-            class A {}
-            class B {}
-            class X {
-                attribute color int -default 20
-                attribute temp int -default 40
-                attribute size int -default 50
-
-            }
-            generalization R1 -union A B X
-
-            class Y {
-                attribute sign bool -default true
-                attribute cost int -default 10
-
-                statemodel {
-                    state s1 {} {
-                        %<ForEachUnionSubClassInstance Z zref>%
-                            printf("%d\n", %<instAttribute zref plus>%) ;
-                        %<end>%
-                    }
-                    transition s1 - e1 -> s1
-                }
-            }
-            class Z {
-                attribute magnitude bool -default false
-                attribute plus int -default 42
-            }
-
-            generalization R2 -union X Y Z
-        }
-        population codegen25 {
-            class A {
-                instance a1
-                instance a2
-                instance a3
-                instance a4
-            }
-            class B {
-                instance b1 R1 a1
-            }
-            class X {
-                instance x1 R1 a2
-                instance x2 R1 a3
-                instance x3 R1 a4
-            }
-            class Y {
-                instance y1 R2 x1
-            }
-            class Z {
-                instance z1 R2 x2
-                instance z2 R2 x3
-            }
-        }
-    }
-} -cleanup {
-    cleanupDomain
-} -body {
-    micca generate
-    testConditions\
-        {[llength [fileutil::grep {->base__INST} codegen25.c]] == 5}
-} -result {1}
 ----
