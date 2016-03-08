@@ -7752,7 +7752,8 @@ class based association in the _backward_ direction.
 ----
 <<population: set singular referenced class values>>=
 set simprefedclass [findRelated $singlerefs {~R38 SimpleReferencedClass}]
-set backrefs [pipe {
+# Compute the referenced made by the refering class instances.
+set refingrefs [pipe {
     deRef $simprefedclass |
     relation eliminate ~ Role Conditionality |
     relation rename ~ Class ReferencedClass |
@@ -7761,14 +7762,21 @@ set backrefs [pipe {
     relation eliminate ~ Role Conditionality Multiplicity |
     relation join ~ $popvalues -using\
         {Domain Domain Component Component ReferringClass Class} |
-    relation restrictwith ~ {$Value ne "@nil@"} |
+    relation update ~ sbtup {1} {
+        tuple update $sbtup Component "[tuple extract $sbtup Component]__BACK"}
+}]
+# puts [relformat $refingrefs refingrefs]
+
+# Now we have to split out the nil references
+# Invert referring and referenced formating a new value to show
+# which instances referenced by the referring class.
+set backrefs [pipe {
+    relation restrictwith $refingrefs {$Value ne "@nil@"} |
     relation extend ~ sbtup NewValue string {[list\
         [tuple extract $sbtup ReferringClass]\
         [tuple extract $sbtup Instance]]} |
     relation eliminate ~ ReferringClass Instance |
-    relation rename ~ ReferencedClass Class Value Instance NewValue Value |
-    relation update ~ sbtup {1} {
-        tuple update $sbtup Component "[tuple extract $sbtup Component]__BACK"}
+    relation rename ~ ReferencedClass Class Value Instance NewValue Value
 }]
 # puts [relformat $backrefs backrefs]
 
@@ -7776,7 +7784,16 @@ foreach backref [relation body $backrefs] {
     ClassComponentValue create {*}$backref
 }
 
-CreateNilDestBackRefs $simprefedclass $backrefs
+# Find any components that had nil references. We have to find any
+# instances of those classes that don't have a reference to them.
+set nilcomps [pipe {
+    relation restrictwith $refingrefs {$Value eq "@nil@"} |
+    relation project ~ Domain ReferencedClass Component |
+    relation rename ~ ReferencedClass Class
+}]
+# puts [relformat $nilcomps nilcomps]
+
+CreateNilDestBackRefs $simprefedclass $backrefs $nilcomps
 ----
 
 We can factor out some common code for creating the back references
@@ -7786,27 +7803,30 @@ for conditional associations where we have `nil` reference values.
 [source,tcl]
 ----
 <<helper commands>>=
-proc CreateNilDestBackRefs {refedclasses backrefs} {
-    set nilbackrefs [FindNilDestBackRefs $refedclasses $backrefs]
-    foreach nilbackref [relation body $nilbackrefs] {
-        ClassComponentValue create {*}$nilbackref Value @nil@
-    }
-}
-----
-
-(((micca,Helpers,FindNilDestBackRefs)))
-[source,tcl]
-----
-<<helper commands>>=
-proc FindNilDestBackRefs {refedclasses backrefs} {
-    return [pipe {
+proc CreateNilDestBackRefs {refedclasses backrefs nilcomps} {
+    # Find all the class instances and then subtract off those where there
+    # non-nil back references. This leaves the one's that must be set
+    # to nil.
+    # puts [relformat $backrefs backrefs]
+    # puts [relformat $nilcomps nilcomps]
+    set allnilcomps [pipe {
+        relation project $backrefs Domain Class Component |
+        relation union ~ $nilcomps
+    }]
+    # puts [relformat $allnilcomps allnilcomps]
+    set nilbackrefs [pipe {
         findRelated $refedclasses R38 R40 R41 R104 {~R101 ElementPopulation}\
             {~R105 ClassPopulation} ~R102 |
         deRef % |
         relation eliminate % Number |
-        relation semiminus $backrefs % |
-        relation join % [relation eliminate $backrefs Instance Value]
+        relation minus % [relation eliminate $backrefs Component Value] |
+        relation join % $allnilcomps
     } {} |%]
+    # puts [relformat $nilbackrefs nilbackrefs]
+
+    foreach nilbackref [relation body $nilbackrefs] {
+        ClassComponentValue create {*}$nilbackref Value @nil@
+    }
 }
 ----
 
@@ -7828,7 +7848,10 @@ test singlebackref-1.0 {
             }
             class Y {
             }
+            class Z {
+            }
             association R1 X 0..1--0..1 Y
+            association R2 X 0..1--0..1 Z
         }
 
         population foo {
@@ -7842,11 +7865,15 @@ test singlebackref-1.0 {
                 instance y2
                 instance y3
             }
+            class Z {
+                instance z1
+                instance z2
+            }
         }
     }
     log::debug [formatMiccaClass ClassComponentValue]
     testConditions\
-        {[refMultiplicity [ClassComponentValue findAll]] == 6}
+        {[refMultiplicity [ClassComponentValue findAll]] == 11}
 } -result {1}
 ----
 
@@ -7887,7 +7914,7 @@ its backward references will be to the associator class itself.
 ----
 <<population: set singular target class values>>=
 set trgclass [findRelated $singlerefs {~R38 TargetClass}]
-set trgbackrefs [pipe {
+set trgrefing [pipe {
     deRef $trgclass |
     relation eliminate ~ Role Conditionality Multiplicity |
     relation rename ~ Class TargetClass |
@@ -7897,8 +7924,17 @@ set trgbackrefs [pipe {
     relation join ~ $::micca::SourceClass |
     relation rename ~ Class SourceClass Relationship Component |
     relation eliminate ~ Role Conditionality Multiplicity |
-    relation join ~ $popvalues -using\
-        {Domain Domain Component Component AssociatorClass Class}
+    relation rename ~ AssociatorClass Class |
+    ralutil::rvajoin ~ $popvalues Values |
+    relation update ~ sbtup {1} {
+        tuple update $sbtup Component "[tuple extract $sbtup Component]__BACK"}
+}]
+# puts [relformat $trgrefing trgrefing]
+
+set trgbackrefs [pipe {
+    relation restrictwith $trgrefing {[relation isnotempty $Values]} |
+    relation ungroup ~ Values |
+    relation rename ~ Class AssociatorClass
 }]
 # puts [relformat $trgbackrefs trgbackrefs]
 ----
@@ -7951,9 +7987,7 @@ set backrefs [pipe {
         [tuple extract $brtup AssociatorClass]\
         [tuple extract $brtup Instance]]} |
     relation eliminate ~ AssociatorClass SourceClass Instance Value |
-    relation rename ~ TargetClass Class TargetInstance Instance NewValue Value |
-    relation update ~ sbtup {1} {
-        tuple update $sbtup Component "[tuple extract $sbtup Component]__BACK"}
+    relation rename ~ TargetClass Class TargetInstance Instance NewValue Value
 }]
 # puts [relformat $backrefs backrefs]
 ----
@@ -7973,7 +8007,14 @@ foreach backref [relation body $backrefs] {
     ClassComponentValue create {*}$backref
 }
 
-CreateNilDestBackRefs $trgclass $backrefs
+set nilcomps [pipe {
+    relation restrictwith $trgrefing {[relation isempty $Values]} |
+    relation project ~ Domain TargetClass Component |
+    relation rename ~ TargetClass Class
+}]
+# puts [relformat $nilcomps nilcomps]
+
+CreateNilDestBackRefs $trgclass $backrefs $nilcomps
 ----
 
 ==== Singular Forward Reference Values
@@ -7990,20 +8031,28 @@ set srcclass [pipe {
     SingularReference findWhere {$Domain eq $domain} |
     findRelated % R26 {~R28 ForwardReference} ~R95
 } {} |%]
-set srcforwrefs [pipe {
+set srcrefing [pipe {
     deRef $srcclass |
-    relation eliminate % Role Conditionality Multiplicity |
-    relation rename % Class SourceClass |
-    relation join % $::micca::AssociatorClass |
-    relation rename % Class AssociatorClass |
-    relation eliminate % Role |
-    relation join % $::micca::TargetClass |
-    relation rename % Class TargetClass Relationship Component |
-    relation eliminate % Role Conditionality Multiplicity |
-    relation join % $popvalues -using\
-        {Domain Domain Component Component AssociatorClass Class}
-} {} |%]
+    relation eliminate ~ Role Conditionality Multiplicity |
+    relation rename ~ Class SourceClass |
+    relation join ~ $::micca::AssociatorClass |
+    relation rename ~ Class AssociatorClass |
+    relation eliminate ~ Role |
+    relation join ~ $::micca::TargetClass |
+    relation rename ~ Class TargetClass Relationship Component |
+    relation eliminate ~ Role Conditionality Multiplicity |
+    relation rename ~ AssociatorClass Class |
+    ralutil::rvajoin ~ $popvalues Values |
+    relation update ~ sbtup {1} {
+        tuple update $sbtup Component "[tuple extract $sbtup Component]__FORW"}
+}]
 # puts [relformat $srcforwrefs srcforwrefs]
+
+set srcforwrefs [pipe {
+    relation restrictwith $srcrefing {[relation isnotempty $Values]} |
+    relation ungroup ~ Values |
+    relation rename ~ Class AssociatorClass
+}]
 ----
 
 Again we must deal with the reflexive and non-reflexive cases
@@ -8039,9 +8088,7 @@ set forwrefs [pipe {
         [tuple extract $frtup AssociatorClass]\
         [tuple extract $frtup Instance]]} |
     relation eliminate ~ AssociatorClass TargetClass Instance Value |
-    relation rename ~ SourceClass Class SourceInstance Instance NewValue Value |
-    relation update ~ sbtup {1} {
-        tuple update $sbtup Component "[tuple extract $sbtup Component]__FORW"}
+    relation rename ~ SourceClass Class SourceInstance Instance NewValue Value
 }]
 # puts [relformat $forwrefs forwrefs]
 ----
@@ -8055,7 +8102,41 @@ foreach forwref [relation body $forwrefs] {
     ClassComponentValue create {*}$forwref
 }
 
-CreateNilSourceBackRefs $srcclass $forwrefs
+set nilcomps [pipe {
+    relation restrictwith $srcrefing {[relation isempty $Values]} |
+    relation project ~ Domain SourceClass Component |
+    relation rename ~ SourceClass Class
+}]
+# puts [relformat $nilcomps nilcomps]
+
+CreateNilSourceBackRefs2 $srcclass $forwrefs $nilcomps
+----
+
+[source,tcl]
+----
+<<helper commands>>=
+proc CreateNilSourceBackRefs2 {srcclasses forwrefs nilcomps} {
+    # puts [relformat $forwrefs forwrefs]
+    # puts [relformat $nilcomps nilcomps]
+    set allnilcomps [pipe {
+        relation project $forwrefs Domain Class Component |
+        relation union ~ $nilcomps
+    }]
+    # puts [relformat $allnilcomps allnilcomps]
+    set nilforwrefs [pipe {
+        findRelated $srcclasses R40 R41 R104 {~R101 ElementPopulation}\
+            {~R105 ClassPopulation} ~R102 |
+        deRef % |
+        relation eliminate % Number |
+        relation minus % [relation eliminate $forwrefs Component Value] |
+        relation join % $allnilcomps
+    } {} |%]
+    # puts [relformat $nilforwrefs nilforwrefs]
+
+    foreach nilforwref [relation body $nilforwrefs] {
+        ClassComponentValue create {*}$nilforwref Value @nil@
+    }
+}
 ----
 
 The case of `nil` references from Source Classes can also be factored
@@ -8140,6 +8221,48 @@ test singlebackref-2.0 {
 ----
 <<config command tests>>=
 test singlebackref-2.1 {
+    Class based association singular back reference -- no linkage
+} -setup {
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca configure {
+        domain foo {
+            class A {
+            }
+            class X {
+            }
+            class Y {
+            }
+            association R1 -associator A X 0..1--0..1 Y
+        }
+
+        population foo {
+            class A {
+                allocate 3
+            }
+            class X {
+                instance x1
+                instance x2
+                instance x3
+            }
+            class Y {
+                instance y1
+                instance y2
+                instance y3
+            }
+        }
+    }
+    log::debug [formatMiccaClass ClassComponentValue]
+    testConditions\
+        {[refMultiplicity [ClassComponentValue findAll]] == 6}
+} -result {1}
+----
+
+[source,tcl]
+----
+<<config command tests>>=
+test singlebackref-2.2 {
     Class based association singular back reference -- reflexive
 } -setup {
 } -cleanup {
@@ -8200,17 +8323,54 @@ First we examine the simple referenced classes.
 ----
 <<population: set array referenced class values>>=
 set arrayrefedclass [findRelated $arrayrefs {~R38 SimpleReferencedClass}]
+set refingrefs [FindSimpleReferringRefs $arrayrefedclass $popvalues]
+puts [relformat $refingrefs refingrefs]
 set backrefs [pipe {
-    FindSimpleBackRefs $arrayrefedclass $popvalues |
+    FindSimpleBackRefs $refingrefs |
     relation eliminate ~ Relationship
 }]
-# puts [relformat $backrefs backrefs]
+puts [relformat $backrefs backrefs]
 
 foreach backref [relation body $backrefs] {
     ClassComponentValue create {*}$backref
 }
 
-CreateNilDestBackRefs $arrayrefedclass $backrefs
+set nilcomps [pipe {
+    relation restrictwith $refingrefs {$Value eq "@nil@"} |
+    relation project ~ Domain ReferencedClass Component |
+    relation rename ~ ReferencedClass Class
+}]
+
+CreateNilDestBackRefs $arrayrefedclass $backrefs $nilcomps
+----
+
+// HERE -- deal with simple linked list and target array and source array.
+// eliminate Refs2 procedures
+
+[source,tcl]
+----
+<<helper commands>>=
+proc CreateNilDestBackRefs2 {refedclasses backrefs} {
+    set nilbackrefs [FindNilDestBackRefs2 $refedclasses $backrefs]
+    foreach nilbackref [relation body $nilbackrefs] {
+        ClassComponentValue create {*}$nilbackref Value @nil@
+    }
+}
+----
+
+[source,tcl]
+----
+<<helper commands>>=
+proc FindNilDestBackRefs2 {refedclasses backrefs} {
+    return [pipe {
+        findRelated $refedclasses R38 R40 R41 R104 {~R101 ElementPopulation}\
+            {~R105 ClassPopulation} ~R102 |
+        deRef % |
+        relation eliminate % Number |
+        relation semiminus $backrefs % |
+        relation join % [relation eliminate $backrefs Instance Value]
+    } {} |%]
+}
 ----
 
 As it turns out,
@@ -8225,7 +8385,7 @@ We will also factor out the other cases below.
 [source,tcl]
 ----
 <<helper commands>>=
-proc FindSimpleBackRefs {refedclasses popvalues} {
+proc FindSimpleReferringRefs {refedclasses popvalues} {
     return [pipe {
         deRef $refedclasses |
         relation eliminate ~ Role Conditionality |
@@ -8235,12 +8395,18 @@ proc FindSimpleBackRefs {refedclasses popvalues} {
         relation eliminate ~ Role Conditionality Multiplicity |
         relation join ~ $popvalues -using\
             {Domain Domain Relationship Component ReferringClass Class} |
-        relation restrictwith ~ {$Value ne "@nil@"} |
+        relation extend ~ abtup\
+            Component string {"[tuple extract $abtup Relationship]__BACK"}
+    }]
+}
+
+proc FindSimpleBackRefs {refingrefs} {
+    return [pipe {
+        relation restrictwith $refingrefs {$Value ne "@nil@"} |
         relation group ~ Instances Instance |
         relation extend ~ abtup\
             NewValue string {[list [tuple extract $abtup ReferringClass]\
-                [relation list [tuple extract $abtup Instances]]]}\
-            Component string {"[tuple extract $abtup Relationship]__BACK"} |
+                [relation list [tuple extract $abtup Instances]]]} |
         relation eliminate ~ ReferringClass Instances |
         relation rename ~ ReferencedClass Class Value Instance NewValue Value
     }]
@@ -8261,11 +8427,12 @@ test arraybackref-1.0 {
 } -body {
     micca configure {
         domain foo {
-            class X {
-            }
-            class Y {
-            }
+            class X {}
+            class Y {}
             association R1 -static X 0..*--0..1 Y
+
+            class Z {}
+            association R2 -static X 0..*--0..1 Z
         }
 
         population foo {
@@ -8280,11 +8447,15 @@ test arraybackref-1.0 {
                 instance y2
                 instance y3
             }
+            class Z {
+                instance z1
+                instance z2
+            }
         }
     }
     log::debug [formatMiccaClass ClassComponentValue]
     testConditions\
-        {[refMultiplicity [ClassComponentValue findAll]] == 7}
+        {[refMultiplicity [ClassComponentValue findAll]] == 13}
 } -result {1}
 ----
 
@@ -8335,7 +8506,7 @@ foreach backref [relation body $backrefs] {
     ClassComponentValue create {*}$backref
 }
 
-CreateNilDestBackRefs $trgclass $backrefs
+CreateNilDestBackRefs2 $trgclass $backrefs
 ----
 
 Again, finding the target back references can be shared with the
@@ -8702,7 +8873,8 @@ the linked references.
 ----
 <<population: set link referenced class values>>=
 set linkrefedclass [findRelated $linkbackrefs {~R38 SimpleReferencedClass}]
-set backrefs [FindSimpleBackRefs $linkrefedclass $popvalues]
+set refingrefs [FindSimpleReferringRefs $linkrefedclass $popvalues]
+set backrefs [FindSimpleBackRefs $refingrefs]
 # puts [relformat $backrefs backrefs]
 
 CreateLinkedRefs $backrefs BLINKS
@@ -8776,7 +8948,7 @@ proc CreateLinkedRefs {backrefs compname} {
 ----
 <<helper commands>>=
 proc CreateNilLinkedBackRefs {refedclasses backrefs} {
-    set nilbackrefs [FindNilDestBackRefs $refedclasses $backrefs]
+    set nilbackrefs [FindNilDestBackRefs2 $refedclasses $backrefs]
     # puts [relformat $nilbackrefs nilbackrefs]
     CreateNilLinkedRefs $nilbackrefs
 }
