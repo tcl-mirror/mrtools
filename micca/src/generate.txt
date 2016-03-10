@@ -134,8 +134,7 @@ proc miccaGenerate {arglist} {
     <<miccaGenerate: parse command line arguments>>
     <<miccaGenerate: set up template expansion>>
     <<miccaGenerate: verify domains are populated>>
-    <<miccaGenerate: generate header files>>
-    <<miccaGenerate: generate code files>>
+    <<miccaGenerate: generate files>>
 
     rename expand {} ; # <1>
 
@@ -220,12 +219,6 @@ Following our usual pattern,
 we will execute the header generation commands from the template in
 a child namespace to avoid any name conflicts.
 
-[source,c]
-----
-<<miccaGenerate: generate header files>>=
-expand evalcmd "namespace eval [namespace current]::GenHeader"
-----
-
 The `GenHeader` namespace is a child of `::micca::@Gen@` and follows
 our usual pattern of imports, command path and contents.
 
@@ -279,8 +272,9 @@ We use some variables to provide context to the embedded expansion commands.
 
 [source,c]
 ----
-<<miccaGenerate: generate header files>>=
+<<miccaGenerate: generate files>>=
 variable headerTemplate
+variable codeTemplate
 
 forAllRefs domainRef [Domain findAll] {
     namespace upvar GenHeader\
@@ -294,6 +288,9 @@ forAllRefs domainRef [Domain findAll] {
         {Interface interface}
     set thisdomain $domain
 
+    PrepareDomainProperties $domain
+
+    expand evalcmd "namespace eval [namespace current]::GenHeader"
     set hchan [::open $domain.h w]
     try {
         puts $hchan [expand expand $headerTemplate]
@@ -305,6 +302,30 @@ forAllRefs domainRef [Domain findAll] {
     }
 
     unset domain interface
+
+    namespace upvar GenCode\
+        domain domain\
+        prologue prologue\
+        epilogue epilogue
+
+    assignAttribute $domainRef\
+        {Name domain}\
+        {Prologue prologue}\
+        {Epilogue epilogue}
+
+    CreateActivityCommands $domain
+
+    expand evalcmd "namespace eval [namespace current]::GenCode"
+    set cchan [::open $domain.c w]
+    try {
+        puts $cchan [expand expand $codeTemplate]
+    } on error {result opts} {
+        puts $::errorInfo
+        return -options $opts $result
+    } finally {
+        chan close $cchan
+        namespace delete GenActivity
+    }
 }
 ----
 
@@ -704,7 +725,7 @@ instance population.
 <<portalIds:: generate instance encodings>>=
 set instRefs [findRelated $classRef ~R20 ~R103]
 append result "#define [string toupper ${Domain}_${Name}_INSTCOUNT]\
-        [refMultiplicity $instRefs]\n"
+        [GetClassProperty $Name TotalInstance]\n"
 forAllRefs inst $instRefs {
     assignAttribute $inst Instance {Number InstNumber}
     set instid [string toupper ${Domain}_${Name}_${Instance}_INSTID]
@@ -800,12 +821,6 @@ test headergen-4.0 {
 
 [source,c]
 ----
-<<miccaGenerate: generate code files>>=
-expand evalcmd "namespace eval [namespace current]::GenCode"
-----
-
-[source,c]
-----
 <<generation code namespace>>=
 namespace eval GenCode {
     logger::initNamespace [namespace current]
@@ -871,38 +886,6 @@ set codeTemplate [string cat\
     %<externalOpDefinitions>%\
     %<epilogue>%\
 ]
-----
-
-[source,c]
-----
-<<miccaGenerate: generate code files>>=
-variable codeTemplate
-
-forAllRefs domainRef [Domain findAll] {
-    namespace upvar GenCode\
-        domain domain\
-        prologue prologue\
-        epilogue epilogue
-
-    assignAttribute $domainRef\
-        {Name domain}\
-        {Prologue prologue}\
-        {Epilogue epilogue}
-
-    PrepareDomainProperties $domain
-    CreateActivityCommands $domain
-
-    set cchan [::open $domain.c w]
-    try {
-        puts $cchan [expand expand $codeTemplate]
-    } on error {result opts} {
-        puts $::errorInfo
-        return -options $opts $result
-    } finally {
-        chan close $cchan
-        namespace delete GenActivity
-    }
-}
 ----
 
 [source,c]
@@ -3381,7 +3364,8 @@ proc classDefinitions {} {
             [relation cardinality [tuple extract $etup SModel]] == 0 ?\
             "NULL" : "&[tuple extract $etup Name]__EDB"} |
         ralutil::rvajoin ~\
-            [relation rename $::micca::DeferredEvent Model Name] PEvents |
+            [relation rename $::micca::DeferredEvent Model Name Number EvtNum]\
+                PEvents |
         relation extend ~ ptup PDB string {
             [relation cardinality [tuple extract $ptup PEvents]] == 0 ?\
             "NULL" : "&[tuple extract $ptup Name]__PDB"} |
@@ -5165,7 +5149,7 @@ proc InstanceForeachRelated {instref startref args} {
     foreach relspec $args {
         set relinfo [LookUpRelationship $relspec]
         while {[llength $relinfo] != 0} {
-            puts "relinfo = \"$relinfo\""
+            # puts "relinfo = \"$relinfo\""
             set relinfo [lassign $relinfo sourceclass targetclass reftype cond\
                 comp]
             switch -exact -- $reftype {
@@ -5988,15 +5972,96 @@ test codegen-42.0 {
 ----
 <<generation support commands>>=
 proc InstanceSignal {instref event args} {
+    lassign [InstanceNewECB $instref $event $args] ecbvar result
+    append result [IndentToBlock "mrt_PostEvent($ecbvar) ;\n"]
+    return $result
+}
+----
+
+[source,c]
+----
+<<generation support commands>>=
+proc InstanceDelaySignal {instref time event args} {
+    lassign [InstanceNewECB $instref $event $args] ecbvar result
+    append result [IndentToBlock "mrt_PostDelayedEvent($ecbvar, $time) ;\n"]
+    return $result
+}
+----
+
+[source,c]
+----
+<<generation support commands>>=
+proc InstanceCancelSignal {instref event {sourceref {}}} {
+    set target [CheckSymbol $instref]
+    if {[dict get $target Type] ne "Reference"} {
+        error "$instref does not refer to a class instance"
+    }
+    set eventRef [Event findById Domain $domain Model [dict get $target Class]\
+        Event $event]
+    if {[isEmptyRef $eventRef]} {
+        error "event, $event, is not a known event for class,\
+            [dict get $target Class]"
+    }
+    if {$sourceref ne {}} {
+        set source [CheckSymbol $sourceref]
+        if {[dict get $source Type] ne "Reference"} {
+            error "$instref does not refer to a class instance"
+        }
+        set sourceinst $sourceref
+    } else {
+        set sourceinst NULL
+    }
+    return [IndentToBlock\
+        "mrt_CancelDelayedEvent([readAttribute $eventRef Number],\
+            $instref, $sourceinst) ;\n"\
+    ]
+}
+----
+
+[source,c]
+----
+<<generation support commands>>=
+proc InstanceRemainingTime {instref event {sourceref {}}} {
+    set target [CheckSymbol $instref]
+    if {[dict get $target Type] ne "Reference"} {
+        error "$instref does not refer to a class instance"
+    }
+    set eventRef [Event findById Domain $domain Model [dict get $target Class]\
+        Event $event]
+    if {[isEmptyRef $eventRef]} {
+        error "event, $event, is not a known event for class,\
+            [dict get $target Class]"
+    }
+    if {$sourceref ne {}} {
+        set source [CheckSymbol $sourceref]
+        if {[dict get $source Type] ne "Reference"} {
+            error "$instref does not refer to a class instance"
+        }
+        set sourceinst $sourceref
+    } else {
+        set sourceinst NULL
+    }
+    return "mrt_RemainingDelayTime([readAttribute $eventRef Number],\
+            $instref, $sourceinst) ;\n"
+}
+----
+
+[source,c]
+----
+<<generation support commands>>=
+proc InstanceNewECB {instref event arglist} {
     variable domain
 
-    if {[llength $args] % 2 != 0} {
+    if {[llength $arglist] % 2 != 0} {
         error "event parameters must be given as name / value pairs, got:\
-            \"$args\""
+            \"$arglist\""
     }
     set target [CheckSymbol $instref]
 
     dict with target {
+        if {$Type ne "Reference"} {
+            error "$instref does not refer to a class instance"
+        }
         set eventRef [Event findById Domain $domain Model $Class Event $event]
         if {[isEmptyRef $eventRef]} {
             error "event, $event, is not a known event for class, $Class"
@@ -6007,7 +6072,7 @@ proc InstanceSignal {instref event args} {
             assignAttribute $transRef {Number eventNum}
             set eventType mrtTransitionEvent
         } else {
-            set deferredRef [findRelated $eventRef {~R80 DeferredEvent}
+            set deferredRef [findRelated $eventRef {~R80 DeferredEvent}]
             assignAttribute $deferredRef {Number eventNum}
             set eventType mrtPolymorphicEvent
         }
@@ -6015,7 +6080,7 @@ proc InstanceSignal {instref event args} {
         set psig [findRelated $eventRef R69]
         set params [FindParamsFromSig $psig]
         set required [relation list $params Name]
-        set supplied [dict keys $args]
+        set supplied [dict keys $arglist]
         if {![::struct::set equal $required $supplied]} {
             error "event, $event, requires parameters,\
                 \"[join $required {, }]\", got:\
@@ -6036,12 +6101,11 @@ proc InstanceSignal {instref event args} {
                 "    (struct $eparamsname *)$ecbvar->eventParameters ;\n"
             relation foreach param $params -ascending Position {
                 relation assign $param Name
-                append result "$ptrparams->$Name = [dict get $args $Name] ;\n"
+                append result "$ptrparams->$Name = [dict get $arglist $Name] ;\n"
             }
         }
-        append result "mrt_PostEvent($ecbvar) ;\n"
     }
-    return [IndentToBlock $result]
+    return [list $ecbvar [IndentToBlock $result]]
 }
 ----
 

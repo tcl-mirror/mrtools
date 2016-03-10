@@ -81,7 +81,7 @@ micca_rt_test : LOADLIBES = $(HOME)/local/lib/libcunit.a
 
 micca_rt_test : micca_rt_test.c
 
-micca_rt_test.c : micca_rt.c micca_rt.h
+micca_rt_test.c : micca_rt.c micca_rt.h testdomain.c
 
 micca_rt_test.c : $(DOCSRC)
 	atangle $(ATANGLEOPTS) -root micca_rt_test.c -output $@ $<
@@ -94,6 +94,21 @@ micca_rt.h : $(RTSRC) $(MICCADIR)/*.txt
 micca_rt.c : $(RTSRC) $(MICCADIR)/*.txt
 	cd $(MICCADIR) ; atangle $(ATANGLEOPTS) -root micca_rt_posix.c -output $@ micca.aweb
 	mv $(MICCADIR)/micca_rt.c .
+
+testdomain.c : testdomain.micca
+	tclsh $<
+
+testdomain.micca : $(DOCSRC)
+	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
+
+CLEANFILES =\
+	micca_rt_test\
+	micca_rt_test.c\
+	micca_rt.c\
+	micca_rt.h\
+	testdomain.c\
+	testdomain.h\
+	$(NULL)
 
 clean :
 	$(RM) $(CLEANFILES)
