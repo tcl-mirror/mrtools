@@ -261,6 +261,7 @@ set headerTemplate [string cat\
     %<externalOpDeclarations>%\
     %<eventParamDeclarations>%\
     %<portalIds>%\
+    %<portalDeclaration>%\
     "#endif /* %<headerFileGuard>% */"\
 ]
 ----
@@ -817,6 +818,17 @@ test headergen-4.0 {
 } -result {2}
 ----
 
+[source,c]
+----
+<<generation header commands>>=
+proc portalDeclaration {} {
+    variable domain
+    append result\
+        [comment "Domain Portal Declaration"]\
+        "extern MRT_DomainPortal ${domain}__PORTAL ;\n"
+}
+----
+
 == Generating Code Files
 
 [source,c]
@@ -884,6 +896,7 @@ set codeTemplate [string cat\
     %<domainCtorDefinition>%\
     %<domainOpDefinitions>%\
     %<externalOpDefinitions>%\
+    %<portalDefinition>%\
     %<epilogue>%\
 ]
 ----
@@ -1099,6 +1112,7 @@ relation foreach info $classInfo {
         create [list ${suppns}::ClassCreate $Name]\
         foreachInstance [list ${suppns}::ClassForeachInstance $Name]\
         declareReference [list ${suppns}::ClassDeclareReference $Name]\
+        findByName [list ${suppns}::ClassFindByName $Name]\
     ]
     if {$HasStateModel} {
         dict set cmdmap createin [list ${suppns}::ClassCreateIn $Name]
@@ -1192,6 +1206,9 @@ set cmdmap [dict create\
     withAttribute ${suppns}::InstanceWithAttribute\
     assignAttribute ${suppns}::InstanceAssignAttribute\
     signal ${suppns}::InstanceSignal\
+    delaysignal ${suppns}::InstanceDelaySignal\
+    canceldelayed ${suppns}::InstanceCancelSignal\
+    delayremaining ${suppns}::InstanceRemainingTime\
     delete ${suppns}::InstanceDelete\
     foreachRelated ${suppns}::InstanceForeachRelated\
 ]
@@ -2930,22 +2947,10 @@ proc pdbDefinitions {} {
     set gdbs {}
     set pdbs {}
 
-    set superRefs [pipe {
-        DeferredEvent findWhere {$Domain eq $domain} |
-        findRelated % ~R86
-    } {} |%]
+    set deRefs [DeferredEvent findWhere {$Domain eq $domain}]
+    set superRefs [findRelated $deRefs ~R86]
     if {[isEmptyRef $superRefs]} {
         return
-    }
-
-    set subRefs [findRelated $superRefs\
-            {~R48 ReferencedSuperclass} R36 ~R37 R47]
-    if {[isNotEmptyRef $subRefs]} {
-        set supertype mrtPolyReference
-    } else {
-        set subRefs [findRelated $superRefs\
-                {~R48 UnionSuperclass} R44 ~R45 R47]
-        set supertype mrtPolyUnion
     }
 
     set deferred [pipe {
@@ -2953,13 +2958,12 @@ proc pdbDefinitions {} {
         deRef ~ |
         relation join ~ $::micca::DeferredEvent |
         relation eliminate ~ Domain Role |
-        relation extend ~ gtup SuperType string {$supertype} |
         relation rename ~ Model Superclass Number SuperNumber
     }]
     # puts [relformat $deferred deferred]
 
     set nonlocals [pipe {
-        findRelated $subRefs ~R85 |
+        Non-LocalEvent findWhere {$Domain eq $domain} |
         deRef % |
         relation join % $::micca::Relationship\
             -using {Domain Domain Relationship Name} |
@@ -2985,7 +2989,7 @@ proc pdbDefinitions {} {
         relation join ~ $deferred |
         relation group ~ EventMap Event SuperNumber Number Type |
         relation group ~ SubMap Model EventMap |
-        relation group ~ Generalizations Relationship RelNumber SuperType SubMap
+        relation group ~ Generalizations Relationship RelNumber SubMap
     }]
     # puts [relformat $supers supers]
 
@@ -4704,6 +4708,25 @@ test codegen-19.0 {
 [source,c]
 ----
 <<generation code commands>>=
+proc portalDefinition {} {
+    variable domain
+
+    set classRefs [Class findWhere {$Domain eq $domain}]
+    append result\
+        [comment "Domain Portal Definition"]\
+        "MRT_DomainPortal ${domain}__PORTAL = \{\n"\
+        "    .classCount = [refMultiplicity $classRefs],\n"\
+        "    .classes = ${domain}__CLASSES,\n"\
+        "        #ifndef MRT_NO_NAMES\n"\
+        "    .name = \"$domain\"\n"\
+        "        #endif /* MRT_NO_NAMES */\n"\
+        "\} ;\n"
+}
+----
+
+[source,c]
+----
+<<generation code commands>>=
 proc epilogue {} {
     variable epilogue
 
@@ -5992,16 +6015,13 @@ proc InstanceDelaySignal {instref time event args} {
 ----
 <<generation support commands>>=
 proc InstanceCancelSignal {instref event {sourceref {}}} {
+    variable domain
+
     set target [CheckSymbol $instref]
     if {[dict get $target Type] ne "Reference"} {
         error "$instref does not refer to a class instance"
     }
-    set eventRef [Event findById Domain $domain Model [dict get $target Class]\
-        Event $event]
-    if {[isEmptyRef $eventRef]} {
-        error "event, $event, is not a known event for class,\
-            [dict get $target Class]"
-    }
+    set eventNum [FindEventNumber [dict get $target Class] $event]
     if {$sourceref ne {}} {
         set source [CheckSymbol $sourceref]
         if {[dict get $source Type] ne "Reference"} {
@@ -6012,9 +6032,7 @@ proc InstanceCancelSignal {instref event {sourceref {}}} {
         set sourceinst NULL
     }
     return [IndentToBlock\
-        "mrt_CancelDelayedEvent([readAttribute $eventRef Number],\
-            $instref, $sourceinst) ;\n"\
-    ]
+        "mrt_CancelDelayedEvent($eventNum, $instref, $sourceinst) ;\n"]
 }
 ----
 
@@ -6022,16 +6040,13 @@ proc InstanceCancelSignal {instref event {sourceref {}}} {
 ----
 <<generation support commands>>=
 proc InstanceRemainingTime {instref event {sourceref {}}} {
+    variable domain
+
     set target [CheckSymbol $instref]
     if {[dict get $target Type] ne "Reference"} {
         error "$instref does not refer to a class instance"
     }
-    set eventRef [Event findById Domain $domain Model [dict get $target Class]\
-        Event $event]
-    if {[isEmptyRef $eventRef]} {
-        error "event, $event, is not a known event for class,\
-            [dict get $target Class]"
-    }
+    set eventNum [FindEventNumber [dict get $target Class] $event]
     if {$sourceref ne {}} {
         set source [CheckSymbol $sourceref]
         if {[dict get $source Type] ne "Reference"} {
@@ -6041,8 +6056,7 @@ proc InstanceRemainingTime {instref event {sourceref {}}} {
     } else {
         set sourceinst NULL
     }
-    return "mrt_RemainingDelayTime([readAttribute $eventRef Number],\
-            $instref, $sourceinst) ;\n"
+    return "mrt_RemainingDelayTime($eventNum, $instref, $sourceinst) ;\n"
 }
 ----
 
@@ -6106,6 +6120,26 @@ proc InstanceNewECB {instref event arglist} {
         }
     }
     return [list $ecbvar [IndentToBlock $result]]
+}
+----
+
+[source,c]
+----
+<<generation support commands>>=
+proc FindEventNumber {class event} {
+    variable domain
+    set eventRef [Event findById Domain $domain Model $class Event $event]
+    if {[isEmptyRef $eventRef]} {
+        error "event, $event, is not a known event for class, $Class"
+    }
+
+    set transRef [findRelated $eventRef {~R80 TransitioningEvent}]
+    if {[isNotEmptyRef $transRef]} {
+        return [readAttribute $transRef Number]
+    } else {
+        set deferredRef [findRelated $eventRef {~R80 DeferredEvent}]
+        return [readAttribute $deferredRef Number]
+    }
 }
 ----
 
@@ -6553,15 +6587,6 @@ test codegen-28.0 {
 [source,c]
 ----
 <<generation support commands>>=
-proc ClassDeclareReference {className varName} {
-    return [string trimright\
-        [IndentToBlock [CreateRefSymbol $className $varName]] \n]
-}
-----
-
-[source,c]
-----
-<<generation support commands>>=
 proc ClassForeachInstance {className instref} {
     variable domain
 
@@ -6631,6 +6656,34 @@ test codegen-29.0 {
     testConditions\
         {[llength [fileutil::grep {xref->color} codegen29.c]] == 1}
 } -result {1}
+----
+
+[source,c]
+----
+<<generation support commands>>=
+proc ClassDeclareReference {className varName} {
+    return [string trimright\
+        [IndentToBlock [CreateRefSymbol $className $varName]] \n]
+}
+----
+
+[source,c]
+----
+<<generation support commands>>=
+proc ClassFindByName {className instName varName} {
+    variable domain
+    set instRef [ClassInstance findById Domain $domain Class $className\
+        Instance $instName]
+    if {[isEmptyRef $instRef]} {
+        error "class, $className, has not instance named, $instName"
+    }
+    set instNum [readAttribute $instRef Number]
+    set instdecl [CreateRefSymbol $className $varName]
+    append result\
+        "$instdecl = &${className}__POOL\[$instNum\] ;\n"\
+        "assert($varName->base__INST.alloc > 0) ;\n"
+    return [IndentToBlock $result]
+}
 ----
 
 Union subclasses require a different strategy.
