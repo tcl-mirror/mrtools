@@ -382,7 +382,7 @@ pointer to a `MRT_Instance` with impunity.
 [source,c]
 ----
 <<mrt interface simple types>>=
-typedef uint16_t AllocStatus ;
+typedef int16_t AllocStatus ;
 ----
 
 A class instance is in reality an element of a ``C'' array.
@@ -888,7 +888,7 @@ mrtIncrAllocCounter(
     /*
      * Catch any overflow
      */
-    return iab->alloc == UINT16_MAX ? 1 : ++iab->alloc ;
+    return iab->alloc == INT16_MAX ? 1 : ++iab->alloc ;
 }
 ----
 
@@ -1435,7 +1435,7 @@ mrtMarkTransaction(
         for (unsigned markedCount = mrtDataTransaction.count ;
                 markedCount != 0 ; --markedCount, ++marked) {
             if (*marked == *rel) {
-                continue ;
+                return ;
             }
         }
 
@@ -1455,10 +1455,13 @@ of the stored pointers.
 
 [source,c]
 ----
-<<mrt static functions>>=
-static
+<<mrt external interfaces>>=
 void
-mrtEndTransaction(void)
+mrt_EndTransaction(void) ;
+
+<<mrt external functions>>=
+void
+mrt_EndTransaction(void)
 {
     MRT_Relationship const **rships = mrtDataTransaction.relationships ;
     for (unsigned count = mrtDataTransaction.count ; count != 0 ;
@@ -1474,7 +1477,7 @@ mrtEndTransaction(void)
 ==== Verifying Referential Integrity
 
 At the end of a transaction on the data model,
-`mrtEndTransaction` iterates across the set of saved relationship
+`mrt_EndTransaction` iterates across the set of saved relationship
 descriptors and checks each relationship to make sure the data model
 is in a consistent state.
 The design approach is to use the `refCount` member of each instance
@@ -1890,10 +1893,6 @@ mrtCountAssocRefs(
     struct mrtassociationrole const *source,
     struct mrtassociationrole const *target)
 {
-    if (source->storageType == mrtArray || target->storageType == mrtArray) {
-        mrtFatalError(mrtConstRelationship) ;
-    }
-
     MRT_iab *iabSource = source->classDesc->iab ;
     MRT_iab *iabTarget = target->classDesc->iab ;
 
@@ -1903,11 +1902,17 @@ mrtCountAssocRefs(
         break ;
 
     case mrtLinkedList:
-        mrtCountLinkedListRefs(iabSource, source->storageOffset,
-                iabTarget, source->linkOffset) ;
+        /*
+         * For simple associations, the reference from the referring class to
+         * the referenced class is always singular.  If we get here, there is a
+         * serious linkage problem.
+         */
+        mrtFatalError(mrtRelationshipLinkage) ;
         break ;
 
-    case mrtArray: /* to eliminate a compiler warning */
+    case mrtArray:
+    default:
+        mrtFatalError(mrtStaticRelationship) ;
         break ;
     }
 
@@ -1921,7 +1926,9 @@ mrtCountAssocRefs(
                 iabSource, target->linkOffset) ;
         break ;
 
-    case mrtArray: /* to eliminate a compiler warning */
+    case mrtArray:
+    default:
+        mrtFatalError(mrtStaticRelationship) ;
         break ;
     }
 }
@@ -2040,8 +2047,8 @@ mrtCountLinkedListRefs(
         if (inst->alloc > 0) {
             MRT_LinkRef *ref = (MRT_LinkRef *)((uintptr_t)inst + refOffset) ;
             if (ref->next != NULL) { // <1>
-                for (MRT_LinkRef *iter = mrtLinkRefBegin(iter) ;
-                        iter != mrtLinkRefEnd(iter) ; iter = iter->next) {
+                for (MRT_LinkRef *iter = mrtLinkRefBegin(ref) ;
+                        iter != mrtLinkRefEnd(ref) ; iter = iter->next) {
                     MRT_Instance *targetInst =
                         (MRT_Instance *)((uintptr_t)iter - linkOffset) ; // <2>
                     if ((void *)targetInst >= target->storageStart &&
@@ -2093,10 +2100,6 @@ mrtCountClassAssocRefs(
     MRT_iab *iabAssociator,
     MRT_AttrOffset assocOffset)
 {
-    if (participant->storageType == mrtArray) {
-        mrtFatalError(mrtConstRelationship) ;
-    }
-
     MRT_iab *iabPart = participant->classDesc->iab ;
 
     switch (participant->storageType) {
@@ -2109,7 +2112,8 @@ mrtCountClassAssocRefs(
                 iabAssociator, participant->linkOffset) ;
         break ;
 
-    case mrtArray: /* to eliminate a compiler warning */
+    case mrtArray:
+        mrtFatalError(mrtStaticRelationship) ;
         break ;
     }
     mrtCountSingularRefs(iabAssociator, assocOffset, iabPart) ;
@@ -2349,7 +2353,7 @@ mrtLink(
 
     case mrtArray:
         // can't link array types
-        mrtFatalError(mrtConstRelationship) ;
+        mrtFatalError(mrtStaticRelationship) ;
         break ;
 
     case mrtLinkedList: { // <2>
@@ -2640,7 +2644,7 @@ mrtUnlink(
 
     case mrtArray:
         // can't unlink array types
-        mrtFatalError(mrtConstRelationship) ;
+        mrtFatalError(mrtStaticRelationship) ;
         break ;
 
     case mrtLinkedList: {
@@ -4382,7 +4386,7 @@ mrtDispatchOneEvent(void)
     if (!mrtEventQueueEmpty(&eventQueue)) {
         queue = &eventQueue ;
     } else {
-        mrtEndTransaction() ;
+        mrt_EndTransaction() ;
         if (!mrtEventQueueEmpty(&tocEventQueue)) {
             queue = &tocEventQueue ;
         } else {
@@ -5032,7 +5036,8 @@ mrtDispatchCreationEvent(
     assert(ecb->alloc == ecb->targetInst->alloc) ;
     assert(ecb->alloc < 0) ;
     assert(ecb->targetInst->alloc < 0) ;
-    assert(ecb->targetInst->currentState == 0) ;
+    assert(ecb->targetInst->currentState ==
+        ecb->targetInst->classDesc->edb->creationState) ;
 
     /*
      * Negate the alloc member to show that the instance is now active.
@@ -6623,7 +6628,7 @@ typedef enum {
     mrtSyncOverflow,
     mrtRefIntegrity,
     mrtTransOverflow,
-    mrtConstRelationship,
+    mrtStaticRelationship,
     mrtRelationshipLinkage,
 
 #       ifdef _POSIX_C_SOURCE
@@ -6646,7 +6651,7 @@ static char const * const errMsgs[] = {
     [mrtSyncOverflow] = "synchronization queue overflow\n",
     [mrtRefIntegrity] = "referential integrity check failed\n",
     [mrtTransOverflow] = "transaction markings overflow\n",
-    [mrtConstRelationship] = "attempt to modify constant relationship\n",
+    [mrtStaticRelationship] = "attempt to modify static relationship\n",
     [mrtRelationshipLinkage] = "attempt to link non-participant\n",
 
 #       ifndef MRT_NO_NAMES
@@ -7747,16 +7752,35 @@ mrtPrintTraceInfo(
         sourceName = "none" ;
         sourceClassName = "none" ;
     } else {
-        if (traceInfo->sourceInst->name == NULL) {
-            sourceName = "unknown" ;
-        } else {
-            sourceName = traceInfo->sourceInst->name ;
-        }
         sourceClassName = traceInfo->sourceInst->classDesc->name ;
+        sourceName = traceInfo->sourceInst->name ;
+        if (sourceName == NULL) {
+            MRT_iab *iab = traceInfo->sourceInst->classDesc->iab ;
+            if (iab && iab->storageStart != NULL) {
+                int32_t instid = ((uintptr_t)traceInfo->sourceInst -
+                    (uintptr_t)iab->storageStart) / iab->instanceSize ;
+                char idnumbuf[32] ;
+                snprintf(idnumbuf, sizeof(idnumbuf), "%" PRId32, instid) ;
+                sourceName = idnumbuf ;
+            } else {
+                sourceName = "unknown" ;
+            }
+        }
     }
     
-    char const *targetName = traceInfo->targetInst->name ?
-            traceInfo->targetInst->name : "unknown" ;
+    char const *targetName = traceInfo->targetInst->name ;
+    if (targetName == NULL) {
+        MRT_iab *iab = traceInfo->targetInst->classDesc->iab ;
+        if (iab && iab->storageStart != NULL) {
+            int32_t instid = ((uintptr_t)traceInfo->targetInst -
+                (uintptr_t)iab->storageStart) / iab->instanceSize ;
+            char idnumbuf[32] ;
+            snprintf(idnumbuf, sizeof(idnumbuf), "%" PRId32, instid) ;
+            targetName = idnumbuf ;
+        } else {
+            targetName = "unknown" ;
+        }
+    }
 
     switch (traceInfo->eventType) {
     case mrtTransitionEvent: {
@@ -8012,6 +8036,7 @@ mrt_Initialize(void)
 <<common includes>>=
 #include <string.h>
 #include <assert.h>
+#include <inttypes.h>
 #include "micca_rt.h"
 ----
 
