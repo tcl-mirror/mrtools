@@ -155,7 +155,7 @@ $(POSIXOBJ) : posixc posixh
 
 posixc : $(POSIXC)
 
-posixh : $(POSICH)
+posixh : $(POSIXH)
 
 $(POSIXOBJ) : $(POSIXH) $(POSIXC)
 

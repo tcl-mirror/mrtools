@@ -1049,8 +1049,7 @@ proc CreateActivityCommands {domain} {
     set actns ${currns}::GenActivity
     set suppns ${currns}::GenSupport
 
-    <<CreateActivityCommands: union subclass classes>>
-    <<CreateActivityCommands: non-union subclass classes>>
+    <<CreateActivityCommands: classes>>
     <<CreateActivityCommands: relationships>>
     <<CreateActivityCommands: instances>>
     <<CreateActivityCommands: instance sets>>
@@ -1061,39 +1060,20 @@ proc CreateActivityCommands {domain} {
 
 [source,tcl]
 ----
-<<CreateActivityCommands: union subclass classes>>=
-set usubRefs [pipe {
-    UnionSubclass findWhere {$Domain eq $domain} |
-    findRelated ~ R47 R40 R41
-}]
-
+<<CreateActivityCommands: classes>>=
 set usubnames [pipe {
-    deRef $usubRefs |
-    relation list ~ Name
+    UnionSubclass findWhere {$Domain eq $domain} |
+    deRef ~ |
+    relation list ~ Class
 }]
-
-set cmdmap [dict create]
-foreach usubname $usubnames {
-    set cmdmap [dict create\
-        foreachInstance [list ${suppns}::ClassForeachUSubInstance $usubname]\
-        instanceReference [list ${suppns}::ClassInstanceReference $usubname]\
-    ]
-    namespace ensemble create\
-        -command ${actns}::$usubname\
-        -map $cmdmap
-}
 ----
 
 [source,tcl]
 ----
-<<CreateActivityCommands: non-union subclass classes>>=
-set nuClassRefs [pipe {
-    Class findWhere {$Domain eq $domain} |
-    refMinus ~ $usubRefs
-}]
-
+<<CreateActivityCommands: classes>>=
 set classInfo [pipe {
-    deRef $nuClassRefs |
+    Class findWhere {$Domain eq $domain} |
+    deRef ~ |
     ralutil::rvajoin ~ [relation rename $::micca::StateModel Model Name]\
         StateModels |
     relation extend ~ itup HasStateModel boolean {
@@ -1110,17 +1090,19 @@ set cmdmap [dict create]
 relation foreach info $classInfo {
     relation assign $info
     set cmdmap [dict create\
-        create [list ${suppns}::ClassCreate $Name]\
         foreachInstance [list ${suppns}::ClassForeachInstance $Name]\
         instanceReference [list ${suppns}::ClassInstanceReference $Name]\
         instanceSet [list ${suppns}::ClassInstanceSet $Name]\
         findByName [list ${suppns}::ClassFindByName $Name]\
     ]
-    if {$HasStateModel} {
-        dict set cmdmap createin [list ${suppns}::ClassCreateIn $Name]
-    }
-    if {$HasCreationState} {
-        dict set cmdmap createasync [list ${suppns}::ClassCreateAsync $Name]\
+    if {$Name ni $usubnames} {
+        dict set cmdmap create [list ${suppns}::ClassCreate $Name]
+        if {$HasStateModel} {
+            dict set cmdmap createin [list ${suppns}::ClassCreateIn $Name]
+        }
+        if {$HasCreationState} {
+            dict set cmdmap createasync [list ${suppns}::ClassCreateAsync $Name]
+        }
     }
     namespace ensemble create\
         -command ${actns}::$Name\
@@ -1225,6 +1207,8 @@ namespace ensemble create\
 ----
 <<CreateActivityCommands: instance sets>>=
 set cmdmap [dict create\
+    select ${suppns}::InstanceSelect\
+    foreachSelected ${suppns}::InstanceForeachSelected\
     union ${suppns}::InstanceSetUnion\
     intersect ${suppns}::InstanceSetIntersect\
     minus ${suppns}::InstanceSetMinus\
@@ -4903,18 +4887,17 @@ proc CreateInstRefSymbol {className varName} {
 proc CreateInstRefSetSymbol {className varName} {
     set sym [LookUpSymbol $varName]
     if {$sym ne {}} {
-        if {[dict get $sym Type] ne "ReferenceSet"} {
-            error "variable, $varName, exists but is not an instance\
-                set reference"
+        if {[dict get $sym Type] ne "InstanceSet"} {
+            error "variable, $varName, exists but is not an instance set"
         }
         if {$className ne [dict get $sym Class]} {
-            error "variable, $varName, exists and is an instance set reference\
+            error "variable, $varName, exists and is an instance set referring\
                 to class, [dict get $sym Class]: requested class, $className"
         }
         return
     }
-    set ctype MRT_InstRefSet
-    InsertSymbol Name $varName Ctype $ctype Type ReferenceSet Class $className
+    set ctype MRT_InstanceSet
+    InsertSymbol Name $varName Ctype $ctype Type InstanceSet Class $className
     return "$ctype $varName ;\n"
 }
 
@@ -5052,8 +5035,7 @@ proc End {} {
             append result "\}\n"
         }
         InstanceForeachRelated -
-        ClassForeachInstance -
-        ClassForeachUSubInstance {
+        ClassForeachInstance {
             set result [PopContext $context depth]
             for {set i 0} {$i < $depth} {incr i} {
                 PopBlock
@@ -6824,26 +6806,24 @@ proc ClassForeachInstance {className instref} {
         error "instance reference variable, \"$instref\", already exists"
     }
 
+    set iter [CreateTempSymbol Ctype {MRT_InstanceIterator}\
+            Type InstanceIterator Class $className]
     set iab [CreateTempSymbol Ctype {MRT_iab *} Type IAB Class $className]
-    set iter [CreateTempSymbol Ctype {void *} Type Pointer Class $className]
 
     set startlevel [GetBlock]
 
     set result [IndentToBlock [string cat\
         [linecomment "$className foreachInstance $instref"]\
-        "MRT_iab *const $iab = [GetClassDescriptor $domain $className].iab ;\n"\
-        "for (void *$iter = $iab->storageStart ; "\
-        "$iter < $iab->storageFinish ;\n"\
-        "        $iter = (void *)((uintptr_t)$iter + $iab->instanceSize)) "\
-        "\{\n"\
+        "MRT_InstanceIterator $iter ;\n"\
+        [CreateInstRefSymbol $className $instref]\
+        "for ($instref = mrt_InstIteratorStart(&$iter,\
+            &[GetClassDescriptor $domain $className]) ;\n"\
+        "        mrt_InstIteratorMore(&$iter) ;\n"\
+        "        $instref = mrt_InstIteratorNext(&$iter)) \{\n"
     ]]
     PushBlock
 
-    append result [IndentToBlock [string cat\
-        [CreateInstRefSymbol $className $instref]\
-        "$instref = $iter ;\n"\
-        "if ($instref->base__INST.alloc > 0) \{\n"\
-    ]]
+    append result [IndentToBlock "if ($instref->base__INST.alloc > 0) \{\n"]
     PushBlock
 
     PushContext ClassForeachInstance depth [expr {[GetBlock] - $startlevel}]
@@ -6930,108 +6910,6 @@ proc ClassFindByName {className instName instref} {
 }
 ----
 
-Union subclasses require a different strategy.
-Since they do not have their storage pool,
-we must iterate over the storage of the ultimate union superclass,
-traverse the relationship down to the subclass and verify that the
-subclass is of the correct type.
-
-[source,tcl]
-----
-<<generation support commands>>=
-proc ClassForeachUSubInstance {className instref} {
-    variable domain
-
-    set sym [LookUpSymbol $instref]
-    if {$sym ne {}} {
-        error "instance reference variable, \"$instref\", already exists"
-    }
-
-    set relpath [FindUnionSuperPath $className]
-
-    set relpath [lassign $relpath superName relName subName]
-    set iab [CreateTempSymbol Ctype {MRT_iab *const} Type IAB Class $superName]
-    set iter [CreateTempSymbol Ctype {void *} Type Pointer Class $superName]
-
-    set startlevel [GetBlock]
-
-    set result [IndentToBlock [string cat\
-        [linecomment "$className foreachInstance $instref"]\
-        "MRT_iab *const $iab = [GetClassDescriptor $domain $superName].iab ;\n"\
-        "for (void *$iter = $iab->storageStart ; "\
-        "$iter < $iab->storageFinish ;\n"\
-        "        $iter = (void *)((uintptr_t)$iter + $iab->instanceSize)) "\
-        "\{\n"\
-    ]]
-    PushBlock
-
-    lassign [CreateTempRefSymbol $superName] superType superVar
-    lassign [CreateTempRefSymbol $subName] subType subVar
-    set subDesc [GetClassDescriptor $domain $subName]
-
-    append result [IndentToBlock [string cat\
-        "$superType$superVar = $iter ;\n"\
-        "if ($superVar->base__INST.alloc > 0) \{\n"
-    ]]
-    PushBlock
-
-    append result [IndentToBlock [string cat\
-        "$subType$subVar = &$superVar->$relName.$subName ;\n"\
-        "if ($subVar->base__INST.classDesc == &$subDesc &&\n"\
-        "        $subVar->base__INST.alloc > 0) \{\n"
-    ]]
-    PushBlock
-
-    foreach {superName relName subName} $relpath {
-        set prevSubVar $subVar
-        lassign [CreateTempRefSymbol $superName] superType superVar
-        lassign [CreateTempRefSymbol $subName] subType subVar
-        set subDesc [GetClassDescriptor $domain $subName]
-        append result [IndentToBlock [string cat\
-            "$subType$subVar = &$prevSubVar->$relName.$subName ;\n"\
-            "if ($subVar->base__INST.classDesc == &$subDesc &&\n"\
-            "        $subVar->base__INST.alloc > 0) \{\n"
-        ]]
-        PushBlock
-    }
-    append result [IndentToBlock [string cat\
-        [CreateInstRefSymbol $subName $instref]\
-        "$instref = $subVar ;\n"]]
-
-    PushContext ClassForeachUSubInstance\
-        depth [expr {[GetBlock] - $startlevel}]
-
-    return $result
-}
-----
-
-Find the path upward from a union subclass to its ultimate superclass.
-Path is returned in the order of ultimate superclass downward
-and consists of triples of superclass name, relationship, subclass name.
-
-[source,tcl]
-----
-<<generation support commands>>=
-proc FindUnionSuperPath {className} {
-    variable domain
-    set subclassRef [UnionSubclass findWhere {$Domain eq $domain &&\
-        $Class eq $className}]
-    set path {}
-    while {[isNotEmptyRef $subclassRef]} {
-        assignAttribute $subclassRef {Relationship relName} {Class subName}
-        set superclassRef [findRelated $subclassRef R45 ~R44]
-        assignAttribute $superclassRef {Class superName}
-        set path [linsert $path 0 $superName $relName $subName]
-        set subclassRef [pipe {
-            deRef $superclassRef |
-            relation semijoin ~ $::micca::UnionSubclass -using\
-                {Domain Domain Class Class} |
-            ::rosea::Helpers::ToRef ::micca::UnionSubclass ~
-        }]
-    }
-    return $path
-}
-----
 
 [source,tcl]
 ----

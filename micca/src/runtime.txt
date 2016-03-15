@@ -259,7 +259,7 @@ This is _not_ the recommended mechanism of running a `micca` based
 applications, but sometimes it is necessary.
 Again,
 testing is sometimes best accomplished by letting a test program
-control event by event dispatch.
+control event-by-event dispatch.
 Another use case involves situations where `micca` generated domains
 must be integrated with legacy code.
 The legacy code will probably have its own execution loop and
@@ -269,7 +269,7 @@ This is not an ideal situation,
 but when migrating an older system to a `micca` translated system
 a transition period is unavoidable.
 We provide the ability to micro-manage the event dispatch with the full
-realization that the facility will be abused by some projects.
+realization that the capablity will be abused by some projects.
 
 (((micca,Run Time,mtr_ProcessOneEvent)))
 [source,c]
@@ -726,6 +726,155 @@ instance.
 <2> Perform the modulus wrap around if we cross over the boundary of
 the storage array.
 
+=== Instance Containment
+
+For most classes,
+the Instance Allocation Block describes everything we need to know
+about how the instances are stored.
+However,
+classes that are subclasses of a union generalization do not have
+their own storage pool.
+Union subclass instances are stored as part of the instance structure
+of the containing superclass.
+The containment may be several levels deep as a union subclass can be
+the superclass for another union generalization.
+The `MRT_Class` data structure contains the necessary information
+to deal with this.
+Here we present a function that forms the basis of allowing us to
+treat the union subclasses the same as other classes.
+
+[source,c]
+----
+<<mrt external interfaces>>=
+extern MRT_iab *
+mrt_GetStorageProperties(
+    MRT_Class const *classDesc,
+    size_t *offsetptr) ;
+----
+
+`classDesc`::
+    A pointer to the class data for which storage properties are computed.
+`offsetptr`::
+    A pointer to a location where the instance offset is returned.
+    If not `NULL`, the return value is the offset in bytes from the
+    beginning of an instance to where the class storage begins.
+returns::
+    a pointer to the IAB that describes the storage containment for the
+    class.
+    For non-union subclasses, this is simply the IAB that describes the
+    class storage pool.
+    For union subclasses, the returned IAB will be for the ultimate
+    superclass that contains the class instances.
+
+==== Implementation
+
+[source,c]
+----
+<<mrt external functions>>=
+MRT_iab *
+mrt_GetStorageProperties(
+    MRT_Class const *classDesc,
+    MRT_AttrOffset *offsetptr)
+{
+    assert(classDesc != NULL) ;
+    MRT_iab *iab = classDesc->iab ;
+    MRT_AttrOffset instanceOffset = 0 ;
+    for (struct mrtsuperclassrole const *container = classDesc->containment ;
+            container != NULL ;
+            container = container->classDesc->containment) {// <1>
+        instanceOffset += container->storageOffset ;
+        iab = container->classDesc->iab ;
+    }
+    if (offsetptr) {// <2>
+        *offsetptr = instanceOffset ;
+    }
+
+    return iab ;
+}
+----
+<1> We iterate up the generalization hierarchy to find the ultimate
+superclass that contains the class instances.
+At each step of the iteration, we accumulate the relative offset of
+each contained instance.
+<2> The offset is returned only if requested.
+
+We will also find occasion to want to compute the index into the
+storage pool for a particular instance.
+Again we must allow that the instance may be a union subclass instance.
+
+[source,c]
+----
+<<mrt external interfaces>>=
+extern unsigned
+mrt_InstanceIndex(
+    void *instance) ;
+----
+
+`instance`::
+    A pointer to a class instance.
+returns::
+    the array index value of the instance in its storage pool.
+
+[source,c]
+----
+<<mrt external functions>>=
+unsigned
+mrt_InstanceIndex(
+    void *instance)
+{
+    assert(instance != NULL) ;
+
+    MRT_Instance *instref = instance ;
+    MRT_AttrOffset offset ;
+    MRT_iab *iab = mrt_GetStorageProperties(instref->classDesc, &offset) ;
+    return (((uintptr_t)instance - offset) - (uintptr_t)iab->storageStart) /
+            iab->instanceSize ;
+}
+----
+
+The inverse of finding the instance index is to convert such an index
+into a reference to an instance.
+
+[source,c]
+----
+<<mrt external interfaces>>=
+extern void *
+mrt_InstanceReference(
+    MRT_Class const *classDesc,
+    unsigned index) ;
+----
+
+`classDesc`::
+    A pointer to the class description for the reference to be computed.
+`index`::
+    An array index into the class storage pool.
+    If `index` out of bounds, then a reference to the last instance
+    in the storage pool is returned.
+returns::
+    A pointer to the instance in the class storage pool.
+
+[source,c]
+----
+<<mrt external functions>>=
+void *
+mrt_InstanceReference(
+    MRT_Class const *classDesc,
+    unsigned index)
+{
+    assert(classDesc != NULL) ;
+    MRT_AttrOffset offset ;
+    MRT_iab *iab = mrt_GetStorageProperties(classDesc, &offset) ;
+    void *instref = (void *)((uintptr_t)iab->storageStart +
+            (index * iab->instanceSize) + offset) ;
+    assert(instref < iab->storageFinish) ;
+    if (instref >= iab->storageFinish) {
+        instref = (void *)((uintptr_t)iab->storageFinish - iab->instanceSize) ;
+    }
+
+    return instref ;
+}
+----
+
 === Creating an Instance
 
 The function, `mrt_CreateInstance`, is used to synchronously
@@ -958,6 +1107,366 @@ That work is not done here!
 It is the responsibility of the analysis model to take any actions
 necessary to preserve data integrity when deleting an instance.
 
+=== Iterating Over Class Instances
+
+[source,c]
+----
+<<mrt interface aggregate types>>=
+typedef struct mrtinstanceiterator {
+    void *instance ;
+    unsigned size ;
+    void *end ;
+} MRT_InstanceIterator ;
+
+<<mrt external interfaces>>=
+void *
+mrt_InstIteratorStart(
+    MRT_InstanceIterator *iter,
+    MRT_Class const *classDesc) ;
+
+<<mrt external functions>>=
+void *
+mrt_InstIteratorStart(
+    MRT_InstanceIterator *iter,
+    MRT_Class const *classDesc)
+{
+    assert(classDesc != NULL) ;
+    assert(iter != NULL) ;
+
+    MRT_AttrOffset instanceOffset ;
+    MRT_iab *iab = mrt_GetStorageProperties(classDesc, &instanceOffset) ;
+
+    assert(iab != NULL) ;
+    iter->size = iab->instanceSize ;
+    iter->end = iab->storageFinish ;
+    iter->instance = (void *)((uintptr_t)iab->storageStart + instanceOffset) ;
+    return iter->instance ;
+}
+
+<<mrt external interfaces>>=
+bool
+mrt_InstIteratorMore(
+    MRT_InstanceIterator *iter) ;
+
+<<mrt external functions>>=
+bool
+mrt_InstIteratorMore(
+    MRT_InstanceIterator *iter)
+{
+    assert(iter != NULL) ;
+    return iter->instance < iter->end ;
+}
+
+<<mrt external interfaces>>=
+void *
+mrt_InstIteratorNext(
+    MRT_InstanceIterator *iter) ;
+
+<<mrt external functions>>=
+void *
+mrt_InstIteratorNext(
+    MRT_InstanceIterator *iter)
+{
+    assert(iter != NULL) ;
+    assert(iter->instance < iter->end) ;
+
+    iter->instance = (void *)((uintptr_t)iter->instance + iter->size) ;
+    return iter->instance ;
+}
+----
+
+=== Instance Sets
+
+[source,c]
+----
+<<mrt constants>>=
+#ifndef MRT_MAX_CLASS_INSTANCES
+#   define MRT_MAX_CLASS_INSTANCES 128
+#endif /* MRT_MAX_CLASS_INSTANCES */
+----
+
+[source,c]
+----
+<<mrt interface aggregate types>>=
+typedef struct mrtinstanceset {
+    MRT_Class const *classDesc ;
+    uint32_t instvector[(MRT_MAX_CLASS_INSTANCES + 31) / 32] ;
+} MRT_InstanceSet ;
+----
+
+[source,c]
+----
+<<mrt external interfaces>>=
+void
+mrt_InstSetInitialize(
+    MRT_InstanceSet *set,
+    MRT_Class const *classDesc) ;
+----
+
+[source,c]
+----
+<<mrt external functions>>=
+void
+mrt_InstSetInitialize(
+    MRT_InstanceSet *set,
+    MRT_Class const *classDesc)
+{
+    assert(classDesc != NULL) ;
+    set->classDesc = classDesc ;
+    memset(set->instvector, 0, sizeof(set->instvector)) ;
+}
+----
+
+[source,c]
+----
+<<mrt external interfaces>>=
+void
+mrt_InstSetSelectInstance(
+    MRT_InstanceSet *set,
+    void *instance) ;
+----
+
+[source,c]
+----
+<<mrt external functions>>=
+void
+mrt_InstSetSelectInstance(
+    MRT_InstanceSet *set,
+    void *instance)
+{
+    MRT_Instance *instref = instance ;
+
+    assert(instref != NULL) ;
+    assert(instref->classDesc = set->classDesc) ;
+    if (instref->classDesc != set->classDesc) {
+        return ;
+    }
+    unsigned instid = mrt_InstanceIndex(instance) ;
+    set->instvector[instid / 32] |= (1 << (instid % 32)) ;
+}
+----
+
+[source,c]
+----
+<<mrt external interfaces>>=
+void
+mrt_InstSetUnion(
+    MRT_InstanceSet *set1,
+    MRT_InstanceSet *set2,
+    MRT_InstanceSet *result) ;
+----
+typedef struct mrtinstanceset {
+    MRT_Class const *classDesc ;
+    uint32_t instvector[(MRT_MAX_CLASS_INSTANCES + 31) / 32] ;
+} MRT_InstanceSet ;
+
+[source,c]
+----
+<<mrt external functions>>=
+void
+mrt_InstSetUnion(
+    MRT_InstanceSet *set1,
+    MRT_InstanceSet *set2,
+    MRT_InstanceSet *result)
+{
+    assert(set1 != NULL) ;
+    assert(set1->classDesc != NULL) ;
+    assert(set2 != NULL) ;
+    assert(set2->classDesc != NULL) ;
+    assert(result != NULL) ;
+    assert(set1->classDesc == set2->classDesc) ;
+
+    if (set1->classDesc != set2->classDesc) {
+        memset(result->instvector, 0, sizeof(result->instvector)) ;
+        return ;
+    }
+    uint32_t *dst = result->instvector ;
+    uint32_t *src1 = set1->instvector ;
+    uint32_t *src2 = set2->instvector ;
+    while (dst < result->instvector + sizeof(result->instvector)) {
+        *dst++ = *src1++ | *src2++ ;
+    }
+}
+----
+
+[source,c]
+----
+<<mrt external interfaces>>=
+void
+mrt_InstSetIntersect(
+    MRT_InstanceSet *set1,
+    MRT_InstanceSet *set2,
+    MRT_InstanceSet *result) ;
+----
+
+[source,c]
+----
+<<mrt external functions>>=
+void
+mrt_InstSetIntersect(
+    MRT_InstanceSet *set1,
+    MRT_InstanceSet *set2,
+    MRT_InstanceSet *result)
+{
+    assert(set1 != NULL) ;
+    assert(set1->classDesc != NULL) ;
+    assert(set2 != NULL) ;
+    assert(set2->classDesc != NULL) ;
+    assert(result != NULL) ;
+    assert(set1->classDesc == set2->classDesc) ;
+
+    if (set1->classDesc != set2->classDesc) {
+        memset(result->instvector, 0, sizeof(result->instvector)) ;
+        return ;
+    }
+    uint32_t *dst = result->instvector ;
+    uint32_t *src1 = set1->instvector ;
+    uint32_t *src2 = set2->instvector ;
+    while (dst < result->instvector + sizeof(result->instvector)) {
+        *dst++ = *src1++ & *src2++ ;
+    }
+}
+----
+
+[source,c]
+----
+<<mrt external interfaces>>=
+void
+mrt_InstSetMinus(
+    MRT_InstanceSet *set1,
+    MRT_InstanceSet *set2,
+    MRT_InstanceSet *result) ;
+----
+
+[source,c]
+----
+<<mrt external functions>>=
+void
+mrt_InstSetMinus(
+    MRT_InstanceSet *set1,
+    MRT_InstanceSet *set2,
+    MRT_InstanceSet *result)
+{
+    assert(set1 != NULL) ;
+    assert(set1->classDesc != NULL) ;
+    assert(set2 != NULL) ;
+    assert(set2->classDesc != NULL) ;
+    assert(result != NULL) ;
+    assert(set1->classDesc == set2->classDesc) ;
+
+    if (set1->classDesc != set2->classDesc) {
+        memset(result->instvector, 0, sizeof(result->instvector)) ;
+        return ;
+    }
+    uint32_t *dst = result->instvector ;
+    uint32_t *src1 = set1->instvector ;
+    uint32_t *src2 = set2->instvector ;
+    while (dst < result->instvector + sizeof(result->instvector)) {
+        *dst++ = *src1++ & ~*src2++ ;
+    }
+}
+----
+
+=== Iterating Over Instance Sets
+
+[source,c]
+----
+<<mrt interface aggregate types>>=
+typedef struct mrtinstsetiterator {
+    MRT_InstanceSet *set ;
+    uint32_t *vectorloc ;
+    unsigned bitoffset ;
+} MRT_InstSetIterator ;
+----
+
+[source,c]
+----
+<<mrt external interfaces>>=
+void
+mrt_InstSetIterBegin(
+    MRT_InstanceSet *set,
+    MRT_InstSetIterator *iter) ;
+----
+
+[source,c]
+----
+<<mrt external functions>>=
+void
+mrt_InstSetIterBegin(
+    MRT_InstanceSet *set,
+    MRT_InstSetIterator *iter)
+{
+    assert(set != NULL) ;
+    assert(iter != NULL) ;
+
+    iter->set = set ;
+    iter->vectorloc = set->instvector ;
+    iter->bitoffset = 0 ;
+}
+----
+
+[source,c]
+----
+<<mrt external interfaces>>=
+bool
+mrt_InstSetIterMore(
+    MRT_InstSetIterator *iter) ;
+----
+
+[source,c]
+----
+<<mrt external functions>>=
+bool
+mrt_InstSetIterMore(
+    MRT_InstSetIterator *iter)
+{
+    assert(iter != NULL) ;
+    return iter->vectorloc <
+            iter->set->instvector + sizeof(iter->set->instvector) ;
+}
+----
+
+[source,c]
+----
+<<mrt external interfaces>>=
+void *
+mrt_InstSetIterNext(
+    MRT_InstSetIterator *iter) ;
+----
+
+[source,c]
+----
+<<mrt external functions>>=
+void *
+mrt_InstSetIterNext(
+    MRT_InstSetIterator *iter)
+{
+    assert(iter != NULL) ;
+    
+    while (mrt_InstSetIterMore(iter)) {
+        if (*iter->vectorloc != 0) {
+            while (++iter->bitoffset < 32) {
+                uint32_t mask = 1 << iter->bitoffset ;
+                if ((*iter->vectorloc & ~ mask) != 0) {
+                    unsigned instindex =
+                        (iter->vectorloc - iter->set->instvector) * 32 +
+                        iter->bitoffset ;
+                    MRT_Instance *instref = mrt_InstanceReference(
+                        iter->set->classDesc, instindex) ;
+                    if (instref->alloc > 0) {
+                        return instref ;
+                    }
+                }
+            }
+        }
+        iter->vectorloc++ ;
+        iter->bitoffset = 0 ;
+    }
+
+    return NULL ;
+}
+----
+
 == Managing Referential Integrity
 
 When the target translation platform is based on a Relational Database
@@ -1023,221 +1532,6 @@ We will show how this is accomplished by:
 . Showing the data structures used to describe relationships.
 . Explaining how transactions work and how referential integrity is checked.
 . Giving code to relate and unrelate instances in a relationship.
-
-=== Instance Sets
-
-[source,c]
-----
-<<mrt constants>>=
-#ifndef MRT_MAX_CLASS_INSTANCES
-#   define MRT_MAX_CLASS_INSTANCES 128
-#endif /* MRT_MAX_CLASS_INSTANCES */
-
-<<mrt interface aggregate types>>=
-typedef struct mrtinstrefset {
-    MRT_Class const *classDesc ;
-    uint_fast32_t *groupptr ;
-    uint_fast8_t groupcounter ;
-    uint_fast32_t groups[(MRT_MAX_CLASS_INSTANCES + 31) / 32] ;
-} MRT_InstRefSet ;
-----
-
-[source,c]
-----
-<<mrt external interfaces>>=
-void
-mrt_RefSetBeginSelection(
-    MRT_InstRefSet *set,
-    MRT_Class const *classDesc) ;
-
-<<mrt external functions>>=
-void
-mrt_RefSetBeginSelection(
-    MRT_InstRefSet *set,
-    MRT_Class const *classDesc)
-{
-    assert(classDesc != NULL) ;
-    set->classDesc = classDesc ;
-    set->groupptr = NULL ;
-    set->groupcounter = 0 ;
-    memset(set->groups, 0, sizeof(set->groups)) ;
-}
-
-<<mrt external interfaces>>=
-void
-mrt_RefSetMarkSelection(
-    MRT_InstRefSet *set,
-    void *instref) ;
-
-<<mrt external functions>>=
-void
-mrt_RefSetMarkSelection(
-    MRT_InstRefSet *set,
-    void *instref)
-{
-    MRT_Instance *inst = instref ;
-
-    assert(inst != NULL) ;
-    assert(inst->classDesc = set->classDesc) ;
-    if (inst->classDesc != set->classDesc) {
-        return ;
-    }
-    MRT_iab *iab = inst->classDesc->iab ;
-    assert (iab != NULL) ;
-    assert(instref >= iab->storageStart && instref < iab->storageFinish) ;
-    ptrdiff_t instid = ((uintptr_t)instref - (uintptr_t)iab->storageStart) /
-            iab->instanceSize ;
-    set->groups[instid / 32] |= (1 << (instid % 32)) ;
-}
-
-<<mrt external interfaces>>=
-void
-mrt_RefSetBeginSelected(
-    MRT_InstRefSet *set) ;
-
-<<mrt external functions>>=
-void
-mrt_RefSetBeginSelected(
-    MRT_InstRefSet *set)
-{
-    assert(set->classDesc != NULL) ;
-    set->groupptr = set->groups ;
-    set->groupcounter = 0 ;
-}
-
-<<mrt external interfaces>>=
-void *
-mrt_RefSetNextSelected(
-    MRT_InstRefSet *set) ;
-
-<<mrt external functions>>=
-void *
-mrt_RefSetNextSelected(
-    MRT_InstRefSet *set)
-{
-    while (set->groupptr < set->groups + sizeof(set->groups)) {
-        if (*set->groupptr != 0) {
-            uint_fast32_t mask = 1 << set->groupcounter ;
-            unsigned instindex = (set->groupptr - set->groups) * 32 +
-                    set->groupcounter ;
-            while (++set->groupcounter < 32) {
-                if ((*set->groupptr & ~mask) != 0) {
-                    MRT_Instance *instref = (MRT_Instance *)
-                        ((uintptr_t)set->classDesc->iab->storageStart +
-                        (instindex * set->classDesc->iab->instanceSize)) ;
-                    if (instref->alloc > 0) {
-                        return instref ;
-                    }
-                }
-                mask <<= 1 ;
-                instindex++ ;
-            }
-        }
-        set->groupptr++ ;
-        set->groupcounter = 0 ;
-    }
-    return NULL ;
-}
-
-<<mrt external interfaces>>=
-void
-mrt_RefSetUnion(
-    MRT_InstRefSet *set1,
-    MRT_InstRefSet *set2,
-    MRT_InstRefSet *result) ;
-
-<<mrt external functions>>=
-void
-mrt_RefSetUnion(
-    MRT_InstRefSet *set1,
-    MRT_InstRefSet *set2,
-    MRT_InstRefSet *result)
-{
-    assert(set1 != NULL) ;
-    assert(set1->classDesc != NULL) ;
-    assert(set2 != NULL) ;
-    assert(set2->classDesc != NULL) ;
-    assert(result != NULL) ;
-    assert(set1->classDesc == set2->classDesc) ;
-
-    if (set1->classDesc != set2->classDesc) {
-        memset(result->groups, 0, sizeof(result->groups)) ;
-        return ;
-    }
-    uint_fast32_t *dst = result->groups ;
-    uint_fast32_t *src1 = set1->groups ;
-    uint_fast32_t *src2 = set2->groups ;
-    while (dst < result->groups + sizeof(result->groups)) {
-        *dst++ = *src1++ | *src2++ ;
-    }
-}
-
-<<mrt external interfaces>>=
-void
-mrt_RefSetIntersect(
-    MRT_InstRefSet *set1,
-    MRT_InstRefSet *set2,
-    MRT_InstRefSet *result) ;
-
-<<mrt external functions>>=
-void
-mrt_RefSetIntersect(
-    MRT_InstRefSet *set1,
-    MRT_InstRefSet *set2,
-    MRT_InstRefSet *result)
-{
-    assert(set1 != NULL) ;
-    assert(set1->classDesc != NULL) ;
-    assert(set2 != NULL) ;
-    assert(set2->classDesc != NULL) ;
-    assert(result != NULL) ;
-    assert(set1->classDesc == set2->classDesc) ;
-
-    if (set1->classDesc != set2->classDesc) {
-        memset(result->groups, 0, sizeof(result->groups)) ;
-        return ;
-    }
-    uint_fast32_t *dst = result->groups ;
-    uint_fast32_t *src1 = set1->groups ;
-    uint_fast32_t *src2 = set2->groups ;
-    while (dst < result->groups + sizeof(result->groups)) {
-        *dst++ = *src1++ & *src2++ ;
-    }
-}
-
-<<mrt external interfaces>>=
-void
-mrt_RefSetMinus(
-    MRT_InstRefSet *set1,
-    MRT_InstRefSet *set2,
-    MRT_InstRefSet *result) ;
-
-<<mrt external functions>>=
-void
-mrt_RefSetMinus(
-    MRT_InstRefSet *set1,
-    MRT_InstRefSet *set2,
-    MRT_InstRefSet *result)
-{
-    assert(set1 != NULL) ;
-    assert(set1->classDesc != NULL) ;
-    assert(set2 != NULL) ;
-    assert(set2->classDesc != NULL) ;
-    assert(result != NULL) ;
-    assert(set1->classDesc == set2->classDesc) ;
-
-    if (set1->classDesc != set2->classDesc) {
-        memset(result->groups, 0, sizeof(result->groups)) ;
-        return ;
-    }
-    uint_fast32_t *dst = result->groups ;
-    uint_fast32_t *src1 = set1->groups ;
-    uint_fast32_t *src2 = set2->groups ;
-    while (dst < result->groups + sizeof(result->groups)) {
-        *dst++ = *src1++ & ~*src2++ ;
-    }
-}
-----
 
 === Describing Relationships
 
@@ -1789,14 +2083,14 @@ what the relationship requires.
 <<mrtCheckRelationship: simple associations>>=
 struct mrtsimpleassociation const *assoc = &rel->relInfo.simpleAssociation ;
 
-mrtZeroRefCounts(assoc->source.classDesc->iab) ;
-mrtZeroRefCounts(assoc->target.classDesc->iab) ;
+mrtZeroRefCounts(assoc->source.classDesc) ;
+mrtZeroRefCounts(assoc->target.classDesc) ;
 
 mrtCountAssocRefs(&assoc->source, &assoc->target) ;
 
 result =
-    mrtCheckRefCounts(assoc->source.classDesc->iab, assoc->source.cardinality) &&
-    mrtCheckRefCounts(assoc->target.classDesc->iab, assoc->target.cardinality) ;
+    mrtCheckRefCounts(assoc->source.classDesc, assoc->source.cardinality) &&
+    mrtCheckRefCounts(assoc->target.classDesc, assoc->target.cardinality) ;
 ----
 
 Class based associations are more complicated.
@@ -1816,27 +2110,26 @@ if (result) {
      * On the first side, we evaluate the references from the source class
      * to the associator class.
      */
-    mrtZeroRefCounts(assoc->source.classDesc->iab) ;
-    mrtZeroRefCounts(assoc->associator.classDesc->iab) ;
-    mrtCountClassAssocRefs(&assoc->source, assoc->associator.classDesc->iab,
+    mrtZeroRefCounts(assoc->source.classDesc) ;
+    mrtZeroRefCounts(assoc->associator.classDesc) ;
+    mrtCountClassAssocRefs(&assoc->source, assoc->associator.classDesc,
             assoc->associator.backwardOffset) ;
-    result = mrtCheckRefCounts(assoc->source.classDesc->iab,
+    result = mrtCheckRefCounts(assoc->source.classDesc,
                 assoc->source.cardinality) &&
-            mrtCheckRefCounts(assoc->associator.classDesc->iab, mrtExactlyOne) ;
+            mrtCheckRefCounts(assoc->associator.classDesc, mrtExactlyOne) ;
 
     /*
      * If the first side is okay, then we can evaluate the references from the
      * target class to the associator class.
      */
     if (result) {
-        mrtZeroRefCounts(assoc->target.classDesc->iab) ;
-        mrtZeroRefCounts(assoc->associator.classDesc->iab) ;
-        mrtCountClassAssocRefs(&assoc->target,
-                assoc->associator.classDesc->iab,
+        mrtZeroRefCounts(assoc->target.classDesc) ;
+        mrtZeroRefCounts(assoc->associator.classDesc) ;
+        mrtCountClassAssocRefs(&assoc->target, assoc->associator.classDesc,
                 assoc->associator.forwardOffset) ;
-        result = mrtCheckRefCounts(assoc->target.classDesc->iab,
+        result = mrtCheckRefCounts(assoc->target.classDesc,
                 assoc->target.cardinality) &&
-            mrtCheckRefCounts(assoc->associator.classDesc->iab, mrtExactlyOne) ;
+            mrtCheckRefCounts(assoc->associator.classDesc, mrtExactlyOne) ;
     }
 }
 ----
@@ -1855,21 +2148,21 @@ the `refCount` member and count the references.
 <<mrtCheckRelationship: reference generalizations>>=
 struct mrtrefgeneralization const *gen = &rel->relInfo.refGeneralization ;
 
-mrtZeroRefCounts(gen->superclass.classDesc->iab) ;
+mrtZeroRefCounts(gen->superclass.classDesc) ;
 
 struct mrtrefsubclassrole const *subclass = gen->subclasses ;
 for (unsigned subcount = gen->subclassCount ; subcount != 0 ;
         --subcount, ++subclass) {
-    mrtZeroRefCounts(subclass->classDesc->iab) ;
+    mrtZeroRefCounts(subclass->classDesc) ;
 }
 
 mrtCountGenRefs(gen) ;
 
-result = mrtCheckRefCounts(gen->superclass.classDesc->iab, mrtExactlyOne) ;
+result = mrtCheckRefCounts(gen->superclass.classDesc, mrtExactlyOne) ;
 subclass = gen->subclasses ;
 for (unsigned subcount = gen->subclassCount ; subcount != 0 && result ;
         --subcount, ++subclass) {
-    result = mrtCheckRefCounts(subclass->classDesc->iab, mrtExactlyOne) ;
+    result = mrtCheckRefCounts(subclass->classDesc, mrtExactlyOne) ;
 }
 ----
 
@@ -1884,13 +2177,14 @@ allocated.
 struct mrtuniongeneralization const *gen = &rel->relInfo.unionGeneralization ;
 
 result = true ;
-MRT_iab *super = gen->superclass.classDesc->iab ;
-for (MRT_Instance *inst = (MRT_Instance *)super->storageStart ;
-        inst < (MRT_Instance *)super->storageFinish ;
-        inst = (MRT_Instance *)((uintptr_t)inst + super->instanceSize)) {
-    if (inst->alloc > 0) {
+MRT_Class const *superClass = gen->superclass.classDesc ;
+MRT_InstanceIterator iter ;
+for (MRT_Instance *instref = mrt_InstIteratorStart(&iter, superClass) ;
+        mrt_InstIteratorMore(&iter) ;
+        instref = mrt_InstIteratorNext(&iter)) {
+    if (instref->alloc > 0) {
         MRT_Instance *subInst = (MRT_Instance *)
-                ((uintptr_t)inst + gen->superclass.storageOffset) ;
+                ((uintptr_t)instref + gen->superclass.storageOffset) ;
         if (subInst->alloc <= 0) {
             result = false ;
             break ;
@@ -1906,12 +2200,12 @@ structure to zero.
 [source,c]
 ----
 <<mrt forward references>>=
-static void mrtZeroRefCounts(MRT_iab *iab) ;
+static void mrtZeroRefCounts(MRT_Class const *classDesc) ;
 ----
 
-Since the instance allocation block contains all the information
-we need to access the instance storage,
-we iterate across the class instance storage setting `refCount` to zero.
+The algorithm is simple.
+We iterate over all the class instances and set the `refCount` member to
+zero.
 
 [source,c]
 ----
@@ -1919,17 +2213,16 @@ we iterate across the class instance storage setting `refCount` to zero.
 static
 void
 mrtZeroRefCounts(
-    MRT_iab *iab)
+    MRT_Class const *classDesc)
 {
-    for (MRT_Instance *inst = (MRT_Instance *)iab->storageStart ;
-            inst < (MRT_Instance *)iab->storageFinish ;
-            inst = (MRT_Instance *)((uintptr_t)inst + iab->instanceSize)) {// <1>
-        inst->refCount = 0 ;
+    MRT_InstanceIterator iter ;
+    for (MRT_Instance *instref = mrt_InstIteratorStart(&iter, classDesc) ;
+            mrt_InstIteratorMore(&iter) ;
+            instref = mrt_InstIteratorNext(&iter)) {
+        instref->refCount = 0 ;
     }
 }
 ----
-<1> Here, and in many other places below, we must perform the scaled pointer
-arithmetic ourselves.
 
 The other operation that depends only upon accessing the `refCount` member
 of an instance is to evaluate the value of `refCount` against what
@@ -1978,7 +2271,7 @@ The first failure means we can stop.
 ----
 <<mrt forward references>>=
 static bool
-mrtCheckRefCounts(MRT_iab *iab, MRT_Cardinality cardinality) ;
+mrtCheckRefCounts(MRT_Class const *classDesc, MRT_Cardinality cardinality) ;
 ----
 
 [source,c]
@@ -1986,7 +2279,7 @@ mrtCheckRefCounts(MRT_iab *iab, MRT_Cardinality cardinality) ;
 <<mrt static functions>>=
 static bool
 mrtCheckRefCounts(
-    MRT_iab *iab,
+    MRT_Class const *classDesc,
     MRT_Cardinality cardinality)
 {
     if (cardinality == mrtZeroOrMore) { // <1>
@@ -2003,10 +2296,11 @@ mrtCheckRefCounts(
     assert(cardinality <= mrtOneOrMore) ;
     bool (*const compareCardinality)(unsigned) = compareFuncs[cardinality] ; // <3>
 
-    for (MRT_Instance *inst = (MRT_Instance *)iab->storageStart ;
-            inst < (MRT_Instance *)iab->storageFinish ;
-            inst = (MRT_Instance *)((uintptr_t)inst + iab->instanceSize)) {
-        if (inst->alloc > 0 && !compareCardinality(inst->refCount)) {
+    MRT_InstanceIterator iter ;
+    for (MRT_Instance *instref = mrt_InstIteratorStart(&iter, classDesc) ;
+            mrt_InstIteratorMore(&iter) ;
+            instref = mrt_InstIteratorNext(&iter)) {
+        if (instref->alloc > 0 && !compareCardinality(instref->refCount)) {
             return false ; // <4>
         }
     }
@@ -2109,12 +2403,10 @@ mrtCountAssocRefs(
     struct mrtassociationrole const *source,
     struct mrtassociationrole const *target)
 {
-    MRT_iab *iabSource = source->classDesc->iab ;
-    MRT_iab *iabTarget = target->classDesc->iab ;
-
     switch (source->storageType) {
     case mrtSingular:
-        mrtCountSingularRefs(iabSource, source->storageOffset, iabTarget) ;
+        mrtCountSingularRefs(source->classDesc, source->storageOffset,
+            target->classDesc) ;
         break ;
 
     case mrtLinkedList:
@@ -2134,12 +2426,13 @@ mrtCountAssocRefs(
 
     switch (target->storageType) {
     case mrtSingular:
-        mrtCountSingularRefs(iabTarget, target->storageOffset, iabSource) ;
+        mrtCountSingularRefs(target->classDesc, target->storageOffset,
+            source->classDesc) ;
         break ;
 
     case mrtLinkedList:
-        mrtCountLinkedListRefs(iabTarget, target->storageOffset,
-                iabSource, target->linkOffset) ;
+        mrtCountLinkedListRefs(target->classDesc, target->storageOffset,
+                source->classDesc, target->linkOffset) ;
         break ;
 
     case mrtArray:
@@ -2162,19 +2455,19 @@ class instance.
 static
 void
 mrtCountSingularRefs(
-    MRT_iab *source,
+    MRT_Class const *sourceClass,
     MRT_AttrOffset offset,
-    MRT_iab *target) ;
+    MRT_Class const *targetClass) ;
 ----
 
-`source`::
-    A pointer to the instance allocation block for the class instances
+`sourceClass`::
+    A pointer to the class description block for the class instances
     that make a singular reference to target instances.
 `offset`::
     The offset in bytes from the beginning of source instances to
     where the pointer to the target instance is located.
-`target`::
-    A pointer to the instance allocation block for the class instances
+`targetClass`::
+    A pointer to the class description for the class instances
     to which the source instances refer.
 
 The `mrtCountSingularRefs` functions iterates across all the active
@@ -2186,18 +2479,21 @@ and increments the `refCount` member in the referenced target instance.
 <<mrt static functions>>=
 static void
 mrtCountSingularRefs(
-    MRT_iab *source,
+    MRT_Class const *sourceClass,
     MRT_AttrOffset offset,
-    MRT_iab *target)
+    MRT_Class const *targetClass)
 {
-    for (MRT_Instance *inst = (MRT_Instance *)source->storageStart ;
-            inst < (MRT_Instance *)source->storageFinish ;
-            inst = (MRT_Instance *)((uintptr_t)inst + source->instanceSize)) {
-        if (inst->alloc > 0) { // <1>
+    MRT_iab *targetiab = mrt_GetStorageProperties(targetClass, NULL) ;
+
+    MRT_InstanceIterator srciter ;
+    for (MRT_Instance *instref = mrt_InstIteratorStart(&srciter, sourceClass) ;
+            mrt_InstIteratorMore(&srciter) ;
+            instref = mrt_InstIteratorNext(&srciter)) {
+        if (instref->alloc > 0) { // <1>
             MRT_Instance *targetInst =
-                    *(MRT_Instance **)((uintptr_t)inst + offset) ;
-            if ((void *)targetInst >= target->storageStart &&
-                    (void *)targetInst < target->storageFinish &&
+                    *(MRT_Instance **)((uintptr_t)instref + offset) ;
+            if ((void *)targetInst >= targetiab->storageStart &&
+                    (void *)targetInst < targetiab->storageFinish &&
                     targetInst->alloc > 0) { // <2>
                 targetInst->refCount += 1 ;
             }
@@ -2224,20 +2520,20 @@ point to.
 <<mrt forward references>>=
 static void
 mrtCountLinkedListRefs(
-    MRT_iab *source,
+    MRT_Class const *sourceClass,
     MRT_AttrOffset refOffset,
-    MRT_iab *target,
+    MRT_Class const *targetClass,
     MRT_AttrOffset linkOffset) ;
 ----
 
-`source`::
-    A pointer to the instance allocation block for the class instances
+`sourceClass`::
+    A pointer to the class description for the class instances
     that make a linked reference to target instances.
 `refOffset`::
     The offset in bytes from the beginning of source instances to
     where the linked list terminus is located.
-`target`::
-    A pointer to the instance allocation block for the class instances
+`targetClass`::
+    A pointer to the class description for the class instances
     to which the source instances refer.
 `linkOffset`::
     The offset in bytes from the beginning of target instances to where
@@ -2252,23 +2548,26 @@ When a target instance is found, it's `refCount` member is incremented.
 <<mrt static functions>>=
 static void
 mrtCountLinkedListRefs(
-    MRT_iab *source,
+    MRT_Class const *sourceClass,
     MRT_AttrOffset refOffset,
-    MRT_iab *target,
+    MRT_Class const *targetClass,
     MRT_AttrOffset linkOffset)
 {
-    for (MRT_Instance *inst = (MRT_Instance *)source->storageStart ;
-            inst < (MRT_Instance *)source->storageFinish ;
-            inst = (MRT_Instance *)((uintptr_t)inst + source->instanceSize)) {
-        if (inst->alloc > 0) {
-            MRT_LinkRef *ref = (MRT_LinkRef *)((uintptr_t)inst + refOffset) ;
+    MRT_iab *targetiab = mrt_GetStorageProperties(targetClass, NULL) ;
+    MRT_InstanceIterator srciter ;
+    for (MRT_Instance *srcInst = mrt_InstIteratorStart(&srciter, sourceClass) ;
+            mrt_InstIteratorMore(&srciter) ;
+            srcInst = mrt_InstIteratorNext(&srciter)) {
+        if (srcInst->alloc > 0) {
+            MRT_LinkRef *ref = (MRT_LinkRef *)((uintptr_t)srcInst + refOffset) ;
             if (ref->next != NULL) { // <1>
-                for (MRT_LinkRef *iter = mrtLinkRefBegin(ref) ;
-                        iter != mrtLinkRefEnd(ref) ; iter = iter->next) {
+                for (MRT_LinkRef *trgIter = mrtLinkRefBegin(ref) ;
+                        trgIter != mrtLinkRefEnd(ref) ;
+                        trgIter = trgIter->next) {
                     MRT_Instance *targetInst =
-                        (MRT_Instance *)((uintptr_t)iter - linkOffset) ; // <2>
-                    if ((void *)targetInst >= target->storageStart &&
-                            (void *)targetInst < target->storageFinish &&
+                        (MRT_Instance *)((uintptr_t)trgIter - linkOffset) ; // <2>
+                    if ((void *)targetInst >= targetiab->storageStart &&
+                            (void *)targetInst < targetiab->storageFinish &&
                             targetInst->alloc > 0) {
                         targetInst->refCount += 1 ;
                     }
@@ -2295,7 +2594,7 @@ we have already seen.
 static void
 mrtCountClassAssocRefs(
     struct mrtassociationrole const *participant,
-    MRT_iab *iabAssociator,
+    MRT_Class const *assocClass,
     MRT_AttrOffset assocOffset) ;
 ----
 
@@ -2313,26 +2612,26 @@ singular.
 static void
 mrtCountClassAssocRefs(
     struct mrtassociationrole const *participant,
-    MRT_iab *iabAssociator,
+    MRT_Class const *assocClass,
     MRT_AttrOffset assocOffset)
 {
-    MRT_iab *iabPart = participant->classDesc->iab ;
-
     switch (participant->storageType) {
     case mrtSingular:
-        mrtCountSingularRefs(iabPart, participant->storageOffset, iabAssociator) ;
+        mrtCountSingularRefs(participant->classDesc, participant->storageOffset,
+            assocClass) ;
         break ;
 
     case mrtLinkedList:
-        mrtCountLinkedListRefs(iabPart, participant->storageOffset,
-                iabAssociator, participant->linkOffset) ;
+        mrtCountLinkedListRefs(participant->classDesc,
+                participant->storageOffset, assocClass,
+                participant->linkOffset) ;
         break ;
 
     case mrtArray:
         mrtFatalError(mrtStaticRelationship) ;
         break ;
     }
-    mrtCountSingularRefs(iabAssociator, assocOffset, iabPart) ;
+    mrtCountSingularRefs(assocClass, assocOffset, participant->classDesc) ;
 }
 ----
 
@@ -2357,14 +2656,17 @@ static void
 mrtCountGenRefs(
     struct mrtrefgeneralization const *gen)
 {
-    MRT_iab *super = gen->superclass.classDesc->iab ;
-    for (MRT_Instance *inst = (MRT_Instance *)super->storageStart ;
-            inst < (MRT_Instance *)super->storageFinish ;
-            inst = (MRT_Instance *)((uintptr_t)inst + super->instanceSize)) {
-        if (inst->alloc > 0) {
+    MRT_Class const *superClass = gen->superclass.classDesc ;
+    MRT_InstanceIterator iter ;
+    for (MRT_Instance *instref = mrt_InstIteratorStart(&iter, superClass) ;
+            mrt_InstIteratorMore(&iter) ;
+            instref = mrt_InstIteratorNext(&iter)) {
+        if (instref->alloc > 0) {
             MRT_Instance *subInst = *(MRT_Instance **)
-                    ((uintptr_t)inst + gen->superclass.storageOffset) ;
-            MRT_iab *subiab = subInst->classDesc->iab ;
+                    ((uintptr_t)instref + gen->superclass.storageOffset) ;
+            MRT_Class const *subClass = subInst->classDesc ;
+
+            MRT_iab *subiab = mrt_GetStorageProperties(subClass, NULL) ;
             if ((void *)subInst >= subiab->storageStart &&
                     (void *)subInst < subiab->storageFinish &&
                     subInst->alloc > 0) {
@@ -2376,8 +2678,8 @@ mrtCountGenRefs(
     struct mrtrefsubclassrole const *subclass = gen->subclasses ;
     for (unsigned subcount = gen->subclassCount ; subcount != 0 ;
             --subcount, ++subclass) {
-        mrtCountSingularRefs(subclass->classDesc->iab, subclass->storageOffset,
-                gen->superclass.classDesc->iab) ;
+        mrtCountSingularRefs(subclass->classDesc, subclass->storageOffset,
+                gen->superclass.classDesc) ;
     }
 }
 ----
