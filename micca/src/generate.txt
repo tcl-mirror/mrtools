@@ -1207,8 +1207,10 @@ namespace ensemble create\
 ----
 <<CreateActivityCommands: instance sets>>=
 set cmdmap [dict create\
-    select ${suppns}::InstanceSelect\
-    foreachSelected ${suppns}::InstanceForeachSelected\
+    foreachSelected ${suppns}::InstanceSetForeachSelected\
+    empty ${suppns}::InstanceSetEmpty\
+    notempty ${suppns}::InstanceSetNotEmpty\
+    add ${suppns}::InstanceSetAdd\
     union ${suppns}::InstanceSetUnion\
     intersect ${suppns}::InstanceSetIntersect\
     minus ${suppns}::InstanceSetMinus\
@@ -1872,8 +1874,8 @@ test codegen-6.0 {
 } -body {
     micca generate
     testConditions\
-        {[llength [fileutil::grep {R1} codegen6.c]] == 10}\
-        {[llength [fileutil::grep {R2} codegen6.c]] == 8}
+        {[llength [fileutil::grep {R1} codegen6.c]] == 13}\
+        {[llength [fileutil::grep {R2} codegen6.c]] == 11}
 } -result {1}
 ----
 
@@ -3327,18 +3329,26 @@ proc classDefinitions {} {
 
     set classRefs [Class findWhere {$Domain eq $domain}]
 
-    set rels [pipe {
+    set classinrel [pipe {
         findRelated $classRefs {~R41 ClassRole} |
         deRef % |
-        relation eliminate % Role |
-        relation join % $::micca::Association -using\
-            {Domain Domain Relationship Name} |
-        relation restrictwith % {!$IsStatic} |
-        relation eliminate % IsStatic |
-        relation join % $::micca::Relationship\
-            -using {Domain Domain Relationship Name} |
-        relation rename % Class Name Number RelNumber
+        relation eliminate % Role
     } {} |%]
+    set assocrels [pipe {
+        relation join $classinrel $::micca::Association -using\
+            {Domain Domain Relationship Name} |
+        relation restrictwith ~ {!$IsStatic} |
+        relation eliminate ~ IsStatic
+    }]
+    set genrels [relation join $classinrel $::micca::Generalization\
+            -using {Domain Domain Relationship Name}]
+
+    set rels [pipe {
+        relation union $assocrels $genrels |
+        relation join ~ $::micca::Relationship\
+            -using {Domain Domain Relationship Name} |
+        relation rename ~ Class Name Number RelNumber
+    }]
     # puts [relformat $rels rels]
 
     set attrs [pipe {
@@ -4832,14 +4842,6 @@ proc LookUpSymbol {name} {
     }]
 }
 
-proc CheckSymbol {name} {
-    set sym [LookUpSymbol $name]
-    if {$sym eq {}} {
-        error "unknown symbol, $name"
-    }
-    return $sym
-}
-
 proc InsertSymbol {args} {
     try {
         variable block
@@ -4851,6 +4853,10 @@ proc InsertSymbol {args} {
     } on error {result opts} {
         return -options $opts $result
     }
+}
+
+proc DeleteSymbol {name} {
+    return [relvar deleteone Symbol Name $name]
 }
 
 proc CreateTempSymbol {args} {
@@ -4866,17 +4872,29 @@ proc CreateTempRefSymbol {className} {
     return [list $reftype $symName]
 }
 
+proc CheckSymbol {name} {
+    set sym [LookUpSymbol $name]
+    if {$sym eq {}} {
+        error "unknown symbol, $name"
+    }
+    return $sym
+}
+
+proc CheckSymProperties {sym args} {
+    set name [dict get $sym Name]
+    foreach {prop value} $args {
+        if {[dict get $sym $prop] ne $value} {
+            error "for variable, $name, expected $prop to be, $value:\
+                got [dict get $sym $prop] instead"
+        }
+    }
+    return
+}
+
 proc CreateInstRefSymbol {className varName} {
     set sym [LookUpSymbol $varName]
     if {$sym ne {}} {
-        if {[dict get $sym Type] ne "Reference"} {
-            error "variable, $varName, exists but is not an instance\
-                reference"
-        }
-        if {$className ne [dict get $sym Class]} {
-            error "variable, $varName, exists and is an instance reference\
-                to class, [dict get $sym Class]: requested class, $className"
-        }
+        CheckSymProperties $sym Class $className Type Reference
         return
     }
     set creftype [GetClassProperty $className Reference]
@@ -4884,16 +4902,16 @@ proc CreateInstRefSymbol {className varName} {
     return "$creftype$varName ;\n"
 }
 
-proc CreateInstRefSetSymbol {className varName} {
+proc CheckInstRefSymbol {varName} {
+    set sym [CheckSymbol $varName]
+    CheckSymProperties $sym Type Reference
+    return $sym
+}
+
+proc CreateInstSetSymbol {className varName} {
     set sym [LookUpSymbol $varName]
     if {$sym ne {}} {
-        if {[dict get $sym Type] ne "InstanceSet"} {
-            error "variable, $varName, exists but is not an instance set"
-        }
-        if {$className ne [dict get $sym Class]} {
-            error "variable, $varName, exists and is an instance set referring\
-                to class, [dict get $sym Class]: requested class, $className"
-        }
+        CheckSymProperties $sym Class $className Type InstanceSet
         return
     }
     set ctype MRT_InstanceSet
@@ -4901,8 +4919,10 @@ proc CreateInstRefSetSymbol {className varName} {
     return "$ctype $varName ;\n"
 }
 
-proc DeleteSymbol {name} {
-    return [relvar deleteone Symbol Name $name]
+proc CheckInstSetSymbol {varName args} {
+    set sym [CheckSymbol $varName]
+    CheckSymProperties $sym Type InstanceSet {*}$args
+    return $sym
 }
 
 proc ProcessCodeLines {text} {
@@ -5034,6 +5054,7 @@ proc End {} {
             PopBlock
             append result "\}\n"
         }
+        InstanceSetForeachSelected -
         InstanceForeachRelated -
         ClassForeachInstance {
             set result [PopContext $context depth]
@@ -5971,7 +5992,7 @@ test codegen-40.0 {
 } -body {
     micca generate
     testConditions\
-        {[llength [fileutil::grep {->R1} codegen40.c]] == 1}
+        {[llength [fileutil::grep {offsetof} codegen40.c]] == 3}
 } -result {1}
 ----
 
@@ -6077,9 +6098,11 @@ proc InstanceFindOneRelated {instref startref args} {
 
     set startsym [CheckSymbol $startref]
     set startClass [dict get $startsym Class]
-    set result [IndentToBlock\
-        [linecomment "instance $instref foreachRelated $startref \{$args\}"]\
+    set heading [IndentToBlock\
+        [linecomment "instance $instref findOneRelated $startref \{$args\}"]\
     ]
+    set startlevel [GetBlock]
+    set isCond false
 
     foreach relspec $args {
         set relinfo [LookUpRelationship $relspec]
@@ -6099,6 +6122,7 @@ proc InstanceFindOneRelated {instref startref args} {
                     set refcode "$targettype$targetref = $startref->$comp ;\
                     // $relspec \n"
                     if {$cond} {
+                        set isCond true
                         append refcode "if ($targetref != NULL) \{\n"
                         append result [IndentToBlock $refcode]
                         PushBlock
@@ -6124,6 +6148,7 @@ proc InstanceFindOneRelated {instref startref args} {
                         // $relspec \n"]
                 }
                 reftosub {
+                    set isCond true
                     lassign [CreateTempRefSymbol $targetclass] targettype\
                             targetref
                     set subnum [GetClassProperty $targetclass Number]
@@ -6151,6 +6176,7 @@ proc InstanceFindOneRelated {instref startref args} {
                         // $relspec \n"]
                 }
                 uniontosub {
+                    set isCond true
                     lassign [CreateTempRefSymbol $targetclass] targettype\
                             targetref
                     set subnum [GetClassProperty $targetclass Number]
@@ -6168,11 +6194,18 @@ proc InstanceFindOneRelated {instref startref args} {
             set startref $targetref
         }
     }
-    append result [IndentToBlock [string cat\
-        [CreateInstRefSymbol $targetclass $instref]\
-        "$instref = $targetref ;\n"]]
+    append result [IndentToBlock "$instref = $targetref ;\n"]
 
-    return $result
+    for {set i [expr {[GetBlock] - $startlevel}]} {$i > 0} {incr i -1} {
+        PopBlock
+        append result [IndentToBlock "\}\n"]
+    }
+    append heading [IndentToBlock [CreateInstRefSymbol $targetclass $instref]]
+    if {$isCond} {
+        append heading [IndentToBlock "$instref = NULL ;\n"]
+    }
+
+    return [string cat $heading $result]
 }
 ----
 
@@ -6333,14 +6366,94 @@ proc FindEventNumber {class event} {
 [source,tcl]
 ----
 <<generation support commands>>=
-proc InstanceSetUnion {result set1 set2 args} {
+proc InstanceSetForeachSelected {set inst} {
+    set setsym [CheckInstSetSymbol $set]
+
+    set startlevel [GetBlock]
+    set iter [CreateTempSymbol Ctype MRT_InstSetIterator Type SetIterator\
+            Class [dict get $setsym Class]]
+    append result [IndentToBlock [string cat\
+        "MRT_InstSetIterator $iter ;\n"\
+        "for (mrt_InstSetIterBegin(&$set, &$iter) ;\
+        mrt_InstSetIterMore(&$iter) ; mrt_InstSetIterNext(&$iter)) \{\n"\
+    ]]
+    PushBlock
+
+    append result [IndentToBlock [string cat\
+        [CreateInstRefSymbol [dict get $setsym Class] $inst]\
+        "$inst = mrt_InstSetIterGet(&$iter) ;\n"\
+    ]]
+
+    PushContext InstanceSetForeachSelected\
+            depth [expr {[GetBlock] - $startlevel}]
+
+    return $result
 }
 ----
 
 [source,tcl]
 ----
 <<generation support commands>>=
-proc InstanceSetIntersect {result set1 set2 args} {
+proc InstanceSetEmpty {set} {
+    CheckInstSetSymbol $set
+    return "mrt_InstSetEmpty(&$set)"
+}
+----
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc InstanceSetNotEmpty {set} {
+    return ![InstanceSetEmpty $set]
+}
+----
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc InstanceSetAdd {set inst} {
+    set setsym [CheckInstSetSymbol $set]
+    set instsym [CheckInstRefSymbol $inst]
+
+    CheckSymProperties $instsym Class [dict get $setsym Class]
+    return [IndentToBlock "mrt_InstSetAddInstance(&$set, $inst) ;\n"]
+}
+----
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc InstanceSetUnion {result set1 args} {
+    tailcall InstanceSetOperation mrt_InstSetUnion $result $set1 {*}$args
+}
+----
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc InstanceSetIntersect {result set1 args} {
+    tailcall InstanceSetOperation mrt_InstSetIntersect $result $set1 {*}$args
+}
+----
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc InstanceSetOperation {op result set1 args} {
+    variable domain
+
+    set sym1 [CheckInstSetSymbol $set1]
+    set className [dict get $sym1 Class]
+    set classDesc [GetClassDescriptor $domain $className]
+
+    append result\
+        [CreateInstSetSymbol [dict get $sym1 Class] $result]\
+        "mrt_InstSetInitialize(&$result, &$classDesc) ;\n"
+    foreach set $args {
+        set setsym [CheckInstSetSymbol $set Class $className]
+        append result "$op\(&$result, &$set, &$result) ;\n"
+    }
+    return [IndentToBlock $result]
 }
 ----
 
@@ -6348,6 +6461,19 @@ proc InstanceSetIntersect {result set1 set2 args} {
 ----
 <<generation support commands>>=
 proc InstanceSetMinus {result set1 set2} {
+    variable domain
+
+    set sym1 [CheckInstSetSymbol $set1]
+    set sym2 [CheckInstSetSymbol $set2]
+
+    set className [dict get $sym1 Class]
+    CheckSymProperties $sym2 $className
+    set classDesc [GetClassDescriptor $domain $className]
+    append result\
+        [CreateInstSetSymbol [dict get $sym1 Class] $result]\
+        "mrt_InstSetInitialize(&$result, &$classDesc) ;\n"\
+        "mrt_InstSetMinus(&$set1, &$set2, &$result) ;\n"
+    return [IndentToBlock $result]
 }
 ----
 
@@ -6801,29 +6927,26 @@ test codegen-28.0 {
 proc ClassForeachInstance {className instref} {
     variable domain
 
-    set sym [LookUpSymbol $instref]
-    if {$sym ne {}} {
-        error "instance reference variable, \"$instref\", already exists"
-    }
-
     set iter [CreateTempSymbol Ctype {MRT_InstanceIterator}\
             Type InstanceIterator Class $className]
     set iab [CreateTempSymbol Ctype {MRT_iab *} Type IAB Class $className]
 
     set startlevel [GetBlock]
 
+    set classDesc [GetClassDescriptor $domain $className]
     set result [IndentToBlock [string cat\
         [linecomment "$className foreachInstance $instref"]\
         "MRT_InstanceIterator $iter ;\n"\
-        [CreateInstRefSymbol $className $instref]\
-        "for ($instref = mrt_InstIteratorStart(&$iter,\
-            &[GetClassDescriptor $domain $className]) ;\n"\
-        "        mrt_InstIteratorMore(&$iter) ;\n"\
-        "        $instref = mrt_InstIteratorNext(&$iter)) \{\n"
+        "for (mrt_InstIteratorStart(&$iter, &$classDesc) ;\
+            mrt_InstIteratorMore(&$iter) ;\
+            mrt_InstIteratorNext(&$iter)) \{\n"\
     ]]
     PushBlock
-
-    append result [IndentToBlock "if ($instref->base__INST.alloc > 0) \{\n"]
+    append result [IndentToBlock [string cat\
+        [CreateInstRefSymbol $className $instref]\
+        "$instref = mrt_InstIteratorGet(&$iter) ;\n"\
+        "if ($instref->base__INST.alloc > 0) \{\n"\
+    ]]
     PushBlock
 
     PushContext ClassForeachInstance depth [expr {[GetBlock] - $startlevel}]
@@ -6865,21 +6988,6 @@ test codegen-29.0 {
     testConditions\
         {[llength [fileutil::grep {xref->color} codegen29.c]] == 1}
 } -result {1}
-----
-
-[source,tcl]
-----
-<<generation support commands>>=
-proc ClassDeclareRefSet {className varName} {
-    variable domain
-    set classDesc [GetClassDescriptor $domain $className]
-    append result\
-        [linecomment "$className referenceSet $varName"]\
-        [CreateRefSetSymbol $className $varName]\
-        "mrt_RefSetBeginSelection(&$varName, &$classDesc) ;\n"
-
-    return [IndentToBlock $result]
-}
 ----
 
 [source,tcl]
@@ -6980,7 +7088,7 @@ test codegen-25.0 {
 } -body {
     micca generate
     testConditions\
-        {[llength [fileutil::grep {->base__INST} codegen25.c]] == 5}
+        {[llength [fileutil::grep {->base__INST} codegen25.c]] == 1}
 } -result {1}
 ----
 
@@ -6991,8 +7099,8 @@ proc ClassInstanceSet {className varName} {
     variable domain
     set classDesc [GetClassDescriptor $domain $className]
     append result\
-        [CreateInstRefSetSymbol $className $varName]\
-        "mrt_RefSetBeginSelection(&$varname, &$classDesc) ;\n"\
+        [CreateInstSetSymbol $className $varName]\
+        "mrt_InstSetInitialize(&$varName, &$classDesc) ;\n"
     return [IndentToBlock $result]
 }
 ----
