@@ -1121,8 +1121,8 @@ set simpassocs [findRelated $assocs {~R31 SimpleAssociation}]
 forAllRefs simpassoc $simpassocs {
     set simpname [readAttribute $simpassoc Name]
     set cmdmap [dict create\
-        relate [list ${suppns}::RelSimpleRelate $simpname]\
-        unrelate [list ${suppns}::RelSimpleUnrelate $simpname]\
+        relate [list ${suppns}::RelSimpleRelateForw $simpname]\
+        unrelate [list ${suppns}::RelSimpleUnrelateForw $simpname]\
     ]
     set assigner [findRelated $simpassoc R31 ~R52]
     if {[isNotEmptyRef $assigner]} {
@@ -1136,16 +1136,41 @@ forAllRefs simpassoc $simpassocs {
     namespace ensemble create\
         -command ${actns}::$simpname\
         -map $cmdmap
+
+    set cmdmap [dict create\
+        relate [list ${suppns}::RelSimpleRelateBack $simpname]\
+        unrelate [list ${suppns}::RelSimpleUnrelateBack $simpname]\
+    ]
+    namespace ensemble create\
+        -command ${actns}::~$simpname\
+        -map $cmdmap
 }
 
 set classassocs [findRelated $assocs {~R31 ClassBasedAssociation}]
 foreach cbname [relation list [deRef $classassocs] Name] {
     set cmdmap [dict create\
-        relate [list ${suppns}::RelClassRelate $cbname]\
-        unrelate [list ${suppns}::RelClassUnrelate $cbname]\
+        relate [list ${suppns}::RelClassRelateForw $cbname]\
+        unrelate [list ${suppns}::RelClassUnrelateForw $cbname]\
     ]
+    set assigner [findRelated $classassocs R31 ~R52]
+    if {[isNotEmptyRef $assigner]} {
+        if {[isNotEmptyRef [findRelated $assigner {~R53 SingleAssigner}]]} {
+            dict set cmdmap signal\
+                [list ${suppns}::SingleAssignerSignal $simpname]
+        } else {
+            dict set cmdmap signal [list ${suppns}::InstanceSignal $simpname]
+        }
+    }
     namespace ensemble create\
         -command ${actns}::$cbname\
+        -map $cmdmap
+
+    set cmdmap [dict create\
+        relate [list ${suppns}::RelClassRelateBack $cbname]\
+        unrelate [list ${suppns}::RelClassUnrelateBack $cbname]\
+    ]
+    namespace ensemble create\
+        -command ${actns}::~$cbname\
         -map $cmdmap
 }
 
@@ -1154,12 +1179,20 @@ set gens [findRelated $relRefs {~R30 Generalization}]
 set refgens [findRelated $gens {~R43 ReferenceGeneralization}]
 foreach rgname [relation list [deRef $refgens] Name] {
     set cmdmap [dict create\
-        relate [list ${suppns}::RelRefGenRelate $rgname]\
-        unrelate [list ${suppns}::RelRefGenUnrelate $rgname]\
+        relate [list ${suppns}::RelRefGenRelateForw $rgname]\
+        unrelate [list ${suppns}::RelRefGenUnrelateForw $rgname]\
         reclassify [list ${suppns}::RelRefGenReclassify $rgname]\
     ]
     namespace ensemble create\
         -command ${actns}::$rgname\
+        -map $cmdmap
+
+    set cmdmap [dict create\
+        relate [list ${suppns}::RelRefGenRelateBack $rgname]\
+        unrelate [list ${suppns}::RelRefGenUnrelateBack $rgname]\
+    ]
+    namespace ensemble create\
+        -command ${actns}::~$rgname\
         -map $cmdmap
 }
 
@@ -1171,15 +1204,6 @@ foreach ugname [relation list [deRef $uniongens] Name] {
             reclassify [list ${suppns}::RelUnionGenReclassify $ugname]\
         ]
 }
-
-
-# HERE
-# -- union generalization
-----
-
-[source,tcl]
-----
-<<CreateActivityCommands: assigners>>=
 ----
 
 [source,tcl]
@@ -5218,7 +5242,7 @@ proc InstanceAssignAttribute {instref args} {
 
     lassign [ParseAttrVars $instref $args] attrNames varNames dataTypes
 
-    set result [linecomment "instance $instref assignAttribute \{$args\}"]
+    set result [linecomment "instance $instref assignAttribute $args"]
 
     foreach attr $attrNames var $varNames type $dataTypes {
         set varDecl [typeCheck composeDeclaration $type $var]
@@ -5251,7 +5275,7 @@ proc InstanceForeachRelated {instref startref args} {
     set startClass [dict get $startsym Class]
     set startlevel [GetBlock]
     set result [IndentToBlock\
-        [linecomment "instance $instref foreachRelated $startref \{$args\}"]\
+        [linecomment "instance $instref foreachRelated $startref $args"]\
     ]
 
     foreach relspec $args {
@@ -5315,7 +5339,8 @@ proc InstanceForeachRelated {instref startref args} {
                     append result [IndentToBlock\
                         "for (MRT_LinkRef *$itervar =\
                             mrtLinkRefBegin(&$startref->$termcomp) ;\
-                            $itervar != mrtLinkRefEnd(&$startref->$termcomp) ;)\                            \{\n"]
+                            $itervar != mrtLinkRefEnd(&$startref->$termcomp) ;)\
+                            \{\n"]
                     PushBlock
                     lassign [CreateTempRefSymbol $targetclass] targettype\
                             targetref
@@ -5485,16 +5510,32 @@ proc LookUpRelationship {relspec} {
                     ]
                 }
             } else {
-                if {$destclass ne $assocclass} {
-                    error "class based association, $relname, found $destclass\
-                        as destination: should be, $assocclass"
-                }
-                if {$dir eq "forw"} {
-                    return [list $srcclass $assocclass $srctype $trgcond\
-                        $srccomp]
+                if {$destclass eq $assocclass} {
+                    if {$dir eq "forw"} {
+                        return [list $srcclass $assocclass $srctype $trgcond\
+                            $srccomp]
+                    } else {
+                        return [list $trgclass $assocclass $trgtype $srccond\
+                            $trgcomp]
+                    }
+                } elseif {$destclass eq $trgclass} {
+                    if {$dir eq "forw"} {
+                        return [list $assocclass $trgclass reference false\
+                            ${relname}.forward]
+                    } else {
+                        error "navigating forward from $assocclass arrives at\
+                            $trgclass: got $destclass"
+                    }
+                } elseif {$destclass eq $srcclass} {
+                    if {$dir eq "back"} {
+                        return [list $assocclass $srcclass reference false\
+                            ${relname}.backward]
+                    } else {
+                        error "navigating backward from $assocclass arrives at\
+                            $srcclass: got $destclass"
+                    }
                 } else {
-                    return [list $trgclass $assocclass $trgtype $srccond\
-                        $trgcomp]
+                    error "$destclass does not participate in $relname"
                 }
             }
         }
@@ -6087,7 +6128,7 @@ proc InstanceFindOneRelated {instref startref args} {
     set startsym [CheckInstRefSymbol $startref]
     set startClass [dict get $startsym Class]
     set heading [IndentToBlock\
-        [linecomment "instance $instref findOneRelated $startref \{$args\}"]\
+        [linecomment "instance $instref findOneRelated $startref $args"]\
     ]
     set startlevel [GetBlock]
     set isCond false
@@ -6394,23 +6435,24 @@ proc InstanceSetAdd {set inst} {
 [source,tcl]
 ----
 <<generation support commands>>=
-proc InstanceSetUnion {result set1 args} {
-    tailcall InstanceSetOperation mrt_InstSetUnion $result $set1 {*}$args
+proc InstanceSetUnion {opset set1 args} {
+    tailcall InstanceSetOperation union mrt_InstSetUnion $opset $set1 {*}$args
 }
 ----
 
 [source,tcl]
 ----
 <<generation support commands>>=
-proc InstanceSetIntersect {result set1 args} {
-    tailcall InstanceSetOperation mrt_InstSetIntersect $result $set1 {*}$args
+proc InstanceSetIntersect {opset set1 args} {
+    tailcall InstanceSetOperation intersect mrt_InstSetIntersect\
+        $opset $set1 {*}$args
 }
 ----
 
 [source,tcl]
 ----
 <<generation support commands>>=
-proc InstanceSetOperation {op result set1 args} {
+proc InstanceSetOperation {label op opset set1 args} {
     variable domain
 
     set sym1 [CheckInstSetSymbol $set1]
@@ -6418,11 +6460,13 @@ proc InstanceSetOperation {op result set1 args} {
     set classDesc [GetClassDescriptor $domain $className]
 
     append result\
-        [CreateInstSetSymbol $className $result]\
-        "mrt_InstSetInitialize(&$result, &$classDesc) ;\n"
+        [linecomment "instset $opset $label $set1 $args"]\
+        [CreateInstSetSymbol $className $opset]\
+        "mrt_InstSetInitialize(&$opset, &$classDesc) ;\n"\
+        "$op\(&$opset, &$set1, &$opset\) ;\n"
     foreach set $args {
-        set setsym [CheckInstSetSymbol $set Class $className]
-        append result "$op\(&$result, &$set, &$result) ;\n"
+        CheckInstSetSymbol $set Class $className
+        append result "$op\(&$opset, &$set, &$opset\) ;\n"
     }
     return [IndentToBlock $result]
 }
@@ -6431,7 +6475,7 @@ proc InstanceSetOperation {op result set1 args} {
 [source,tcl]
 ----
 <<generation support commands>>=
-proc InstanceSetMinus {result set1 set2} {
+proc InstanceSetMinus {diffset set1 set2} {
     variable domain
 
     set sym1 [CheckInstSetSymbol $set1]
@@ -6440,9 +6484,10 @@ proc InstanceSetMinus {result set1 set2} {
 
     set classDesc [GetClassDescriptor $domain $className]
     append result\
-        [CreateInstSetSymbol $className $result]\
-        "mrt_InstSetInitialize(&$result, &$classDesc) ;\n"\
-        "mrt_InstSetMinus(&$set1, &$set2, &$result) ;\n"
+        [linecomment "instset $diffset minus $set1 $set2"]\
+        [CreateInstSetSymbol $className $diffset]\
+        "mrt_InstSetInitialize(&$diffset, &$classDesc) ;\n"\
+        "mrt_InstSetMinus(&$set1, &$set2, &$diffset) ;\n"
     return [IndentToBlock $result]
 }
 ----
@@ -6459,7 +6504,7 @@ proc ClassCreate {className instref args} {
     set classDesc [GetClassDescriptor $domain $className]
 
     append result\
-        [linecomment "$className create $instref \{$args\}"]\
+        [linecomment "$className create $instref $args"]\
         [CreateInstRefSymbol $className $instref]\
         "$instref = mrt_CreateInstance(&$classDesc, MRT_StateCode_IG) ;\n"
 
@@ -6662,7 +6707,7 @@ proc ClassCreateIn {className instref state args} {
     set statenum [GetStateNumber $domain $className $state]
 
     append result\
-        [linecomment "$className createin $instref $state \{$args\}"]\
+        [linecomment "$className createin $instref $state $args"]\
         [CreateInstRefSymbol $className $instref]\
         "$instref = mrt_CreateInstance(&$classDesc, $statenum) ;\n"
     foreach {attrName attrValue} $attrvalues {
@@ -6794,7 +6839,7 @@ proc ClassCreateAsync {className event eventparams args} {
     set eventNum [readAttribute $eventRef Number]
 
     append result\
-        [linecomment "$className createasync $event \{$eventparams\} \{$args\}"]
+        [linecomment "$className createasync $event \{$eventparams\} $args"]
 
     set psig [findRelated $eventRef R80 R69]
     set params [FindParamsFromSig $psig]
@@ -7080,10 +7125,10 @@ proc ClassInstanceSet {className varName} {
 [source,tcl]
 ----
 <<generation support commands>>=
-proc RelSimpleRelate {relName oneref otherref} {
+proc RelSimpleRelateForw {relName source target} {
     return [string cat [IndentToBlock\
-        [linecomment "$relName relate $oneref $otherref"]]\
-        [SimpleAssocLinkage $relName $oneref $otherref mrt_Relate]\
+        [linecomment "$relName relate $source $target"]]\
+        [SimpleAssocLinkage $relName $source $target mrt_Relate]\
     ]
 }
 ----
@@ -7091,10 +7136,10 @@ proc RelSimpleRelate {relName oneref otherref} {
 [source,tcl]
 ----
 <<generation support commands>>=
-proc RelSimpleUnrelate {relName oneref otherref} {
+proc RelSimpleRelateBack {relName target source} {
     return [string cat [IndentToBlock\
-        [linecomment "$relName unrelate $oneref $otherref"]]\
-        [SimpleAssocLinkage $relName $oneref $otherref mrt_Unrelate]\
+        [linecomment "~$relName relate $target $source"]]\
+        [SimpleAssocLinkage $relName $source $target mrt_Relate]\
     ]
 }
 ----
@@ -7102,37 +7147,41 @@ proc RelSimpleUnrelate {relName oneref otherref} {
 [source,tcl]
 ----
 <<generation support commands>>=
-proc SimpleAssocLinkage {relName oneref otherref opname} {
+proc RelSimpleUnrelateForw {relName source target} {
+    return [string cat [IndentToBlock\
+        [linecomment "$relName unrelate $source $target"]]\
+        [SimpleAssocLinkage $relName $source $target mrt_Unrelate]\
+    ]
+}
+----
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc RelSimpleUnrelateBack {relName target source} {
+    return [string cat [IndentToBlock\
+        [linecomment "~$relName unrelate $source $target"]]\
+        [SimpleAssocLinkage $relName $source $target mrt_Unrelate]\
+    ]
+}
+----
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc SimpleAssocLinkage {relName sourceref targetref opname} {
     variable domain
     set relRef [SimpleAssociation findById Domain $domain Name $relName]
     set relNum [readAttribute [findRelated $relRef R31 R30] Number]
+    set rship &${domain}__RSHIPS\[$relNum\]
 
-    set onesym [CheckInstRefSymbol $oneref]
-    set oneclass [dict get $onesym Class]
+    set sourceClass [readAttribute [findRelated $relRef ~R32] Class]
+    CheckInstRefSymbol $sourceref Class $sourceClass
 
-    set othersym [CheckInstRefSymbol $otherref]
-    set otherclass [dict get $othersym Class]
+    set targetClass [readAttribute [findRelated $relRef ~R33] Class]
+    CheckInstRefSymbol $targetref Class $targetClass
 
-    set sourceclass [readAttribute [findRelated $relRef ~R32] Class]
-    set targetclass [readAttribute [findRelated $relRef ~R33] Class]
-
-    if {$oneclass eq $sourceclass && $otherclass eq $targetclass} {
-        set sourceref $oneref
-        set targetref $otherref
-    } elseif {$oneclass eq $targetclass && $otherclass eq $sourceclass} {
-        set sourceref $otherref
-        set targetref $oneref
-    } else {
-        if {!($oneclass eq $sourceclass || $oneclass eq $targetclass)} {
-            error "class, $oneclass, does not participate in relationship,\
-                $relName"
-        } else {
-            error "class, $otherclass, does not participate in relationship,\
-                $relName"
-        }
-    }
-    return [IndentToBlock\
-        "$opname\(&${domain}__RSHIPS\[$relNum\], $sourceref, $targetref\) ;\n"]
+    return [IndentToBlock "$opname\($rship, $sourceref, $targetref\) ;\n"]
 }
 ----
 
@@ -7154,7 +7203,7 @@ test codegen-30.0 {
             domainop void makePair {} {
                 %<X create xref>%
                 %<Y create yref>%
-                %<R1 relate yref xref>%
+                %<~R1 relate yref xref>%
             }
 
             domainop void breakPair {} {
@@ -7196,10 +7245,10 @@ test codegen-30.0 {
 [source,tcl]
 ----
 <<generation support commands>>=
-proc RelClassRelate {relName oneref otherref assocref} {
+proc RelClassRelateForw {relName source target assoc} {
     return [string cat [IndentToBlock\
-        [linecomment "$relName relate $oneref $otherref $assocref"]]\
-        [ClassAssocLinkage $relName $oneref $otherref $assocref mrt_Relate]\
+        [linecomment "$relName relate $source $target $assoc"]]\
+        [ClassAssocLinkage $relName $source $target $assoc mrt_Relate]\
     ]
 }
 ----
@@ -7207,10 +7256,10 @@ proc RelClassRelate {relName oneref otherref assocref} {
 [source,tcl]
 ----
 <<generation support commands>>=
-proc RelClassUnrelate {relName oneref otherref assocref} {
+proc RelClassRelateBack {relName target source assoc} {
     return [string cat [IndentToBlock\
-        [linecomment "$relName unrelate $oneref $otherref $assocref"]]\
-        [ClassAssocLinkage $relName $oneref $otherref $assocref mrt_Unrelate]\
+        [linecomment "$relName relate $target $source $assoc"]]\
+        [ClassAssocLinkage $relName $source $target $assoc mrt_Relate]\
     ]
 }
 ----
@@ -7218,41 +7267,44 @@ proc RelClassUnrelate {relName oneref otherref assocref} {
 [source,tcl]
 ----
 <<generation support commands>>=
-proc ClassAssocLinkage {relName oneref otherref assocref opname} {
+proc RelClassUnrelateForw {relName source target assoc} {
+    return [string cat [IndentToBlock\
+        [linecomment "$relName unrelate $source $target $assoc"]]\
+        [ClassAssocLinkage $relName $source $target $assoc mrt_Unrelate]\
+    ]
+}
+----
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc RelClassUnrelateBack {relName target source assoc} {
+    return [string cat [IndentToBlock\
+        [linecomment "$relName unrelate $target $source $assoc"]]\
+        [ClassAssocLinkage $relName $source $target $assoc mrt_Unrelate]\
+    ]
+}
+----
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc ClassAssocLinkage {relName sourceref targetref assocref opname} {
     variable domain
     set relRef [ClassBasedAssociation findById Domain $domain Name $relName]
     set relNum [readAttribute [findRelated $relRef R31 R30] Number]
+    set rship &${domain}__RSHIPS\[$relNum\]
 
-    set onesym [CheckInstRefSymbol $oneref]
-    set oneclass [dict get $onesym Class]
+    set sourceClass [readAttribute [findRelated $relRef ~R34] Class]
+    CheckInstRefSymbol $sourceref Class $sourceClass
 
-    set othersym [CheckInstRefSymbol $otherref]
-    set otherclass [dict get $othersym Class]
+    set targetClass [readAttribute [findRelated $relRef ~R35] Class]
+    CheckInstRefSymbol $targetref Class $targetClass
 
-    set assocclass [readAttribute [findRelated $relRef ~R42] Class]
-    set assocsym [CheckInstRefSymbol $assocref Class $assocclass]
+    set assocClass [readAttribute [findRelated $relRef ~R42] Class]
+    set assocsym [CheckInstRefSymbol $assocref Class $assocClass]
 
-    set sourceclass [readAttribute [findRelated $relRef ~R34] Class]
-    set targetclass [readAttribute [findRelated $relRef ~R35] Class]
-
-    if {$oneclass eq $sourceclass && $otherclass eq $targetclass} {
-        set sourceref $oneref
-        set targetref $otherref
-    } elseif {$oneclass eq $targetclass && $otherclass eq $sourceclass} {
-        set sourceref $otherref
-        set targetref $oneref
-    } else {
-        if {!($oneclass eq $sourceclass || $oneclass eq $targetclass)} {
-            error "class, $oneclass, does not participate in relationship,\
-                $relName"
-        } else {
-            error "class, $otherclass, does not participate in relationship,\
-                $relName"
-        }
-    }
-    return [IndentToBlock\
-        "$opname\(&${domain}__RSHIPS\[$relNum\], $sourceref, $targetref,\
-            $assocref\) ;\n"]
+    return [IndentToBlock "$opname\($rship, $sourceref, $targetref, $assocref\) ;\n"]
 }
 ----
 
@@ -7276,7 +7328,7 @@ test codegen-31.0 {
                 %<X create xref>%
                 %<Y create yref>%
                 %<A create aref>%
-                %<R1 relate yref xref aref>%
+                %<~R1 relate yref xref aref>%
                 %<R1 unrelate xref yref aref>%
             }
         }
@@ -7305,10 +7357,10 @@ test codegen-31.0 {
 [source,tcl]
 ----
 <<generation support commands>>=
-proc RelRefGenRelate {relName oneref otherref} {
+proc RelRefGenRelateForw {relName subref superref} {
     return [string cat [IndentToBlock\
-        [linecomment "$relName relate $oneref $otherref"]]\
-        [RefGenLinkage $relName $oneref $otherref mrt_Relate]\
+        [linecomment "$relName relate $subref $superref"]]\
+        [RefGenLinkage $relName $subref $superref mrt_Relate]\
     ]
 }
 ----
@@ -7316,10 +7368,10 @@ proc RelRefGenRelate {relName oneref otherref} {
 [source,tcl]
 ----
 <<generation support commands>>=
-proc RelRefGenUnrelate {relName oneref otherref} {
+proc RelRefGenRelateBack {relName superref subref} {
     return [string cat [IndentToBlock\
-        [linecomment "$relName unrelate $oneref $otherref"]]\
-        [RefGenLinkage $relName $oneref $otherref mrt_Unrelate]\
+        [linecomment "$relName relate $superref $subref"]]\
+        [RefGenLinkage $relName $subref $superref mrt_Relate]\
     ]
 }
 ----
@@ -7327,43 +7379,46 @@ proc RelRefGenUnrelate {relName oneref otherref} {
 [source,tcl]
 ----
 <<generation support commands>>=
-proc RefGenLinkage {relName oneref otherref opname} {
+proc RelRefGenUnrelateForw {relName subref superref} {
+    return [string cat [IndentToBlock\
+        [linecomment "$relName unrelate $subref $superref"]]\
+        [RefGenLinkage $relName $subref $superref mrt_Unrelate]\
+    ]
+}
+----
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc RelRefGenUnrelateBack {relName superref subref} {
+    return [string cat [IndentToBlock\
+        [linecomment "$relName unrelate $superref $subref"]]\
+        [RefGenLinkage $relName $subref $superref mrt_Unrelate]\
+    ]
+}
+----
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc RefGenLinkage {relName source target opname} {
     variable domain
     set relRef [ReferenceGeneralization findById Domain $domain Name $relName]
     set relNum [readAttribute [findRelated $relRef R43 R30] Number]
+    set rship &${domain}__RSHIPS\[$relNum\]
 
-    set onesym [CheckSymbol $oneref]
-    if {[dict get $onesym Type] ne "Reference"} {
-        error "variable, $oneref, is not an instance reference"
-    }
-    set oneclass [dict get $onesym Class]
-    set othersym [CheckSymbol $otherref]
-    if {[dict get $othersym Type] ne "Reference"} {
-        error "variable, $otherref, is not an instance reference"
-    }
-    set otherclass [dict get $othersym Class]
+    set superClass [readAttribute [findRelated $relRef ~R36] Class]
+    CheckInstRefSymbol $target Class $superClass
 
-    set superclass [readAttribute [findRelated $relRef ~R36] Class]
+    set subsym [CheckInstRefSymbol $source]
     set subrefs [findRelated $relRef ~R37]
     set subclasses [relation list [deRef $subrefs] Class]
-
-    if {$oneclass eq $superclass && $otherclass in $subclasses} {
-        set sourceref $otherref
-        set targetref $oneref
-    } elseif {$otherclass eq $superclass && $oneclass in $subclasses} {
-        set sourceref $oneref
-        set targetref $otherref
-    } else {
-        if {!($oneclass eq $superclass || $oneclass in $subclasses)} {
-            error "class, $oneclass, does not participate in relationship,\
-                $relName"
-        } else {
-            error "class, $otherclass, does not participate in relationship,\
-                $relName"
-        }
+    if {[dict get $subsym Class] ni $subclasses} {
+        error "expected $source to be a reference to one of,\
+            \"[join $subclasses {, }]\", got: [dict get $subsym Class]"
     }
-    return [IndentToBlock\
-        "$opname\(&${domain}__RSHIPS\[$relNum\], $sourceref, $targetref\) ;\n"]
+
+    return [IndentToBlock "$opname\($rship, $source, $target\) ;\n"]
 }
 ----
 
@@ -7386,7 +7441,7 @@ test codegen-32.0 {
             domainop void makePair {} {
                 %<X create x1>%
                 %<S create s1>%
-                %<R1 relate s1 x1>%
+                %<~R1 relate s1 x1>%
                 %<R1 unrelate x1 s1>%
             }
         }
@@ -7493,7 +7548,7 @@ test codegen-33.0 {
             domainop void makePair {} {
                 %<X create x1>%
                 %<S create s1>%
-                %<R1 relate s1 x1>%
+                %<~R1 relate s1 x1>%
                 %<R1 reclassify s1 Y y1 color 20>%
             }
         }
@@ -7606,7 +7661,7 @@ proc SingleAssignerSignal {relName event args} {
     set instref [CreateTempSymbol Ctype $reftype Type Reference Class $relName]
 
     append result\
-        [linecomment "$relName $event \{$args\}"]\
+        [linecomment "$relName $event $args"]\
         "$reftype$instref = &${relName}__POOL\[0\] ;\n"
 
     return [string cat\
