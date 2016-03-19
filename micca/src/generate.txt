@@ -1054,6 +1054,7 @@ proc CreateActivityCommands {domain} {
     <<CreateActivityCommands: instances>>
     <<CreateActivityCommands: instance sets>>
 
+    interp alias {} external {} ${suppns}::InvokeExternalOp
     interp alias {} end {} ${suppns}::End
 }
 ----
@@ -1094,6 +1095,7 @@ relation foreach info $classInfo {
         instanceReference [list ${suppns}::ClassInstanceReference $Name]\
         instanceSet [list ${suppns}::ClassInstanceSet $Name]\
         findByName [list ${suppns}::ClassFindByName $Name]\
+        operation [list ${suppns}::ClassOperation $Name]\
     ]
     if {$Name ni $usubnames} {
         dict set cmdmap create [list ${suppns}::ClassCreate $Name]
@@ -1218,6 +1220,7 @@ set cmdmap [dict create\
     canceldelayed ${suppns}::InstanceCancelSignal\
     delayremaining ${suppns}::InstanceRemainingTime\
     delete ${suppns}::InstanceDelete\
+    operation ${suppns}::InstanceOperation\
     foreachRelated ${suppns}::InstanceForeachRelated\
     findOneRelated ${suppns}::InstanceFindOneRelated\
 ]
@@ -1234,6 +1237,8 @@ set cmdmap [dict create\
     foreachSelected ${suppns}::InstanceSetForeachSelected\
     empty ${suppns}::InstanceSetEmpty\
     notempty ${suppns}::InstanceSetNotEmpty\
+    equal ${suppns}::InstanceSetEqual\
+    notequal ${suppns}::InstanceSetNotEqual\
     add ${suppns}::InstanceSetAdd\
     union ${suppns}::InstanceSetUnion\
     intersect ${suppns}::InstanceSetIntersect\
@@ -2439,7 +2444,7 @@ proc activityDeclarations {} {
     set result {}
 
     set classes [pipe {
-        State findWhere {$Domain eq $domain && $Activity ne {}} |
+        State findWhere {$Domain eq $domain && [string trim $Activity] ne {}} |
         deRef ~ |
         relation eliminate ~ Domain Activity IsTerminal PSigID |
         relation group ~ States Name
@@ -2865,7 +2870,7 @@ proc GenerateActivityTable {smodel} {
         set state [relation semijoin $place $::micca::State]
         if {[relation isnotempty $state]} {
             relation assign $state Name Activity
-            if {$Activity eq {}} {
+            if {[string trim $Activity] eq {}} {
                 append result "    NULL, // $Name\n"
             } else {
                 append result "    ${className}_${Name}__ACTIVITY, // $Name\n"
@@ -4471,7 +4476,7 @@ proc activityDefinitions {} {
     set result {}
 
     set classes [pipe {
-        State findWhere {$Domain eq $domain && $Activity ne {}} |
+        State findWhere {$Domain eq $domain && [string trim $Activity] ne {}} |
         deRef ~ |
         relation eliminate ~ Domain IsTerminal |
         relation group ~ States Name Activity PSigID
@@ -5085,6 +5090,38 @@ proc End {} {
 }
 ----
 
+[source,tcl]
+----
+<<generation support commands>>=
+proc InvokeExternalOp {opName args} {
+    if {[llength $args] % 2 != 0} {
+        error "operation parameters must be given as name / value pairs"
+    }
+    variable domain
+
+    set opRef [ExternalOperation findWhere {$Domain eq $domain &&\
+            $Name eq $opName}]
+    if {[isEmptyRef $opRef]} {
+        error "unknown external operation, $opName, for domain, $domain"
+    }
+
+    append result "${domain}_$opName__EOP\("
+    set pset {}
+    set paramRefs [findRelated $opRef ~R11]
+    relation foreach param [deRef $paramRefs] -ascending Number {
+        relation assign $param
+        if {![dict exists $args $Name]} {
+            error "no value given for the $Name parameter"
+        }
+        append pset "[dict get $args $Name], "
+    }
+    set pset [string trimright $pset {, }]
+
+    append result $pset "\)"
+    return $result
+}
+----
+
 === Instance Commands
 
 [source,tcl]
@@ -5259,9 +5296,42 @@ proc InstanceAssignAttribute {instref args} {
 proc InstanceDelete {instref} {
     CheckInstRefSymbol $instref
     append result\
-        "// instance delete $instref\n"\
+        [linecomment "instance $instref delete"]\
         "mrt_DeleteInstance($instref) ;\n"
     return [IndentToBlock $result]
+}
+----
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc InstanceOperation {instref opName args} {
+    CheckInstRefSymbol $instref
+    if {[llength $args] % 2 != 0} {
+        error "operation parameters must be given as name / value pairs"
+    }
+    variable domain
+
+    set opRef [Operation findWhere {$Domain eq $domain && $Class eq $className\
+        && $Name eq $opName && $IsInstance}]
+    if {[isEmptyRef $opRef]} {
+        error "unknown instance operation, $opName, for class, $className"
+    }
+
+    append result "${className}_$opName\($instref, "
+    set pset {}
+    set paramRefs [findRelated $opRef ~R4]
+    relation foreach param [deRef $paramRefs] -ascending Number {
+        relation assign $param
+        if {![dict exists $args $Name]} {
+            error "no value given for the $Name parameter"
+        }
+        append pset "[dict get $args $Name], "
+    }
+    set pset [string trimright $pset {, }]
+
+    append result $pset "\)"
+    return $result
 }
 ----
 
@@ -6425,45 +6495,68 @@ proc InstanceSetNotEmpty {set} {
 [source,tcl]
 ----
 <<generation support commands>>=
+proc InstanceSetEqual {set1 set2} {
+    set sym1 [CheckInstSetSymbol $set1]
+    CheckInstSetSymbol $set2 Class [dict get $sym1 Class]
+    return "mrt_InstSetEqual(&$set1, &$set2)"
+}
+----
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc InstanceSetNotEqual {set1 set2} {
+    return ![InstanceSetEqual $set1 $set2]
+}
+----
+
+[source,tcl]
+----
+<<generation support commands>>=
 proc InstanceSetAdd {set inst} {
     set setsym [CheckInstSetSymbol $set]
     set instsym [CheckInstRefSymbol $inst Class [dict get $setsym Class]]
-    return [IndentToBlock "mrt_InstSetAddInstance(&$set, $inst) ;\n"]
+    return [IndentToBlock [string cat\
+        [linecomment "instset $set add $inst"]\
+        "mrt_InstSetAddInstance(&$set, $inst) ;\n"\
+    ]]
 }
 ----
 
 [source,tcl]
 ----
 <<generation support commands>>=
-proc InstanceSetUnion {opset set1 args} {
-    tailcall InstanceSetOperation union mrt_InstSetUnion $opset $set1 {*}$args
+proc InstanceSetUnion {opset set1 set2 args} {
+    tailcall InstanceSetOperation union mrt_InstSetUnion $opset $set1 $set2\
+            {*}$args
 }
 ----
 
 [source,tcl]
 ----
 <<generation support commands>>=
-proc InstanceSetIntersect {opset set1 args} {
-    tailcall InstanceSetOperation intersect mrt_InstSetIntersect\
-        $opset $set1 {*}$args
+proc InstanceSetIntersect {opset set1 set2 args} {
+    tailcall InstanceSetOperation intersect mrt_InstSetIntersect $opset\
+            $set1 $set2 {*}$args
 }
 ----
 
 [source,tcl]
 ----
 <<generation support commands>>=
-proc InstanceSetOperation {label op opset set1 args} {
+proc InstanceSetOperation {label op opset set1 set2 args} {
     variable domain
 
     set sym1 [CheckInstSetSymbol $set1]
     set className [dict get $sym1 Class]
-    set classDesc [GetClassDescriptor $domain $className]
+    CheckInstSetSymbol $set2 Class $className
 
+    set classDesc [GetClassDescriptor $domain $className]
     append result\
         [linecomment "instset $opset $label $set1 $args"]\
         [CreateInstSetSymbol $className $opset]\
         "mrt_InstSetInitialize(&$opset, &$classDesc) ;\n"\
-        "$op\(&$opset, &$set1, &$opset\) ;\n"
+        "$op\(&$set1, &$set2, &$opset\) ;\n"
     foreach set $args {
         CheckInstSetSymbol $set Class $className
         append result "$op\(&$opset, &$set, &$opset\) ;\n"
@@ -7009,7 +7102,10 @@ test codegen-29.0 {
 ----
 <<generation support commands>>=
 proc ClassInstanceReference {className varName} {
-    return [IndentToBlock [CreateInstRefSymbol $className $varName]]
+    return [IndentToBlock [string cat\
+        [linecomment "$className instanceReference $varName"]\
+        "[CreateInstRefSymbol $className $varName] ;\n"\
+    ]]
 }
 ----
 
@@ -7032,7 +7128,6 @@ proc ClassFindByName {className instName instref} {
     return [IndentToBlock $result]
 }
 ----
-
 
 [source,tcl]
 ----
@@ -7110,13 +7205,46 @@ test codegen-25.0 {
 [source,tcl]
 ----
 <<generation support commands>>=
+proc ClassOperation {className opName args} {
+    if {[llength $args] % 2 != 0} {
+        error "operation parameters must be given as name / value pairs"
+    }
+    variable domain
+
+    set opRef [Operation findWhere {$Domain eq $domain && $Class eq $className\
+        && $Name eq $opName && !$IsInstance}]
+    if {[isEmptyRef $opRef]} {
+        error "unknown class operation, $opName, for class, $className"
+    }
+
+    append result "${className}_$opName\("
+    set pset {}
+    set paramRefs [findRelated $opRef ~R4]
+    relation foreach param [deRef $paramRefs] -ascending Number {
+        relation assign $param
+        if {![dict exists $args $Name]} {
+            error "no value given for the $Name parameter"
+        }
+        append pset "[dict get $args $Name], "
+    }
+    set pset [string trimright $pset {, }]
+
+    append result $pset "\)"
+    return $result
+}
+----
+
+[source,tcl]
+----
+<<generation support commands>>=
 proc ClassInstanceSet {className varName} {
     variable domain
     set classDesc [GetClassDescriptor $domain $className]
-    append result\
+    return [IndentToBlock [string cat\
+        [linecomment "$className instanceSet $varName"]\
         [CreateInstSetSymbol $className $varName]\
-        "mrt_InstSetInitialize(&$varName, &$classDesc) ;\n"
-    return [IndentToBlock $result]
+        "mrt_InstSetInitialize(&$varName, &$classDesc) ;\n"\
+    ]]
 }
 ----
 
