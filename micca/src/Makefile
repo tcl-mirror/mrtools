@@ -33,6 +33,7 @@ DOCPARTS=\
 	bibliography.txt\
 	codeorg.txt\
 	configure.txt\
+	example.txt\
 	generate.txt\
 	litprog.txt\
 	platform.txt\
@@ -56,6 +57,9 @@ LSDIAGRAMS =\
 	pointer-example.uxf\
 	pointer-set-example.uxf\
 	assoc-decompose.uxf\
+	wmc-class-diagram.uxf\
+	wm-states.uxf\
+	ct-states.uxf\
 	$(NULL)
 
 IMAGES =\

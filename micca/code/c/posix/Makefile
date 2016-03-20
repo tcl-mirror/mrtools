@@ -113,7 +113,7 @@ CLEANFILES =\
 clean :
 	$(RM) $(CLEANFILES)
 
-$(PDF) : $(DOCSRC) $(DOCPARTS) $(EXTRAS) $(IMAGES)
+$(PDF) : $(DOCSRC) $(DOCPARTS) $(EXTRAS) $(IMAGES) $(DOCINFO)
 
 %.pdf : %.aweb
 	a2x $(A2XOPTS) --doctype=book  --format=pdf\
