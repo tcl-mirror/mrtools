@@ -1093,7 +1093,6 @@ relation foreach info $classInfo {
     set cmdmap [dict create\
         foreachInstance [list ${suppns}::ClassForeachInstance $Name]\
         instanceReference [list ${suppns}::ClassInstanceReference $Name]\
-        instid [list ${suppns}::ClassRefToId $Name]\
         reference [list ${suppns}::ClassIdToRef $Name]\
         instanceSet [list ${suppns}::ClassInstanceSet $Name]\
         findByName [list ${suppns}::ClassFindByName $Name]\
@@ -1225,6 +1224,7 @@ set cmdmap [dict create\
     operation ${suppns}::InstanceOperation\
     foreachRelated ${suppns}::InstanceForeachRelated\
     findOneRelated ${suppns}::InstanceFindOneRelated\
+    instid [list ${suppns}::InstanceRefToId]\
 ]
 namespace ensemble create\
     -command ${actns}::instance\
@@ -4351,6 +4351,9 @@ proc operationDefinitions {} {
 
             if {[relation isempty $Parameters]} {
                 append result "\(void\)\n"
+                set syms [relation create {
+                    Name string Ctype string Type string Class string
+                }]
             } else {
                 relation foreach param $Parameters -ascending Number {
                     relation assign $param
@@ -4362,13 +4365,21 @@ proc operationDefinitions {} {
                 append result\
                     "\(\n"\
                     [indentCode $pdecls]
+
+                set syms [pipe {
+                    relation project $Parameters Name DataType |
+                    relation rename ~ DataType Ctype |
+                    relation extend ~ stup\
+                        Type string {"Parameter"}\
+                        Class string {$Class}
+                }]
             }
 
             append result\
                 [blockcomment $Body]\
                 "\{\n"\
                 "    MRT_INSTRUMENT_ENTRY\n"\
-                [ExpandActivity $Body [expr {$IsInstance ? $Class : {}}]]\
+                [ExpandActivity $Body $syms]\
                 "\}\n"
         }
     }
@@ -4410,6 +4421,11 @@ proc TorDefinitions {which} {
         append result [comment "$which Definitions"]
         forAllRefs tor $tors {
             assignAttribute $tor
+
+            set selfdecl [GetClassProperty $Class Reference]const
+            set syms [relation create {
+                Name string Ctype string Type string Class string
+            } [list Name self Ctype $selfdecl Type Reference Class $Class]]
             append result\
                 "static void\n${Class}__[dict get $suffixmap $which]\(\n"\
                 "    void *const s__SELF\)\n"\
@@ -4417,9 +4433,8 @@ proc TorDefinitions {which} {
                 "\{\n"\
                 [string cat\
                     "    MRT_INSTRUMENT_ENTRY\n"\
-                    "    [GetClassProperty $Class Reference]const self =\
-                            s__SELF ;\n"\
-                    [ExpandActivity $Body $Class]\
+                    "    $selfdecl self = s__SELF ;\n"\
+                    [ExpandActivity $Body $syms]\
                 ]\
                 "\}\n"
         }
@@ -4493,6 +4508,7 @@ proc activityDefinitions {} {
             append result "#define MRT_CLASSNAME \"$Model\"\n"
             relation foreach state $States {
                 relation assign $state
+                set selfdecl [GetClassProperty $Model Reference]const
                 append result\
                     "static void\n${Model}_${Name}__ACTIVITY\(\n"\
                     "    void *const s__SELF,\n"\
@@ -4501,7 +4517,7 @@ proc activityDefinitions {} {
                     "\{\n"\
                     "        #define MRT_STATENAME \"$Name\"\n"\
                     "    MRT_INSTRUMENT_ENTRY\n"\
-                    "    [GetClassProperty $Model Reference]const self = s__SELF ;\n"
+                    "    $selfdecl self = s__SELF ;\n"
                 if {$PSigID ne {}} {
                     set signame ${Model}_${Name}__SPARAMS
                     append result\
@@ -4514,8 +4530,23 @@ proc activityDefinitions {} {
                         relation assign $param {Name pname} Declaration
                         append result "    $Declaration = pp__PARAMS->$pname ;\n"
                     }
+
+                    set syms [pipe {
+                        relation project $params Name Declaration |
+                        relation rename ~ Declaration Ctype |
+                        relation extend ~ stup\
+                            Type string {"Parameter"}\
+                            Class string {$Model}
+                    }]
+                } else {
+                    set syms [relation create {
+                        Name string Ctype string Type string Class string
+                    }]
                 }
-                append result [ExpandActivity $Activity $Model]
+                set syms [relation insert $syms [list Name self Ctype $selfdecl\
+                        Type Reference Class $Model]]
+
+                append result [ExpandActivity $Activity $syms]
 
                 append result\
                     "        #undef MRT_STATENAME\n"\
@@ -4608,6 +4639,9 @@ proc domainOpDefinitions {} {
             if {[relation isempty $Parameters]} {
                 set decl "\(void\)\n"
                 append result $decl
+                set syms [relation create {
+                    Name string Ctype string Type string Class string
+                }]
             } else {
                 set pdecls {}
                 relation foreach param $Parameters -ascending Number {
@@ -4622,13 +4656,20 @@ proc domainOpDefinitions {} {
                     [indentCode $pdecls]\
                 ]
                 append result $decl
+                set syms [pipe {
+                    relation project $Parameters Name DataType |
+                    relation rename ~ DataType Ctype |
+                    relation extend ~ stup\
+                        Type string {"Parameter"}\
+                        Class string {{}}
+                }]
             }
 
             append result\
                 [blockcomment $Body]\
                 "\{\n"\
                 "    MRT_INSTRUMENT_ENTRY\n"\
-                [ExpandActivity $Body]\
+                [ExpandActivity $Body $syms]\
                 "\}\n"
         }
     }
@@ -4701,6 +4742,9 @@ proc externalOpDefinitions {} {
 
             if {[relation isempty $Parameters]} {
                 append result "\(void\)\n"
+                set syms [relation create {
+                    Name string Ctype string Type string Class string
+                }]
             } else {
                 relation foreach param $Parameters -ascending Number {
                     relation assign $param
@@ -4712,12 +4756,19 @@ proc externalOpDefinitions {} {
                 append result\
                     "\(\n"\
                     [indentCode $pdecls]
+                set syms [pipe {
+                    relation project $Parameters Name DataType |
+                    relation rename ~ DataType Ctype |
+                    relation extend ~ stup\
+                        Type string {"Parameter"}\
+                        Class string {{}}
+                }]
             }
 
             append result\
                 [blockcomment $Body]\
                 "\{\n"\
-                [ExpandActivity $Body]\
+                [ExpandActivity $Body $syms]\
                 "\}\n"
         }
     }
@@ -5023,25 +5074,19 @@ proc GetBlock {} {
 
 === Template Expansion of Activity Code
 
-// HERE, before the calls to ExpandActivity, we need to set up
-// the symbol table with the symbol names for the parameters
-// that are passed in. That implies setting to block to 0
-// and pushing / poping the block around the call to ExpandActivity.
-// Probably can push all that into this function.
-
 [source,tcl]
 ----
 <<generation support commands>>=
-proc ExpandActivity {body {class {}}} {
-    variable block 0
+proc ExpandActivity {body parameters} {
+    # parameters is a relation value with heading:
+    # Name string Ctype string Type string Class string
+
+    variable block 1
     try {
-        if {$class ne {}} {
-            CreateInstRefSymbol $class self
+        foreach param [relation body $parameters] {
+            InsertSymbol {*}$param
         }
-        set expanded [actexpand expand $body]
-        PushBlock
-        set result [IndentToBlock $expanded]
-        PopBlock
+        return [actexpand expand $body]
     } on error {result} {
         # puts $::errorInfo
         log::error $result
@@ -5057,8 +5102,6 @@ proc ExpandActivity {body {class {}}} {
     } finally {
         relvar set Symbol [relation emptyof [relvar set Symbol]]
     }
-
-    return $result
 }
 ----
 
@@ -6376,6 +6419,15 @@ proc InstanceRemainingTime {instref event {sourceref {}}} {
 [source,tcl]
 ----
 <<generation support commands>>=
+proc InstanceRefToId {instref} {
+    CheckInstRefSymbol $instref
+    return "mrt_InstanceIndex($instref)"
+}
+----
+
+[source,tcl]
+----
+<<generation support commands>>=
 proc InstanceNewECB {instref event arglist} {
     variable domain
 
@@ -7114,15 +7166,6 @@ proc ClassInstanceReference {className varName} {
         [linecomment "$className instanceReference $varName"]\
         "[CreateInstRefSymbol $className $varName] ;\n"\
     ]]
-}
-----
-
-[source,tcl]
-----
-<<generation support commands>>=
-proc ClassRefToId {className instref} {
-    CheckInstRefSymbol $instref Class $className
-    return "mrt_InstanceIndex($instref)"
 }
 ----
 
