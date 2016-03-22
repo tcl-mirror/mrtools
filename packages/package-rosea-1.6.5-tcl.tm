@@ -2,7 +2,7 @@
 # -- Tcl Module
 
 # @@ Meta Begin
-# Package rosea 1.6.4
+# Package rosea 1.6.5
 # Meta description Rosea is a data and execution architecture for
 # Meta description translating XUML models using Tcl as the implementation
 # Meta description language.
@@ -30,7 +30,7 @@ package require lambda
 
 # ACTIVESTATE TEAPOT-PKG BEGIN DECLARE
 
-package provide rosea 1.6.4
+package provide rosea 1.6.5
 
 # ACTIVESTATE TEAPOT-PKG END DECLARE
 # ACTIVESTATE TEAPOT-PKG END TM
@@ -113,7 +113,7 @@ namespace eval ::rosea {
     
     namespace ensemble create
 
-    variable version 1.6.4
+    variable version 1.6.5
 
     logger::initNamespace [namespace current]
 
@@ -1919,7 +1919,7 @@ namespace eval ::rosea {
                 if {![dict exists $heading $attr]} {
                     tailcall DeclError UNKNOWN_ATTRIBUTE $attr
                 }
-                lappend extcmd $attr [dict get $heading $attr] \"$value\"
+                lappend extcmd $attr [dict get $heading $attr] \{$value\}
             }
             relvar updateper $relvar [eval $extcmd]
             return
@@ -1965,7 +1965,7 @@ namespace eval ::rosea {
             foreach attr $attrnames var $varnames {
                 if {[uplevel 1 [list info exists $var]]} {
                     upvar 1 $var varvalue
-                    lappend extcmd $attr [dict get $heading $attr] \"$varvalue\"
+                    lappend extcmd $attr [dict get $heading $attr] \{$varvalue\}
                 }
             }
             relvar updateper $relvar [eval $extcmd]

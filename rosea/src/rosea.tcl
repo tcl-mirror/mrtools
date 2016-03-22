@@ -77,7 +77,7 @@ namespace eval ::rosea {
     
     namespace ensemble create
 
-    variable version 1.6.4
+    variable version 1.6.5
 
     logger::initNamespace [namespace current]
 
@@ -1883,7 +1883,7 @@ namespace eval ::rosea {
                 if {![dict exists $heading $attr]} {
                     tailcall DeclError UNKNOWN_ATTRIBUTE $attr
                 }
-                lappend extcmd $attr [dict get $heading $attr] \"$value\"
+                lappend extcmd $attr [dict get $heading $attr] \{$value\}
             }
             relvar updateper $relvar [eval $extcmd]
             return
@@ -1929,7 +1929,7 @@ namespace eval ::rosea {
             foreach attr $attrnames var $varnames {
                 if {[uplevel 1 [list info exists $var]]} {
                     upvar 1 $var varvalue
-                    lappend extcmd $attr [dict get $heading $attr] \"$varvalue\"
+                    lappend extcmd $attr [dict get $heading $attr] \{$varvalue\}
                 }
             }
             relvar updateper $relvar [eval $extcmd]
