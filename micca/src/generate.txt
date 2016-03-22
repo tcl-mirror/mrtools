@@ -256,7 +256,7 @@ set headerTemplate [textutil::adjust::undent {
     #include <stddef.h>
     #include <stdint.h>
     #include <stdbool.h>
-    %<typeAliases>%
+    %<interfaceTypeAliases>%
     %<domainOpDeclarations>%
     %<externalOpDeclarations>%
     %<eventParamDeclarations>%
@@ -421,7 +421,7 @@ There are three circumstances where a type is needed external to the domain:
 [source,tcl]
 ----
 <<generation header commands>>=
-proc typeAliases {} {
+proc interfaceTypeAliases {} {
     variable domain
 
     set domRef [Domain findWhere {$Name eq $domain}]
@@ -462,16 +462,15 @@ proc typeAliases {} {
     set taRefs [refUnion $taRefs $eoRefs]
     set taRefs [refUnion $taRefs $eopRefs]
     set taRefs [refUnion $taRefs $argRefs]
+
     set result {}
-    if {[isNotEmptyRef $taRefs]} {
-        append result [comment "Type Aliases"]
-        forAllRefs taRef $taRefs {
-            assignAttribute $taRef TypeName TypeDefinition
-            append result\
-                "typedef "\
-                [typeCheck composeDeclaration $TypeDefinition $TypeName]\
-                " \;\n"
-        }
+    append result [comment "Type Aliases"]
+    forAllRefs taRef $taRefs {
+        assignAttribute $taRef TypeName TypeDefinition
+        append result\
+            "typedef "\
+            [typeCheck composeDeclaration $TypeDefinition $TypeName]\
+            " \;\n"
     }
 
     return $result
@@ -859,7 +858,7 @@ namespace eval GenCode {
 <<generation data>>=
 set codeTemplate [textutil::adjust::undent {
     %<banner>%
-    %<prologue>%
+    %<prologueDeclarations>%
     #include "micca_rt.h"
     #ifdef MRT_INSTRUMENT
         #ifndef MRT_INSTRUMENT_ENTRY
@@ -870,6 +869,7 @@ set codeTemplate [textutil::adjust::undent {
         #define MRT_INSTRUMENT_ENTRY
     #endif /* MRT_INSTRUMENT */
     %<domainInclude>%
+    %<implementationTypeAliases>%
     %<forwardClassDeclarations>%
     %<forwardRelationshipDeclaration>%
     %<classDeclarations>%
@@ -1255,18 +1255,14 @@ namespace ensemble create\
 [source,tcl]
 ----
 <<generation code commands>>=
-proc prologue {} {
+proc prologueDeclarations {} {
     variable prologue
 
-    set result {}
-    if {$prologue ne {}} {
-        append result\
-            [comment "Domain Prologue Begin"]\
-            [indentCode [string trim $prologue \n] 0]\
-            [comment "Domain Prologue End"]
-    }
-
-    return $result
+    return [string cat\
+        [comment "Domain Prologue Begin"]\
+        [textutil::adjust::undent [string trim $prologue]]\
+        [comment "Domain Prologue End"]\
+    ]
 }
 ----
 
@@ -1323,6 +1319,69 @@ test codegen-1.0 {
     micca generate
     llength [fileutil::grep {Special} codegen1.c]
 } -result {2}
+----
+
+// HERE do something about all the copy / paste code between here and
+// interfaceTypeAliases
+
+[source,tcl]
+----
+<<generation code commands>>=
+proc implementationTypeAliases {} {
+    variable domain
+
+    set domRef [Domain findWhere {$Name eq $domain}]
+    set aliasRefs [findRelated $domRef ~R7]
+    set aliases [pipe {
+        deRef $aliasRefs |
+        relation list ~ TypeName
+    }]
+    # Domain operations
+    set doRefs [pipe {
+        findRelatedWhere $domRef ~R5 {$ReturnDataType in $aliases} |
+        findRelated % R5 ~R7
+    } {} |%]
+    set dopRefs [pipe {
+        findRelatedWhere $domRef {~R5 ~R6} {$DataType in $aliases} |
+        findRelated % R6 R5 ~R7
+    } {} |%]
+    # External operations
+    set eoRefs [pipe {
+        findRelatedWhere $domRef ~R10 {$ReturnDataType in $aliases} |
+        findRelated % R10 ~R7
+    } {} |%]
+    set eopRefs [pipe {
+        findRelatedWhere $domRef {~R10 ~R11} {$DataType in $aliases} |
+        findRelated % R11 R10 ~R7
+    } {} |%]
+    # Event arguments
+    set argRefs [pipe {
+        Argument findWhere {$Domain eq $domain && $DataType in $aliases} |
+        deRef ~ |
+        relation semijoin ~ $::micca::TypeAlias\
+                -using {Domain Domain DataType TypeName} |
+        ::rosea::Helpers::ToRef ::micca::TypeAlias ~
+    }]
+
+    # Union all the different refs together.
+    set taRefs [refUnion $doRefs $dopRefs]
+    set taRefs [refUnion $taRefs $eoRefs]
+    set taRefs [refUnion $taRefs $eopRefs]
+    set taRefs [refUnion $taRefs $argRefs]
+    set aliasRefs [refMinus $aliasRefs $taRefs]
+
+    set result {}
+    append result [comment "Type Aliases"]
+    forAllRefs taRef $aliasRefs {
+        assignAttribute $taRef TypeName TypeDefinition
+        append result\
+            "typedef "\
+            [typeCheck composeDeclaration $TypeDefinition $TypeName]\
+            " \;\n"
+    }
+
+    return $result
+}
 ----
 
 [source,tcl]
@@ -4371,7 +4430,11 @@ proc operationDefinitions {} {
                     relation rename ~ DataType Ctype |
                     relation extend ~ stup\
                         Type string {"Parameter"}\
-                        Class string {$Class}
+                        Class string {$Class} |
+                    relation update ~ utup {
+                        [tuple extract $utup Name] eq "self"} {
+                        tuple update $utup Type Reference
+                    }
                 }]
             }
 
@@ -5357,18 +5420,20 @@ proc InstanceDelete {instref} {
 ----
 <<generation support commands>>=
 proc InstanceOperation {instref opName args} {
-    CheckInstRefSymbol $instref
+    set instsym [CheckInstRefSymbol $instref]
     if {[llength $args] % 2 != 0} {
         error "operation parameters must be given as name / value pairs"
     }
     variable domain
 
+    set className [dict get $instsym Class]
     set opRef [Operation findWhere {$Domain eq $domain && $Class eq $className\
         && $Name eq $opName && $IsInstance}]
     if {[isEmptyRef $opRef]} {
         error "unknown instance operation, $opName, for class, $className"
     }
 
+    dict set args self $instref
     append result "${className}_$opName\($instref, "
     set pset {}
     set paramRefs [findRelated $opRef ~R4]
