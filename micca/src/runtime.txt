@@ -124,10 +124,8 @@ Each system will have to construct a custom `main` function.
 The goals of this function are to perform any required initialization
 and then to enter the event loop.
 Below we show an outline of what a `main` function would do.
-The only hard and fast requirements are that `mrt_Initialize` must be called
-before any run time facilities are used and `mrt_EventLoop` must
-be invoked to cause the system to run.
 
+(((micca,Run Time Function,main)))
 [source,c]
 ----
 int
@@ -150,46 +148,103 @@ main(void)
      * here. Sometimes domain interactions are such that a second round of
      * initialization is required.  Bridges between domains may also require
      * that the initialization for a domain be done before the bridge can be
-     * initialized.  Since the run time initialization has been done by this
-     * point, domains may generate events and do other model level activities.
-     * Regardless of how the initialization is accomplished, it is system
-     * specific and, unfortunately, only temporally cohesive.
+     * initialized. Once mrt_Initialize() has been invoked, domains may
+     * generate events and do other model level activities.  Regardless of how
+     * the initialization is accomplished, it is system specific and,
+     * unfortunately, only temporally cohesive.
      */
 
     /*
-     * Entering the event loop causes the system to dispatch events.
+     * Entering the event loop causes the system to run.
      */
     mrt_EventLoop() ;
 }
 ----
 
+The only hard and fast requirements are that `mrt_Initialize` must be called
+before any facilities of the run time are used and `mrt_EventLoop` must
+be invoked to cause the system to run.
+
+(((micca,Run Time Function,mrt_Initialize)))
+
+*****
 [source,c]
 ----
 <<mrt external interfaces>>=
 extern void mrt_Initialize(void) ;
 ----
 
+The `mrt_Initialize` function initializes the micca run time.
+This function should be called early in the initialization of a system
+and must be invoked before using any run time facilities such as
+signaling an event.
+*****
+
+The implementation of `mrt_Initialize` is target platform specific.
+So we postpone showing its code until later when we discuss how the
+run time is tailored to the supported target computing platforms.
+
 === Event Loop
 
-To a first approximation,
-the run time event loop is an infinite loop.
-Most applications will enter the event loop after their initialization
-phase and remain there forever.
-However,
-testing and other considerations mean that we may want to exit the
-event loop to gain control of the program.
+The figure below shows a flow diagram of
+how the event loop of the run time works.
 
-(((micca,Run Time,mrt_EventLoop)))
+image::main-loop.pdf[title="Micca Run Time Event Loop"]
+
+Processing is divided between the background and foreground.
+Foreground processing happens as a result of an interrupt[footnote:In the
+POSIX environment, signals serve the role of an interrupt].
+A queue is used to synchronize between the two execution realms.
+The background processing is single threaded.
+We will discuss the internal logic of processing an event later.
+For now, we make two points.
+
+. If interrupts have occurred,
+we deal with their background synchronization first and completely.
+The exact process to synchronize between interrupts and the background
+is processor architecture dependent.
+. Only one event is dispatched after synchronizing with interrupts.
+Because we deal with all the interrupts before dispatching a single event,
+interrupt synchronization has an effective higher priority than event dispatch.
+
+If there is no work to be done, _i.e._ both the sync queue and the event
+queue are empty, then the system waits until there is further work to be done.
+Note that any further work must arise from interrupt service and its
+synchronization to the background.
+Waiting is platform specific, but usually, for embeddeded systems,
+involves going into a low power mode.
+For the POSIX version of the run time, the `pselect(2)` system call is used
+to suspend the process.
+
+*****
+(((micca,Run Time Function,mrt_EventLoop)))
 [source,c]
 ----
 <<mrt external interfaces>>=
-extern void mrt_EventLoop(void) ;
+extern void
+mrt_EventLoop(void) ;
+----
 
+The `mrt_EventLoop` function enters the micca run time event loop
+and dispatches event to cause the system to run.
+Control remains in the event loop unless specifically requested to
+exit via the `mrt_SyncToEventLoop` function.
+*****
+
+To a first approximation,
+the event loop is an infinite loop.
+Most applications will enter the event loop after their initialization
+phase and remain there forever.
+
+(((micca,Run Time Function,mrt_EventLoop)))
+[source,c]
+.Implementation
+----
 <<mrt external functions>>=
 void
 mrt_EventLoop(void)
 {
-    for (mrtExitEventLoop = false ; !mrtExitEventLoop ; ) {
+    for (mrtExitEventLoop = false ; !mrtExitEventLoop ; /* empty */ ) {
         if (!mrt_ProcessOneEvent()) {
             mrtWait() ;
         }
@@ -202,9 +257,11 @@ the flow of control loops,
 processing one event at a time as long as it has not been requested to exit the
 loop.
 
+Testing and other considerations mean that we may want to exit the
+event loop to gain control of the program.
 Exiting the event loop is controlled by a boolean variable.
 
-(((micca,Run Time,mrtExitEventLoop)))
+(((micca,Run Time Function,mrtExitEventLoop)))
 [source,c]
 ----
 <<mrt static data>>=
@@ -225,14 +282,23 @@ The exact details are system specific,
 but this provides the means to gain control of the run time execution
 for exceptional situations.
 
+*****
 [source,c]
 ----
 <<mrt external interfaces>>=
-extern bool mrt_SyncToEventLoop() ;
+extern bool
+mrt_SyncToEventLoop() ;
 ----
 
-(((micca,Run Time,mrt_SyncToEventLoop)))
+The `mrt_SyncToEventLoop` function will cause the event loop to exit
+after completing the processing of the ongoing activity.
+Note the event loop is exited only if the system is not waiting,
+_i.e._ there must be some activity ongoing.
+*****
+
+(((micca,Run Time Function,mrt_SyncToEventLoop)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 bool
@@ -246,17 +312,26 @@ mrt_SyncToEventLoop(void)
 
 === Process a Single Event
 
-A public interface is also provided to process a single event.
+An external interface is also provided to process a single event.
 
+*****
 [source,c]
 ----
 <<mrt external interfaces>>=
-extern bool mrt_ProcessOneEvent(void) ;
+extern bool
+mrt_ProcessOneEvent(void) ;
 ----
 
-This is used by the event loop but can also be invoked on it own.
+The `mrt_ProcessOneEvent` function may be invoked to process a single
+event and then return to the caller.
+The return value for `mrt_ProcessOneEvent` indicates if an event
+was actually dispatched.
+A return value of `false` indicates that the event queue is empty.
+*****
+
+This function is used by the event loop but can also be invoked on it own.
 This is _not_ the recommended mechanism of running a `micca` based
-applications, but sometimes it is necessary.
+application, but sometimes it is necessary.
 Again,
 testing is sometimes best accomplished by letting a test program
 control event-by-event dispatch.
@@ -271,8 +346,9 @@ a transition period is unavoidable.
 We provide the ability to micro-manage the event dispatch with the full
 realization that the capablity will be abused by some projects.
 
-(((micca,Run Time,mtr_ProcessOneEvent)))
+(((micca,Run Time Function,mtr_ProcessOneEvent)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 bool
@@ -284,27 +360,13 @@ mrt_ProcessOneEvent(void)
 }
 ----
 
-The return value for `mrt_ProcessOneEvent` indictes if an event
-was actually dispatched.
-A return value of `false` indicates that there is no additional work
-that needs to be done at this time.
-
-We will discuss the internal logic of processing an event later.
-For now, we make two points.
-
-. If interrupts have occurred,
-we deal with their background synchronization first and completely.
-The exact process to synchronize between interrupts and the background
-is processor architecture dependent.
-. Only one event is dispatched after synchronizing with interrupts.
-Because we deal with all the interrupts before dispatching a single event,
-interrupt synchronization has an effective higher priority than event dispatch.
-
-We also note that the exact manner in which background synchronization
+Note that the exact manner in which background synchronization
 functions are executed is dependent upon the processor architecture.
 We will discuss this later, but for now,
 it is only important to remember that all requests for background
 synchronization are executed before dispatching at most one event.
+The code for `mrtDispatchOneEvent` is shown later when we discuss event
+dispatch.
 
 == Managing Data
 
@@ -328,11 +390,12 @@ We need to be able to:
 The structure of the instances of each class is, in general, different.
 Each class can have different attributes and relationships and this
 is reflected in the ``C'' structure that is used for each class.
-However from the point of view of the run time and the operations provided by
+From the point of view of the run time and the operations provided by
 the run time,
 instances can be treated the same.
 The view of a class instance by the run time is shown below.
 
+(((micca,Run Time Data,MRT_Instance)))
 [source,c]
 ----
 <<mrt interface aggregate types>>=
@@ -357,7 +420,7 @@ typedef struct mrtinstance {
     to a new instance.
     A negative value means the memory has been reserved but is not in active
     use.
-    A positive value means the memory has been reserved and the instances
+    A positive value means the memory has been reserved and the instance
     is in active use.
 `currentState`::
     For those classes that have a state model,
@@ -380,6 +443,7 @@ In this manner a pointer to an arbitrary class can be cast to a
 pointer to a `MRT_Instance` with impunity.
 
 [source,c]
+.Allocation Status Data Type
 ----
 <<mrt interface simple types>>=
 typedef int16_t AllocStatus ;
@@ -396,6 +460,7 @@ but we need a way to insure that events that have been signaled are not
 delivered to instances that have been deleted.
 
 [source,c]
+.Current State Data Type
 ----
 <<mrt interface simple types>>=
 typedef int8_t MRT_StateCode ;
@@ -407,6 +472,8 @@ That is an enormous number of states for a class state model.
 We use negative state numbers to indicate the non-transitioning actions
 that may occur when an event is dispatched.
 
+(((micca,Run Time Constant,MRT_StateCode_IG)))
+(((micca,Run Time Constant,MRT_StateCode_CH)))
 [source,c]
 ----
 <<mrt constants>>=
@@ -433,6 +500,7 @@ First, we consider class attributes.
 We will have need to obtain attribute values in a generic way
 and so need some offset and size information.
 
+(((micca,Run Time Data,MRT_Attribute)))
 [source,c]
 ----
 <<mrt interface aggregate types>>=
@@ -449,7 +517,7 @@ typedef struct mrtattribute {
 `offset`::
     The offset in bytes from the beginning of the instance to the attribute.
 `size`::
-    The number of bytes in which the attribute is stored.
+    The number of bytes of memory occupied by the attribute value.
 `name`::
     The name of the attribute.
 
@@ -457,6 +525,7 @@ To manage all the aspects of class instances,
 we need information on memory allocation, event dispatch, relationships
 in which the instances participate and many other pieces of information.
 
+(((micca,Run Time Data,MRT_Class)))
 [source,c]
 ----
 <<mrt interface aggregate types>>=
@@ -478,17 +547,15 @@ typedef struct mrtclass {
 ----
 
 `iab`::
-    A pointer to an instance allocation block.
+    A pointer to an instance allocation block (IAB).
     The IAB is used to dynamically allocation class instances.
-    For classes that are union subclasses,
-    this value is set to `NULL`.
 `edb`::
-    A pointer to an event dispatch block.
+    A pointer to an event dispatch block (EDB).
     The EDB is used to dispatch events to a state machine.
     For classes that do not have a state model,
     this value is set to `NULL`.
 `pdb`::
-    A pointer to a polymorphic dispatch block.
+    A pointer to a polymorphic dispatch block (PDB).
     The PDB is used to dispatch polymorphic events.
     For classes that have no polymorphic events,
     this value is set to `NULL`.
@@ -504,11 +571,13 @@ typedef struct mrtclass {
     A pointer an array of descriptions for the attributes the class contains.
     The array has `attrCount` elements.
 `instCount`::
-    The number of instance of the class.
+    The number of instances of the class.
+    This number represents the number of elements in the array that is
+    used to store the class instances.
 `containment`::
     For classes that are union subclasses, this member points to a descriptor
     for the immediate superclass in the generalization.
-    For other classes the value is `NULL`.
+    For other classes, the value is `NULL`.
 `name`::
     A pointer to a `NUL` terminated string containing the name of the class.
 
@@ -635,38 +704,38 @@ or as part of a state activity for an asynchronously created instance.
 Before we can create an instance,
 we need to find memory for it.
 
+*****
 [source,c]
 ----
 <<mrt forward references>>=
 static
 MRT_Instance *
-mrtInstFindSlot(
-    MRT_Class const *classDesc) ;
+mrtFindInstSlot(
+    MRT_iab *iab) ;
 ----
 
-`classDesc`::
-    A pointer to the class data for which instance memory is to be allocated.
+`iab`::
+    A pointer to the instance allocation block for the class for
+    which instance memory is to be allocated.
 
-`mrtInstFindSlot` searchs for unused instance memory in the memory pool
-associated with the class described by `classDesc`.
+`mrtFindInstSlot` searchs for unused instance memory in the memory pool
+described by `iab`.
 It returns a pointer to the allocated memory if successful and
-`NULL` if no memory is available.
-
-[float]
-==== Implementation
+`NULL` if no memory is available in the class pool.
+*****
 
 The allocation algorithm is a simple linear search starting at the last
 location that was allocated.
 
+(((micca,Run Time Function,mrtFindInstSlot)))
 [source,c]
+.Implementation
 ----
 <<mrt static functions>>=
 static MRT_Instance *
-mrtInstFindSlot(
-    MRT_Class const *classDesc)
+mrtFindInstSlot(
+    MRT_iab *iab)
 {
-    assert(classDesc != NULL) ;
-    MRT_iab *iab = classDesc->iab ;
     assert(iab != NULL) ;
     assert(iab->storageLast < iab->storageFinish) ;
     /*
@@ -674,10 +743,10 @@ mrtInstFindSlot(
      * where we last allocated an instance.
      */
     MRT_Instance *inst ;
-    for (inst = mrtInstNext(iab, iab->storageLast) ;
+    for (inst = mrtNextInstSlot(iab, iab->storageLast) ;
             inst->alloc != 0 && inst != iab->storageLast ;
-            inst = mrtInstNext(iab, inst)) {
-        // Empty
+            inst = mrtNextInstSlot(iab, inst)) {
+        /* Empty Body */
     }
     /*
      * Check if we ended up on a slot that is free.
@@ -688,7 +757,7 @@ mrtInstFindSlot(
 ----
 <1> If we wrap all the way around to where we started and still did not
 find an instance storage element whose `alloc` member was zero,
-the we have run out of space!
+then we have run out of space!
 That condition is indicated by returning `NULL`.
 
 Finding the next element in the instance storage array involves
@@ -696,20 +765,31 @@ performing the pointer arithmetic modulo the size of the array.
 Since the pool is allocated in a contiguous block of memory,
 we must wrap around the iterator when it passes the end of the
 storage pool.
-That is accomplished with the `mrtInstNext()` function.
+That is accomplished with the `mrtNextInstSlot()` function.
 
+*****
 [source,c]
 ----
 <<mrt forward references>>=
-static inline void *mrtInstNext(MRT_iab *iab, void *ptr) ;
+static inline void *
+mrtNextInstSlot(
+    MRT_iab *iab,
+    void *ptr) ;
 ----
 
+The `mrtNextInstSlot` function returns the memory address of the next instance
+after the one pointed to by `ptr` in the class instance pool described by
+`iab`.
+*****
+
+(((micca,Run Time Function,mrtNextInstSlot)))
 [source,c]
+.Implementation
 ----
 <<mrt static functions>>=
 static inline 
 void *
-mrtInstNext(
+mrtNextInstSlot(
     MRT_iab *iab,
     void *ptr)
 {
@@ -723,7 +803,7 @@ mrtInstNext(
 <1> Since the size of instance varies from class to class,
 we must take over scaling the pointer arithmetic by the size of the
 instance.
-<2> Perform the modulus wrap around if we cross over the boundary of
+<2> Perform the wrap around if we cross over the boundary of
 the storage array.
 
 === Instance Containment
@@ -743,6 +823,7 @@ to deal with this.
 Here we present a function that forms the basis of allowing us to
 treat the union subclasses the same as other classes.
 
+*****
 [source,c]
 ----
 <<mrt external interfaces>>=
@@ -756,19 +837,22 @@ mrt_GetStorageProperties(
     A pointer to the class data for which storage properties are computed.
 `offsetptr`::
     A pointer to a location where the instance offset is returned.
-    If not `NULL`, the return value is the offset in bytes from the
+    If not `NULL`, then 
+    a value is returned via the pointer that is the offset in bytes from the
     beginning of an instance to where the class storage begins.
-returns::
-    a pointer to the IAB that describes the storage containment for the
-    class.
-    For non-union subclasses, this is simply the IAB that describes the
-    class storage pool.
-    For union subclasses, the returned IAB will be for the ultimate
-    superclass that contains the class instances.
 
-==== Implementation
+The `mrt_GetStorageProperties` function a pointer to the IAB that describes the
+storage containment for the class.
+For non-union subclasses,
+this is simply the IAB that describes the class storage pool.
+For union subclasses,
+the returned IAB will be for the ultimate superclass that contains the class
+instances.
+*****
 
+(((micca,Run Time Function,mrt_GetStorageProperties)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 MRT_iab *
@@ -778,30 +862,37 @@ mrt_GetStorageProperties(
 {
     assert(classDesc != NULL) ;
     MRT_iab *iab = classDesc->iab ;
-    MRT_AttrOffset instanceOffset = 0 ;
+    MRT_AttrOffset instanceOffset = 0 ; // <1>
     for (struct mrtsuperclassrole const *container = classDesc->containment ;
             container != NULL ;
-            container = container->classDesc->containment) {// <1>
+            container = container->classDesc->containment) {// <2>
         instanceOffset += container->storageOffset ;
         iab = container->classDesc->iab ;
     }
-    if (offsetptr) {// <2>
+    if (offsetptr) {// <3>
         *offsetptr = instanceOffset ;
     }
 
     return iab ;
 }
 ----
-<1> We iterate up the generalization hierarchy to find the ultimate
+<1> For non-union subclasses, the offset to the beginning of the
+instance data is always zero.
+Only union subclasses are stored with their superclass and will have
+a non-zero offset.
+<2> We iterate up the generalization hierarchy to find the ultimate
 superclass that contains the class instances.
 At each step of the iteration, we accumulate the relative offset of
 each contained instance.
-<2> The offset is returned only if requested.
+<3> The offset is returned only if requested.
 
 We will also find occasion to want to compute the index into the
 storage pool for a particular instance.
+Storage pool indices make convenient identifiers of a class instance
+outside of a domain.
 Again we must allow that the instance may be a union subclass instance.
 
+*****
 [source,c]
 ----
 <<mrt external interfaces>>=
@@ -812,10 +903,14 @@ mrt_InstanceIndex(
 
 `instance`::
     A pointer to a class instance.
-returns::
-    the array index value of the instance in its storage pool.
 
+The `mrt_InstanceIndex` function returns the array index value of the instance
+in its storage pool.
+*****
+
+(((micca,Run Time Function,mrt_InstanceIndex)))
 [source,c]
+.Implemenation
 ----
 <<mrt external functions>>=
 unsigned
@@ -828,13 +923,23 @@ mrt_InstanceIndex(
     MRT_AttrOffset offset ;
     MRT_iab *iab = mrt_GetStorageProperties(instref->classDesc, &offset) ;
     return (((uintptr_t)instance - offset) - (uintptr_t)iab->storageStart) /
-            iab->instanceSize ;
+            iab->instanceSize ; // <1>
 }
 ----
+<1> The `instanceSize` member of the IAB is the number of bytes occupied
+by an instance.
+For union subclasses, the IAB returned by `mrt_GetStorageProperties` will
+be for the enclosing supertype.
+So we have to make sure and subtract off the offset to the subclass
+before computing the index.
+For non-union subclass instances, `offset` here will be zero.
+Such are the complexities when taking over the pointer arithmetic
+and it is necessary to be generic.
 
 The inverse of finding the instance index is to convert such an index
 into a reference to an instance.
 
+*****
 [source,c]
 ----
 <<mrt external interfaces>>=
@@ -848,12 +953,16 @@ mrt_InstanceReference(
     A pointer to the class description for the reference to be computed.
 `index`::
     An array index into the class storage pool.
-    If `index` out of bounds, then a reference to the last instance
-    in the storage pool is returned.
-returns::
-    A pointer to the instance in the class storage pool.
+    If `index` out of bounds, then a fatal system error occurs.
 
+The `mrt_InstanceReference` function returns
+a pointer to the instance in the class storage pool for the
+class described by `classDesc` and indexed by the value of `index`.
+*****
+
+(((micca,Run Time Function,mrt_InstanceReference)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 void *
@@ -884,6 +993,7 @@ mrt_InstanceReference(
 The function, `mrt_CreateInstance`, is used to synchronously
 create an instance of a class.
 
+*****
 [source,c]
 ----
 <<mrt external interfaces>>=
@@ -906,8 +1016,11 @@ mrt_CreateInstance(
 described by `classDesc` and places the instance in the state
 given by `initialState`.
 No state activity is run as part of synchronous instance creation.
+*****
 
+(((micca,Run Time Function,mrt_CreateInstance)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 void *
@@ -920,7 +1033,8 @@ mrt_CreateInstance(
     /*
      * Search for an empty slot in the pool.
      */
-    MRT_Instance *inst = mrtInstFindSlot(classDesc) ;
+    MRT_iab *iab = classDesc->iab ;
+    MRT_Instance *inst = mrtFindInstSlot(iab) ;
     if (inst == NULL) {
 #           ifndef MRT_NO_NAMES
         mrtFatalError(mrtNoInstSlot, classDesc->name) ;
@@ -928,7 +1042,6 @@ mrt_CreateInstance(
         mrtFatalError(mrtNoInstSlot, classDesc) ;
 #           endif /* MRT_NO_NAMES */
     }
-    MRT_iab *iab = classDesc->iab ;
     /*
      * Record where we left off for the next allocation attempt.
      */
@@ -951,7 +1064,9 @@ members of the `MRT_Instance` structure.
 Any link list references must be initialized to empty and
 the constructor is run if there is one.
 
+(((micca,Run Time Function,mrtInitializeInstance)))
 [source,c]
+.Implementation
 ----
 <<mrt static functions>>=
 static void
@@ -982,10 +1097,8 @@ mrtInitializeInstance(
     } else {
         inst->currentState = MRT_StateCode_IG ; // <2>
     }
-    /*
-     * Initialize the link pointer containers.
-     */
-    MRT_AttrOffset const *offsets = iab->linkOffsets ;
+
+    MRT_AttrOffset const *offsets = iab->linkOffsets ; // <3>
     for (unsigned count = iab->linkCount ; count != 0 ; --count, ++offsets) {
         MRT_LinkRef *link = (MRT_LinkRef *)((uintptr_t) inst + *offsets) ;
         mrtLinkRefInit(link) ;
@@ -996,7 +1109,7 @@ mrtInitializeInstance(
     if (iab->construct) {
         iab->construct(inst) ;
     }
-    mrtMarkTransaction(classDesc->classRels, classDesc->relCount) ; // <3>
+    mrtMarkTransaction(classDesc->classRels, classDesc->relCount) ; // <4>
 }
 ----
 <1> We use `MRT_StateCode_IG` as a special value to indicate that
@@ -1006,7 +1119,9 @@ them the same.
 <2> If a class does not have a state model, then we ignore the
 value passed in to the function and set the current state to ignored.
 This is a convenient value for such a situation.
-<3> Creating an instance means it must be evaluated for referential
+<3> If a class contains linked lists used for relationship navigation,
+they must be initialized to show that the linked list is empty.
+<4> Creating an instance means it must be evaluated for referential
 integrity at the end of the data transaction.
 This is discussed in the next chapter.
 
@@ -1030,7 +1145,9 @@ Here we want to make sure the value remains positive.
 static inline AllocStatus mrtIncrAllocCounter(MRT_iab *iab) ;
 ----
 
+(((micca,Run Time Function,mrtIncrAllocCounter)))
 [source,c]
+.Implementation
 ----
 <<mrt static functions>>=
 static inline 
@@ -1041,7 +1158,8 @@ mrtIncrAllocCounter(
     /*
      * Catch any overflow
      */
-    return iab->alloc == INT16_MAX ? 1 : ++iab->alloc ;
+    iab->alloc = (iab->alloc == INT16_MAX ? 1 : iab->alloc + 1) ;
+    return iab->alloc ;
 }
 ----
 
@@ -1050,6 +1168,7 @@ mrtIncrAllocCounter(
 The function, `mrt_DeleteInstance`, is used to synchronously
 destroy an instance.
 
+*****
 [source,c]
 ----
 <<mrt external interfaces>>=
@@ -1061,6 +1180,9 @@ mrt_DeleteInstance(
 `inst`::
     A pointer to an instance to be destroyed.
 
+The `mrt_DeleteInstance` function deletes the instance given by `instref`.
+*****
+
 Just as there was a distinction between synchronous and asynchronous
 instance creation,
 there is a similar distinction for destruction.
@@ -1068,7 +1190,9 @@ Asynchronous destruction happens as a result of an instance entering
 an _terminal_ state and that is discussed further below.
 Here we are dealing with synchronous destruction of an instance.
 
+(((micca,Run Time Function,mrt_DeleteInstance)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 void
@@ -1113,6 +1237,26 @@ necessary to preserve data integrity when deleting an instance.
 
 === Iterating Over Class Instances
 
+It is a common operation to iterate over the instances of a class.
+This is done both in the internals of the run time as well as by
+domain activity code.
+For example,
+domain code has the need to search for instances meeting certain criteria
+such as the value of an attribute.
+For small instance populations,
+that search can be implemented by iterating over the instances of the
+class and making the comparison to the criteria.
+Consequently,
+the run time provides a general means to iterate over the instances
+of a class.
+
+The interface to instance iteration follows familiar patterns of Start, More,
+Next and Get.
+We have designed the interface in this way to avoid having to
+return `NULL` as a special value to indicate the end of the iteration.
+First, we need a data structure to hold the information we need for
+iteration.
+
 [source,c]
 ----
 <<mrt interface aggregate types>>=
@@ -1121,13 +1265,38 @@ typedef struct mrtinstanceiterator {
     unsigned size ;
     void *end ;
 } MRT_InstanceIterator ;
+----
 
+`instance`::
+    A pointer to the memory of the next instance in the iteration.
+`size`::
+    The size in bytes of a class instance.
+`end`::
+    A pointer one past the end of the memory for the class that is used
+    to compute the end of the iteration.
+
+*****
+[source,c]
+----
 <<mrt external interfaces>>=
 extern void
 mrt_InstIteratorStart(
     MRT_InstanceIterator *iter,
     MRT_Class const *classDesc) ;
+----
 
+`iter`::
+    A pointer to a class instance iterator that is used to record the
+    state of the iteration.
+`classDesc`::
+    A pointer to the class description for the class across which the
+    iteration will happen.
+*****
+
+(((micca,Run Time Function,mrt_InstIteratorStart)))
+[source,c]
+.Implementation
+----
 <<mrt external functions>>=
 void
 mrt_InstIteratorStart(
@@ -1146,12 +1315,18 @@ mrt_InstIteratorStart(
     iter->instance = (void *)((uintptr_t)iab->storageStart + instanceOffset) ;
     return ;
 }
+----
 
+[source,c]
+----
 <<mrt external interfaces>>=
 extern bool
 mrt_InstIteratorMore(
     MRT_InstanceIterator *iter) ;
+----
 
+[source,c]
+----
 <<mrt external functions>>=
 bool
 mrt_InstIteratorMore(
@@ -1160,12 +1335,18 @@ mrt_InstIteratorMore(
     assert(iter != NULL) ;
     return iter->instance < iter->end ;
 }
+----
 
+[source,c]
+----
 <<mrt external interfaces>>=
 extern void *
 mrt_InstIteratorGet(
     MRT_InstanceIterator *iter) ;
+----
 
+[source,c]
+----
 <<mrt external functions>>=
 void *
 mrt_InstIteratorGet(
@@ -1174,12 +1355,18 @@ mrt_InstIteratorGet(
     assert(iter != NULL) ;
     return iter->instance ;
 }
+----
 
+[source,c]
+----
 <<mrt external interfaces>>=
 extern void
 mrt_InstIteratorNext(
     MRT_InstanceIterator *iter) ;
+----
 
+[source,c]
+----
 <<mrt external functions>>=
 void
 mrt_InstIteratorNext(
@@ -1588,7 +1775,8 @@ Sometimes this limitation is understandable.
 It takes more code and data space to deal with referential integrity.
 For applications that do little dynamic instance creation or relationship
 changes,
-there is little danger of violating the integrity of the data model.
+the risk that some code path results in a violation of
+referential integrity is much less.
 
 However,
 in `micca` we will support detection of referential integrity violations.
@@ -1624,7 +1812,7 @@ relationships from the platform model.
 
 In keeping with our goal that the run time be completely data driven,
 the code generator will supply the necessary information about all the
-associations and generalization in the domain.
+associations and generalizations in the domain.
 This will allow us to manipulate the pointer values used in the relationships
 and to check that the result does not violate any of the
 multiplicity and conditionality constraints specified for the
@@ -1639,7 +1827,7 @@ We will show how this is accomplished by:
 === Describing Relationships
 
 In this section we present the data structure that is supplied
-by the code generator to describe the properties of a relationship.
+by the `micca` code generator to describe the properties of a relationship.
 You can think of this data structure as an implementation version
 of the various classes in the platform model that deal with
 class relationships.
@@ -1697,8 +1885,8 @@ the class structure member is a counted array of the type shown below:
 ----
 <<mrt interface aggregate types>>=
 typedef struct mrtarrayref {
+    MRT_Instance * const *links ;
     unsigned count ;
-    MRT_Instance * const *references ;
 } MRT_ArrayRef ;
 ----
 
@@ -1767,7 +1955,7 @@ struct mrtsimpleassociation {
 
 ==== Class Based Associations
 
-For class based association,
+For class based associations,
 there is another role played by the associator class.
 Associator classes always have two singular references to the
 participant classes.
@@ -1810,7 +1998,7 @@ struct mrtclassassociation {
 
 ==== Reference Generalizations
 
-For generalization relationships implemented as references,
+For generalization relationships implemented by pointer references,
 the superclass implements its reference to a subclass by holding a
 simple pointer to the subclass instance.
 It is possible for the superclass to determine the type of the
@@ -1883,8 +2071,8 @@ union holding the subclass rather than a reference pointer to a subclass.
 
 Subclass instances held in union generalizations do not have a
 pointer back to their related superclasses.
-The related superclass can be determined by pointer arithmetic
-(_i.e._ subtracting `storageOffset` from the subclass instance pointer).
+The related superclass can be determined by pointer arithmetic (_i.e._
+subtracting the superclass `storageOffset` from the subclass instance pointer).
 So the role information for a union subclass is nothing more than
 a pointer to its class descriptor
 
@@ -1949,7 +2137,7 @@ For example,
 consider two classes in a one-to-one unconditional relationship.
 If an instance of one class is created we do not want to check referential
 integrity until the code has had an opportunity to create a corresponding
-instance of the associated class.
+instance of the associated class and to relate the two instances together.
 
 The precise rules of data integrity are that each state activity must
 leave the domain data in a consistent state or signal one or more events
@@ -2012,7 +2200,7 @@ run time functions that either modify the relationship pointer storage
 or change the number of active instances invoke
 `mrtMarkTransaction` to save away the relationships that will need to
 be checked at the end of the transaction.
-This prevents us from have to check every relationships at the end
+This prevents us from having to check every relationship at the end
 of every transaction.
 
 The only complication in the marking algorithm is that we wish to
@@ -2091,7 +2279,7 @@ mrtEndTransaction(void)
 
 At the end of a transaction on the data model,
 `mrtEndTransaction` iterates across the set of saved relationship
-descriptors and checks each relationship to make sure the data model
+descriptors and checks the relationship to insure the data model
 is in a consistent state.
 The design approach is to use the `refCount` member of each instance
 as a place to store how many times the instance is referred to by
@@ -2313,8 +2501,7 @@ zero.
 [source,c]
 ----
 <<mrt static functions>>=
-static
-void
+static void
 mrtZeroRefCounts(
     MRT_Class const *classDesc)
 {
@@ -2341,24 +2528,21 @@ perform the comparison.
 [source,c]
 ----
 <<mrt static functions>>=
-static
-bool
+static bool
 compareAtMostOne(
     unsigned refCount)
 {
     return refCount <= 1 ;
 }
 
-static
-bool
+static bool
 compareExactlyOne(
     unsigned refCount)
 {
     return refCount == 1 ;
 }
 
-static
-bool
+static bool
 compareOneOrMore(
     unsigned refCount)
 {
@@ -2647,10 +2831,6 @@ mrtCountArrayRefs(
     MRT_AttrOffset offset,
     MRT_Class const *targetClass)
 {
-    struct arrayrefs {
-        MRT_Instance *const *links ;
-        unsigned count ;
-    } ;
     MRT_iab *targetiab = mrt_GetStorageProperties(targetClass, NULL) ;
 
     MRT_InstanceIterator srciter ;
@@ -2658,8 +2838,8 @@ mrtCountArrayRefs(
             mrt_InstIteratorMore(&srciter) ; mrt_InstIteratorNext(&srciter)) {
         MRT_Instance *instref = mrt_InstIteratorGet(&srciter) ;
         if (instref->alloc > 0) {
-            struct arrayrefs *srcrefs =
-                    (struct arrayrefs *)((uintptr_t)instref + offset) ;
+            MRT_ArrayRef *srcrefs =
+                    (MRT_ArrayRef *)((uintptr_t)instref + offset) ;
             MRT_Instance *const *iter = srcrefs->links ;
             for (unsigned count = srcrefs->count ; count != 0 ; count--, iter++) {
                 MRT_Instance *targetInst = *iter ;
@@ -7606,7 +7786,7 @@ routines can fill the queue.
 The `mrt_InstanceAvailable()` function provides a means determine if there
 is space available to create a new instance of a class.
 
-(((micca,Run Time,mrt_InstanceAvailable)))
+(((micca,Run Time Function,mrt_InstanceAvailable)))
 [source,c]
 ----
 <<mrt external interfaces>>=
@@ -7634,7 +7814,7 @@ mrt_InstanceAvailable(
     /*
      * Search for an empty slot in the pool.
      */
-    return mrtInstFindSlot(classDesc) != NULL ;
+    return mrtFindInstSlot(classDesc->iab) != NULL ;
 }
 ----
 
