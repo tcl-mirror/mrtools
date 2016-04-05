@@ -125,6 +125,7 @@ the design of the generator is very similar to generating reports
 from a database.
 In this case the database is the platform model and the reports are ``C'' code.
 
+(((micca,Gen,miccaGenerate)))
 [source,tcl]
 ----
 <<generation commands>>=
@@ -132,11 +133,9 @@ proc miccaGenerate {arglist} {
     variable errcount 0
 
     <<miccaGenerate: parse command line arguments>>
-    <<miccaGenerate: set up template expansion>>
     <<miccaGenerate: verify domains are populated>>
+    <<miccaGenerate: set up template expansion>>
     <<miccaGenerate: generate files>>
-
-    rename expand {} ; # <1>
 
     if {$errcount > 0} {
         tailcall DeclError GENERATE_ERRORS $errcount
@@ -144,9 +143,6 @@ proc miccaGenerate {arglist} {
     return
 }
 ----
-<1> The template expander creates a new command and we need to delete it
-so that there won't be any conflict the next time `micccaGenerate` is
-invoked.
 
 (((error code,CONFIG_ERRORS)))
 [source,tcl]
@@ -172,18 +168,6 @@ set options [dict merge $options $arglist]
 The `textutil::expander` package creates a command that does all the
 expansion work.
 
-[source,tcl]
-----
-<<miccaGenerate: set up template expansion>>=
-textutil::expander expand
-expand setbrackets %< >% ; # <1>
-expand errmode [dict get $options expanderror]
-----
-<1> The default way to embed commands in the template is with
-the conventional Tcl brackets ([ ]).
-Those characters are inconvenient in ``C'' so we use bracket strings
-that create less interference.
-
 We will insist that each domain have exactly one population for it.
 This is accomplished by finding all the populations associated with
 the domains and looking for those where there is not exactly one
@@ -208,68 +192,20 @@ if {$errcount > 0} {
 }
 ----
 
-== Header Files
-
-The header file generated for a domain contains interfacing information.
-The header file is included in the generated ``C'' code file and,
-typically, is included by bridge code that is
-mapping the dependencies of one domain onto another.
-
-Following our usual pattern,
-we will execute the header generation commands from the template in
-a child namespace to avoid any name conflicts.
-
-The `GenHeader` namespace is a child of `::micca::@Gen@` and follows
-our usual pattern of imports, command path and contents.
+The `expander` package creates a command that, when invoked with a
+template, performs the expansion.
 
 [source,tcl]
 ----
-<<generation header namespace>>=
-namespace eval GenHeader {
-    logger::initNamespace [namespace current]
-
-    <<tclral imports>>
-
-    namespace path {
-        ::micca
-        ::micca::@Gen@::Helpers
-        ::micca::@Config@::Helpers
-        ::rosea::InstCmds
-    }
-
-    <<generation header data>>
-    <<generation header commands>>
-}
+<<miccaGenerate: set up template expansion>>=
+textutil::expander expand
+expand setbrackets %< >% ; # <1>
+expand errmode [dict get $options expanderror]
 ----
-
-The template for the header file is shown below.
-Each embedded command is then shown in the following sections.
-
-[source,tcl]
-----
-<<generation data>>=
-set headerTemplate [textutil::adjust::undent {
-    %<banner>%
-    #ifndef %<headerFileGuard>%
-    #define %<headerFileGuard>%
-    %<interface>%
-    #include <stddef.h>
-    #include <stdint.h>
-    #include <stdbool.h>
-    %<interfaceTypeAliases>%
-    %<domainOpDeclarations>%
-    %<externalOpDeclarations>%
-    %<eventParamDeclarations>%
-    %<portalIds>%
-    %<portalDeclaration>%
-    #endif /* %<headerFileGuard>% */
-}]
-----
-
-The generation of the header files is accomplished by iterating
-over all the domains and placing the output of the template
-expansion into a file.
-We use some variables to provide context to the embedded expansion commands.
+<1> The default way to embed commands in the template is with
+the conventional Tcl brackets ([ ]).
+Those characters are inconvenient in ``C'' so we use bracket strings
+that create less interference.
 
 [source,tcl]
 ----
@@ -277,620 +213,77 @@ We use some variables to provide context to the embedded expansion commands.
 variable headerTemplate
 variable codeTemplate
 
-forAllRefs domainRef [Domain findAll] {
-    namespace upvar GenHeader\
-        domain domain\
-        interface interface
-    namespace upvar GenSupport\
-        domain thisdomain
+try {
+    forAllRefs domainRef [Domain findAll] {
+        namespace upvar GenHeader\
+            domain domain\
+            interface interface
+        namespace upvar GenSupport\
+            domain thisdomain
 
-    assignAttribute $domainRef\
-        {Name domain}\
-        {Interface interface}
-    set thisdomain $domain
+        assignAttribute $domainRef\
+            {Name domain}\
+            {Interface interface}
+        set thisdomain $domain
 
-    PrepareDomainProperties $domain
+        PrepareDomainProperties $domain
 
-    expand evalcmd "namespace eval [namespace current]::GenHeader"
-    set hchan [::open $domain.h w]
-    try {
-        puts $hchan [expand expand $headerTemplate]
-    } on error {result opts} {
-        # puts $::errorInfo
-        return -options $opts $result
-    } finally {
-        chan close $hchan
-    }
-
-    unset domain interface
-
-    namespace upvar GenCode\
-        domain domain\
-        prologue prologue\
-        epilogue epilogue
-
-    assignAttribute $domainRef\
-        {Name domain}\
-        {Prologue prologue}\
-        {Epilogue epilogue}
-
-    CreateActivityCommands $domain
-
-    expand evalcmd "namespace eval [namespace current]::GenCode"
-    set cchan [::open $domain.c w]
-    try {
-        puts $cchan [expand expand $codeTemplate]
-    } on error {result opts} {
-        puts $::errorInfo
-        return -options $opts $result
-    } finally {
-        chan close $cchan
-        namespace delete GenActivity
-    }
-}
-----
-
-The commands embedded in the template all follow a similar pattern.
-The return values of the commands are placed in the output of the
-template expansion.
-
-=== Header File Guard
-
-The generated header file includes definitions of preprocessor symbols
-to prevent the header file from being included multiple times.
-
-[source,tcl]
-----
-<<generation header commands>>=
-proc headerFileGuard {} {
-    variable domain
-    return [string toupper [string trim $domain]]_H_
-}
-----
-
-=== Domain Interface
-
-The contents of the domain interface values is placed first in the
-generated header.
-
-[source,tcl]
-----
-<<generation header commands>>=
-proc interface {} {
-    variable interface
-
-    return [string cat\
-        [comment "Domain Interface Contents"]\
-        [indentCode [string trim $interface \n] 0]\
-    ]
-}
-----
-
-[float]
-==== Tests
-
-[source,tcl]
-----
-<<generate command tests>>=
-test headergen-1.0 {
-    Generated header file with interface info
-} -setup {
-    makeFile {} header1.h
-    makeFile {} header1.c
-    micca configure {
-        domain header1 {
-            interface {#include <stdio.h>}
-
-            class c1 {
-                attribute color int -default 20
-            }
+        expand evalcmd "namespace eval [namespace current]::GenHeader"
+        set hchan [::open $domain.h w]
+        try {
+            puts $hchan [expand expand $headerTemplate]
+        } on error {result opts} {
+            # puts $::errorInfo
+            return -options $opts $result
+        } finally {
+            chan close $hchan
         }
-        population header1 {
-            class c1 {
-                instance fred1
-            }
+
+        unset domain interface
+
+        namespace upvar GenCode\
+            domain domain\
+            prologue prologue\
+            epilogue epilogue
+
+        assignAttribute $domainRef\
+            {Name domain}\
+            {Prologue prologue}\
+            {Epilogue epilogue}
+
+        CreateActivityCommands $domain
+
+        expand evalcmd "namespace eval [namespace current]::GenCode"
+        set cchan [::open $domain.c w]
+        try {
+            puts $cchan [expand expand $codeTemplate]
+        } on error {result opts} {
+            puts $::errorInfo
+            return -options $opts $result
+        } finally {
+            chan close $cchan
+            namespace delete GenActivity
         }
     }
-} -cleanup {
-    cleanupDomain
-} -body {
-    micca generate
-    llength [fileutil::grep {stdio} header1.h]
-} -result {1}
-----
-
-=== Type Aliases
-
-The domain configuration can contain type aliases.
-Normally,
-the type alias information is placed in the generated code file.
-However, if a type alias name is used in a context where it would be
-exposed outside of the domain,
-_e.g._ as a parameter to a domain operation,
-then the type alias definition is placed in the generated header file.
-There are three circumstances where a type is needed external to the domain:
-
-. As the return type or parameter type of a domain operation.
-. As the return type or parameter type of an external operation.
-. As an argument to an event (as events can be tunneled into the domain).
-
-[source,tcl]
-----
-<<generation header commands>>=
-proc interfaceTypeAliases {} {
-    variable domain
-
-    set domRef [Domain findWhere {$Name eq $domain}]
-    set aliases [pipe {
-        findRelated $domRef ~R7 |
-        deRef % |
-        relation list % TypeName
-    } {} |%]
-    # Domain operations
-    set doRefs [pipe {
-        findRelatedWhere $domRef ~R5 {$ReturnDataType in $aliases} |
-        findRelated % R5 ~R7
-    } {} |%]
-    set dopRefs [pipe {
-        findRelatedWhere $domRef {~R5 ~R6} {$DataType in $aliases} |
-        findRelated % R6 R5 ~R7
-    } {} |%]
-    # External operations
-    set eoRefs [pipe {
-        findRelatedWhere $domRef ~R10 {$ReturnDataType in $aliases} |
-        findRelated % R10 ~R7
-    } {} |%]
-    set eopRefs [pipe {
-        findRelatedWhere $domRef {~R10 ~R11} {$DataType in $aliases} |
-        findRelated % R11 R10 ~R7
-    } {} |%]
-    # Event arguments
-    set argRefs [pipe {
-        Argument findWhere {$Domain eq $domain && $DataType in $aliases} |
-        deRef ~ |
-        relation semijoin ~ $::micca::TypeAlias\
-                -using {Domain Domain DataType TypeName} |
-        ::rosea::Helpers::ToRef ::micca::TypeAlias ~
-    }]
-
-    # Union all the different refs together.
-    set taRefs [refUnion $doRefs $dopRefs]
-    set taRefs [refUnion $taRefs $eoRefs]
-    set taRefs [refUnion $taRefs $eopRefs]
-    set taRefs [refUnion $taRefs $argRefs]
-
-    set result {}
-    append result [comment "Type Aliases"]
-    forAllRefs taRef $taRefs {
-        assignAttribute $taRef TypeName TypeDefinition
-        append result\
-            "typedef "\
-            [typeCheck composeDeclaration $TypeDefinition $TypeName]\
-            " \;\n"
-    }
-
-    return $result
+} finally {
+    rename expand {} ; # <1>
 }
 ----
+<1> The template expander creates a new command and we need to delete it
+so that there won't be any conflict the next time `micccaGenerate` is
+invoked.
 
-[float]
-==== Tests
+=== Common Domain Queries
 
-[source,tcl]
-----
-<<generate command tests>>=
-test headergen-2.0 {
-    Generated header file with external type alias
-} -setup {
-    makeFile {} header2.h
-    makeFile {} header2.c
-    micca configure {
-        domain header2 {
-            typealias gCount uint64_t
-            typealias pCount uint32_t
+There are a number of queries about the properties of domains that
+common and frequent enough to warrant factoring the queries into a
+more convenient form.
 
-            domainop gCount countAll {a int} {
-                return 27 ;
-            }
+We start by accumulating some common properties of a domain.
+We will store these properties in a relation values that are held in
+an ordinary namespace variables
 
-            domainop int countSome {b pCount} {
-                return 42 ;
-            }
-            class c1 {
-                attribute color int -default 20
-            }
-        }
-        population header2 {
-            class c1 {
-                instance fred1
-            }
-        }
-    }
-} -cleanup {
-    cleanupDomain
-} -body {
-    micca generate
-    llength [fileutil::grep {typedef} header2.h]
-} -result {2}
-----
-
-=== Domain Operation Declarations
-
-``C'' language programs tend to be composed of _declarations_ and
-_definitions_.
-A declaration makes symbol names and types known to the compile.
-A definition associates allocates specific data or code statements
-to a symbol.
-Header files contain a lot of declarations.
-Here we start with declarations for the domain operations.
-Domain operations are just ordinary ``C'' functions but are given
-external scope.
-
-[source,tcl]
-----
-<<generation header commands>>=
-proc domainOpDeclarations {} {
-    variable domain
-    set opRefs [DomainOperation findWhere {$Domain eq $domain}]
-
-    return [string cat\
-        [comment "Domain Operations External Declarations"]\
-        [GenOperationDeclarations $opRefs ~R6]\
-    ]
-}
-----
-
-[source,tcl]
-----
-<<generation helper commands>>=
-proc GenOperationDeclarations {opRefs paramRel {suffix {}}} {
-    set result {}
-
-    set params [deRef [findRelated $opRefs $paramRel]]
-    set ops [pipe {
-        deRef $opRefs |
-        relation rename ~ Name Operation |
-        relation join ~ $params |
-        relation group ~ Parameters Name Number DataType
-    }]
-
-    relation foreach op $ops {
-        relation assign $op
-        if {$Comment ne {}} {
-            append result [comment $Comment]
-        }
-        append result\
-            "extern $ReturnDataType "\
-            $Domain _ $Operation $suffix \(\
-            [join [relation list $Parameters DataType] {, }]\
-            "\) ;\n"
-    }
-
-    return $result
-}
-----
-
-[float]
-==== Tests
-
-[source,tcl]
-----
-<<generate command tests>>=
-test headergen-3.0 {
-    Generated header file domain operations
-} -setup {
-    makeFile {} header3.h
-    makeFile {} header3.c
-    micca configure {
-        domain header3 {
-            domainop int op1 {a int b char} {
-                printf ("%d %c\n", a, b) ;
-            } {
-                two parameters
-            }
-            domainop int op2 {a {char *} b {uint8_t *}} {
-                printf ("%s %s\n", a, b) ;
-            } {
-                pointer type parameters
-            }
-            class c1 {
-                attribute color int -default 20
-            }
-        }
-        population header3 {
-            class c1 {
-                instance fred1
-            }
-        }
-    }
-} -cleanup {
-    cleanupDomain
-} -body {
-    micca generate
-    llength [fileutil::grep {extern int header3_op[0-9]} header3.h]
-} -result {2}
-----
-
-=== External Operation Declarations
-
-The declarations for external operations follows the same pattern as
-for domain operations.
-
-[source,tcl]
-----
-<<generation header commands>>=
-proc externalOpDeclarations {} {
-    variable domain
-    set opRefs [ExternalOperation findWhere {$Domain eq $domain}]
-
-    return [string cat\
-        [comment "External Operations Declarations"]\
-        [GenOperationDeclarations $opRefs ~R11 __EOP]\
-    ]
-}
-----
-
-=== Portal Function Constants
-
-The runtime code provides a set of functions that allow bridge code
-to tunnel simple model level operations, such a signaling an event,
-into a domain.
-The functions require integer constants that encode identifiers
-for the various entities that can be accessed via the portal.
-Those constants are placed in the generated header file.
-
-We generate information on three aspects of the domain:
-classes, transitioning events and polymorphic events.
-
-[source,tcl]
-----
-<<generation header commands>>=
-proc portalIds {} {
-    variable domain
-    set result {}
-
-    <<portalIds:: generate class information>>
-    <<portalIds:: generate event information>>
-    <<portalIds:: generate polymorphic event information>>
-
-    return $result
-}
-----
-
-For classes,
-we generate encodings for the class itself,
-its attributes and its initial instances.
-
-[source,tcl]
-----
-<<portalIds:: generate class information>>=
-append result [comment "Numeric encoding of classes, attributes and\
-        instances used by the portal functions"]
-set classRefs [Class findWhere {$Domain eq $domain}]
-append result "#define [string toupper ${domain}_CLASSCOUNT]\
-        [refMultiplicity $classRefs]\n"
-forAllRefs classRef $classRefs {
-    assignAttribute $classRef
-    <<portalIds:: generate class encodings>>
-    <<portalIds:: generate attribute encodings>>
-    <<portalIds:: generate instance encodings>>
-}
-----
-
-Each class was given a unique number within the domain when
-the platform model was populated.
-This is the basis for the class id encodings.
-
-[source,tcl]
-----
-<<portalIds:: generate class encodings>>=
-append result [comment "Class: $Name"]
-set classid [string toupper ${Domain}_${Name}_CLASSID]
-append result "#define $classid $Number\n"
-----
-
-Attributes are encoded in alphabetical order.
-Note that the portal does not allow access to relationships.
-
-[source,tcl]
-----
-<<portalIds:: generate attribute encodings>>=
-set attrRefs [findRelated $classRef ~R20 {~R25 PopulatedComponent}\
-        {~R21 Attribute}]
-append result "#define [string toupper ${Domain}_${Name}_ATTRCOUNT]\
-        [refMultiplicity $attrRefs]\n"
-set attrNumber -1
-relation foreach attr [deRef $attrRefs] -ascending Name {
-    relation assign $attr {Name attrName}
-    set attrid [string toupper ${Domain}_${Name}_${attrName}_ATTRID]
-    append result "#define $attrid [incr attrNumber]\n"
-}
-----
-
-We generate encodings for instances that are part of the initial
-instance population.
-
-[source,tcl]
-----
-<<portalIds:: generate instance encodings>>=
-set instRefs [findRelated $classRef ~R20 ~R103]
-append result "#define [string toupper ${Domain}_${Name}_INSTCOUNT]\
-        [GetClassProperty $Name TotalInstance]\n"
-forAllRefs inst $instRefs {
-    assignAttribute $inst Instance {Number InstNumber}
-    set instid [string toupper ${Domain}_${Name}_${Instance}_INSTID]
-    append result "#define $instid $InstNumber\n"
-}
-----
-
-[source,tcl]
-----
-<<portalIds:: generate event information>>=
-append result [comment "Numeric encoding of event numbers\
-        used by the portal functions"]
-set tevents [pipe {
-    TransitioningEvent findWhere {$Domain eq $domain} |
-    deRef ~ |
-    relation eliminate ~ Domain |
-    relation group ~ Events Event Number
-}]
-relation foreach tevent $tevents -ascending Model {
-    relation assign $tevent
-    append result [comment "Class: $Model"]
-    append result "#define [string toupper ${domain}_${Model}_EVENTCOUNT]\
-        [relation cardinality $Events]\n"
-    relation foreach event $Events -ascending Number {
-        relation assign $event
-        append result "#define\
-            [string toupper ${domain}_${Model}_${Event}_EVENT] $Number\n"
-    }
-}
-----
-
-[source,tcl]
-----
-<<portalIds:: generate polymorphic event information>>=
-append result [comment "Numeric encoding of polymorphic event numbers\
-        used by the portal functions"]
-set pevents [pipe {
-    DeferredEvent findWhere {$Domain eq $domain} |
-    deRef ~ |
-    relation eliminate ~ Domain |
-    relation group ~ Events Event Number
-}]
-relation foreach pevent $pevents -ascending Model {
-    relation assign $pevent
-    append result [comment "Class: $Model"]
-    append result "#define [string toupper ${domain}_${Model}_POLYEVENTCOUNT]\
-        [relation cardinality $Events]\n"
-    relation foreach event $Events -ascending Number {
-        relation assign $event
-        append result "#define\
-            [string toupper ${domain}_${Model}_${Event}_POLYEVENT] $Number\n"
-    }
-}
-----
-
-[source,tcl]
-----
-<<generate command tests>>=
-test headergen-4.0 {
-    Generated header file with portal constants
-} -setup {
-    makeFile {} header4.h
-    makeFile {} header4.c
-    micca configure {
-        domain header4 {
-            class c1 {
-                attribute color int -default 10
-                attribute temp double -default 2.0
-            }
-            class c2 {
-                attribute color int -default 10
-                attribute temp double -default 2.0
-            }
-        }
-        population header4 {
-            class c1 {
-                instance fred1
-            }
-            class c2 {
-                instance fred1
-            }
-        }
-    }
-} -cleanup {
-    cleanupDomain
-} -body {
-    micca generate
-    llength [fileutil::grep {CLASSID} header4.h]
-} -result {2}
-----
-
-[source,tcl]
-----
-<<generation header commands>>=
-proc portalDeclaration {} {
-    variable domain
-    append result\
-        [comment "Domain Portal Declaration"]\
-        "extern MRT_DomainPortal ${domain}__PORTAL ;\n"
-}
-----
-
-== Generating Code Files
-
-[source,tcl]
-----
-<<generation code namespace>>=
-namespace eval GenCode {
-    logger::initNamespace [namespace current]
-
-    <<tclral imports>>
-
-    namespace path {
-        ::micca
-        ::micca::@Gen@::Helpers
-        ::micca::@Config@::Helpers
-        ::rosea::InstCmds
-    }
-
-    namespace import [namespace parent]::expand
-    namespace import [namespace parent]::GenSupport::ExpandActivity
-
-    <<generation code data>>
-    <<generation code commands>>
-}
-----
-
-[source,tcl]
-----
-<<generation data>>=
-set codeTemplate [textutil::adjust::undent {
-    %<banner>%
-    #include "micca_rt.h"
-    #ifdef MRT_INSTRUMENT
-        #ifndef MRT_INSTRUMENT_ENTRY
-            #define MRT_INSTRUMENT_ENTRY\
-            printf("%s: %s %d\n", __func__, __FILE__, __LINE__) ;
-        #endif /* MRT_INSTRUMENT_ENTRY */
-    #else
-        #define MRT_INSTRUMENT_ENTRY
-    #endif /* MRT_INSTRUMENT */
-    %<domainInclude>%
-    %<prologueDeclarations>%
-    %<implementationTypeAliases>%
-    %<forwardClassDeclarations>%
-    %<forwardRelationshipDeclaration>%
-    %<classDeclarations>%
-    %<assignerDeclarations>%
-    %<stateParamDeclarations>%
-    %<operationDeclarations>%
-    %<ctorDeclarations>%
-    %<dtorDeclarations>%
-    %<activityDeclarations>%
-    %<storageDeclarations>%
-    %<nameDefinitions>%
-    %<iabDefinitions>%
-    %<edbDefinitions>%
-    %<pdbDefinitions>%
-    %<classDefinitions>%
-    %<assignerDefinitions>%
-    %<relationshipDefinitions>%
-    %<classInstanceDefinitions>%
-    %<assignerInstanceDefinitions>%
-    %<operationDefinitions>%
-    %<ctorDefinitions>%
-    %<dtorDefinitions>%
-    %<activityDefinitions>%
-    %<domainCtorDefinition>%
-    %<domainOpDefinitions>%
-    %<externalOpDefinitions>%
-    %<portalDefinition>%
-    %<epilogueDeclarations>%
-}]
-----
-
+(((micca,Helper,PrepareDomainProperties)))
 [source,tcl]
 ----
 <<generation helper commands>>=
@@ -998,7 +391,14 @@ proc PrepareDomainProperties {domain} {
 
     return
 }
+----
 
+We need some procedures to access the properties.
+
+(((micca,Helper,GetClassProperty)))
+[source,tcl]
+----
+<<generation helper commands>>=
 proc GetClassProperty {class prop} {
     variable ClassProperties
     set cprop [relation restrictwith $ClassProperties {$Name eq $class}]
@@ -1008,7 +408,12 @@ proc GetClassProperty {class prop} {
 
     error "unknown property, \"$prop\", for class, \"$class\""
 }
+----
 
+(((micca,Helper,GetRelationshipProperty)))
+[source,tcl]
+----
+<<generation helper commands>>=
 proc GetRelationshipProperty {rel prop} {
     variable RelationshipProperties
     set rprops [relation restrictwith $RelationshipProperties {$Name eq $rel}]
@@ -1018,9 +423,731 @@ proc GetRelationshipProperty {rel prop} {
 
     error "unknown property, \"$prop\", for relationship, \"$rel\""
 }
+----
 
+(((micca,Helper,GetClassDescriptor)))
+[source,tcl]
+----
+<<generation helper commands>>=
 proc GetClassDescriptor {domain className} {
     return ${domain}__CLASSES\[[GetClassProperty $className Number]\]
+}
+----
+
+== Header Files
+
+The header file generated for a domain contains interfacing information.
+The header file is included in the generated ``C'' code file and,
+typically, is included by bridge code that is
+mapping the dependencies of one domain onto another.
+
+Following our usual pattern,
+we will execute the header generation commands from the template in
+a child namespace to avoid any name conflicts.
+
+The `GenHeader` namespace is a child of `::micca::@Gen@` and follows
+our usual pattern of imports, command path and contents.
+
+[source,tcl]
+----
+<<generation header namespace>>=
+namespace eval GenHeader {
+    logger::initNamespace [namespace current]
+
+    <<tclral imports>>
+
+    namespace path {
+        ::micca
+        ::micca::@Gen@::Helpers
+        ::micca::@Config@::Helpers
+        ::rosea::InstCmds
+    }
+
+    <<generation header data>>
+    <<generation header commands>>
+}
+----
+
+The template for the header file is shown below.
+Each embedded command is then shown in the following sections.
+
+[source,tcl]
+----
+<<generation data>>=
+set headerTemplate [textutil::adjust::undent {
+    %<banner>%
+    #ifndef %<headerFileGuard>%
+    #define %<headerFileGuard>%
+    %<interface>%
+    #include <stddef.h>
+    #include <stdint.h>
+    #include <stdbool.h>
+    %<interfaceTypeAliases>%
+    %<domainOpDeclarations>%
+    %<externalOpDeclarations>%
+    %<eventParamDeclarations>%
+    %<portalIds>%
+    %<portalDeclaration>%
+    #endif /* %<headerFileGuard>% */
+}]
+----
+
+The generation of the header files is accomplished by iterating
+over all the domains and placing the output of the template
+expansion into a file.
+We use some variables to provide context to the embedded expansion commands.
+
+The commands embedded in the template all follow a similar pattern.
+The return values of the commands are placed in the output of the
+template expansion.
+
+=== Header File Guard
+
+The generated header file includes definitions of preprocessor symbols
+to prevent the header file from being included multiple times.
+
+(((micca,Header Generation,headerFileGuard)))
+[source,tcl]
+----
+<<generation header commands>>=
+proc headerFileGuard {} {
+    variable domain
+    return [string toupper [string trim $domain]]_H_
+}
+----
+
+=== Domain Interface
+
+Arbitrary code may be placed in the generated header file by
+invoking the `interface` command as part of the domain configuration.
+The text provided during configuration is simply passed into the
+generated header file.
+
+(((micca,Header Generation,interface)))
+[source,tcl]
+----
+<<generation header commands>>=
+proc interface {} {
+    variable interface
+
+    return [string cat\
+        [comment "Domain Interface Contents"]\
+        [textutil::adjust::undent [string trim $interface \n]]\
+    ]
+}
+----
+
+[source,tcl]
+.Tests
+----
+<<generate command tests>>=
+test headergen-1.0 {
+    Generated header file with interface info
+} -setup {
+    makeFile {} header1.h
+    makeFile {} header1.c
+    micca configure {
+        domain header1 {
+            interface {#include <stdio.h>}
+
+            class c1 {
+                attribute color int -default 20
+            }
+        }
+        population header1 {
+            class c1 {
+                instance fred1
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca generate
+    llength [fileutil::grep {stdio} header1.h]
+} -result {1}
+----
+
+=== Type Aliases
+
+The domain configuration can contain type aliases.
+Normally,
+the type alias information is placed in the generated code file.
+However, if a type alias name is used in a context where it would be
+exposed outside of the domain,
+_e.g._ as a parameter to a domain operation,
+then the type alias definition is placed in the generated header file.
+There are three circumstances where a type is needed external to the domain:
+
+. As the return type or parameter type of a domain operation.
+. As the return type or parameter type of an external operation.
+. As an argument to an event (as events can be signaled by bridge operations).
+
+We will have need to compute the type aliases needed by the interface
+more than once, so we factor the code into a procedure.
+
+(((micca,Helper,FindInterfaceTypeAliases)))
+[source,tcl]
+----
+<<generation helper commands>>=
+proc FindInterfaceTypeAliases {domain} {
+    set domRef [Domain findWhere {$Name eq $domain}]
+
+    <<FindInterfaceTypeAliases:: find type alias names>>
+    <<FindInterfaceTypeAliases:: find aliases in domain operations>>
+    <<FindInterfaceTypeAliases:: find aliases in external operations>>
+    <<FindInterfaceTypeAliases:: find aliases in events>>
+    <<FindInterfaceTypeAliases:: union the combination>>
+
+    return $aliasRefs
+}
+----
+
+[source,tcl]
+----
+<<FindInterfaceTypeAliases:: find type alias names>>=
+set aliasNames [pipe {
+    findRelated $domRef ~R7 |
+    deRef % |
+    relation list % TypeName
+} {} |%]
+----
+
+[source,tcl]
+----
+<<FindInterfaceTypeAliases:: find aliases in domain operations>>=
+set doRefs [pipe {
+    findRelatedWhere $domRef ~R5 {$ReturnDataType in $aliasNames} |
+    findRelated % R5 ~R7
+} {} |%]
+set dopRefs [pipe {
+    findRelatedWhere $domRef {~R5 ~R6} {$DataType in $aliasNames} |
+    findRelated % R6 R5 ~R7
+} {} |%]
+----
+
+[source,tcl]
+----
+<<FindInterfaceTypeAliases:: find aliases in external operations>>=
+set eoRefs [pipe {
+    findRelatedWhere $domRef ~R10 {$ReturnDataType in $aliasNames} |
+    findRelated % R10 ~R7
+} {} |%]
+set eopRefs [pipe {
+    findRelatedWhere $domRef {~R10 ~R11} {$DataType in $aliasNames} |
+    findRelated % R11 R10 ~R7
+} {} |%]
+----
+
+[source,tcl]
+----
+<<FindInterfaceTypeAliases:: find aliases in events>>=
+set argRefs [pipe {
+    Argument findWhere {$Domain eq $domain && $DataType in $aliasNames} |
+    deRef ~ |
+    relation semijoin ~ $::micca::TypeAlias\
+            -using {Domain Domain DataType TypeName} |
+    ::rosea::Helpers::ToRef ::micca::TypeAlias ~
+}]
+----
+
+[source,tcl]
+----
+<<FindInterfaceTypeAliases:: union the combination>>=
+set aliasRefs [refUnion $doRefs $dopRefs]
+set aliasRefs [refUnion $aliasRefs $eoRefs]
+set aliasRefs [refUnion $aliasRefs $eopRefs]
+set aliasRefs [refUnion $aliasRefs $argRefs]
+----
+
+The implementation of the `interfaceTypeAliases` iterates over the
+type aliases that are used in the domain interfaces and emits the
+corresponding ``C'' `typedef` statement.
+
+(((micca,Header Generation,interfaceTypeAliases)))
+[source,tcl]
+----
+<<generation header commands>>=
+proc interfaceTypeAliases {} {
+    variable domain
+    append result [comment "Type Aliases"]
+    forAllRefs taRef [FindInterfaceTypeAliases $domain] {
+        assignAttribute $taRef TypeName TypeDefinition
+        append result\
+            "typedef "\
+            [typeCheck composeDeclaration $TypeDefinition $TypeName]\
+            " \;\n"
+    }
+
+    return $result
+}
+----
+
+[source,tcl]
+.Tests
+----
+<<generate command tests>>=
+test headergen-2.0 {
+    Generated header file with external type alias
+} -setup {
+    makeFile {} header2.h
+    makeFile {} header2.c
+    micca configure {
+        domain header2 {
+            typealias gCount uint64_t
+            typealias pCount uint32_t
+
+            domainop gCount countAll {a int} {
+                return 27 ;
+            }
+
+            domainop int countSome {b pCount} {
+                return 42 ;
+            }
+            class c1 {
+                attribute color int -default 20
+            }
+        }
+        population header2 {
+            class c1 {
+                instance fred1
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca generate
+    llength [fileutil::grep {typedef} header2.h]
+} -result {2}
+----
+
+=== Domain Operation Declarations
+
+``C'' language programs tend to be composed of _declarations_ and
+_definitions_.
+A declaration makes symbol names and types known to the compile.
+A definition associates specific data or code statements to a symbol.
+Header files contain a lot of declarations.
+Here we start with declarations for the domain operations.
+Domain operations are just ordinary ``C'' functions but are given
+external scope.
+
+There are several different operations defined in the platform model.
+Since they use the same attribute names,
+it is possible to factor the generation of declaration code into
+a common procedure.
+What we need to know is are instance references to the operation
+and the name of the relationship used to find the parameters of
+the operation.
+
+(((micca,Helper,GenOperationDeclarations)))
+[source,tcl]
+----
+<<generation helper commands>>=
+proc GenOperationDeclarations {opRefs paramRel {suffix {}}} {
+    set result {}
+
+    set params [deRef [findRelated $opRefs $paramRel]]
+    set ops [pipe {
+        deRef $opRefs |
+        relation rename ~ Name Operation |
+        relation join ~ $params |
+        relation group ~ Parameters Name Number DataType
+    }]
+
+    relation foreach op $ops {
+        relation assign $op
+        if {$Comment ne {}} {
+            append result [comment [string trim $Comment \n]]
+        }
+        append result\
+            "extern $ReturnDataType "\
+            $Domain _ $Operation $suffix \(\
+            [join [relation list $Parameters DataType] {, }]\
+            "\) ;\n"
+    }
+
+    return $result
+}
+----
+
+Given a procedure to emit the operation declaration,
+then the template expansion for the domain operations just invokes
+the common code with the correct references and relationship name.
+
+(((micca,Header Generation,domainOpDeclarations)))
+[source,tcl]
+----
+<<generation header commands>>=
+proc domainOpDeclarations {} {
+    variable domain
+    set opRefs [DomainOperation findWhere {$Domain eq $domain}]
+
+    return [string cat\
+        [comment "Domain Operations External Declarations"]\
+        [GenOperationDeclarations $opRefs ~R6]\
+    ]
+}
+----
+
+[source,tcl]
+.Tests
+----
+<<generate command tests>>=
+test headergen-3.0 {
+    Domain operation declarations in header file
+} -setup {
+    makeFile {} header3.h
+    makeFile {} header3.c
+    micca configure {
+        domain header3 {
+            domainop int op1 {a int b char} {
+                printf ("%d %c\n", a, b) ;
+            } {
+                two parameters
+            }
+            domainop int op2 {a {char *} b {uint8_t *}} {
+                printf ("%s %s\n", a, b) ;
+            } {
+                pointer type parameters
+            }
+            class c1 {
+                attribute color int -default 20
+            }
+        }
+        population header3 {
+            class c1 {
+                instance fred1
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca generate
+    llength [fileutil::grep {extern int header3_op[0-9]} header3.h]
+} -result {2}
+----
+
+=== External Operation Declarations
+
+The declarations for external operations follows the same pattern as
+for domain operations.
+
+(((micca,Header Generation,externalOpDeclarations)))
+[source,tcl]
+----
+<<generation header commands>>=
+proc externalOpDeclarations {} {
+    variable domain
+    set opRefs [ExternalOperation findWhere {$Domain eq $domain}]
+
+    return [string cat\
+        [comment "External Operations Declarations"]\
+        [GenOperationDeclarations $opRefs ~R11 __EOP]\
+    ]
+}
+----
+
+=== Portal Function Constants
+
+The runtime code provides a set of functions that allow bridge code
+to tunnel simple model level operations, such a signaling an event,
+into a domain.
+The functions require integer constants that encode identifiers
+for the various entities that can be accessed via the portal.
+Those constants are placed in the generated header file.
+
+We generate information on three aspects of the domain:
+
+. Classes
+. Transitioning events
+. Polymorphic events
+
+(((micca,Header Generation,portalIds)))
+[source,tcl]
+----
+<<generation header commands>>=
+proc portalIds {} {
+    variable domain
+
+    <<portalIds:: generate class information>>
+    <<portalIds:: generate event information>>
+    <<portalIds:: generate polymorphic event information>>
+
+    return $result
+}
+----
+
+For classes,
+we generate encodings for the class itself,
+its attributes and its initial instances.
+
+[source,tcl]
+----
+<<portalIds:: generate class information>>=
+append result [comment "Numeric encoding of classes, attributes and\
+        instances used by the portal functions"]
+set classRefs [Class findWhere {$Domain eq $domain}]
+append result "#define [string toupper ${domain}_CLASSCOUNT]\
+        [refMultiplicity $classRefs]\n"
+forAllRefs classRef $classRefs {
+    assignAttribute $classRef
+    <<portalIds:: generate class encodings>>
+    <<portalIds:: generate attribute encodings>>
+    <<portalIds:: generate instance encodings>>
+}
+----
+
+Each class was given a unique number within the domain when
+the platform model was populated.
+This is the basis for the class id encodings.
+
+[source,tcl]
+----
+<<portalIds:: generate class encodings>>=
+append result [comment "Class: $Name"]
+set classid [string toupper ${Domain}_${Name}_CLASSID]
+append result "#define $classid $Number\n"
+----
+
+Attributes are encoded in alphabetical order.
+Note that the portal does not allow access to relationships or
+the pointer values that are used to navigate a relationship.
+
+[source,tcl]
+----
+<<portalIds:: generate attribute encodings>>=
+set attrRefs [findRelated $classRef ~R20 {~R25 PopulatedComponent}\
+        {~R21 Attribute}]
+append result "#define [string toupper ${Domain}_${Name}_ATTRCOUNT]\
+        [refMultiplicity $attrRefs]\n"
+set attrNumber -1
+relation foreach attr [deRef $attrRefs] -ascending Name {
+    relation assign $attr {Name attrName}
+    set attrid [string toupper ${Domain}_${Name}_${attrName}_ATTRID]
+    append result "#define $attrid [incr attrNumber]\n"
+}
+----
+
+We generate encodings for instances that are part of the initial
+instance population.
+
+[source,tcl]
+----
+<<portalIds:: generate instance encodings>>=
+set instRefs [findRelated $classRef ~R20 ~R103]
+append result "#define [string toupper ${Domain}_${Name}_INSTCOUNT]\
+        [GetClassProperty $Name TotalInstance]\n"
+forAllRefs inst $instRefs {
+    assignAttribute $inst Instance {Number InstNumber}
+    set instid [string toupper ${Domain}_${Name}_${Instance}_INSTID]
+    append result "#define $instid $InstNumber\n"
+}
+----
+
+[source,tcl]
+----
+<<portalIds:: generate event information>>=
+append result [comment "Numeric encoding of event numbers\
+        used by the portal functions"]
+set tevents [pipe {
+    TransitioningEvent findWhere {$Domain eq $domain} |
+    deRef ~ |
+    relation eliminate ~ Domain |
+    relation group ~ Events Event Number
+}]
+relation foreach tevent $tevents -ascending Model {
+    relation assign $tevent
+    append result [comment "Class: $Model"]
+    append result "#define [string toupper ${domain}_${Model}_EVENTCOUNT]\
+        [relation cardinality $Events]\n"
+    relation foreach event $Events -ascending Number {
+        relation assign $event
+        append result "#define\
+            [string toupper ${domain}_${Model}_${Event}_EVENT] $Number\n"
+    }
+}
+----
+
+[source,tcl]
+----
+<<portalIds:: generate polymorphic event information>>=
+append result [comment "Numeric encoding of polymorphic event numbers\
+        used by the portal functions"]
+set pevents [pipe {
+    DeferredEvent findWhere {$Domain eq $domain} |
+    deRef ~ |
+    relation eliminate ~ Domain |
+    relation group ~ Events Event Number
+}]
+relation foreach pevent $pevents -ascending Model {
+    relation assign $pevent
+    append result [comment "Class: $Model"]
+    append result "#define [string toupper ${domain}_${Model}_POLYEVENTCOUNT]\
+        [relation cardinality $Events]\n"
+    relation foreach event $Events -ascending Number {
+        relation assign $event
+        append result "#define\
+            [string toupper ${domain}_${Model}_${Event}_POLYEVENT] $Number\n"
+    }
+}
+----
+
+[source,tcl]
+.Tests
+----
+<<generate command tests>>=
+test headergen-4.0 {
+    Generated header file with portal constants
+} -setup {
+    makeFile {} header4.h
+    makeFile {} header4.c
+    micca configure {
+        domain header4 {
+            class c1 {
+                attribute color int -default 10
+                attribute temp double -default 2.0
+            }
+            class c2 {
+                attribute color int -default 10
+                attribute temp double -default 2.0
+            }
+        }
+        population header4 {
+            class c1 {
+                instance fred1
+            }
+            class c2 {
+                instance fred1
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca generate
+    llength [fileutil::grep {CLASSID} header4.h]
+} -result {2}
+----
+
+=== Portal Data Structure Declaration
+
+The portal functions require a data structure and we must emit the
+declaration of that data structure.
+
+(((micca,Header Generation,portalDeclaration)))
+[source,tcl]
+----
+<<generation header commands>>=
+proc portalDeclaration {} {
+    variable domain
+    append result\
+        [comment "Domain Portal Declaration"]\
+        "extern MRT_DomainPortal ${domain}__PORTAL ;\n"
+}
+----
+
+== Generating Code Files
+
+In this section we describe the code used to generate the domain
+code file.
+We follow the pattern established for the header file.
+A namespace is used to prevent any naming conflicts for the
+template expansion commands.
+
+[source,tcl]
+----
+<<generation code namespace>>=
+namespace eval GenCode {
+    logger::initNamespace [namespace current]
+
+    <<tclral imports>>
+
+    namespace path {
+        ::micca
+        ::micca::@Gen@::Helpers
+        ::micca::@Config@::Helpers
+        ::rosea::InstCmds
+    }
+
+    namespace import [namespace parent]::expand
+    namespace import [namespace parent]::GenSupport::ExpandActivity
+
+    <<generation code data>>
+    <<generation code commands>>
+}
+----
+
+The template for code generation is much more complicated.
+In the code file we will find it necessary to emit many forward
+declaration in addition to the required definitions.
+For example,
+it is necessary to emit forward declarations for all instance operations
+since we do not know in which activity it might be invoked.
+
+[source,tcl]
+----
+<<generation data>>=
+set codeTemplate [textutil::adjust::undent {
+    %<banner>%
+    #include "micca_rt.h"
+    #ifdef MRT_INSTRUMENT
+        #ifndef MRT_INSTRUMENT_ENTRY
+            #define MRT_INSTRUMENT_ENTRY\
+            printf("%s: %s %d\n", __func__, __FILE__, __LINE__) ;
+        #endif /* MRT_INSTRUMENT_ENTRY */
+    #else
+        #define MRT_INSTRUMENT_ENTRY
+    #endif /* MRT_INSTRUMENT */
+    %<domainInclude>%
+    %<prologueDeclarations>%
+    %<implementationTypeAliases>%
+    %<forwardClassDeclarations>%
+    %<forwardRelationshipDeclaration>%
+    %<classDeclarations>%
+    %<assignerDeclarations>%
+    %<stateParamDeclarations>%
+    %<operationDeclarations>%
+    %<ctorDeclarations>%
+    %<dtorDeclarations>%
+    %<activityDeclarations>%
+    %<storageDeclarations>%
+    %<nameDefinitions>%
+    %<iabDefinitions>%
+    %<edbDefinitions>%
+    %<pdbDefinitions>%
+    %<classDefinitions>%
+    %<assignerDefinitions>%
+    %<relationshipDefinitions>%
+    %<classInstanceDefinitions>%
+    %<assignerInstanceDefinitions>%
+    %<operationDefinitions>%
+    %<ctorDefinitions>%
+    %<dtorDefinitions>%
+    %<activityDefinitions>%
+    %<domainCtorDefinition>%
+    %<domainOpDefinitions>%
+    %<externalOpDefinitions>%
+    %<portalDefinition>%
+    %<epilogueDeclarations>%
+}]
+----
+
+In the following sections, we show the procedures that are
+invoked as part of the code template expansion.
+
+=== Including the Domain Header File
+
+(((micca,Code Generation,domainInclude)))
+[source,tcl]
+----
+<<generation code commands>>=
+proc domainInclude {} {
+    variable domain
+
+    return "#include \"$domain.h\"\n"
 }
 ----
 
@@ -1250,18 +1377,8 @@ proc prologueDeclarations {} {
 
     return [string cat\
         [comment "Domain Prologue"]\
-        [indentCode [string trim $prologue \n] 0]\
+        [textutil::adjust::undent [string trim $prologue \n]]\
     ]
-}
-----
-
-[source,tcl]
-----
-<<generation code commands>>=
-proc domainInclude {} {
-    variable domain
-
-    return "#include \"$domain.h\"\n"
 }
 ----
 
@@ -1318,48 +1435,9 @@ test codegen-1.0 {
 <<generation code commands>>=
 proc implementationTypeAliases {} {
     variable domain
-
     set domRef [Domain findWhere {$Name eq $domain}]
-    set aliasRefs [findRelated $domRef ~R7]
-    set aliases [pipe {
-        deRef $aliasRefs |
-        relation list ~ TypeName
-    }]
-    # Domain operations
-    set doRefs [pipe {
-        findRelatedWhere $domRef ~R5 {$ReturnDataType in $aliases} |
-        findRelated % R5 ~R7
-    } {} |%]
-    set dopRefs [pipe {
-        findRelatedWhere $domRef {~R5 ~R6} {$DataType in $aliases} |
-        findRelated % R6 R5 ~R7
-    } {} |%]
-    # External operations
-    set eoRefs [pipe {
-        findRelatedWhere $domRef ~R10 {$ReturnDataType in $aliases} |
-        findRelated % R10 ~R7
-    } {} |%]
-    set eopRefs [pipe {
-        findRelatedWhere $domRef {~R10 ~R11} {$DataType in $aliases} |
-        findRelated % R11 R10 ~R7
-    } {} |%]
-    # Event arguments
-    set argRefs [pipe {
-        Argument findWhere {$Domain eq $domain && $DataType in $aliases} |
-        deRef ~ |
-        relation semijoin ~ $::micca::TypeAlias\
-                -using {Domain Domain DataType TypeName} |
-        ::rosea::Helpers::ToRef ::micca::TypeAlias ~
-    }]
-
-    # Union all the different refs together.
-    set taRefs [refUnion $doRefs $dopRefs]
-    set taRefs [refUnion $taRefs $eoRefs]
-    set taRefs [refUnion $taRefs $eopRefs]
-    set taRefs [refUnion $taRefs $argRefs]
-    set aliasRefs [refMinus $aliasRefs $taRefs]
-
-    set result {}
+    set aliasRefs [refMinus [findRelated $domRef ~R7]\
+            [FindInterfaceTypeAliases $domain]]
     append result [comment "Type Aliases"]
     forAllRefs taRef $aliasRefs {
         assignAttribute $taRef TypeName TypeDefinition
@@ -1483,8 +1561,12 @@ proc DeclareClassStructure {classRef} {
     # Attributes first
     forAllRefs attrRef [findRelated $compRefs {~R25 PopulatedComponent}\
             {~R21 Attribute}] {
-        assignAttribute $attrRef {Name attrName} DataType
-        append result "    $DataType $attrName ;\n"
+        assignAttribute $attrRef {Name attrName} DataType Dimension
+        append result "    $DataType $attrName"
+        if {$Dimension > 0} {
+            append result "\[$Dimension\]"
+        }
+        append result " ;\n"
     }
 
     # References second
@@ -1746,7 +1828,7 @@ test codegen-3.0 {
 } -body {
     micca generate
     testConditions\
-        {[llength [fileutil::grep {R1} codegen3.c]] == 24}
+        {[llength [fileutil::grep {R1} codegen3.c]] == 27}
 } -result {1}
 ----
 
@@ -1880,7 +1962,7 @@ test codegen-21.0 {
 } -body {
     micca generate
     testConditions\
-        {[llength [fileutil::grep {R1} codegen21.c]] == 19}
+        {[llength [fileutil::grep {R1} codegen21.c]] == 21}
 } -result {1}
 ----
 
@@ -2197,22 +2279,20 @@ proc eventParamDeclarations {} {
         relation group ~ Params Name Position DataType |
         relation group ~ Events Event Params
     }]
-    if {[relation isnotempty $tevents]} {
-        append result [comment "Transition Event Parameter Structure\
-                Declarations"]
-        relation foreach tevent $tevents -ascending Model {
-            relation assign $tevent
-            relation foreach event $Events {
-                relation assign $event
+    append result [comment "Transition Event Parameter Structure\
+            Declarations"]
+    relation foreach tevent $tevents -ascending Model {
+        relation assign $tevent
+        relation foreach event $Events {
+            relation assign $event
+            append result\
+                "struct ${domain}_${Model}_${Event}__EPARAMS \{\n"
+            relation foreach param $Params -ascending Position {
+                relation assign $param DataType Name
                 append result\
-                    "struct ${domain}_${Model}_${Event}__EPARAMS \{\n"
-                relation foreach param $Params -ascending Position {
-                    relation assign $param DataType Name
-                    append result\
-                        "    [typeCheck composeDeclaration $DataType $Name] ;\n"
-                }
-                append result "\} ;\n"
+                    "    [typeCheck composeDeclaration $DataType $Name] ;\n"
             }
+            append result "\} ;\n"
         }
     }
 
@@ -2227,22 +2307,20 @@ proc eventParamDeclarations {} {
         relation group ~ Params Name Position DataType |
         relation group ~ Events Event Params
     }]
-    if {[relation isnotempty $pevents]} {
-        append result [comment "Polymorphic Event Parameter Structure\
-                Declarations"]
-        relation foreach tevent $pevents -ascending Model {
-            relation assign $tevent
-            relation foreach event $Events {
-                relation assign $event
+    append result [comment "Polymorphic Event Parameter Structure\
+            Declarations"]
+    relation foreach tevent $pevents -ascending Model {
+        relation assign $tevent
+        relation foreach event $Events {
+            relation assign $event
+            append result\
+                "struct ${domain}_${Model}_${Event}__PEPARAMS \{\n"
+            relation foreach param $Params -ascending Position {
+                relation assign $param DataType Name
                 append result\
-                    "struct ${domain}_${Model}_${Event}__PEPARAMS \{\n"
-                relation foreach param $Params -ascending Position {
-                    relation assign $param DataType Name
-                    append result\
-                        "    [typeCheck composeDeclaration $DataType $Name] ;\n"
-                }
-                append result "\} ;\n"
+                    "    [typeCheck composeDeclaration $DataType $Name] ;\n"
             }
+            append result "\} ;\n"
         }
     }
 
@@ -5058,10 +5136,16 @@ proc ProcessCodeLines {text} {
                 lappend newlines {}
             }
         } else {
+            if {[string first \{ $line] != -1} {
+                incr block
+            }
             if {[regsub -- {\A\s{4,}} $line {} newline] != 0} {
                 set line [string repeat { } [expr {$block * 4}]]$newline
             }
             lappend newlines $line
+            if {[string first \} $line] != -1} {
+                incr block -1
+            }
         }
     }
     set newtext [join $newlines \n]
@@ -5161,7 +5245,7 @@ proc End {} {
             }
             append result [IndentToBlock $update]
             PopBlock
-            append result "\}\n"
+            append result [IndentToBlock "\}\n"]
         }
         InstanceSetForeachSelected -
         InstanceForeachRelated -
@@ -5242,9 +5326,10 @@ proc InstanceWithAttribute {instref args} {
 
     lassign [ParseAttrVars $instref $args] attrNames varNames dataTypes
 
-    append result\
+    append result [IndentToBlock [string cat\
         [linecomment "instance $instref withAttribute $args"]\
-        "\{\n"
+        "\{\n"\
+    ]]
     PushBlock
 
     foreach attr $attrNames var $varNames type $dataTypes {
@@ -5483,7 +5568,7 @@ proc InstanceForeachRelated {instref startref args} {
                             $startref->$comp.links ; // $relspec\n"
                     append refcode\
                         "for (size_t $cntvar = $startref->$comp.count ;\
-                            $cntvar != 0 ; $cntvar -= 1, $itervar++) \{"
+                            $cntvar != 0 ; $cntvar--, $itervar++) \{"
                     append result [IndentToBlock $refcode]
                     PushBlock
                     lassign [CreateTempRefSymbol $targetclass] targettype\
@@ -6406,9 +6491,10 @@ proc InstanceFindOneRelated {instref startref args} {
 ----
 <<generation support commands>>=
 proc InstanceSignal {instref event args} {
-    lassign [InstanceNewECB $instref $event $args] ecbvar result
-    append result [IndentToBlock "mrt_PostEvent($ecbvar) ;\n"]
-    return $result
+    append result [linecomment "instance $instref signal $event [list $args]"]
+    lassign [InstanceNewECB $instref $event $args] ecbvar ecbcode
+    append result $ecbcode "mrt_PostEvent($ecbvar) ;\n"
+    return [IndentToBlock $result]
 }
 ----
 
@@ -6416,9 +6502,11 @@ proc InstanceSignal {instref event args} {
 ----
 <<generation support commands>>=
 proc InstanceDelaySignal {instref time event args} {
-    lassign [InstanceNewECB $instref $event $args] ecbvar result
-    append result [IndentToBlock "mrt_PostDelayedEvent($ecbvar, $time) ;\n"]
-    return $result
+    append result [linecomment "instance $instref delaysignal $time\
+            $event [list $args]"]
+    lassign [InstanceNewECB $instref $event $args] ecbvar ecbcode
+    append result $ecbcode "mrt_PostDelayedEvent($ecbvar, $time) ;\n"
+    return [IndentToBlock $result]
 }
 ----
 
@@ -6428,6 +6516,8 @@ proc InstanceDelaySignal {instref time event args} {
 proc InstanceCancelSignal {instref event {sourceref {}}} {
     variable domain
 
+    append result [linecomment "instance $instref canceldelayed $event\
+        [list $sourceref]"]
     set target [CheckInstRefSymbol $instref]
     set eventNum [FindEventNumber [dict get $target Class] $event]
     if {$sourceref ne {}} {
@@ -6436,8 +6526,9 @@ proc InstanceCancelSignal {instref event {sourceref {}}} {
     } else {
         set sourceinst NULL
     }
-    return [IndentToBlock\
-        "mrt_CancelDelayedEvent($eventNum, $instref, $sourceinst) ;\n"]
+    append result\
+        "mrt_CancelDelayedEvent($eventNum, $instref, $sourceinst) ;\n"
+    return [IndentToBlock $result]
 }
 ----
 
@@ -6455,7 +6546,7 @@ proc InstanceRemainingTime {instref event {sourceref {}}} {
     } else {
         set sourceinst NULL
     }
-    return "mrt_RemainingDelayTime($eventNum, $instref, $sourceinst) ;\n"
+    return "mrt_RemainingDelayTime($eventNum, $instref, $sourceinst)"
 }
 ----
 
@@ -6524,7 +6615,7 @@ proc InstanceNewECB {instref event arglist} {
             }
         }
     }
-    return [list $ecbvar [IndentToBlock $result]]
+    return [list $ecbvar $result]
 }
 ----
 
@@ -6694,21 +6785,46 @@ proc InstanceSetMinus {diffset set1 set2} {
 ----
 <<generation support commands>>=
 proc ClassCreate {className instref args} {
-    set attrvalues [GetAttrInitialValues $className $args]
-
     variable domain
     set classDesc [GetClassDescriptor $domain $className]
+    set attrvalues [GetAttrInitialValues $className $args]
 
     append result\
         [linecomment "$className create $instref $args"]\
         [CreateInstRefSymbol $className $instref]\
-        "$instref = mrt_CreateInstance(&$classDesc, MRT_StateCode_IG) ;\n"
-
-    foreach {attrName attrValue} $attrvalues {
-        append result "$instref->$attrName = $attrValue ;\n"
-    }
+        "$instref = mrt_CreateInstance(&$classDesc, MRT_StateCode_IG) ;\n"\
+        [AssignAttributeValues $className $instref $attrvalues]
 
     return [IndentToBlock $result]
+}
+----
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc AssignAttributeValues {className instref attrvalues} {
+    variable domain
+    set result {}
+    foreach {attrName attrValue} $attrvalues {
+        set attrRef [Attribute findById Domain $domain Class $className\
+            Name $attrName]
+        lassign [readAttribute $attrRef DataType Dimension] type dim
+        if {$dim > 0} {
+            # Got a matrix, see if it is a string
+            if {$type eq "char"} {
+                set maxchars [expr {$dim - 1}]
+                append result\
+                    "strncpy($instref->$attrName, $attrValue, $maxchars) ;\n"\
+                    "$instref->$attrName\[$maxchars\] = '\\0' ;\n"
+            } else {
+                append result "memcpy($instref->$attrName, $attrValue,\
+                    sizeof($instref->$attrName)) ;\n"
+            }
+        } else {
+            append result "$instref->$attrName = $attrValue ;\n"
+        }
+    }
+    return $result
 }
 ----
 
@@ -6894,21 +7010,54 @@ test codegen-26.3 {
 
 [source,tcl]
 ----
+<<generate command tests>>=
+test codegen-26.4 {
+    Generated code file instance creation with string
+} -setup {
+    # makeFile {} codegen26_4.h
+    # makeFile {} codegen26_4.c
+    micca configure {
+        domain codegen26_4 {
+            class X {
+                attribute color char -dimension 32 -default {"red"}
+                attribute temp int
+            }
+            domainop void newX {} {
+                %<X create newx color {"blue"} temp 22>%
+                printf("%s\n", %<instance newx attribute color>%) ;
+                char *newcolor = "yellow" ;
+                %<X create newx color newcolor temp 10>%
+            }
+        }
+        population codegen26_4 {
+            class X {
+                allocate 4
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca generate
+    testConditions\
+        {[llength [fileutil::grep {strncpy} codegen26_4.c]] == 2}
+} -result {1}
+----
+
+[source,tcl]
+----
 <<generation support commands>>=
 proc ClassCreateIn {className instref state args} {
-    set attrvalues [GetAttrInitialValues $className $args]
-
     variable domain
     set classDesc [GetClassDescriptor $domain $className]
     set statenum [GetStateNumber $domain $className $state]
+    set attrvalues [GetAttrInitialValues $className $args]
 
     append result\
         [linecomment "$className createin $instref $state $args"]\
         [CreateInstRefSymbol $className $instref]\
-        "$instref = mrt_CreateInstance(&$classDesc, $statenum) ;\n"
-    foreach {attrName attrValue} $attrvalues {
-        append result "$instref->$attrName = $attrValue ;\n"
-    }
+        "$instref = mrt_CreateInstance(&$classDesc, $statenum) ;\n"\
+        [AssignAttributeValues $className $instref $attrvalues]
 
     return [IndentToBlock $result]
 }
@@ -7035,7 +7184,8 @@ proc ClassCreateAsync {className event eventparams args} {
     set eventNum [readAttribute $eventRef Number]
 
     append result\
-        [linecomment "$className createasync $event \{$eventparams\} $args"]
+        [linecomment "$className createasync $event [list $eventparams]\
+            [list $args]"]
 
     set psig [findRelated $eventRef R80 R69]
     set params [FindParamsFromSig $psig]
@@ -7072,16 +7222,13 @@ proc ClassCreateAsync {className event eventparams args} {
     lassign [CreateTempRefSymbol $className] reftype refvar
     variable domain
     set classDesc [GetClassDescriptor $domain $className]
+    set attrvalues [GetAttrInitialValues $className $args]
     append result\
         "$reftype$refvar = mrt_CreateAsync(&$classDesc, $eventNum,\
-            $paramptr, $paramsize, $sourceinst) ;\n"
+            $paramptr, $paramsize, $sourceinst) ;\n"\
+        [AssignAttributeValues $className $refvar $attrvalues]
 
-    set attrvalues [GetAttrInitialValues $className $args]
-    foreach {attrName attrValue} $attrvalues {
-        append result "$refvar->$attrName = $attrValue ;\n"
-    }
-
-    return $result
+    return [IndentToBlock $result]
 }
 ----
 
@@ -7156,9 +7303,7 @@ proc ClassForeachInstance {className instref} {
     append result [IndentToBlock [string cat\
         [CreateInstRefSymbol $className $instref]\
         "$instref = mrt_InstIteratorGet(&$iter) ;\n"\
-        "if ($instref->base__INST.alloc > 0) \{\n"\
     ]]
-    PushBlock
 
     PushContext ClassForeachInstance depth [expr {[GetBlock] - $startlevel}]
 
@@ -7312,7 +7457,7 @@ test codegen-25.0 {
 } -body {
     micca generate
     testConditions\
-        {[llength [fileutil::grep {->base__INST} codegen25.c]] == 1}
+        {[llength [fileutil::grep {struct Z} codegen25.c]] == 7}
 } -result {1}
 ----
 
@@ -7903,7 +8048,7 @@ proc SingleAssignerSignal {relName event args} {
     set instref [CreateTempSymbol Ctype $reftype Type Reference Class $relName]
 
     append result\
-        [linecomment "$relName $event $args"]\
+        [linecomment "$relName signal $event [list $args]"]\
         "$reftype$instref = &${relName}__POOL\[0\] ;\n"
 
     return [string cat\
@@ -8035,12 +8180,8 @@ proc linecomment {args} {
 ----
 <<generation helper commands>>=
 proc blockcomment {block} {
-    return [string cat\
-        "/*\n"\
-        [textutil::adjust::indent [textutil::adjust::undent\
-            [string trim $block \n]] { * }]\n\
-        " */\n"\
-    ]
+    return [textutil::adjust::indent [textutil::adjust::undent\
+            [string trim $block \n]] {// }]\n
 }
 ----
 

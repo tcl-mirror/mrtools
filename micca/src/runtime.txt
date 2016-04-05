@@ -1313,6 +1313,9 @@ mrt_InstIteratorStart(
     iter->size = iab->instanceSize ;
     iter->end = iab->storageFinish ;
     iter->instance = (void *)((uintptr_t)iab->storageStart + instanceOffset) ;
+    if (((MRT_Instance *)iter->instance)->alloc <= 0) {
+        mrt_InstIteratorNext(iter) ;
+    }
     return ;
 }
 ----
@@ -1375,8 +1378,11 @@ mrt_InstIteratorNext(
     assert(iter != NULL) ;
     assert(iter->instance < iter->end) ;
 
-    if (iter->instance < iter->end) {
+    while (iter->instance < iter->end) {
         iter->instance = (void *)((uintptr_t)iter->instance + iter->size) ;
+        if (((MRT_Instance *)iter->instance)->alloc > 0) {
+            break ;
+        }
     }
     return ;
 }
@@ -1672,7 +1678,14 @@ mrt_InstSetIterBegin(
     iter->set = set ;
     iter->vectorloc = set->instvector ;
     iter->bitoffset = 0 ;
-    mrt_InstSetIterNext(iter) ;
+    if ((*iter->vectorloc & 1) == 0) {
+        mrt_InstSetIterNext(iter) ;
+    } else {
+        iter->instance = mrt_InstanceReference(iter->set->classDesc, 0) ;
+        if (((MRT_Instance *)iter->instance)->alloc <= 0) {
+            mrt_InstSetIterNext(iter) ;
+        }
+    }
 }
 ----
 
@@ -1733,16 +1746,17 @@ mrt_InstSetIterNext(
     MRT_InstSetIterator *iter)
 {
     assert(iter != NULL) ;
+    iter->bitoffset++ ;
     
     while (iter->vectorloc <
             iter->set->instvector + COUNTOF(iter->set->instvector)) {
         if (*iter->vectorloc != 0) {
-            while (iter->bitoffset < 32) {
-                uint32_t bit = iter->bitoffset++ ;
-                uint32_t mask = 1 << bit ;
+            for ( ; iter->bitoffset < 32 ; iter->bitoffset++) {
+                uint32_t mask = 1 << iter->bitoffset ;
                 if ((*iter->vectorloc & mask) != 0) {
                     unsigned instindex =
-                        (iter->vectorloc - iter->set->instvector) * 32 + bit ;
+                        (iter->vectorloc - iter->set->instvector) * 32 +
+                        iter->bitoffset ;
                     MRT_Instance *instref = mrt_InstanceReference(
                         iter->set->classDesc, instindex) ;
                     if (instref->alloc > 0) {
@@ -2473,13 +2487,11 @@ MRT_InstanceIterator iter ;
 for (mrt_InstIteratorStart(&iter, superClass) ; mrt_InstIteratorMore(&iter) ;
         mrt_InstIteratorNext(&iter)) {
     MRT_Instance *instref = mrt_InstIteratorGet(&iter) ;
-    if (instref->alloc > 0) {
-        MRT_Instance *subInst = (MRT_Instance *)
-                ((uintptr_t)instref + gen->superclass.storageOffset) ;
-        if (subInst->alloc <= 0) {
-            result = false ;
-            break ;
-        }
+    MRT_Instance *subInst = (MRT_Instance *)
+            ((uintptr_t)instref + gen->superclass.storageOffset) ;
+    if (subInst->alloc <= 0) {
+        result = false ;
+        break ;
     }
 }
 ----
@@ -2587,7 +2599,7 @@ mrtCheckRefCounts(
     for (mrt_InstIteratorStart(&iter, classDesc) ; mrt_InstIteratorMore(&iter) ;
             mrt_InstIteratorNext(&iter)) {
         MRT_Instance *instref = mrt_InstIteratorGet(&iter) ;
-        if (instref->alloc > 0 && !compareCardinality(instref->refCount)) {
+        if (!compareCardinality(instref->refCount)) {
             return false ; // <4>
         }
     }
@@ -2777,20 +2789,17 @@ mrtCountSingularRefs(
     for (mrt_InstIteratorStart(&srciter, sourceClass) ;
             mrt_InstIteratorMore(&srciter) ; mrt_InstIteratorNext(&srciter)) {
         MRT_Instance *instref = mrt_InstIteratorGet(&srciter) ;
-        if (instref->alloc > 0) { // <1>
-            MRT_Instance *targetInst =
-                    *(MRT_Instance **)((uintptr_t)instref + offset) ;
-            if ((void *)targetInst >= targetiab->storageStart &&
-                    (void *)targetInst < targetiab->storageFinish &&
-                    targetInst->alloc > 0) { // <2>
-                targetInst->refCount += 1 ;
-            }
+        MRT_Instance *targetInst =
+                *(MRT_Instance **)((uintptr_t)instref + offset) ;
+        if ((void *)targetInst >= targetiab->storageStart &&
+                (void *)targetInst < targetiab->storageFinish &&
+                targetInst->alloc > 0) { // <1>
+            targetInst->refCount += 1 ;
         }
     }
 }
 ----
-<1> Only consider active source instances.
-<2> Validate that the reference pointer value actually points into
+<1> Validate that the reference pointer value actually points into
 target instance storage. This will eliminate any NULL values also.
 Note we also insist that the target instance be active.
 
@@ -2837,17 +2846,15 @@ mrtCountArrayRefs(
     for (mrt_InstIteratorStart(&srciter, sourceClass) ;
             mrt_InstIteratorMore(&srciter) ; mrt_InstIteratorNext(&srciter)) {
         MRT_Instance *instref = mrt_InstIteratorGet(&srciter) ;
-        if (instref->alloc > 0) {
-            MRT_ArrayRef *srcrefs =
-                    (MRT_ArrayRef *)((uintptr_t)instref + offset) ;
-            MRT_Instance *const *iter = srcrefs->links ;
-            for (unsigned count = srcrefs->count ; count != 0 ; count--, iter++) {
-                MRT_Instance *targetInst = *iter ;
-                if ((void *)targetInst >= targetiab->storageStart &&
-                        (void *)targetInst < targetiab->storageFinish &&
-                        targetInst->alloc > 0) {
-                    targetInst->refCount += 1 ;
-                }
+        MRT_ArrayRef *srcrefs =
+                (MRT_ArrayRef *)((uintptr_t)instref + offset) ;
+        MRT_Instance *const *iter = srcrefs->links ;
+        for (unsigned count = srcrefs->count ; count != 0 ; count--, iter++) {
+            MRT_Instance *targetInst = *iter ;
+            if ((void *)targetInst >= targetiab->storageStart &&
+                    (void *)targetInst < targetiab->storageFinish &&
+                    targetInst->alloc > 0) {
+                targetInst->refCount += 1 ;
             }
         }
     }
@@ -2906,19 +2913,17 @@ mrtCountLinkedListRefs(
     for (mrt_InstIteratorStart(&srciter, sourceClass) ;
             mrt_InstIteratorMore(&srciter) ; mrt_InstIteratorNext(&srciter)) {
         MRT_Instance *srcInst = mrt_InstIteratorGet(&srciter) ;
-        if (srcInst->alloc > 0) {
-            MRT_LinkRef *ref = (MRT_LinkRef *)((uintptr_t)srcInst + refOffset) ;
-            if (ref->next != NULL) { // <1>
-                for (MRT_LinkRef *trgIter = mrtLinkRefBegin(ref) ;
-                        trgIter != mrtLinkRefEnd(ref) ;
-                        trgIter = trgIter->next) {
-                    MRT_Instance *targetInst =
-                        (MRT_Instance *)((uintptr_t)trgIter - linkOffset) ; // <2>
-                    if ((void *)targetInst >= targetiab->storageStart &&
-                            (void *)targetInst < targetiab->storageFinish &&
-                            targetInst->alloc > 0) {
-                        targetInst->refCount += 1 ;
-                    }
+        MRT_LinkRef *ref = (MRT_LinkRef *)((uintptr_t)srcInst + refOffset) ;
+        if (ref->next != NULL) { // <1>
+            for (MRT_LinkRef *trgIter = mrtLinkRefBegin(ref) ;
+                    trgIter != mrtLinkRefEnd(ref) ;
+                    trgIter = trgIter->next) {
+                MRT_Instance *targetInst =
+                    (MRT_Instance *)((uintptr_t)trgIter - linkOffset) ; // <2>
+                if ((void *)targetInst >= targetiab->storageStart &&
+                        (void *)targetInst < targetiab->storageFinish &&
+                        targetInst->alloc > 0) {
+                    targetInst->refCount += 1 ;
                 }
             }
         }
@@ -3014,18 +3019,16 @@ mrtCountGenRefs(
     for (mrt_InstIteratorStart(&iter, superClass) ;
             mrt_InstIteratorMore(&iter) ; mrt_InstIteratorNext(&iter)) {
         MRT_Instance *instref = mrt_InstIteratorGet(&iter) ;
-        if (instref->alloc > 0) {
-            MRT_Instance *subInst = *(MRT_Instance **)
-                    ((uintptr_t)instref + gen->superclass.storageOffset) ;
-            if (subInst != NULL) {
-                MRT_Class const *subClass = subInst->classDesc ;
+        MRT_Instance *subInst = *(MRT_Instance **)
+                ((uintptr_t)instref + gen->superclass.storageOffset) ;
+        if (subInst != NULL) {
+            MRT_Class const *subClass = subInst->classDesc ;
 
-                MRT_iab *subiab = mrt_GetStorageProperties(subClass, NULL) ;
-                if ((void *)subInst >= subiab->storageStart &&
-                        (void *)subInst < subiab->storageFinish &&
-                        subInst->alloc > 0) {
-                    subInst->refCount += 1 ;
-                }
+            MRT_iab *subiab = mrt_GetStorageProperties(subClass, NULL) ;
+            if ((void *)subInst >= subiab->storageStart &&
+                    (void *)subInst < subiab->storageFinish &&
+                    subInst->alloc > 0) {
+                subInst->refCount += 1 ;
             }
         }
     }
