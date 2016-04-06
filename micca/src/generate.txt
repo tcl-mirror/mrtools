@@ -1331,8 +1331,6 @@ foreach ugname [relation list [deRef $uniongens] Name] {
 <<CreateActivityCommands: instances>>=
 set cmdmap [dict create\
     attribute ${suppns}::InstanceAttribute\
-    withAttribute ${suppns}::InstanceWithAttribute\
-    assignAttribute ${suppns}::InstanceAssignAttribute\
     signal ${suppns}::InstanceSignal\
     delaysignal ${suppns}::InstanceDelaySignal\
     canceldelayed ${suppns}::InstanceCancelSignal\
@@ -3597,10 +3595,15 @@ proc classDefinitions {} {
                 relation assign $attr
                 set offset "offsetof([GetClassProperty $Name Declaration],\
                         $Attribute)"
+                set size "sizeof($DataType"
+                if {$Dimension > 0} {
+                    append size "\[$Dimension\]"
+                }
+                append size )
                 append attrrefs\
                     "    \{\n"\
                     "        .offset = $offset,\n"\
-                    "        .size = sizeof($DataType),\n"\
+                    "        .size = $size,\n"\
                     "            #ifndef MRT_NO_NAMES\n"\
                     "        .name = \"$Attribute\"\n"\
                     "            #endif /* MRT_NO_NAMES */\n"\
@@ -5057,7 +5060,7 @@ proc InsertSymbol {args} {
 }
 
 proc DeleteSymbol {name} {
-    return [relvar deleteone Symbol Name $name]
+    return [relvar delete Symbol symtup {[tuple extract $symtup Name] eq $name}]
 }
 
 proc CreateTempSymbol {args} {
@@ -5136,15 +5139,15 @@ proc ProcessCodeLines {text} {
                 lappend newlines {}
             }
         } else {
-            if {[string first \{ $line] != -1} {
-                incr block
+            if {[string first \} $line] != -1} {
+                incr block -1
             }
             if {[regsub -- {\A\s{4,}} $line {} newline] != 0} {
                 set line [string repeat { } [expr {$block * 4}]]$newline
             }
             lappend newlines $line
-            if {[string first \} $line] != -1} {
-                incr block -1
+            if {[string first \{ $line] != -1} {
+                incr block
             }
         }
     }
@@ -5238,15 +5241,6 @@ proc End {} {
 
     set context [actexpand cname]
     switch -exact -- $context {
-        withAttribute {
-            set result [PopContext $context instref attrNames varNames]
-            foreach attr $attrNames var $varNames {
-                append update "$instref->$attr = $var ;\n"
-            }
-            append result [IndentToBlock $update]
-            PopBlock
-            append result [IndentToBlock "\}\n"]
-        }
         InstanceSetForeachSelected -
         InstanceForeachRelated -
         ClassForeachInstance {
@@ -5321,84 +5315,6 @@ proc InstanceAttribute {instref attr} {
 [source,tcl]
 ----
 <<generation support commands>>=
-proc InstanceWithAttribute {instref args} {
-    variable domain
-
-    lassign [ParseAttrVars $instref $args] attrNames varNames dataTypes
-
-    append result [IndentToBlock [string cat\
-        [linecomment "instance $instref withAttribute $args"]\
-        "\{\n"\
-    ]]
-    PushBlock
-
-    foreach attr $attrNames var $varNames type $dataTypes {
-        set varDecl [typeCheck composeDeclaration $type $var]
-        append setup "$varDecl = $instref->$attr ;\n"
-    }
-    append result [IndentToBlock $setup]
-
-    PushContext withAttribute\
-        instref $instref\
-        attrNames $attrNames\
-        varNames $varNames
-
-
-    return $result
-}
-----
-
-[source,tcl]
-----
-<<generate command tests>>=
-test codegen-24.0 {
-    accessing attributes
-} -setup {
-    # makeFile {} codegen24.h
-    # makeFile {} codegen24.c
-    micca configure {
-        domain codegen24 {
-            class X {
-                attribute color int -default 20
-                attribute temp int -default 40
-                attribute size int -default 50
-
-                statemodel {
-                    state s1 {a int} {
-                        printf("color = %d\n", %<instance self attribute color>%) ;
-                        %<instance self signal e1 a 20>%
-                        %<instance self withAttribute>%
-                            color += 10 ;
-                            temp += 20 ;
-                            size -= 2 ;
-                        %<end>%
-                        %<instance self withAttribute {temp t} {size s}>%
-                            t -= 20 ;
-                            s += 2 ;
-                        %<end>%
-                    }
-                    transition s1 - e1 -> s1
-                }
-            }
-        }
-        population codegen24 {
-            class X {
-                instance x1
-            }
-        }
-    }
-} -cleanup {
-    cleanupDomain
-} -body {
-    micca generate
-    testConditions\
-        {[llength [fileutil::grep {self->color} codegen24.c]] == 3}
-} -result {1}
-----
-
-[source,tcl]
-----
-<<generation support commands>>=
 proc ParseAttrVars {instref attrvars} {
     variable domain
 
@@ -5451,30 +5367,12 @@ proc ParseAttrVars {instref attrvars} {
 [source,tcl]
 ----
 <<generation support commands>>=
-proc InstanceAssignAttribute {instref args} {
-    variable domain
-
-    lassign [ParseAttrVars $instref $args] attrNames varNames dataTypes
-
-    set result [linecomment "instance $instref assignAttribute $args"]
-
-    foreach attr $attrNames var $varNames type $dataTypes {
-        set varDecl [typeCheck composeDeclaration $type $var]
-        append result "$varDecl = $instref->$attr ;\n"
-    }
-
-    return [IndentToBlock $result]
-}
-----
-
-[source,tcl]
-----
-<<generation support commands>>=
 proc InstanceDelete {instref} {
     CheckInstRefSymbol $instref
     append result\
         [linecomment "instance $instref delete"]\
         "mrt_DeleteInstance($instref) ;\n"
+    DeleteSymbol $instref
     return [IndentToBlock $result]
 }
 ----
@@ -5509,8 +5407,8 @@ proc InstanceOperation {instref opName args} {
     }
     set pset [string trimright $pset {, }]
 
-    append result $pset "\) ;\n"
-    return [IndentToBlock $result]
+    append result $pset "\)"
+    return $result
 }
 ----
 
@@ -7352,7 +7250,7 @@ test codegen-29.0 {
 proc ClassInstanceReference {className varName} {
     return [IndentToBlock [string cat\
         [linecomment "$className instanceReference $varName"]\
-        "[CreateInstRefSymbol $className $varName] ;\n"\
+        "[CreateInstRefSymbol $className $varName]"\
     ]]
 }
 ----

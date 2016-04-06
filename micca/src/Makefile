@@ -60,6 +60,7 @@ LSDIAGRAMS =\
 	wmc-class-diagram.uxf\
 	wm-states.uxf\
 	ct-states.uxf\
+	main-loop.uxf\
 	$(NULL)
 
 IMAGES =\
