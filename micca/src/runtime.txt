@@ -115,6 +115,83 @@ this scheme works very well and has many advantages in terms of simplicity
 and the lack of shared state information between concurrent execution
 threads.
 
+=== Limitation of the Run Time
+
+Although `micca` supplies everything needed to sequence execution and
+manage model data,
+there are several other components of a target platform that are *not*
+supplied by `micca`.
+Notably:
+
+. Exception handling is very system specific.
+The details of how processor exceptions are handled must be supplied by
+the project.
+The run time provides the means to synchronize to the background processing
+but nothing else.
+. The run time requires access to some type of timing resource.
+The interface to the timing resource is well defined but
+projects will have to supply code to manipulate the timing resource.
+Typically in an embedded context, a hardware timer is used.
+For a POSIX environment,
+code is included to time delayed event dispatch using `SIGALRM`.
+. Access to hardware can require much effort to put into place.
+Projects are strongly encouraged *not* to access hardware directly
+from domain models.
+Direct hardware access limits the ability of the model to be run
+in a different environment for simulation and debugging.
+Rather, a well defined hardware access layer should be put into place
+and external operations defined by the domain models expressing
+their hardware dependencies.
+Then bridging code may be created to map from the external operations
+of the domain to the hardware access layer.
+This scheme is *not* supplied by `micca` and projects will have to
+create the hardware access to provide a complete target platform.
+. The `micca` run time provides simple linear iteration techniques for
+access to class instances and to navigate relationships.
+These simple techniques work well in many circumstances,
+but when the number of class instances is large other types of searching
+will be desired.
+`Micca` does not supply any techniques for hashing, binary searches or
+any of the many other ways that a class instance may be located.
+If these techniques are required for a particular domain,
+projects will have to supply their own code to accomplish it.
+Such code is not difficult to use in the `micca` environment, but it
+is not supplied.
+`Micca` does guarantee the ordering of initial instances in the class storage
+pool,
+so often a binary search using the standard ``C'' library functions will
+suffice if the instances are defined in a sorted order.
+
+=== Conditional Compilation
+
+The run time support the following ``C'' preprocessor symbols:
+
+`NDEBUG`::
+    The run time uses the standard `assert` macro and the assertions may
+    be removed by defining this symbol.
+`MRT_NO_NAMES`::
+    If defined, this symbol will exclude naming information about classes,
+    relationships and other domain entities from being compiled in.
+    For small memory systems,
+    strings can consume a considerable amount of space and are usually
+    only used during debugging.
+`MRT_TRANSACTIONSIZE`::
+    The value of this symbol sets the maximum number of relationships
+    that can be modified during a data transaction.
+    The default value is 64.
+`MRT_EVENTPOOLSIZE`::
+    The value of this symbol sets the number event control blocks which
+    are used for signaling events.
+    The default value is 32.
+    This number represents the maximum number of signaled events that
+    may be _in flight_ at the same time.
+`MRT_ECB_PARAM_SIZE`:
+    This value of this symbol set the maximum number of bytes that can
+    be occupied by event parameters or sync function parameters.
+    The default value is 32.
+`MRT_SYNCQUEUESIZE`::
+    The default value is 10.
+
 == The Main Program
 
 In ``C'',
@@ -192,7 +269,7 @@ how the event loop of the run time works.
 image::main-loop.pdf[title="Micca Run Time Event Loop"]
 
 Processing is divided between the background and foreground.
-Foreground processing happens as a result of an interrupt[footnote:In the
+Foreground processing happens as a result of an interruptfootnote:[In the
 POSIX environment, signals serve the role of an interrupt].
 A queue is used to synchronize between the two execution realms.
 The background processing is single threaded.
@@ -211,10 +288,11 @@ If there is no work to be done, _i.e._ both the sync queue and the event
 queue are empty, then the system waits until there is further work to be done.
 Note that any further work must arise from interrupt service and its
 synchronization to the background.
-Waiting is platform specific, but usually, for embeddeded systems,
+Waiting is platform specific, but usually, for embedded systems,
 involves going into a low power mode.
 For the POSIX version of the run time, the `pselect(2)` system call is used
-to suspend the process.
+to suspend the process awaiting either a signal or a change in status
+of a file descriptor.
 
 *****
 (((micca,Run Time Function,mrt_EventLoop)))
@@ -294,6 +372,7 @@ The `mrt_SyncToEventLoop` function will cause the event loop to exit
 after completing the processing of the ongoing activity.
 Note the event loop is exited only if the system is not waiting,
 _i.e._ there must be some activity ongoing.
+The previous value of the exit status is returned.
 *****
 
 (((micca,Run Time Function,mrt_SyncToEventLoop)))
@@ -354,7 +433,7 @@ realization that the capablity will be abused by some projects.
 bool
 mrt_ProcessOneEvent(void)
 {
-    <<EventLoop: background sync>>
+    <<ProcessOneEvent: background sync>>
 
     return mrtDispatchOneEvent() ;
 }
@@ -387,9 +466,12 @@ We need to be able to:
 
 === Instance Data
 
-The structure of the instances of each class is, in general, different.
+For every class (and assigner),
+the code generator will declare a ``C'' structure whose members contain
+all the attributes and other elements of the class.
+The structure of each class is, in general, different.
 Each class can have different attributes and relationships and this
-is reflected in the ``C'' structure that is used for each class.
+is reflected in members of the ``C'' structure that is used for each class.
 From the point of view of the run time and the operations provided by
 the run time,
 instances can be treated the same.
@@ -412,7 +494,8 @@ typedef struct mrtinstance {
 ----
 
 `classDesc`::
-    A pointer to a class data structure. The class data structure contains
+    A pointer to a <<class-data-structure,class data structure>>.
+    The class data structure contains
     information that is common to all instances of the class.
 `alloc`::
     A value that shows the allocation status of the memory for the instance.
@@ -426,7 +509,8 @@ typedef struct mrtinstance {
     For those classes that have a state model,
     the `currentState` member holds a small integer number indicating the
     current state in which the instance resides.
-    A value of -1 is used to show that the class does not have a state model.
+    A value of `MRT_StateCode_IG` (-1) is used to show that the class does not
+    have a state model.
 `refCount`::
     A counter value used to enforce referential integrity.
     At the end of a data transaction,
@@ -435,12 +519,15 @@ typedef struct mrtinstance {
 `name`::
     An instance may have a name that it was given during the intial instance
     population.
+    For instances not defined as part of the initial instance population,
+    this member is set to `NULL`.
 
 The `micca` code generator will facilitate this view of an arbitrary instance
 by inserting this structure as the first element of the ``C'' structure
 that is generated for each class.
-In this manner a pointer to an arbitrary class can be cast to a
-pointer to a `MRT_Instance` with impunity.
+In this manner,
+a pointer to an arbitrary class instance can be cast to a pointer to a
+`MRT_Instance` with impunity.
 
 [source,c]
 .Allocation Status Data Type
@@ -449,7 +536,7 @@ pointer to a `MRT_Instance` with impunity.
 typedef int16_t AllocStatus ;
 ----
 
-A class instance is in reality an element of a ``C'' array.
+A class instance is nothing more than an element of a ``C'' array.
 The size of the array, and consequently the maximum number of instances
 of the class, is fixed at compile time.
 The `alloc` member of the instance structure is used to keep track of the
@@ -525,6 +612,7 @@ To manage all the aspects of class instances,
 we need information on memory allocation, event dispatch, relationships
 in which the instances participate and many other pieces of information.
 
+[[class-data-structure]]
 (((micca,Run Time Data,MRT_Class)))
 [source,c]
 ----
@@ -634,8 +722,8 @@ class instance memory pool.
 [source,c]
 ----
 <<mrt interface aggregate types>>=
-typedef void (*InstCtor)(void *const) ;
-typedef void (*InstDtor)(void *const) ;
+typedef void (*MRT_InstCtor)(void *const) ;
+typedef void (*MRT_InstDtor)(void *const) ;
 ----
 
 [source,c]
@@ -647,8 +735,8 @@ typedef struct mrtinstallocblock {
     void *storageLast ;
     AllocStatus alloc ;
     size_t instanceSize ;
-    InstCtor construct ;
-    InstDtor destruct ;
+    MRT_InstCtor construct ;
+    MRT_InstDtor destruct ;
     unsigned linkCount ;
     MRT_AttrOffset const *linkOffsets ;
 } MRT_iab ;
@@ -1009,8 +1097,11 @@ mrt_CreateInstance(
     The state number into which the instance will be placed.
     For classes that do not have an associated state model this argument
     is ignored.
-    If this argument is `MRT_StateCode_IG`, then the instance is
-    placed in its default initial state.
+    For classes that do have an associated state model,
+    the class will be created in the state given by `initialState`.
+    If this argument is `MRT_StateCode_IG` or if the value given for
+    `initialState` is not a valid state number for the class,
+    then the instance is created in its default initial state.
 
 `mrt_CreateInstance` allocates memory for an instance of the class
 described by `classDesc` and places the instance in the state
@@ -1079,6 +1170,7 @@ mrtInitializeInstance(
     assert(classDesc != NULL) ;
 
     MRT_iab *iab = classDesc->iab ;
+    assert(iab != NULL) ;
     /*
      * Start with a zeroed out memory space.
      */
@@ -1262,18 +1354,15 @@ iteration.
 <<mrt interface aggregate types>>=
 typedef struct mrtinstanceiterator {
     void *instance ;
-    unsigned size ;
-    void *end ;
+    MRT_iab *iab ;
 } MRT_InstanceIterator ;
 ----
 
 `instance`::
     A pointer to the memory of the next instance in the iteration.
-`size`::
-    The size in bytes of a class instance.
-`end`::
-    A pointer one past the end of the memory for the class that is used
-    to compute the end of the iteration.
+`iab`::
+    A pointer to the Instance Allocation Block for the class across which
+    the iteration is to be performed.
 
 *****
 [source,c]
@@ -1291,6 +1380,10 @@ mrt_InstIteratorStart(
 `classDesc`::
     A pointer to the class description for the class across which the
     iteration will happen.
+
+The `mrt_InstIteratorStart` function is called to initialize an
+instance iterator to iterate over instances of the class described
+by `classDesc`.
 *****
 
 (((micca,Run Time Function,mrt_InstIteratorStart)))
@@ -1308,10 +1401,9 @@ mrt_InstIteratorStart(
 
     MRT_AttrOffset instanceOffset ;
     MRT_iab *iab = mrt_GetStorageProperties(classDesc, &instanceOffset) ;
-
     assert(iab != NULL) ;
-    iter->size = iab->instanceSize ;
-    iter->end = iab->storageFinish ;
+
+    iter->iab = iab ;
     iter->instance = (void *)((uintptr_t)iab->storageStart + instanceOffset) ;
     if (((MRT_Instance *)iter->instance)->alloc <= 0) {
         mrt_InstIteratorNext(iter) ;
@@ -1320,6 +1412,7 @@ mrt_InstIteratorStart(
 }
 ----
 
+*****
 [source,c]
 ----
 <<mrt external interfaces>>=
@@ -1328,7 +1421,18 @@ mrt_InstIteratorMore(
     MRT_InstanceIterator *iter) ;
 ----
 
+`iter`::
+    A pointer to a class instance iterator.
+
+The `mrt_InstIteratorMore` function returns a boolean value indicating
+if there are addition class instances which have not been visited.
+It returns `true` to indicate that the iterator references a
+valid class instance and `false` otherwise.
+*****
+
+(((micca,Run Time Function,mrt_InstIteratorMore)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 bool
@@ -1336,10 +1440,11 @@ mrt_InstIteratorMore(
     MRT_InstanceIterator *iter)
 {
     assert(iter != NULL) ;
-    return iter->instance < iter->end ;
+    return iter->instance < iter->iab->storageFinish ;
 }
 ----
 
+*****
 [source,c]
 ----
 <<mrt external interfaces>>=
@@ -1348,7 +1453,19 @@ mrt_InstIteratorGet(
     MRT_InstanceIterator *iter) ;
 ----
 
+`iter`::
+    A pointer to a class instance iterator.
+
+The `mrt_InstIteratorGet` function returns a pointer to the class
+instance that is currently being visited in the iteration.
+It is not valid to invoke `mrt_InstIteratorGet` after the
+`mrt_InstIteratorMore` function has returned `false`.
+This function is analogous to dereferencing a pointer.
+*****
+
+(((micca,Run Time Function,mrt_InstIteratorGet)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 void *
@@ -1360,6 +1477,7 @@ mrt_InstIteratorGet(
 }
 ----
 
+*****
 [source,c]
 ----
 <<mrt external interfaces>>=
@@ -1368,7 +1486,18 @@ mrt_InstIteratorNext(
     MRT_InstanceIterator *iter) ;
 ----
 
+`iter`::
+    A pointer to a class instance iterator.
+
+The `mrt_InstIteratorNext` function advances the class instance iterator
+to the next valid class instance.
+To be a valid class instance,
+the instance memory slot must show that is allocated and in active use.
+*****
+
+(((micca,Run Time Function,mrt_InstIteratorNext)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 void
@@ -1376,10 +1505,10 @@ mrt_InstIteratorNext(
     MRT_InstanceIterator *iter)
 {
     assert(iter != NULL) ;
-    assert(iter->instance < iter->end) ;
 
-    while (iter->instance < iter->end) {
-        iter->instance = (void *)((uintptr_t)iter->instance + iter->size) ;
+    MRT_iab *iab = iter->iab ;
+    while (iter->instance < iab->storageFinish) { // <1>
+        iter->instance = (void *)((uintptr_t)iter->instance + iab->instanceSize) ;
         if (((MRT_Instance *)iter->instance)->alloc > 0) {
             break ;
         }
@@ -1387,15 +1516,17 @@ mrt_InstIteratorNext(
     return ;
 }
 ----
+<1> Advancing the instance pointer to past the storage pool for the
+class indicates that we have visited all the instances.
 
 === Instance Sets
 
 [source,c]
 ----
 <<mrt constants>>=
-#ifndef MRT_MAX_CLASS_INSTANCES
-#   define MRT_MAX_CLASS_INSTANCES 128
-#endif /* MRT_MAX_CLASS_INSTANCES */
+#ifndef MRT_INSTANCESETSIZE
+#   define MRT_INSTANCESETSIZE 128
+#endif /* MRT_INSTANCESETSIZE */
 ----
 
 [source,c]
@@ -1403,7 +1534,7 @@ mrt_InstIteratorNext(
 <<mrt interface aggregate types>>=
 typedef struct mrtinstanceset {
     MRT_Class const *classDesc ;
-    uint32_t instvector[(MRT_MAX_CLASS_INSTANCES + 31) / 32] ;
+    uint32_t instvector[(MRT_INSTANCESETSIZE + 31) / 32] ;
 } MRT_InstanceSet ;
 ----
 
@@ -3052,7 +3183,7 @@ It is important to perform the relate and unrelate operations properly
 so as to preserve the referential integrity.
 
 Because we are using pointer values to manage instance identity and
-references footnote:[as opposed to attribute values if we were doing this
+referencesfootnote:[as opposed to attribute values if we were doing this
 using relational concepts],
 we need to be clear what operations must be performed for classes
 that participate in relationships.
@@ -3966,7 +4097,7 @@ slow flying events.
 ----
 <<mrt constants>>=
 #ifndef MRT_EVENTPOOLSIZE
-#   define MRT_EVENTPOOLSIZE 10
+#   define MRT_EVENTPOOLSIZE 32
 #endif /* MRT_EVENTPOOLSIZE */
 ----
 
@@ -7108,7 +7239,7 @@ that code appears as below:
 
 [source,c]
 ----
-<<EventLoop: background sync>>=
+<<ProcessOneEvent: background sync>>=
 #   ifndef __ARM_ARCH_7M__
 while (mrtInvokeOneSyncFunction()) {
     ; /* empty */
@@ -8236,7 +8367,7 @@ On POSIX platforms,
 the mechanisms must also supply services to handle I/O.
 The reason for this is that there are two means of awakening a sleeping
 process, receiving a signal and servicing a I/O file
-descriptor.:footnote:[ There are other ways to integrate signals and I/O in
+descriptor.footnote:[ There are other ways to integrate signals and I/O in
 POSIX systems.  The use of a `pselect` based approach is a design decision.]
 On bare metal systems,
 I/O is frequently accomplished on an `ad hoc` basis
