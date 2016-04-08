@@ -20,18 +20,30 @@ We have already seen the platform specific model and how it captures
 the properties of a domain implementation.
 The `micca` domain specific language is used to populate the platform
 model.
-The `micca` run time translates model level actions into ``C'' level
-execution.
-The run time can be compiled separately and is data driven.
-The details of how a domain behaves is completely determined by the
-data values supplied to the run time and the state activities and
-domain operations supplied as ``C'' code.
+The `micca` run time provides functions to map model level actions
+onto the target platform.
 
+The remaining component is to generate ``C'' code
 Code generation consist of two major pieces:
 
-* Generating initialized ``C'' variables of the type required by the run time.
+* Generating initialized ``C'' variables that supply the data values
+that are required by the run time.
 * Generating ``C'' code for state activities and domain operations to
 facilitate interfacing to the run time code.
+
+`Micca` does not compile an action language into the target ``C'' for
+state activities.
+Rather,
+it passes along the ``C'' code provided for the activities wrapped up
+as functions.
+However,
+to insulate the user supplied ``C'' code from the details of
+the run time function interfaces and the data structures used,
+`micca` performs an additional level of macro expansion on the
+state activities and operations code.
+Thus the supplied ``C'' code contains embedded macros and these are expanded
+to support interfacing to the run time and performing other
+model level activities.
 
 In the next section we discuss generating the data required by the run time.
 Afterward, we describe generating ``C'' code to help interface
@@ -165,9 +177,6 @@ set options [dict create\
 set options [dict merge $options $arglist]
 ----
 
-The `textutil::expander` package creates a command that does all the
-expansion work.
-
 We will insist that each domain have exactly one population for it.
 This is accomplished by finding all the populations associated with
 the domains and looking for those where there is not exactly one
@@ -194,6 +203,7 @@ if {$errcount > 0} {
 
 The `expander` package creates a command that, when invoked with a
 template, performs the expansion.
+Here we set up that command and specify some options to it.
 
 [source,tcl]
 ----
@@ -1149,222 +1159,6 @@ proc domainInclude {} {
 
     return "#include \"$domain.h\"\n"
 }
-----
-
-Create the ensemble commands that are used when activities are template
-expanded.
-
-[source,tcl]
-----
-<<generation commands>>=
-proc CreateActivityCommands {domain} {
-    namespace eval GenActivity {
-        logger::initNamespace [namespace current]
-    }
-
-    set currns [namespace current]
-    set actns ${currns}::GenActivity
-    set suppns ${currns}::GenSupport
-
-    <<CreateActivityCommands: classes>>
-    <<CreateActivityCommands: relationships>>
-    <<CreateActivityCommands: instances>>
-    <<CreateActivityCommands: instance sets>>
-
-    interp alias {} external {} ${suppns}::InvokeExternalOp
-    interp alias {} end {} ${suppns}::End
-}
-----
-
-[source,tcl]
-----
-<<CreateActivityCommands: classes>>=
-set usubnames [pipe {
-    UnionSubclass findWhere {$Domain eq $domain} |
-    deRef ~ |
-    relation list ~ Class
-}]
-----
-
-[source,tcl]
-----
-<<CreateActivityCommands: classes>>=
-set classInfo [pipe {
-    Class findWhere {$Domain eq $domain} |
-    deRef ~ |
-    ralutil::rvajoin ~ [relation rename $::micca::StateModel Model Name]\
-        StateModels |
-    relation extend ~ itup HasStateModel boolean {
-        [relation isnotempty [tuple extract $itup StateModels]]} |
-    ralutil::rvajoin ~\
-        [relation rename $::micca::CreationState Name State Model Name]\
-        CreationStates |
-    relation extend ~ ctup HasCreationState boolean {
-        [relation isnotempty [tuple extract $ctup CreationStates]]} |
-    relation project ~ Name HasStateModel HasCreationState
-}]
-
-set cmdmap [dict create]
-relation foreach info $classInfo {
-    relation assign $info
-    set cmdmap [dict create\
-        foreachInstance [list ${suppns}::ClassForeachInstance $Name]\
-        instanceReference [list ${suppns}::ClassInstanceReference $Name]\
-        reference [list ${suppns}::ClassIdToRef $Name]\
-        instanceSet [list ${suppns}::ClassInstanceSet $Name]\
-        findByName [list ${suppns}::ClassFindByName $Name]\
-        operation [list ${suppns}::ClassOperation $Name]\
-    ]
-    if {$Name ni $usubnames} {
-        dict set cmdmap create [list ${suppns}::ClassCreate $Name]
-        if {$HasStateModel} {
-            dict set cmdmap createin [list ${suppns}::ClassCreateIn $Name]
-        }
-        if {$HasCreationState} {
-            dict set cmdmap createasync [list ${suppns}::ClassCreateAsync $Name]
-        }
-    }
-    namespace ensemble create\
-        -command ${actns}::$Name\
-        -map $cmdmap
-}
-----
-
-[source,tcl]
-----
-<<CreateActivityCommands: relationships>>=
-set relRefs [Relationship findWhere {$Domain eq $domain}]
-
-set assocs [findRelatedWhere $relRefs {{~R30 Association}} {!$IsStatic}]
-
-set simpassocs [findRelated $assocs {~R31 SimpleAssociation}]
-forAllRefs simpassoc $simpassocs {
-    set simpname [readAttribute $simpassoc Name]
-    set cmdmap [dict create\
-        relate [list ${suppns}::RelSimpleRelateForw $simpname]\
-        unrelate [list ${suppns}::RelSimpleUnrelateForw $simpname]\
-    ]
-    set assigner [findRelated $simpassoc R31 ~R52]
-    if {[isNotEmptyRef $assigner]} {
-        if {[isNotEmptyRef [findRelated $assigner {~R53 SingleAssigner}]]} {
-            dict set cmdmap signal\
-                [list ${suppns}::SingleAssignerSignal $simpname]
-        } else {
-            dict set cmdmap signal [list ${suppns}::InstanceSignal $simpname]
-        }
-    }
-    namespace ensemble create\
-        -command ${actns}::$simpname\
-        -map $cmdmap
-
-    set cmdmap [dict create\
-        relate [list ${suppns}::RelSimpleRelateBack $simpname]\
-        unrelate [list ${suppns}::RelSimpleUnrelateBack $simpname]\
-    ]
-    namespace ensemble create\
-        -command ${actns}::~$simpname\
-        -map $cmdmap
-}
-
-set classassocs [findRelated $assocs {~R31 ClassBasedAssociation}]
-foreach cbname [relation list [deRef $classassocs] Name] {
-    set cmdmap [dict create\
-        relate [list ${suppns}::RelClassRelateForw $cbname]\
-        unrelate [list ${suppns}::RelClassUnrelateForw $cbname]\
-    ]
-    set assigner [findRelated $classassocs R31 ~R52]
-    if {[isNotEmptyRef $assigner]} {
-        if {[isNotEmptyRef [findRelated $assigner {~R53 SingleAssigner}]]} {
-            dict set cmdmap signal\
-                [list ${suppns}::SingleAssignerSignal $simpname]
-        } else {
-            dict set cmdmap signal [list ${suppns}::InstanceSignal $simpname]
-        }
-    }
-    namespace ensemble create\
-        -command ${actns}::$cbname\
-        -map $cmdmap
-
-    set cmdmap [dict create\
-        relate [list ${suppns}::RelClassRelateBack $cbname]\
-        unrelate [list ${suppns}::RelClassUnrelateBack $cbname]\
-    ]
-    namespace ensemble create\
-        -command ${actns}::~$cbname\
-        -map $cmdmap
-}
-
-set gens [findRelated $relRefs {~R30 Generalization}]
-
-set refgens [findRelated $gens {~R43 ReferenceGeneralization}]
-foreach rgname [relation list [deRef $refgens] Name] {
-    set cmdmap [dict create\
-        relate [list ${suppns}::RelRefGenRelateForw $rgname]\
-        unrelate [list ${suppns}::RelRefGenUnrelateForw $rgname]\
-        reclassify [list ${suppns}::RelRefGenReclassify $rgname]\
-    ]
-    namespace ensemble create\
-        -command ${actns}::$rgname\
-        -map $cmdmap
-
-    set cmdmap [dict create\
-        relate [list ${suppns}::RelRefGenRelateBack $rgname]\
-        unrelate [list ${suppns}::RelRefGenUnrelateBack $rgname]\
-    ]
-    namespace ensemble create\
-        -command ${actns}::~$rgname\
-        -map $cmdmap
-}
-
-set uniongens [findRelated $gens {~R43 UnionGeneralization}]
-foreach ugname [relation list [deRef $uniongens] Name] {
-    namespace ensemble create\
-        -command ${actns}::$ugname\
-        -map [dict create\
-            reclassify [list ${suppns}::RelUnionGenReclassify $ugname]\
-        ]
-}
-----
-
-[source,tcl]
-----
-<<CreateActivityCommands: instances>>=
-set cmdmap [dict create\
-    attribute ${suppns}::InstanceAttribute\
-    signal ${suppns}::InstanceSignal\
-    delaysignal ${suppns}::InstanceDelaySignal\
-    canceldelayed ${suppns}::InstanceCancelSignal\
-    delayremaining ${suppns}::InstanceRemainingTime\
-    delete ${suppns}::InstanceDelete\
-    operation ${suppns}::InstanceOperation\
-    foreachRelated ${suppns}::InstanceForeachRelated\
-    findOneRelated ${suppns}::InstanceFindOneRelated\
-    instid [list ${suppns}::InstanceRefToId]\
-]
-namespace ensemble create\
-    -command ${actns}::instance\
-    -parameters instref\
-    -map $cmdmap
-----
-
-[source,tcl]
-----
-<<CreateActivityCommands: instance sets>>=
-set cmdmap [dict create\
-    foreachSelected ${suppns}::InstanceSetForeachSelected\
-    empty ${suppns}::InstanceSetEmpty\
-    notempty ${suppns}::InstanceSetNotEmpty\
-    equal ${suppns}::InstanceSetEqual\
-    notequal ${suppns}::InstanceSetNotEqual\
-    add ${suppns}::InstanceSetAdd\
-    union ${suppns}::InstanceSetUnion\
-    intersect ${suppns}::InstanceSetIntersect\
-    minus ${suppns}::InstanceSetMinus\
-]
-namespace ensemble create\
-    -command ${actns}::instset\
-    -parameters instset\
-    -map $cmdmap
 ----
 
 [source,tcl]
@@ -2668,6 +2462,12 @@ proc nameDefinitions {} {
                 \"$eventName\" ;\n"
     }
 
+    set maRefs [MultipleAssigner findWhere {$Domain eq $domain}]
+    if {[isNotEmptyRef $maRefs]} {
+        append result "$storageType multi_assigner_attribute__NAME\[\] =\
+                \"idinstance\" ;\n"
+    }
+
     append result "#endif /* MRT_NO_NAMES */\n"
 
     return $result
@@ -3641,53 +3441,59 @@ proc classDefinitions {} {
 <<generation code commands>>=
 proc assignerDefinitions {} {
     variable domain
-    set result {}
 
+    append result [comment "Single Assigner Class Description Definitions"]
     set assignerRefs [SingleAssigner findWhere {$Domain eq $domain}]
-    if {[isNotEmptyRef $assignerRefs]} {
-        append result [comment "Single Assigner Description Definitions"]
-        forAllRefs assigner $assignerRefs {
-            assignAttribute $assigner
-            append result\
-                "static MRT_Class const ${Association}__CLASS = \{\n"\
-                "    .iab = NULL,\n"\
-                "    .edb = &${Association}__EDB,\n"\
-                "    .pdb = NULL,\n"\
-                "    .relCount = 0,\n"\
-                "    .classRels = NULL,\n"\
-                "    .attrCount = 0,\n"\
-                "    .classAttrs = NULL,\n"\
-                "    .instCount = 1,\n"\
-                "    .containment = NULL,\n"\
-                "        #ifndef MRT_NO_NAMES\n"\
-                "    .name = ${Association}__NAME,\n"\
-                "        #endif /* MRT_NO_NAMES */\n"\
-                "\} ;\n"
-        }
+    forAllRefs assigner $assignerRefs {
+        assignAttribute $assigner
+        append result\
+            "static MRT_Class const ${Association}__CLASS = \{\n"\
+            "    .iab = NULL,\n"\
+            "    .edb = &${Association}__EDB,\n"\
+            "    .pdb = NULL,\n"\
+            "    .relCount = 0,\n"\
+            "    .classRels = NULL,\n"\
+            "    .attrCount = 0,\n"\
+            "    .classAttrs = NULL,\n"\
+            "    .instCount = 1,\n"\
+            "    .containment = NULL,\n"\
+            "        #ifndef MRT_NO_NAMES\n"\
+            "    .name = ${Association}__NAME,\n"\
+            "        #endif /* MRT_NO_NAMES */\n"\
+            "\} ;\n"
     }
 
+    append result [comment "Multiple Assigner Class Description Definitions"]
     set assignerRefs [MultipleAssigner findWhere {$Domain eq $domain}]
-    if {[isNotEmptyRef $assignerRefs]} {
-        append result [comment "Multiple Assigner Description Definitions"]
-        forAllRefs assigner $assignerRefs {
-            assignAttribute $assigner
-            set instRefs [findRelated $assigner ~R106]
-            append result\
-                "static MRT_Class const ${Association}__CLASS = \{\n"\
-                "    .iab = &${Association}__IAB,\n"\
-                "    .edb = &${Association}__EDB,\n"\
-                "    .pdb = NULL,\n"\
-                "    .relCount = 0,\n"\
-                "    .classRels = NULL,\n"\
-                "    .attrCount = 0,\n"\
-                "    .classAttrs = NULL,\n"\
-                "    .instCount = [refMultiplicity $instRefs],\n"\
-                "    .containment = NULL,\n"\
-                "        #ifndef MRT_NO_NAMES\n"\
-                "    .name = ${Association}__NAME,\n"\
-                "        #endif /* MRT_NO_NAMES */\n"\
-                "\} ;\n"
-        }
+    forAllRefs assigner $assignerRefs {
+        assignAttribute $assigner
+        append result\
+            "static MRT_Attribute const ${Association}__CATTRS\[1\] = \{\n"\
+            "    \{\n"\
+            "        .offset = offsetof(struct $Association, idinstance),\n"\
+            "        .size = sizeof([GetClassProperty $Class Reference]),\n"\
+            "            #ifndef MRT_NO_NAMES\n"\
+            "        .name = multi_assigner_attribute__NAME\n"\
+            "            #endif /* MRT_NO_NAMES */\n"\
+            "    \}\n"\
+            "\} ;\n"
+
+        set instRefs [findRelated $assigner ~R106]
+        append result\
+            "static MRT_Class const ${Association}__CLASS = \{\n"\
+            "    .iab = &${Association}__IAB,\n"\
+            "    .edb = &${Association}__EDB,\n"\
+            "    .pdb = NULL,\n"\
+            "    .relCount = 0,\n"\
+            "    .classRels = NULL,\n"\
+            "    .attrCount = 1,\n"\
+            "    .classAttrs = ${Association}__CATTRS,\n"\
+            "    .instCount = [refMultiplicity $instRefs],\n"\
+            "    .containment = NULL,\n"\
+            "        #ifndef MRT_NO_NAMES\n"\
+            "    .name = ${Association}__NAME,\n"\
+            "        #endif /* MRT_NO_NAMES */\n"\
+            "\} ;\n"
     }
 
     return $result
@@ -4387,67 +4193,62 @@ proc assignerInstanceDefinitions {} {
     variable domain
     set result {}
 
+    append result [comment "Single Assigner Structure Declarations"]
     set singles [SingleAssigner findWhere {$Domain eq $domain}]
-    if {[isNotEmptyRef $singles]} {
-        append result [comment "Single Assigner Structure Declarations"]
+    forAllRefs assigner $singles {
+        set initstate [pipe {
+            findRelated $assigner R53 R50 R58 R57 |
+            readAttribute ~ Number
+        }]
+        assignAttribute $assigner
+        append result\
+            "static struct $Association ${Association}__POOL\[1\] = \{\n"\
+            "    \{\n"\
+            "        .base__INST = \{\n"\
+            "            .classDesc = &${Association}__CLASS,\n"\
+            "            .alloc = 1,\n"\
+            "            .currentState = $initstate,\n"\
+            "            .refCount = 0,\n"\
+            "                #ifndef MRT_NO_NAMES\n"\
+            "            .name = ${Association}__NAME\n"\
+            "                #endif /* MRT_NO_NAMES */\n"\
+            "        \}\n"\
+            "    \}\n"\
+            "\} ;\n"
+    }
 
-        forAllRefs assigner $singles {
-            set initstate [pipe {
-                findRelated $assigner R53 R50 R58 R57 |
-                readAttribute ~ Number
-            }]
+    append result [comment "Multiple Assigner Structure Declarations"]
+    set multis [MultipleAssigner findWhere {$Domain eq $domain}]
+    forAllRefs multi $multis {
+        assignAttribute $multi {Association assoc}
+        set initstate [pipe {
+            findRelated $multi R53 R50 R58 R57 |
+            readAttribute ~ Number
+        }]
+        set multiinsts [findRelated $multi ~R106]
+        set totalinsts [refMultiplicity [findRelated $multi R54 ~R20 ~R103]]
+
+        append result "static struct $assoc\
+                ${assoc}__POOL\[$totalinsts\] = \{\n"
+        forAllRefs assigner $multiinsts {
             assignAttribute $assigner
+            set allocnum 0
             append result\
-                "static struct $Association ${Association}__POOL\[1\] = \{\n"\
-                "    \{\n"\
+                "    \[$Number\] = \{\n"\
                 "        .base__INST = \{\n"\
                 "            .classDesc = &${Association}__CLASS,\n"\
-                "            .alloc = 1,\n"\
+                "            .alloc = [incr allocnum],\n"\
                 "            .currentState = $initstate,\n"\
                 "            .refCount = 0,\n"\
                 "                #ifndef MRT_NO_NAMES\n"\
-                "            .name = ${Association}__NAME\n"\
+                "            .name = \"$Instance\"\n"\
                 "                #endif /* MRT_NO_NAMES */\n"\
-                "        \}\n"\
-                "    \}\n"\
-                "\} ;\n"
+                "        \},\n"\
+                "        .idinstance = [GenInstanceAddress $domain $IdClass\
+                        $IdInstance]\n"\
+                "    \},\n"\
         }
-    }
-
-    set multis [MultipleAssigner findWhere {$Domain eq $domain}]
-    if {[isNotEmptyRef $multis]} {
-        append result [comment "Multiple Assigner Structure Declarations"]
-        forAllRefs multi $multis {
-            assignAttribute $multi {Association assoc}
-            set initstate [pipe {
-                findRelated $multi R53 R50 R58 R57 |
-                readAttribute ~ Number
-            }]
-            set multiinsts [findRelated $multi ~R106]
-            set totalinsts [refMultiplicity [findRelated $multi R54 ~R20 ~R103]]
-
-            append result "static struct $assoc\
-                    ${assoc}__POOL\[$totalinsts\] = \{\n"
-            forAllRefs assigner $multiinsts {
-                assignAttribute $assigner
-                set allocnum 0
-                append result\
-                    "    \[$Number\] = \{\n"\
-                    "        .base__INST = \{\n"\
-                    "            .classDesc = &${Association}__CLASS,\n"\
-                    "            .alloc = [incr allocnum],\n"\
-                    "            .currentState = $initstate,\n"\
-                    "            .refCount = 0,\n"\
-                    "                #ifndef MRT_NO_NAMES\n"\
-                    "            .name = \"$Instance\"\n"\
-                    "                #endif /* MRT_NO_NAMES */\n"\
-                    "        \},\n"\
-                    "        .idinstance = [GenInstanceAddress $domain $IdClass\
-                            $IdInstance]\n"\
-                    "    \},\n"\
-            }
-            append result "\} ;\n"
-        }
+        append result "\} ;\n"
     }
 
     return $result
@@ -4972,9 +4773,46 @@ proc epilogueDeclarations {} {
 }
 ----
 
-== Interfacing Domain Code to the Run Time
+== Generating Activity Code
 
-Interfacing Domain Code to the Run Time
+In this section we discuss the macro commands that are available
+to a translator for easing the burden of translating model level
+execution into the required ``C'' code.
+The ``C'' code supplied by the user for state activities and other
+operations can contain embedded macros which are further expanded
+by the code generator.
+The macros are simple commands with arguments that are enclosed
+in the special delimiters *%<* and *>%*.
+For example,
+the macro to access the *Color* attribute of an instance could be written
+as:
+
+*****
+ColorType c = %<instance self attribute Color>% ;
+*****
+
+The code generator would then expand the commands contained between the
+*%<* and *>%* delimiters and replace the embedded macro with the
+value of the *Color* attribute of the instance referenced by the
+value of the *self* variable..
+This is a very simple case, but even here the code generator
+performs a number of significant checks in an attempt to discover
+errors before code is sent to the compiler.
+In this case, the code generator insures that the value of *self* is
+a reference to a class instance and that class contains an attribute
+named *Color*.
+
+There are many of these macro commands.
+State activities are then a mix of ``C'' code and macros to accomplish
+the purpose of the activity.
+Since the code generator has access to the populated platform model,
+it performs many consistency checks that would otherwise result in
+compiler errors.
+Discovering error earlier makes them much easier to correct since
+the mapping of compiler errors back to the source becomes more difficult
+since there is a level of translation in between.
+
+=== Expanding the Activities Macros
 
 [source,tcl]
 ----
@@ -5004,6 +4842,223 @@ namespace eval GenSupport {
     <<generation support data>>
     <<generation support commands>>
 }
+----
+
+=== Creating the Macro Commands
+
+[source,tcl]
+----
+<<generation commands>>=
+proc CreateActivityCommands {domain} {
+    namespace eval GenActivity {
+        logger::initNamespace [namespace current]
+    }
+
+    set currns [namespace current]
+    set actns ${currns}::GenActivity
+    set suppns ${currns}::GenSupport
+
+    <<CreateActivityCommands: classes>>
+    <<CreateActivityCommands: relationships>>
+    <<CreateActivityCommands: instances>>
+    <<CreateActivityCommands: instance sets>>
+
+    interp alias {} external {} ${suppns}::InvokeExternalOp
+    interp alias {} end {} ${suppns}::End
+}
+----
+
+[source,tcl]
+----
+<<CreateActivityCommands: classes>>=
+set usubnames [pipe {
+    UnionSubclass findWhere {$Domain eq $domain} |
+    deRef ~ |
+    relation list ~ Class
+}]
+----
+
+[source,tcl]
+----
+<<CreateActivityCommands: classes>>=
+set classInfo [pipe {
+    Class findWhere {$Domain eq $domain} |
+    deRef ~ |
+    ralutil::rvajoin ~ [relation rename $::micca::StateModel Model Name]\
+        StateModels |
+    relation extend ~ itup HasStateModel boolean {
+        [relation isnotempty [tuple extract $itup StateModels]]} |
+    ralutil::rvajoin ~\
+        [relation rename $::micca::CreationState Name State Model Name]\
+        CreationStates |
+    relation extend ~ ctup HasCreationState boolean {
+        [relation isnotempty [tuple extract $ctup CreationStates]]} |
+    relation project ~ Name HasStateModel HasCreationState
+}]
+
+set cmdmap [dict create]
+relation foreach info $classInfo {
+    relation assign $info
+    set cmdmap [dict create\
+        foreachInstance [list ${suppns}::ClassForeachInstance $Name]\
+        instref [list ${suppns}::ClassInstanceReference $Name]\
+        reference [list ${suppns}::ClassIdToRef $Name]\
+        instset [list ${suppns}::ClassInstanceSet $Name]\
+        findByName [list ${suppns}::ClassFindByName $Name]\
+        operation [list ${suppns}::ClassOperation $Name]\
+    ]
+    if {$Name ni $usubnames} {
+        dict set cmdmap create [list ${suppns}::ClassCreate $Name]
+        if {$HasStateModel} {
+            dict set cmdmap createin [list ${suppns}::ClassCreateIn $Name]
+        }
+        if {$HasCreationState} {
+            dict set cmdmap createasync [list ${suppns}::ClassCreateAsync $Name]
+        }
+    }
+    namespace ensemble create\
+        -command ${actns}::$Name\
+        -map $cmdmap
+}
+----
+
+[source,tcl]
+----
+<<CreateActivityCommands: relationships>>=
+set relRefs [Relationship findWhere {$Domain eq $domain}]
+
+set assocs [findRelatedWhere $relRefs {{~R30 Association}} {!$IsStatic}]
+
+set simpassocs [findRelated $assocs {~R31 SimpleAssociation}]
+forAllRefs simpassoc $simpassocs {
+    set simpname [readAttribute $simpassoc Name]
+    set cmdmap [dict create\
+        relate [list ${suppns}::RelSimpleRelateForw $simpname]\
+        unrelate [list ${suppns}::RelSimpleUnrelateForw $simpname]\
+    ]
+    set assigner [findRelated $simpassoc R31 ~R52]
+    if {[isNotEmptyRef $assigner]} {
+        if {[isNotEmptyRef [findRelated $assigner {~R53 SingleAssigner}]]} {
+            dict set cmdmap signal\
+                [list ${suppns}::SingleAssignerSignal $simpname]
+        } else {
+            dict set cmdmap signal [list ${suppns}::InstanceSignal $simpname]
+            dict set cmdmap create [list ${suppns}::MultiAssignerCreate $simpname]
+        }
+    }
+    namespace ensemble create\
+        -command ${actns}::$simpname\
+        -map $cmdmap
+
+    set cmdmap [dict create\
+        relate [list ${suppns}::RelSimpleRelateBack $simpname]\
+        unrelate [list ${suppns}::RelSimpleUnrelateBack $simpname]\
+    ]
+    namespace ensemble create\
+        -command ${actns}::~$simpname\
+        -map $cmdmap
+}
+
+set classassocs [findRelated $assocs {~R31 ClassBasedAssociation}]
+foreach cbname [relation list [deRef $classassocs] Name] {
+    set cmdmap [dict create\
+        relate [list ${suppns}::RelClassRelateForw $cbname]\
+        unrelate [list ${suppns}::RelClassUnrelateForw $cbname]\
+    ]
+    set assigner [findRelated $classassocs R31 ~R52]
+    if {[isNotEmptyRef $assigner]} {
+        if {[isNotEmptyRef [findRelated $assigner {~R53 SingleAssigner}]]} {
+            dict set cmdmap signal\
+                [list ${suppns}::SingleAssignerSignal $simpname]
+        } else {
+            dict set cmdmap signal [list ${suppns}::InstanceSignal $simpname]
+            dict set cmdmap create [list ${suppns}::MultiAssignerCreate $simpname]
+        }
+    }
+    namespace ensemble create\
+        -command ${actns}::$cbname\
+        -map $cmdmap
+
+    set cmdmap [dict create\
+        relate [list ${suppns}::RelClassRelateBack $cbname]\
+        unrelate [list ${suppns}::RelClassUnrelateBack $cbname]\
+    ]
+    namespace ensemble create\
+        -command ${actns}::~$cbname\
+        -map $cmdmap
+}
+
+set gens [findRelated $relRefs {~R30 Generalization}]
+
+set refgens [findRelated $gens {~R43 ReferenceGeneralization}]
+foreach rgname [relation list [deRef $refgens] Name] {
+    set cmdmap [dict create\
+        relate [list ${suppns}::RelRefGenRelateForw $rgname]\
+        unrelate [list ${suppns}::RelRefGenUnrelateForw $rgname]\
+        reclassify [list ${suppns}::RelRefGenReclassify $rgname]\
+    ]
+    namespace ensemble create\
+        -command ${actns}::$rgname\
+        -map $cmdmap
+
+    set cmdmap [dict create\
+        relate [list ${suppns}::RelRefGenRelateBack $rgname]\
+        unrelate [list ${suppns}::RelRefGenUnrelateBack $rgname]\
+    ]
+    namespace ensemble create\
+        -command ${actns}::~$rgname\
+        -map $cmdmap
+}
+
+set uniongens [findRelated $gens {~R43 UnionGeneralization}]
+foreach ugname [relation list [deRef $uniongens] Name] {
+    namespace ensemble create\
+        -command ${actns}::$ugname\
+        -map [dict create\
+            reclassify [list ${suppns}::RelUnionGenReclassify $ugname]\
+        ]
+}
+----
+
+[source,tcl]
+----
+<<CreateActivityCommands: instances>>=
+set cmdmap [dict create\
+    attribute ${suppns}::InstanceAttribute\
+    signal ${suppns}::InstanceSignal\
+    delaysignal ${suppns}::InstanceDelaySignal\
+    canceldelayed ${suppns}::InstanceCancelSignal\
+    delayremaining ${suppns}::InstanceRemainingTime\
+    delete ${suppns}::InstanceDelete\
+    operation ${suppns}::InstanceOperation\
+    foreachRelated ${suppns}::InstanceForeachRelated\
+    findOneRelated ${suppns}::InstanceFindOneRelated\
+    instid [list ${suppns}::InstanceRefToId]\
+]
+namespace ensemble create\
+    -command ${actns}::instance\
+    -parameters instref\
+    -map $cmdmap
+----
+
+[source,tcl]
+----
+<<CreateActivityCommands: instance sets>>=
+set cmdmap [dict create\
+    foreachSelected ${suppns}::InstanceSetForeachSelected\
+    empty ${suppns}::InstanceSetEmpty\
+    notempty ${suppns}::InstanceSetNotEmpty\
+    equal ${suppns}::InstanceSetEqual\
+    notequal ${suppns}::InstanceSetNotEqual\
+    add ${suppns}::InstanceSetAdd\
+    union ${suppns}::InstanceSetUnion\
+    intersect ${suppns}::InstanceSetIntersect\
+    minus ${suppns}::InstanceSetMinus\
+]
+namespace ensemble create\
+    -command ${actns}::instset\
+    -parameters instset\
+    -map $cmdmap
 ----
 
 === Symbol Table
@@ -5118,7 +5173,7 @@ proc CreateInstSetSymbol {className varName} {
         CheckSymProperties $sym Class $className Type InstanceSet
         return
     }
-    set ctype MRT_InstanceSet
+    set ctype MRT_InstSet
     InsertSymbol Name $varName Ctype $ctype Type InstanceSet Class $className
     return "$ctype $varName ;\n"
 }
@@ -7249,7 +7304,7 @@ test codegen-29.0 {
 <<generation support commands>>=
 proc ClassInstanceReference {className varName} {
     return [IndentToBlock [string cat\
-        [linecomment "$className instanceReference $varName"]\
+        [linecomment "$className instRef $varName"]\
         "[CreateInstRefSymbol $className $varName]"\
     ]]
 }
@@ -7398,7 +7453,7 @@ proc ClassInstanceSet {className varName} {
     variable domain
     set classDesc [GetClassDescriptor $domain $className]
     return [IndentToBlock [string cat\
-        [linecomment "$className instanceSet $varName"]\
+        [linecomment "$className instSet $varName"]\
         [CreateInstSetSymbol $className $varName]\
         "mrt_InstSetInitialize(&$varName, &$classDesc) ;\n"\
     ]]
@@ -8007,6 +8062,19 @@ test codegen-35.0 {
     testConditions\
         {[llength [fileutil::grep {mrt_PostEvent} codegen35.c]] == 1}
 } -result {1}
+----
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc MultiAssignerCreate {relName instref idinst} {
+# HERE
+# class structure is in ${relName}__CLASS
+# create/verify instref as a reference to the correct class structure
+# verify idinst class matches the id class for the assigner
+# invoke mrt_CreateInstance
+# assign idinst to the "idinstance" attribute
+}
 ----
 
 == Helper Commands
