@@ -382,23 +382,6 @@ proc PrepareDomainProperties {domain} {
     }]
     # puts [relformat $ClassProperties ClassProperties]
 
-
-    set aprops [pipe {
-        Association findWhere {$Domain eq $domain} |
-        deRef ~ |
-        relation join ~ $::micca::Relationship |
-        relation eliminate ~ Domain
-    }]
-    set gprops [pipe {
-        Generalization findWhere {$Domain eq $domain} |
-        deRef ~ |
-        relation join ~ $::micca::Relationship |
-        relation eliminate ~ Domain |
-        relation extend ~ gtup IsStatic boolean {"false"}
-    }]
-
-    variable RelationshipProperties [relation union $aprops $gprops]
-
     return
 }
 ----
@@ -417,21 +400,6 @@ proc GetClassProperty {class prop} {
     }
 
     error "unknown property, \"$prop\", for class, \"$class\""
-}
-----
-
-(((micca,Helper,GetRelationshipProperty)))
-[source,tcl]
-----
-<<generation helper commands>>=
-proc GetRelationshipProperty {rel prop} {
-    variable RelationshipProperties
-    set rprops [relation restrictwith $RelationshipProperties {$Name eq $rel}]
-    if {[relation isnotempty $rprops]} {
-        return [relation extract $rprops $prop]
-    }
-
-    error "unknown property, \"$prop\", for relationship, \"$rel\""
 }
 ----
 
@@ -1218,9 +1186,6 @@ test codegen-1.0 {
     llength [fileutil::grep {Special} codegen1.c]
 } -result {2}
 ----
-
-// HERE do something about all the copy / paste code between here and
-// interfaceTypeAliases
 
 [source,tcl]
 ----
@@ -2410,12 +2375,14 @@ proc storageDeclarations {} {
         }
     }
 
+    # Total number of multiple assigner instances is the same as the
+    # total number of instances of the id class
     set multis [MultipleAssigner findWhere {$Domain eq $domain}]
     forAllRefs multi $multis {
-        set total [refMultiplicity [findRelated $multi R54 ~R20 ~R103]]
-        assignAttribute $multi Association
+        assignAttribute $multi Association {Class idclass}
+        set totalinsts [GetClassProperty $idclass TotalInstance]
         append result "static struct ${Association}\
-            ${Association}__POOL\[$total\] ;\n"
+            ${Association}__POOL\[$totalinsts\] ;\n"
     }
 
     return $result
@@ -2495,8 +2462,9 @@ proc iabDefinitions {} {
 
     set multis [MultipleAssigner findWhere {$Domain eq $domain}]
     forAllRefs multi $multis {
-        set total [refMultiplicity [findRelated $multi R54 ~R20 ~R103]]
         set initial [refMultiplicity [findRelated $multi ~R106]]
+        assignAttribute $multi {Class idclass}
+        set total [GetClassProperty [readAttribute $multi Class] TotalInstance]
 
         assignAttribute $multi
         append result\
@@ -4193,7 +4161,7 @@ proc assignerInstanceDefinitions {} {
     variable domain
     set result {}
 
-    append result [comment "Single Assigner Structure Declarations"]
+    append result [comment "Single Assigner Instance Definitions"]
     set singles [SingleAssigner findWhere {$Domain eq $domain}]
     forAllRefs assigner $singles {
         set initstate [pipe {
@@ -4217,7 +4185,7 @@ proc assignerInstanceDefinitions {} {
             "\} ;\n"
     }
 
-    append result [comment "Multiple Assigner Structure Declarations"]
+    append result [comment "Multiple Assigner Instance Definitions"]
     set multis [MultipleAssigner findWhere {$Domain eq $domain}]
     forAllRefs multi $multis {
         assignAttribute $multi {Association assoc}
@@ -4225,30 +4193,33 @@ proc assignerInstanceDefinitions {} {
             findRelated $multi R53 R50 R58 R57 |
             readAttribute ~ Number
         }]
-        set multiinsts [findRelated $multi ~R106]
-        set totalinsts [refMultiplicity [findRelated $multi R54 ~R20 ~R103]]
 
-        append result "static struct $assoc\
-                ${assoc}__POOL\[$totalinsts\] = \{\n"
-        forAllRefs assigner $multiinsts {
-            assignAttribute $assigner
-            set allocnum 0
-            append result\
-                "    \[$Number\] = \{\n"\
-                "        .base__INST = \{\n"\
-                "            .classDesc = &${Association}__CLASS,\n"\
-                "            .alloc = [incr allocnum],\n"\
-                "            .currentState = $initstate,\n"\
-                "            .refCount = 0,\n"\
-                "                #ifndef MRT_NO_NAMES\n"\
-                "            .name = \"$Instance\"\n"\
-                "                #endif /* MRT_NO_NAMES */\n"\
-                "        \},\n"\
-                "        .idinstance = [GenInstanceAddress $domain $IdClass\
-                        $IdInstance]\n"\
-                "    \},\n"\
+        set multiinsts [findRelated $multi ~R106]
+        if {[isNotEmptyRef $multiinsts]} {
+            set totalinsts [GetClassProperty [readAttribute $multi Class]\
+                    TotalInstance]
+            append result "static struct $assoc\
+                    ${assoc}__POOL\[$totalinsts\] = \{\n"
+            forAllRefs assigner $multiinsts {
+                assignAttribute $assigner
+                set allocnum 0
+                append result\
+                    "    \[$Number\] = \{\n"\
+                    "        .base__INST = \{\n"\
+                    "            .classDesc = &${Association}__CLASS,\n"\
+                    "            .alloc = [incr allocnum],\n"\
+                    "            .currentState = $initstate,\n"\
+                    "            .refCount = 0,\n"\
+                    "                #ifndef MRT_NO_NAMES\n"\
+                    "            .name = \"$Instance\"\n"\
+                    "                #endif /* MRT_NO_NAMES */\n"\
+                    "        \},\n"\
+                    "        .idinstance = [GenInstanceAddress $domain $IdClass\
+                            $IdInstance]\n"\
+                    "    \},\n"\
+            }
+            append result "\} ;\n"
         }
-        append result "\} ;\n"
     }
 
     return $result
@@ -8046,7 +8017,6 @@ test codegen-35.0 {
             }
         }
         population codegen35 {
-            # HERE -- if R1 is missing, gens an error -- shouldn't
             class clerk {
                 instance clerk1
             }
@@ -8068,13 +8038,82 @@ test codegen-35.0 {
 ----
 <<generation support commands>>=
 proc MultiAssignerCreate {relName instref idinst} {
-# HERE
-# class structure is in ${relName}__CLASS
-# create/verify instref as a reference to the correct class structure
-# verify idinst class matches the id class for the assigner
-# invoke mrt_CreateInstance
-# assign idinst to the "idinstance" attribute
+    variable domain
+
+    set maRef [MultipleAssigner findWhere {$Domain eq $domain &&\
+            $Association eq $relName}]
+    set idClass [readAttribute $maRef Class]
+    CheckInstRefSymbol $idinst Class $idClass
+
+    set assignerClass ${relName}__CLASS
+    append result\
+        [linecomment "$relName create $instref $idinst"]\
+        [CreateInstRefSymbol $relName $instref]\
+        "$instref = mrt_CreateInstance(&$assignerClass, MRT_StateCode_IG) ;\n"\
+        "$instref->idinstance = $idinst ;\n"
+
+    return [IndentToBlock $result]
 }
+----
+
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-47.0 {
+    Create a multi assigner
+} -setup {
+    # makeFile {} codegen47.h
+    # makeFile {} codegen47.c
+    micca configure {
+        domain codegen47 {
+            class clerk {}
+            class client {}
+            class department {
+                attribute name char -dimension 32
+            }
+
+            association R1 clerk 0..1--0..1 client {
+                identifyby department
+                statemodel {
+                    defaulttrans IG
+
+                    state waitingForClerk {} {
+                    }
+                    transition waitingForClerk - clerkReady -> waitingForClient
+
+                    state waitingForClient {} {
+                    }
+                    transition waitingForClient - clientReady -> assigningClerk
+
+                    state assigningClerk {} {
+                    }
+                    transition assigningClerk - clerkAssigned -> waitingForClerk
+                }
+            }
+            domainop void newDept {name {char const *}} {
+                %<department create deptref name name>%
+                %<R1 create r1ref deptref>%
+            }
+        }
+        population codegen47 {
+            class department {
+                allocate 4
+            }
+            class clerk {
+                allocate 3
+            }
+            class client {
+                allocate 3
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+} -body {
+    micca generate
+    testConditions\
+        {[llength [fileutil::grep {R1__POOL} codegen47.c]] == 4}
+} -result {1}
 ----
 
 == Helper Commands
