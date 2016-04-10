@@ -190,7 +190,24 @@ The run time support the following ``C'' preprocessor symbols:
     be occupied by event parameters or sync function parameters.
     The default value is 32.
 `MRT_SYNCQUEUESIZE`::
+    The value of this symbol defines the maximum number of synchronization
+    requests from the foreground processing that may be outstanding
+    at the same time.
     The default value is 10.
+    This symbol represent the number of interrupts that may occur during
+    the execution of a state activity.
+`MRT_INSTANCESETSIZE`::
+    The value of this symbol is the maximum number of instance references
+    that may be held in an instance reference set.
+    The default value is 128.
+`MRT_NO_TRACE`::
+    Defining this symbol removes code from the run time that traces
+    event dispatch.
+    Event dispatch tracing is important during testing and debugging but
+    may be removed from the delivered system.
+`__ARM_ARCH_7M__`::
+    Defining this symbol compiles in the ARM Version 7-M specific
+    code for executing sync requests from the foreground.
 
 == The Main Program
 
@@ -1405,12 +1422,15 @@ mrt_InstIteratorStart(
 
     iter->iab = iab ;
     iter->instance = (void *)((uintptr_t)iab->storageStart + instanceOffset) ;
-    if (((MRT_Instance *)iter->instance)->alloc <= 0) {
+    if (((MRT_Instance *)iter->instance)->alloc <= 0) { // <1>
         mrt_InstIteratorNext(iter) ;
     }
     return ;
 }
 ----
+<1> The iterator is designed to check if the instance is actually in
+use. Here we check the first instance and if it is not being used
+advance the iterator onward.
 
 *****
 [source,c]
@@ -1492,7 +1512,7 @@ mrt_InstIteratorNext(
 The `mrt_InstIteratorNext` function advances the class instance iterator
 to the next valid class instance.
 To be a valid class instance,
-the instance memory slot must show that is allocated and in active use.
+the instance memory slot must be allocated and in active use.
 *****
 
 (((micca,Run Time Function,mrt_InstIteratorNext)))
@@ -1521,6 +1541,68 @@ class indicates that we have visited all the instances.
 
 === Instance Sets
 
+Another common model level operation is to accumulate a set of
+class instances.
+Most action languages are based on the concept of accumulating a set
+of class instances based on some criteria (_e.g._ matching some value
+of an attribute) and then iterating over that set to perform an operation
+on each instance.
+When the operation is simple,
+this construct can be translated into an interation over the class
+instances performing the criteria test and operation together.
+This is to say that just because the action language statement implies
+determining the contents of an instance set does not mean that it must
+necessarily be implemented that way.
+For simple situations involving searching for a criteria and then
+immediately performing some operation,
+it is not necessary to accumulate a set first and then iterate over the set.
+
+However,
+there are times when obtaining a set is crucial and cannot be replaced
+by simple iteration over the class instances.
+For those cases the run time provides an instance set concept.
+The design of the instance set had the goal of making it reasonable
+to allocate the sets as automatic variables on the stack.
+One could design the instance set to be a list of instance reference
+pointers.
+Unfortunately, such sets would occupy a significant amount of space.
+We want to be able to allocate instance sets as automatic variable
+to avoid the complication of managing the lifetime of the set variables.
+Since our target environment is usually quite limited,
+large automatic variables are to be avoided.
+
+The chosen design is to use a bit vector.
+Since class instances are contained in an array,
+the index of a class instance in the storage pool array can be used
+as an index into a bit vector.
+The bit vector design trades off more processing to build and access the
+set, but makes many other set operations much easier.
+For example, since instance sets do not contain duplicates,
+the ability or logically `OR` in a bit means we do not have to
+make any explicit tests to avoid inserting duplicate instances in the set.
+
+The data structure for a instance set is shown below.
+
+[source,c]
+----
+<<mrt interface aggregate types>>=
+typedef uint32_t MRT_SetWord ;
+#define MRT_SETWORD_BITS    (sizeof(MRT_SetWord) * 8)
+
+typedef struct mrtinstanceset {
+    MRT_Class const *classDesc ;
+    MRT_SetWord instvector[(MRT_INSTANCESETSIZE + MRT_SETWORD_BITS - 1) /
+            MRT_SETWORD_BITS] ; // <1>
+} MRT_InstSet ;
+----
+<1> The bit vector is allocated in `MRT_SetWord` words and we round up to
+insure we have enough space for all the instances.
+
+Like all the other memory allocations in the run time,
+we have to fix the maximum number of instance references that can be held
+in the set.
+By default we set that number to 128.
+
 [source,c]
 ----
 <<mrt constants>>=
@@ -1529,15 +1611,9 @@ class indicates that we have visited all the instances.
 #endif /* MRT_INSTANCESETSIZE */
 ----
 
-[source,c]
-----
-<<mrt interface aggregate types>>=
-typedef struct mrtinstanceset {
-    MRT_Class const *classDesc ;
-    uint32_t instvector[(MRT_INSTANCESETSIZE + 31) / 32] ;
-} MRT_InstSet ;
-----
+A function is provided to properly initalize an instance set variable.
 
+*****
 [source,c]
 ----
 <<mrt external interfaces>>=
@@ -1547,7 +1623,20 @@ mrt_InstSetInitialize(
     MRT_Class const *classDesc) ;
 ----
 
+`set`::
+    A pointer to an instance set.
+`classDesc`::
+    A pointer to a class descriptor. The instance set will contain only
+    instances of this class.
+
+The `mrt_InstSetInitialize` function initialized the instance set
+data structure pointed to by `set` to prepare it to accept instances
+of the class described by `classDesc`.
+*****
+
+(((micca,Run Time Function,mrt_InstSetInitialize)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 void
@@ -1561,6 +1650,9 @@ mrt_InstSetInitialize(
 }
 ----
 
+The primary operation on instance sets is to add an instance.
+
+*****
 [source,c]
 ----
 <<mrt external interfaces>>=
@@ -1570,7 +1662,19 @@ mrt_InstSetAddInstance(
     void *instance) ;
 ----
 
+`set`::
+    A pointer to an instance set.
+`instance`::
+    A pointer to a class instance to be inserted into the set.
+
+The `mrt_InstSetAddInstance` function inserts `instance` into the
+instance set pointed to by `set`.
+Attempts to add an instance already in the set is silently ignored.
+*****
+
+(((micca,Run Time Function,mrt_InstSetAddInstance)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 void
@@ -1582,14 +1686,68 @@ mrt_InstSetAddInstance(
 
     assert(instref != NULL) ;
     assert(instref->classDesc = set->classDesc) ;
+    if (instref->classDesc != set->classDesc) { // <1>
+        return ;
+    }
+    unsigned instid = mrt_InstanceIndex(instance) ;
+    set->instvector[instid / MRT_SETWORD_BITS] |=
+            (1 << (instid % MRT_SETWORD_BITS)) ; // <2>
+}
+----
+<1> Make sure we do not add instances of the wrong class.
+Instance indices are only unique within a given class.
+<2> This bit twiddling selects the correct bit in the correct word
+of the bit vector.
+
+We also need a means to remove an instance from the set.
+
+*****
+[source,c]
+----
+<<mrt external interfaces>>=
+extern void
+mrt_InstSetRemoveInstance(
+    MRT_InstSet *set,
+    void *instance) ;
+----
+
+`set`::
+    A pointer to an instance set.
+`instance`::
+    A pointer to a class instance to be inserted into the set.
+
+The `mrt_InstSetRemoveInstance` function removes `instance` from the
+instance set pointed to by `set`.
+Attempts to remove an instance that is not in the set is silently ignored.
+*****
+
+(((micca,Run Time Function,mrt_InstSetRemoveInstance)))
+[source,c]
+.Implementation
+----
+<<mrt external functions>>=
+void
+mrt_InstSetRemoveInstance(
+    MRT_InstSet *set,
+    void *instance)
+{
+    MRT_Instance *instref = instance ;
+
+    assert(instref != NULL) ;
+    assert(instref->classDesc = set->classDesc) ;
     if (instref->classDesc != set->classDesc) {
         return ;
     }
     unsigned instid = mrt_InstanceIndex(instance) ;
-    set->instvector[instid / 32] |= (1 << (instid % 32)) ;
+    set->instvector[instid / MRT_SETWORD_BITS] &=
+            ~(1 << (instid % MRT_SETWORD_BITS)) ;
 }
 ----
 
+We also supply set operations, starting with determining if the
+instance set is empty.
+
+*****
 [source,c]
 ----
 <<mrt external interfaces>>=
@@ -1598,7 +1756,16 @@ mrt_InstSetEmpty(
     MRT_InstSet *set) ;
 ----
 
+`set`::
+    A pointer to an instance set.
+
+The `mrt_InstSetEmpty` returns `true` if the instance set pointed to by
+`set` contains no elements and `false` otherwise.
+*****
+
+(((micca,Run Time Function,mrt_InstSetEmpty)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 bool
@@ -1606,7 +1773,7 @@ mrt_InstSetEmpty(
     MRT_InstSet *set)
 {
     assert(set != NULL) ;
-    uint32_t *pvect = set->instvector ;
+    MRT_SetWord *pvect = set->instvector ;
     while (pvect < set->instvector + COUNTOF(set->instvector)) {
         if (*pvect++ != 0) {
             return false ;
@@ -1617,6 +1784,8 @@ mrt_InstSetEmpty(
 }
 ----
 
+Set equality is also supplied.
+
 ******
 [source,c]
 ----
@@ -1626,9 +1795,21 @@ mrt_InstSetEqual(
     MRT_InstSet *set1,
     MRT_InstSet *set2) ;
 ----
+
+`set1`::
+    A pointer to an instance set.
+`set2`::
+    A pointer to an instance set.
+
+The `mrt_InstSetEqual` returns true if instance set `set1` is equal
+to instance set `set2` and false otherwise.
+If `set1` and `set2` refer to different instance set, then
+false is returned.
 ******
 
+(((micca,Run Time Function,mrt_InstSetEqual)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 bool
@@ -1644,8 +1825,8 @@ mrt_InstSetEqual(
     if (set1->classDesc != set2->classDesc) {
         return false ;
     }
-    uint32_t *src1 = set1->instvector ;
-    uint32_t *src2 = set2->instvector ;
+    MRT_SetWord *src1 = set1->instvector ;
+    MRT_SetWord *src2 = set2->instvector ;
     while (src1 < set1->instvector + COUNTOF(set1->instvector)) {
         if (*src1++ != *src2++) {
             return false ;
@@ -1656,6 +1837,10 @@ mrt_InstSetEqual(
 }
 ----
 
+Basic set operations are also provided.
+We start with the set union operation.
+
+******
 [source,c]
 ----
 <<mrt external interfaces>>=
@@ -1666,7 +1851,22 @@ mrt_InstSetUnion(
     MRT_InstSet *result) ;
 ----
 
+`set1`::
+    A pointer to an instance set.
+`set2`::
+    A pointer to an instance set.
+`result`::
+    A pointer to an instance set where the result is placed.
+
+The `mrt_InstSetUnion` function computes the set union of
+`set1` and `set2` storing the result in the set pointed to by `result`.
+If `set1` and `set2` do not refer to sets of the same class,
+then the result set is the same set as `set1`.
+******
+
+(((micca,Run Time Function,mrt_InstSetUnion)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 void
@@ -1682,19 +1882,21 @@ mrt_InstSetUnion(
     assert(result != NULL) ;
     assert(set1->classDesc == set2->classDesc) ;
 
-    if (set1->classDesc != set2->classDesc) {
-        memset(result->instvector, 0, sizeof(result->instvector)) ;
-        return ;
-    }
-    uint32_t *dst = result->instvector ;
-    uint32_t *src1 = set1->instvector ;
-    uint32_t *src2 = set2->instvector ;
-    while (dst < result->instvector + COUNTOF(result->instvector)) {
-        *dst++ = *src1++ | *src2++ ;
+    result->classDesc = set1->classDesc ;
+    if (set1->classDesc == set2->classDesc) {
+        MRT_SetWord *dst = result->instvector ;
+        MRT_SetWord *src1 = set1->instvector ;
+        MRT_SetWord *src2 = set2->instvector ;
+        while (dst < result->instvector + COUNTOF(result->instvector)) {
+            *dst++ = *src1++ | *src2++ ;
+        }
+    } else {
+        memcpy(result->instvector, set1->instvector, sizeof(result->instvector)) ;
     }
 }
 ----
 
+******
 [source,c]
 ----
 <<mrt external interfaces>>=
@@ -1705,7 +1907,22 @@ mrt_InstSetIntersect(
     MRT_InstSet *result) ;
 ----
 
+`set1`::
+    A pointer to an instance set.
+`set2`::
+    A pointer to an instance set.
+`result`::
+    A pointer to an instance set where the result is placed.
+
+The `mrt_InstSetIntersect` function computes the set intersection of
+`set1` and `set2` storing the result in the set pointed to by `result`.
+If `set1` and `set2` do not refer to sets of the same class,
+then the returned set is the empty set of the same class as `set1`.
+******
+
+(((micca,Run Time Function,mrt_InstSetIntersect)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 void
@@ -1721,19 +1938,21 @@ mrt_InstSetIntersect(
     assert(result != NULL) ;
     assert(set1->classDesc == set2->classDesc) ;
 
-    if (set1->classDesc != set2->classDesc) {
+    result->classDesc = set1->classDesc ;
+    if (set1->classDesc == set2->classDesc) {
+        MRT_SetWord *dst = result->instvector ;
+        MRT_SetWord *src1 = set1->instvector ;
+        MRT_SetWord *src2 = set2->instvector ;
+        while (dst < result->instvector + COUNTOF(result->instvector)) {
+            *dst++ = *src1++ & *src2++ ;
+        }
+    } else {
         memset(result->instvector, 0, sizeof(result->instvector)) ;
-        return ;
-    }
-    uint32_t *dst = result->instvector ;
-    uint32_t *src1 = set1->instvector ;
-    uint32_t *src2 = set2->instvector ;
-    while (dst < result->instvector + COUNTOF(result->instvector)) {
-        *dst++ = *src1++ & *src2++ ;
     }
 }
 ----
 
+******
 [source,c]
 ----
 <<mrt external interfaces>>=
@@ -1744,7 +1963,23 @@ mrt_InstSetMinus(
     MRT_InstSet *result) ;
 ----
 
+`set1`::
+    A pointer to an instance set.
+`set2`::
+    A pointer to an instance set.
+`result`::
+    A pointer to an instance set where the result is placed.
+
+The `mrt_InstSetMinus` function computes the set difference
+of `set1` minus `set2` (order is significant in this case) storing
+the result in the set pointed to by `result`.
+If `set1` and `set2` do not refer to sets of the same class,
+then the result set is the same as `set1`.
+******
+
+(((micca,Run Time Function,mrt_InstSetMinus)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 void
@@ -1760,32 +1995,59 @@ mrt_InstSetMinus(
     assert(result != NULL) ;
     assert(set1->classDesc == set2->classDesc) ;
 
-    if (set1->classDesc != set2->classDesc) {
-        memset(result->instvector, 0, sizeof(result->instvector)) ;
-        return ;
-    }
-    uint32_t *dst = result->instvector ;
-    uint32_t *src1 = set1->instvector ;
-    uint32_t *src2 = set2->instvector ;
-    while (dst < result->instvector + COUNTOF(result->instvector)) {
-        *dst++ = *src1++ & ~*src2++ ;
+    result->classDesc = set1->classDesc ;
+    if (set1->classDesc == set2->classDesc) {
+        MRT_SetWord *dst = result->instvector ;
+        MRT_SetWord *src1 = set1->instvector ;
+        MRT_SetWord *src2 = set2->instvector ;
+        while (dst < result->instvector + COUNTOF(result->instvector)) {
+            *dst++ = *src1++ & ~*src2++ ;
+        }
+    } else {
+        memcpy(result->instvector, set1->instvector, sizeof(result->instvector)) ;
     }
 }
 ----
 
 === Iterating Over Instance Sets
 
+Once we have computed an instance set,
+we need some way to iterate over the resulting set.
+Since we have chosen a bit vector representation of the set,
+the iteration code is slightly more complicated as we must keep track
+of which word and bit offset we are currently referring to.
+Iterating over instance sets has one additional complication.
+It is possible that a class instance referenced in an instance set
+has been deleted in the time between when the instance set was accumulated
+and the time when the iteration across the set occurs.
+So,
+iterating over instance set must also guard against an instance that,
+although it may be a member of the set, has been deleted between the
+time the set was constructed and the time that the iteration occurs.
+
 [source,c]
 ----
 <<mrt interface aggregate types>>=
 typedef struct mrtinstsetiterator {
-    void *instance ;
     MRT_InstSet *set ;
-    uint32_t *vectorloc ;
+    void *instance ;
+    MRT_SetWord *vectorloc ;
     unsigned bitoffset ;
 } MRT_InstSetIterator ;
 ----
 
+`set`::
+    A pointer to the instance set across which the iteration will occur.
+`instance`::
+    A pointer to the current instance of the iteration.
+`vectorloc`::
+    A pointer to the word within the instance set where the current instance
+    is located.
+`bitoffset`::
+    The bit offset into the word pointed to by `vectorloc` that represents
+    the current instance of the iteration.
+
+******
 [source,c]
 ----
 <<mrt external interfaces>>=
@@ -1795,7 +2057,21 @@ mrt_InstSetIterBegin(
     MRT_InstSetIterator *iter) ;
 ----
 
+`set`::
+    A pointer to an instance set across which the iteration will occur.
+`iter`::
+    A pointer to an instance set iterator which will hold the state of the
+    iteration.
+
+The `mrt_InstSetIterBegin` initializes the set iterator pointed to
+by `iter` in order to iterate across the instance set pointed to by `set`.
+This function must be called first to prepare an iteration across an
+instance set.
+******
+
+(((micca,Run Time Function,mrt_InstSetIterBegin)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 void
@@ -1809,17 +2085,22 @@ mrt_InstSetIterBegin(
     iter->set = set ;
     iter->vectorloc = set->instvector ;
     iter->bitoffset = 0 ;
-    if ((*iter->vectorloc & 1) == 0) {
+    if ((*iter->vectorloc & 1) == 0) { // <1>
         mrt_InstSetIterNext(iter) ;
     } else {
         iter->instance = mrt_InstanceReference(iter->set->classDesc, 0) ;
-        if (((MRT_Instance *)iter->instance)->alloc <= 0) {
+        if (((MRT_Instance *)iter->instance)->alloc <= 0) { // <2>
             mrt_InstSetIterNext(iter) ;
         }
     }
 }
 ----
+<1> Check if the first instance belongs to the set. If not, we want to
+advance the iterator until we have a valid set member.
+<2> Check if the set instance is still actively being used. If not,
+we want to advance the iterator to one that is.
 
+******
 [source,c]
 ----
 <<mrt external interfaces>>=
@@ -1828,7 +2109,17 @@ mrt_InstSetIterMore(
     MRT_InstSetIterator *iter) ;
 ----
 
+`iter`::
+    A pointer to an instance set iterator.
+
+The `mrt_InstSetIterMore` function returns `true` if there are
+more instances to visit in the instance set referenced by `iter` and
+`false` otherwise.
+******
+
+(((micca,Run Time Function,mrt_InstSetIterMore)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 bool
@@ -1840,6 +2131,7 @@ mrt_InstSetIterMore(
 }
 ----
 
+******
 [source,c]
 ----
 <<mrt external interfaces>>=
@@ -1848,7 +2140,18 @@ mrt_InstSetIterGet(
     MRT_InstSetIterator *iter) ;
 ----
 
+`iter`::
+    A pointer to an instance set iterator.
+
+The `mrt_InstSetIterGet` function obtains the current instance from the
+instance set referenced by `iter`.
+It is not valid to invoke this function after `mrt_InstSetIterMore`
+returns `false`.
+******
+
+(((micca,Run Time Function,mrt_InstSetIterGet)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 void *
@@ -1861,6 +2164,7 @@ mrt_InstSetIterGet(
 }
 ----
 
+******
 [source,c]
 ----
 <<mrt external interfaces>>=
@@ -1869,7 +2173,22 @@ mrt_InstSetIterNext(
     MRT_InstSetIterator *iter) ;
 ----
 
+`iter`::
+    A pointer to an instance set iterator.
+
+The `mrt_InstSetIterNext` function advances the set iterator pointed to by
+`iter` to the next element of the set.
+******
+
+Advancing the iterator is a more complicated operation.
+We must account for the word boundaries in the bit vector as well as
+the number of bits in each of the vector words.
+Finally, we must also make sure the next element of the set is still
+a valid, allocated instance of the class.
+
+(((micca,Run Time Function,mrt_InstSetIterNext)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 void
@@ -1877,33 +2196,42 @@ mrt_InstSetIterNext(
     MRT_InstSetIterator *iter)
 {
     assert(iter != NULL) ;
-    iter->bitoffset++ ;
     
     while (iter->vectorloc <
             iter->set->instvector + COUNTOF(iter->set->instvector)) {
-        if (*iter->vectorloc != 0) {
-            for ( ; iter->bitoffset < 32 ; iter->bitoffset++) {
-                uint32_t mask = 1 << iter->bitoffset ;
-                if ((*iter->vectorloc & mask) != 0) {
+        if (*iter->vectorloc != 0) { // <1>
+            for (iter->bitoffset++ ; iter->bitoffset < MRT_SETWORD_BITS ;
+                    iter->bitoffset++) { //<2>
+                MRT_SetWord mask = 1 << iter->bitoffset ;
+                if ((*iter->vectorloc & mask) != 0) { // <3>
                     unsigned instindex =
-                        (iter->vectorloc - iter->set->instvector) * 32 +
-                        iter->bitoffset ;
+                        (iter->vectorloc - iter->set->instvector) *
+                        MRT_SETWORD_BITS + iter->bitoffset ; // <4>
                     MRT_Instance *instref = mrt_InstanceReference(
                         iter->set->classDesc, instindex) ;
-                    if (instref->alloc > 0) {
+                    if (instref->alloc > 0) { // <5>
                         iter->instance = instref ;
                         return ;
                     }
                 }
             }
         }
-        iter->vectorloc++ ;
+        iter->vectorloc++ ; // <6>
         iter->bitoffset = 0 ;
     }
 
     iter->instance = NULL ;
 }
 ----
+<1> A simple test determines if we can skip the entire word of bits.
+<2> Advance the iterator by one bit in the bit vector.
+<3> Check if we have found a set bit in the bit vector.
+This indicates that the corresponding instance is a member of the set.
+<4> Compute the index of the instance in bit vector.
+This is the same to the index of the instance in the storage array.
+<5> Verify that the instance was not delete between the time the
+set was build and the time the iteration across the set happens.
+<6> Advance to the next word of the bit vector.
 
 == Managing Referential Integrity
 
@@ -1912,6 +2240,10 @@ Management System (RDMS) or some other data architecture that
 supports the relational model of data (_e.g._ `rosea` or TclRAL),
 referential integrity checking comes with the underlying data management
 facilities.
+Such data management facilities contrain the values of data and
+move much of the data integrity validation away from the application code.
+Such is the motivation to use these facilities since they replace
+application code with declarative specifications of validity.
 
 When targeting staticly typed languages such as ``C'',
 translation platforms frequently do not offer any help in insuring
@@ -1922,6 +2254,10 @@ For applications that do little dynamic instance creation or relationship
 changes,
 the risk that some code path results in a violation of
 referential integrity is much less.
+Nonetheless,
+execution platforms that do not provide any referential integrity checks
+impose a significant burden on the programmer and result in
+systems that are potentially less reliable.
 
 However,
 in `micca` we will support detection of referential integrity violations.
@@ -2183,7 +2519,7 @@ struct mrtrefsubclassrole {
 `classDesc`::
     A pointer to the class data for the participant.
 `storageOffset`::
-    The offset in bytes from the beginning of a reference superclass
+    The offset in bytes from the beginning of a reference subclass
     instance to where the reference to its related superclass is stored.
     The structure member found at `storageOffset` from the beginning of
     the instance is a pointer to the superclass instance.
@@ -2276,7 +2612,7 @@ To check referential integrity,
 it is necessary to introduce the concept of a transaction on the
 domain data model.
 The transaction concept is necessary because we must be able to defer
-the integrity check until such time as the analysis model can insure
+the integrity check until such time as the domain activities can insure
 that the integrity constraints are met.
 For example,
 consider two classes in a one-to-one unconditional relationship.
@@ -2540,7 +2876,7 @@ So we will consider each side separately.
 <<mrtCheckRelationship: class based associations>>=
 struct mrtclassassociation const *assoc = &rel->relInfo.classAssociation ;
 
-result = mrtCheckAssociatorRefs(&assoc->associator) ;
+result = mrtCheckAssociatorRefs(&assoc->associator) ; // <1>
 if (result) {
     /*
      * On the first side, we evaluate the references from the source class
@@ -2569,6 +2905,8 @@ if (result) {
     }
 }
 ----
+<1> We start by checking the singular references from the associator
+class to the two participants.
 
 Since a generalization represents a disjoint union between between the
 superclass and the set of subclasses,
@@ -2768,20 +3106,17 @@ static bool
 mrtCheckAssociatorRefs(
     struct mrtassociatorrole const *associator)
 {
-    void **ref ;
-    MRT_iab const *iab = associator->classDesc->iab ;
-    for (MRT_Instance *inst = (MRT_Instance *)iab->storageStart ;
-            inst < (MRT_Instance *)iab->storageFinish ;
-            inst = (MRT_Instance *)((uintptr_t)inst + iab->instanceSize)) {
-        if (inst->alloc > 0) {
-            ref = (void **)((uintptr_t)inst + associator->forwardOffset) ;
-            if (*ref == NULL) {
-                return false ;
-            }
-            ref = (void **)((uintptr_t)inst + associator->backwardOffset) ;
-            if (*ref == NULL) {
-                return false ;
-            }
+    MRT_InstanceIterator iter ;
+    for (mrt_InstIteratorStart(&iter, associator->classDesc) ;
+            mrt_InstIteratorMore(&iter) ; mrt_InstIteratorNext(&iter)) {
+        void *inst = mrt_InstIteratorGet(&iter) ;
+        void **ref = (void **)((uintptr_t)inst + associator->forwardOffset) ;
+        if (*ref == NULL) {
+            return false ;
+        }
+        ref = (void **)((uintptr_t)inst + associator->backwardOffset) ;
+        if (*ref == NULL) {
+            return false ;
         }
     }
 
@@ -2816,13 +3151,7 @@ Counting references mean understanding how the reference pointers are
 stored.
 There are three ways that reference pointer are stored:
 single pointer, counted arrays and linked lists.
-For counted arrays,
-these are associated with constant populations and they are not intended
-to be modified during the running of the program.
-So it is always an error to modify the instances or relationships
-of constant populations.
-This condition is checked first.
-Otherwise, we can use the knowledge of offsets in the instance to
+We use the knowledge of offsets in the instance to
 where the pointer values are stored to access target instances.
 
 [source,c]
@@ -2874,9 +3203,7 @@ mrtCountAssocRefs(
 }
 ----
 
-We will show how single and linked list references are counted now.
-These functions are reused for counting classed based associations.
-
+We will now show how the references stored in the three types are counted.
 For singular references, the reference is a pointer to the related
 class instance.
 
@@ -2996,10 +3323,10 @@ The structure of the linked list pointers makes counting them
 a bit more complicated.
 We must know the offset within the source instance where the link
 list terminus is located.
-Since linked list point around other links and since the link pointers
-in the target are embedded somewhere in the target instance structure,
-we need to know the offset into the target instance that the links
-point to.
+Since the link pointers in the target are embedded somewhere in the target
+instance structure,
+we need to know the offset into the target instance that the links point to
+in order recover a pointer to the beginning of the target instance..
 
 [source,c]
 ----
@@ -3047,8 +3374,7 @@ mrtCountLinkedListRefs(
         MRT_LinkRef *ref = (MRT_LinkRef *)((uintptr_t)srcInst + refOffset) ;
         if (ref->next != NULL) { // <1>
             for (MRT_LinkRef *trgIter = mrtLinkRefBegin(ref) ;
-                    trgIter != mrtLinkRefEnd(ref) ;
-                    trgIter = trgIter->next) {
+                    trgIter != mrtLinkRefEnd(ref) ; trgIter = trgIter->next) {
                 MRT_Instance *targetInst =
                     (MRT_Instance *)((uintptr_t)trgIter - linkOffset) ; // <2>
                 if ((void *)targetInst >= targetiab->storageStart &&
@@ -3066,8 +3392,8 @@ mrtCountLinkedListRefs(
 located `linkOffset` from the beginning of the target instance.
 So we need to do some pointer arithmetic to get the pointer to the beginning
 of the instance.
-It may be the case that the target is on several linked lists depending upon
-the relationships in which it participates.
+We have to do this computation because it may be the case that the target is on
+several linked lists depending upon the relationships in which it participates.
 
 Counting class based associations uses the basic counting primatives that
 we have already seen.
@@ -3179,8 +3505,9 @@ Since the relationship descriptions have sufficient information
 to manage referential integrity,
 they also can be used to do the pointer manipulations required with
 class instances are related and unrelated to each other.
-It is important to perform the relate and unrelate operations properly
-so as to preserve the referential integrity.
+It is important for the run time to provide functions to perform the relate and
+unrelate operations since determining referential integrity depends upon
+correct reference pointer manipulation.
 
 Because we are using pointer values to manage instance identity and
 referencesfootnote:[as opposed to attribute values if we were doing this
@@ -3200,26 +3527,28 @@ in which it participates.
 * When relating a class based association, either an existing associator
 class instance or a newly created associator class instance is required
 to relate the two participating instances.
-If an existing associator instance is reused, it must have be unrelated
+If an existing associator instance is reused, it must have been unrelated
 before reuse.
 * When unrelating a class based association,
 the instance of the associator class must either be reused in making a
-new association or deleted.
+new association or deleted since the associator class instance itself
+represents an instance of the association.
 
 For generalizations:
 
 * Newly created superclasses and subclasses must be related to each other.
 * Reclassifying a subclass instance to a new type can be accomplished via
 the supplied function.
-* When deleting superclass and subclass instances, unrelating the
-instances is not strictly necessary.
-* For a union generalization, subclass instance may not be created directly.
+* When deleting both superclass and subclass instances that
+are currently related,
+unrelating the instances is not strictly necessary.
+* For a union generalization, subclass instances may not be created directly.
 It is sufficient to create the superclass instance and then migrate the
 subclass to the desired type.
 
 === Relating Instances
 
-The `micca` run time provides a function to relation two class instances
+The `micca` run time provides a function to relate two class instances
 across a relationship.
 The class instance references must be given in the correct order for the roles
 played by the participating classes.
@@ -3248,16 +3577,16 @@ mrt_Relate(
 `?associator?`::
     For simple associations and generalizations this argument may be omitted
     and, if supplied, it is ignored.
-    For class based association, it is the instance reference to
+    For class based associations, it is the instance reference to
     the associator class.
     In this case, if the argument is `NULL`, then a new instance of the
     associator class is created and the instance reference of the
     newly created associator instance is returned.
 
 The return value of `mrt_Relate` is NULL except in the case of a
-class based association and the `associator` argument was `NULL`.
-In that case the return value is an instance reference to the newly
-created association class instance.
+class based association.
+In that case the return value is an instance reference to the
+association class instance either supplied or newly created.
 
 ==== Implementation
 
@@ -3906,7 +4235,7 @@ mrtLinkRefRemove(
 
 In this section we discuss the rules and policies associated
 with managing the sequencing of execution.
-There are two means available to an application to control the
+There are two means available to domain activities to control the
 sequencing of execution.
 
 * Invoke an ordinary function.
@@ -3959,9 +4288,13 @@ If you have some state model that is large and complicated where
 you think some other kind of higher order structure is needed,
 the usual reason is that you have multiple classes masquerading as one
 and further refinement of your analysis is necessary.
-That is not usually a welcome answer to the problem,
+That is not usually a welcome answer to the situation,
 because if the analyst had been able to conceive of a better solution,
-he/she would probably already have done so.
+he/she would probably have done so already.
+When state models are used to describe the lifecycle behavior of
+a well defined class (and not sets of classes or the domain as whole)
+there is no need for more complicated state execution schemes
+such as hierarchies.
 
 Generally, state actions affect other computations in the domain
 by updating instance attribute values or by generating events to
@@ -3976,7 +4309,7 @@ There are three types of events:
 
 . Transition events that cause transitions in state machines.
 . Polymorphic events that are mapped at runtime across a generalization
-hierarchy.
+hierarchy to transition events.
 . Creations events that support asynchronous instance creation.
 
 Creation events are transition events that are also associated with
