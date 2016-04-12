@@ -217,6 +217,9 @@ the conventional Tcl brackets ([ ]).
 Those characters are inconvenient in ``C'' so we use bracket strings
 that create less interference.
 
+Generating the files happens by iterating over all the domains and
+generating a header file and a code file for each one.
+
 [source,tcl]
 ----
 <<miccaGenerate: generate files>>=
@@ -225,55 +228,13 @@ variable codeTemplate
 
 try {
     forAllRefs domainRef [Domain findAll] {
-        namespace upvar GenHeader\
-            domain domain\
-            interface interface
-        namespace upvar GenSupport\
-            domain thisdomain
+        assignAttribute $domainRef {Name domain} {Interface interface}\
+            {Prologue prologue} {Epilogue epilogue}
 
-        assignAttribute $domainRef\
-            {Name domain}\
-            {Interface interface}
-        set thisdomain $domain
+        GatherDomainProperties $domain
 
-        PrepareDomainProperties $domain
-
-        expand evalcmd "namespace eval [namespace current]::GenHeader"
-        set hchan [::open $domain.h w]
-        try {
-            puts $hchan [expand expand $headerTemplate]
-        } on error {result opts} {
-            # puts $::errorInfo
-            return -options $opts $result
-        } finally {
-            chan close $hchan
-        }
-
-        unset domain interface
-
-        namespace upvar GenCode\
-            domain domain\
-            prologue prologue\
-            epilogue epilogue
-
-        assignAttribute $domainRef\
-            {Name domain}\
-            {Prologue prologue}\
-            {Epilogue epilogue}
-
-        CreateActivityCommands $domain
-
-        expand evalcmd "namespace eval [namespace current]::GenCode"
-        set cchan [::open $domain.c w]
-        try {
-            puts $cchan [expand expand $codeTemplate]
-        } on error {result opts} {
-            puts $::errorInfo
-            return -options $opts $result
-        } finally {
-            chan close $cchan
-            namespace delete GenActivity
-        }
+        <<miccaGenerate: generate header file>>
+        <<miccaGenerate: generate code file>>
     }
 } finally {
     rename expand {} ; # <1>
@@ -283,6 +244,60 @@ try {
 so that there won't be any conflict the next time `micccaGenerate` is
 invoked.
 
+To generate the header file,
+we set up some variable in the namespace where the template
+expansion occurs.
+These variables define the domain context for the header generation.
+We perform the expansion in the `GenHeader` namespace so that the
+command embedded in the template resolve without qualification and
+we don't have any name conflicts between those commands and other
+code generation commands.
+
+[source,tcl]
+----
+<<miccaGenerate: generate header file>>=
+set GenHeader::domain $domain
+set GenHeader::interface $interface
+set GenSupport::domain $domain
+
+expand evalcmd "namespace eval [namespace current]::GenHeader"
+set hchan [::open $domain.h w]
+try {
+    puts $hchan [expand expand $headerTemplate]
+} on error {result opts} {
+    # puts $::errorInfo
+    return -options $opts $result
+} finally {
+    chan close $hchan
+}
+----
+
+Generating the code files is done in a similar manner.
+In this case,
+we perform the generation in the `GenCode` namespace.
+
+[source,tcl]
+----
+<<miccaGenerate: generate code file>>=
+set GenCode::domain $domain
+set GenCode::prologue $prologue
+set GenCode::epilogue $epilogue
+
+CreateActivityCommands $domain
+
+expand evalcmd "namespace eval [namespace current]::GenCode"
+set cchan [::open $domain.c w]
+try {
+    puts $cchan [expand expand $codeTemplate]
+} on error {result opts} {
+    # puts $::errorInfo
+    return -options $opts $result
+} finally {
+    chan close $cchan
+    namespace delete GenActivity
+}
+----
+
 === Common Domain Queries
 
 There are a number of queries about the properties of domains that
@@ -290,34 +305,15 @@ common and frequent enough to warrant factoring the queries into a
 more convenient form.
 
 We start by accumulating some common properties of a domain.
-We will store these properties in a relation values that are held in
+We will store these properties in a relation value that are held in
 an ordinary namespace variables
 
-(((micca,Helper,PrepareDomainProperties)))
+(((micca,Helpers,GatherDomainProperties)))
 [source,tcl]
 ----
 <<generation helper commands>>=
-proc PrepareDomainProperties {domain} {
+proc GatherDomainProperties {domain} {
     variable ClassProperties
-
-    # Need to handle missing class populations.
-    # Not all classes will have a ClassPopulation instance.
-    set classRefs [Class findWhere {$Domain eq $domain}]
-    set allocs [pipe {
-        findRelated $classRefs R104 {~R101 ElementPopulation}\
-            {~R105 ClassPopulation} |
-        deRef % |
-        relation project % Class Allocation |
-        relation rename % Class Name
-    } {} |%]
-
-    set insts [pipe {
-        findRelated $classRefs R104 {~R101 ElementPopulation}\
-            {~R105 ClassPopulation} ~R102 |
-        deRef % |
-        relation project % Class Number |
-        relation rename % Class Name
-    } {} |%]
 
     set sassigners [pipe {
         SingleAssigner findWhere {$Domain eq $domain} |
@@ -333,6 +329,8 @@ proc PrepareDomainProperties {domain} {
             InitialInstance int {1}\
             TotalInstance int {1}
     }]
+    # puts [relformat $sassigners sassigners]
+
     set massigners [pipe {
         MultipleAssigner findWhere {$Domain eq $domain} |
         deRef ~ |
@@ -354,6 +352,23 @@ proc PrepareDomainProperties {domain} {
             relation rename ~ Association Name AssignerNumber Number
     }]
     # puts [relformat $massigners massigners]
+
+    set classRefs [Class findWhere {$Domain eq $domain}]
+    set allocs [pipe {
+        findRelated $classRefs R104 {~R101 ElementPopulation}\
+            {~R105 ClassPopulation} |
+        deRef % |
+        relation project % Class Allocation |
+        relation rename % Class Name
+    } {} |%]
+
+    set insts [pipe {
+        findRelated $classRefs R104 {~R101 ElementPopulation}\
+            {~R105 ClassPopulation} ~R102 |
+        deRef % |
+        relation project % Class Number |
+        relation rename % Class Name
+    } {} |%]
 
     set ClassProperties [pipe {
         deRef $classRefs |
@@ -388,7 +403,7 @@ proc PrepareDomainProperties {domain} {
 
 We need some procedures to access the properties.
 
-(((micca,Helper,GetClassProperty)))
+(((micca,Helpers,GetClassProperty)))
 [source,tcl]
 ----
 <<generation helper commands>>=
@@ -403,7 +418,9 @@ proc GetClassProperty {class prop} {
 }
 ----
 
-(((micca,Helper,GetClassDescriptor)))
+The class descriptor array element for a given class is commonly needed.
+
+(((micca,Helpers,GetClassDescriptor)))
 [source,tcl]
 ----
 <<generation helper commands>>=
@@ -522,9 +539,7 @@ proc interface {} {
 test headergen-1.0 {
     Generated header file with interface info
 } -setup {
-    makeFile {} header1.h
-    makeFile {} header1.c
-    micca configure {
+    validateutils genMiccaFile header1 {
         domain header1 {
             interface {#include <stdio.h>}
 
@@ -540,9 +555,11 @@ test headergen-1.0 {
     }
 } -cleanup {
     cleanupDomain
+    validateutils forgetFiles
 } -body {
-    micca generate
-    llength [fileutil::grep {stdio} header1.h]
+    validateutils matchLines header1.h {
+        #include <stdio.h>
+    }
 } -result {1}
 ----
 
@@ -564,7 +581,7 @@ There are three circumstances where a type is needed external to the domain:
 We will have need to compute the type aliases needed by the interface
 more than once, so we factor the code into a procedure.
 
-(((micca,Helper,FindInterfaceTypeAliases)))
+(((micca,Helpers,FindInterfaceTypeAliases)))
 [source,tcl]
 ----
 <<generation helper commands>>=
@@ -668,9 +685,7 @@ proc interfaceTypeAliases {} {
 test headergen-2.0 {
     Generated header file with external type alias
 } -setup {
-    makeFile {} header2.h
-    makeFile {} header2.c
-    micca configure {
+    validateutils genMiccaFile header2 {
         domain header2 {
             typealias gCount uint64_t
             typealias pCount uint32_t
@@ -694,10 +709,16 @@ test headergen-2.0 {
     }
 } -cleanup {
     cleanupDomain
+    validateutils forgetFiles
 } -body {
-    micca generate
-    llength [fileutil::grep {typedef} header2.h]
-} -result {2}
+    testConditions\
+        {[validateutils matchLines header2.h {
+            typedef uint32_t pCount ;
+        }]}\
+        {[validateutils matchLines header2.h {
+            typedef uint64_t gCount ;
+        }]}
+} -result {1}
 ----
 
 === Domain Operation Declarations
@@ -719,7 +740,7 @@ What we need to know is are instance references to the operation
 and the name of the relationship used to find the parameters of
 the operation.
 
-(((micca,Helper,GenOperationDeclarations)))
+(((micca,Helpers,GenOperationDeclarations)))
 [source,tcl]
 ----
 <<generation helper commands>>=
@@ -776,9 +797,7 @@ proc domainOpDeclarations {} {
 test headergen-3.0 {
     Domain operation declarations in header file
 } -setup {
-    makeFile {} header3.h
-    makeFile {} header3.c
-    micca configure {
+    validateutils genMiccaFile header3 {
         domain header3 {
             domainop int op1 {a int b char} {
                 printf ("%d %c\n", a, b) ;
@@ -802,10 +821,22 @@ test headergen-3.0 {
     }
 } -cleanup {
     cleanupDomain
+    validateutils forgetFiles
 } -body {
-    micca generate
-    llength [fileutil::grep {extern int header3_op[0-9]} header3.h]
-} -result {2}
+    testConditions\
+        {[validateutils matchLines header3.h {
+            /*
+             * two parameters
+             */
+            extern int header3_op1(int, char) ;
+        }]}\
+        {[validateutils matchLines header3.h {
+            /*
+             * pointer type parameters
+             */
+            extern int header3_op2(char *, uint8_t *) ;
+        }]}
+} -result {1}
 ----
 
 === External Operation Declarations
@@ -980,9 +1011,7 @@ relation foreach pevent $pevents -ascending Model {
 test headergen-4.0 {
     Generated header file with portal constants
 } -setup {
-    makeFile {} header4.h
-    makeFile {} header4.c
-    micca configure {
+    validateutils genMiccaFile header4 {
         domain header4 {
             class c1 {
                 attribute color int -default 10
@@ -1004,10 +1033,21 @@ test headergen-4.0 {
     }
 } -cleanup {
     cleanupDomain
+    validateutils forgetFiles
 } -body {
-    micca generate
-    llength [fileutil::grep {CLASSID} header4.h]
-} -result {2}
+    testConditions\
+        {[validateutils matchLines header4.h {
+            #define HEADER4_CLASSCOUNT 2
+        }]}\
+        {[validateutils matchLines header4.h {
+            #define HEADER4_C1_CLASSID 0
+            #define HEADER4_C1_ATTRCOUNT 2
+        }]}\
+        {[validateutils matchLines header4.h {
+            #define HEADER4_C2_CLASSID 1
+            #define HEADER4_C2_ATTRCOUNT 2
+        }]}
+} -result {1}
 ----
 
 === Portal Data Structure Declaration
@@ -7219,7 +7259,7 @@ test codegen-28.0 {
 proc ClassForeachInstance {className instref} {
     variable domain
 
-    set iter [CreateTempSymbol Ctype {MRT_InstanceIterator}\
+    set iter [CreateTempSymbol Ctype {MRT_InstIterator}\
             Type InstanceIterator Class $className]
     set iab [CreateTempSymbol Ctype {MRT_iab *} Type IAB Class $className]
 
@@ -7228,7 +7268,7 @@ proc ClassForeachInstance {className instref} {
     set classDesc [GetClassDescriptor $domain $className]
     set result [IndentToBlock [string cat\
         [linecomment "$className foreachInstance $instref"]\
-        "MRT_InstanceIterator $iter ;\n"\
+        "MRT_InstIterator $iter ;\n"\
         "for (mrt_InstIteratorStart(&$iter, &$classDesc) ;\
             mrt_InstIteratorMore(&$iter) ;\
             mrt_InstIteratorNext(&$iter)) \{\n"\
