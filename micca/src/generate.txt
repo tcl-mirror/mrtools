@@ -23,7 +23,7 @@ model.
 The `micca` run time provides functions to map model level actions
 onto the target platform.
 
-The remaining component is to generate ``C'' code
+The remaining component is to generate ``C'' code for a domain.
 Code generation consist of two major pieces:
 
 * Generating initialized ``C'' variables that supply the data values
@@ -41,9 +41,9 @@ to insulate the user supplied ``C'' code from the details of
 the run time function interfaces and the data structures used,
 `micca` performs an additional level of macro expansion on the
 state activities and operations code.
-Thus the supplied ``C'' code contains embedded macros and these are expanded
-to support interfacing to the run time and performing other
-model level activities.
+Thus the supplied ``C'' code for activities contains embedded macros
+and these are expanded to support interfacing to the run time and performing
+other model level activities.
 
 In the next section we discuss generating the data required by the run time.
 Afterward, we describe generating ``C'' code to help interface
@@ -704,7 +704,7 @@ test headergen-2.0 {
 
 ``C'' language programs tend to be composed of _declarations_ and
 _definitions_.
-A declaration makes symbol names and types known to the compile.
+A declaration makes symbol names and types known to the compiler.
 A definition associates specific data or code statements to a symbol.
 Header files contain a lot of declarations.
 Here we start with declarations for the domain operations.
@@ -1120,6 +1120,7 @@ invoked as part of the code template expansion.
 
 (((micca,Code Generation,domainInclude)))
 [source,tcl]
+.Implementation
 ----
 <<generation code commands>>=
 proc domainInclude {} {
@@ -1129,7 +1130,14 @@ proc domainInclude {} {
 }
 ----
 
+=== Domain Prologue
+
+Any prologue text defined during domain configuration is placed early
+in the generated code file.
+
+(((micca,Code Generation,prologueDeclarations)))
 [source,tcl]
+.Implementation
 ----
 <<generation code commands>>=
 proc prologueDeclarations {} {
@@ -1187,14 +1195,21 @@ test codegen-1.0 {
 } -result {2}
 ----
 
+=== Implementation Type Aliases
+
+The type aliases that are not placed in the header file are placed in the
+code file.
+
+(((micca,Code Generation,implementationTypeAliases)))
 [source,tcl]
+.Implementation
 ----
 <<generation code commands>>=
 proc implementationTypeAliases {} {
     variable domain
     set domRef [Domain findWhere {$Name eq $domain}]
     set aliasRefs [refMinus [findRelated $domRef ~R7]\
-            [FindInterfaceTypeAliases $domain]]
+            [FindInterfaceTypeAliases $domain]] ; # <1>
     append result [comment "Type Aliases"]
     forAllRefs taRef $aliasRefs {
         assignAttribute $taRef TypeName TypeDefinition
@@ -1207,8 +1222,19 @@ proc implementationTypeAliases {} {
     return $result
 }
 ----
+<1> The set difference between all the type aliases and those used
+in the domain interface is the set that we are interested in here.
 
+=== Forward Class Declarations
+
+We need to introduce the structure names for the classes.
+No definition of the structure is given here.
+That will come later, but since class structures have pointers to
+other class structures we need to tell the compiler about the names.
+
+(((micca,Code Generation,forwardClassDeclarations)))
 [source,tcl]
+.Implementation
 ----
 <<generation code commands>>=
 proc forwardClassDeclarations {} {
@@ -1228,7 +1254,11 @@ proc forwardClassDeclarations {} {
 }
 ----
 
+=== Forward Relationshp Declaration
+
+(((micca,Code Generation,forwardRelationshipDeclaration)))
 [source,tcl]
+.Implementation
 ----
 <<generation code commands>>=
 proc forwardRelationshipDeclaration {} {
@@ -1240,7 +1270,19 @@ proc forwardRelationshipDeclaration {} {
 }
 ----
 
+=== Class Declarations
+
+To declare the structures of the classes has one complication.
+As usual,
+union subclasses have to be treated separately.
+Because the class structure of union based generalization nests
+the subclasses as part of the superclass structure,
+we must emit the union subclass declarations in the correct order
+for the compiler.
+
+(((micca,Code Generation,classDeclarations)))
 [source,tcl]
+.Implementation
 ----
 <<generation code commands>>=
 proc classDeclarations {} {
@@ -1260,20 +1302,6 @@ proc classDeclarations {} {
     }
 
     return $result
-}
-----
-
-[source,tcl]
-----
-<<generation helper commands>>=
-proc FindNonUnionSubclasses {domain} {
-    set usubs [UnionSubclass findWhere {$Domain eq $domain}]
-    return [pipe {
-        Class findWhere {$Domain eq $domain} |
-        deRef ~ |
-        relation semiminus [deRef $usubs] ~ -using {Domain Domain Class Name} |
-        ::rosea::Helpers::ToRef ::micca::Class ~
-    }]
 }
 ----
 
@@ -1416,6 +1444,20 @@ proc DeclareClassStructure {classRef} {
     }
 
     append result "\} ;\n"
+}
+----
+
+[source,tcl]
+----
+<<generation helper commands>>=
+proc FindNonUnionSubclasses {domain} {
+    set usubs [UnionSubclass findWhere {$Domain eq $domain}]
+    return [pipe {
+        Class findWhere {$Domain eq $domain} |
+        deRef ~ |
+        relation semiminus [deRef $usubs] ~ -using {Domain Domain Class Name} |
+        ::rosea::Helpers::ToRef ::micca::Class ~
+    }]
 }
 ----
 
@@ -4765,7 +4807,7 @@ ColorType c = %<instance self attribute Color>% ;
 The code generator would then expand the commands contained between the
 *%<* and *>%* delimiters and replace the embedded macro with the
 value of the *Color* attribute of the instance referenced by the
-value of the *self* variable..
+value of the *self* variable.
 This is a very simple case, but even here the code generator
 performs a number of significant checks in an attempt to discover
 errors before code is sent to the compiler.
@@ -4782,6 +4824,24 @@ compiler errors.
 Discovering error earlier makes them much easier to correct since
 the mapping of compiler errors back to the source becomes more difficult
 since there is a level of translation in between.
+
+The macro commands expand to one of three types of ``C'' constructs:
+
+. A macro command may expand to a statement in ``C''.
+For statement macros,
+the expansion yields one or more lines of code and the code generator
+takes care of the semicolon punctuation.
+. A macro command may expand to a value in ``C''.
+For value macros,
+the code generator just replaces the macro and does not add any punctuation.
+This enable a value macro to be used inside of another ``C'' expression.
+. A macro command may expand to a loop construct in ``C''.
+For looping macros,
+additional ``C'' code is included in the loop body and the end of the
+loop is given by invoking the `%<end>%` macro.
+Typically, the looping macros allow iteration over sets of instances.
+
+In the descriptions below we state the expansion type of each macro.
 
 === Expanding the Activities Macros
 
@@ -5286,6 +5346,8 @@ proc End {} {
 }
 ----
 
+=== Invoking External Operations
+
 [source,tcl]
 ----
 <<generation support commands>>=
@@ -5335,58 +5397,6 @@ proc InstanceAttribute {instref attr} {
             named, $attr"
     }
     return "$instref->$attr"
-}
-----
-
-[source,tcl]
-----
-<<generation support commands>>=
-proc ParseAttrVars {instref attrvars} {
-    variable domain
-
-    set sym [CheckInstRefSymbol $instref]
-    set className [dict get $sym Class]
-
-    if {[llength $attrvars] == 0} {
-        # look up the attributes of the class
-        set attrs [pipe {
-            Attribute findWhere {$Domain eq $domain && $Class eq $className} |
-            deRef ~ |
-            relation project ~ Name DataType
-        }]
-        set attrNames [relation list $attrs Name -ascending Name]
-        set varNames $attrNames
-        set dataTypes [relation list $attrs DataType -ascending Name]
-    } else {
-        set attrNames [list]
-        set varNames [list]
-        foreach attrvar $attrvars {
-            set l [llength $attrvar]
-            if {$l < 1 || $l > 2} {
-                error "bad format for attribute name /variable name pair,\
-                        \"$attrvar\""
-            }
-            set attrName [lindex $attrvar 0]
-            set attrRef [Attribute findById Domain $domain Class $className\
-                Name $attrName]
-            if {[isEmptyRef $attrRef]} {
-                error "class, $className, does not have an attribute named,\
-                    \"$attrName\""
-            }
-            lappend attrNames $attrName
-            lappend dataTypes [readAttribute $attrRef DataType]
-            if {$l == 1} {
-                set varName $attrName
-            } elseif {$l == 2} {
-                set varName [lindex $attrvar 1]
-                if {[::struct::set contains $varNames $varName]} {
-                    error "duplicate variable name, \"$varName\""
-                }
-            }
-            lappend varNames $varName
-        }
-    }
-    return [list $attrNames $varNames $dataTypes]
 }
 ----
 
