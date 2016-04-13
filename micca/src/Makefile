@@ -14,10 +14,6 @@ TESTDIR = ../tests
 PKGDIR	= ../../packages
 IMAGEDIR = ./images
 CODEDIR	= ../code
-POSIXDIR = $(CODEDIR)/c/posix
-
-CFLAGS	= -std=c11 -g -L$(HOME)/local/lib
-CPPFLAGS = -D_POSIX_C_SOURCE=200112L -D_ISOC11_SOURCE
 
 vpath %.pdf $(DOCDIR)
 vpath %.html $(DOCDIR)
@@ -141,7 +137,6 @@ ASCIIDOC_OPTS =\
 	$(NULL)
 
 .PHONY : all doc code tests runtests
-.PHONY : posixcode posixh posixc
 
 all : doc code tests
 
@@ -154,20 +149,6 @@ tests : code $(TESTS)
 runtests : tests
 	cd $(TESTDIR) ; tclsh $(TESTS) -verbose bet -level debug
 
-posixcode : $(POSIXOBJ)
-
-$(POSIXOBJ) : posixc posixh
-
-posixc : $(POSIXC)
-
-posixh : $(POSIXH)
-
-$(POSIXOBJ) : $(POSIXH) $(POSIXC)
-
-$(POSIXH) : $(DOCSRC) $(DOCPARTS)
-	atangle $(ATANGLEOPTS) -line '#line %l% "%f%"' -root micca_rt_posix.h -output $@ $<
-$(POSIXC) : $(DOCSRC) $(DOCPARTS)
-	atangle $(ATANGLEOPTS) -line '#line %l% "%f%"' -root micca_rt_posix.c -output $@ $<
 clean :
 	$(RM) $(CLEANFILES)
 
@@ -184,10 +165,6 @@ $(DOCDIR)/%.pdf : %.aweb
 	    --destination-dir=$(DOCDIR)\
 	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) $<
 	$(RM) $(DOCDIR)/*__[0-9].pdf
-
-mrt_interface.h : runtime.txt
-
-mrt_implementation.c : runtime.txt
 
 %.tcl : %.aweb
 	atangle $(ATANGLEOPTS) -root $@ -output $(CODEDIR)/tcl/$@ $<
@@ -216,23 +193,6 @@ builddoc :
 	a2x $(A2XOPTS) --doctype=book  --format=pdf\
 	    --destination-dir=$(DOCDIR)\
 	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) micca.aweb
-
-rttests : $(POSIXDIR)/micca_rt_test
-
-runrttests : rttests
-	$(POSIXDIR)/micca_rt_test
-	gcov micca_rt_test.c
-
-$(POSIXDIR)/micca_rt_test : CPPFLAGS += -I$(HOME)/local/include \
-    	-fprofile-arcs -ftest-coverage
-$(POSIXDIR)/micca_rt_test : LOADLIBES = $(HOME)/local/lib/libcunit.a
-
-$(POSIXDIR)/micca_rt_test : $(POSIXDIR)/micca_rt_test.c
-
-$(POSIXDIR)/micca_rt_test.c : $(POSIXC) $(POSIXH)
-
-$(POSIXDIR)/micca_rt_test.c : $(DOCSRC) $(DOCPARTS)
-	atangle $(ATANGLEOPTS) -root micca_rt_test.c -output $@ $<
 
 #atangle $(ATANGLEOPTS) -line '#line %l% "%f%"' -root micca_rt_test.c -output $@ $<
 #

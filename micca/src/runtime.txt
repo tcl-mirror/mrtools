@@ -8702,7 +8702,7 @@ It is necessary to initialize our managed signal mask to be empty.
 <<posix static functions>>=
 static inline
 void
-initCriticalSection(void)
+mrtInitCriticalSection(void)
 {
     sigemptyset(&mrtSigMask) ;
 }
@@ -9664,13 +9664,470 @@ void
 mrt_Initialize(void)
 {
     mrtEventPoolInit() ;
+    mrtInitCriticalSection() ;
     mrtInitSysTimer() ;
     mrtInitFDService() ;
     mrt_RegisterTraceHandler(mrtPrintTraceInfo) ;
 }
 ----
 
+== ARM 7M Specific Code
+
+[source,c]
+----
+<<arm7m includes>>=
+typedef enum IRQn {
+/******  Cortex-M3 Processor Exceptions Numbers **********/
+  NonMaskableInt_IRQn   = -14,   /* 2 Non Maskable */
+  HardFault_IRQn        = -13,   /* 3 Hard Fault */
+  MemoryManagement_IRQn = -12,   /* 4 Memory Management */
+  BusFault_IRQn         = -11,   /* 5 Bus Fault */
+  UsageFault_IRQn       = -10,   /* 6 Usage Fault */
+  SVCall_IRQn           = -5,    /* 11 SV Call */
+  DebugMonitor_IRQn     = -4,    /* 12 Debug Monitor */
+  PendSV_IRQn           = -2,    /* 14 Pend SV */
+  SysTick_IRQn          = -1,    /* 15 System Tick */
+} IRQn_Type ;
+#include "core_cm3.h"
+#include "bit_twiddle.h"
+/*
+ * Use the Energy Micro library functions for low level peripheral access.
+ */
+#include "em_chip.h"
+#include "em_cmu.h"
+#include "em_emu.h"
+#include "em_rtc.h"
+#include "em_dbg.h"
+
+
+#define SWO_LOCATION 0
+#ifndef MRT_TIMER_FREQUENCY
+#   define MRT_TIMER_FREQUENCY     4096UL
+#endif /* MRT_TIMER_FREQUENCY */
+#define MRT_MAX_CLOCK_TICKS     (UINT32_MAX - 1)
+#define MRT_MAX_MSEC_DELAY\
+        ((MRT_MAX_CLOCK_TICKS / MRT_TIMER_FREQUENCY) * 1000UL)
+----
+
+=== ARM 7M Critical Sections
+
+[source,c]
+----
+<<arm7m static functions>>=
+static inline
+void
+mrtInitCriticalSection(void)
+{
+    #define MRT_PENDSV_PRIORITY     0xff
+    NVIC_SetPriority(PendSV_IRQn, MRT_PENDSV_PRIORITY) ;
+}
+static inline
+void
+beginCriticalSection(void)
+{
+    __disable_irq() ;
+}
+static inline
+void
+endCriticalSection(void)
+{
+    __enable_irq() ;
+}
+----
+
+=== ARM 7M Timing Interfaces
+
+[source,c]
+----
+<<arm7m static functions>>=
+static inline
+MRT_DelayTime
+mrtMsecToTicks(
+    MRT_DelayTime msec)
+{
+    if (msec > MRT_MAX_MSEC_DELAY) {
+        msec = MRT_MAX_MSEC_DELAY ;
+    }
+    /*
+     * We must avoid overflow if the requested number of
+     * msecs is large.
+     */
+    return msec < MRT_MAX_CLOCK_TICKS / MRT_TIMER_FREQUENCY ?
+            ((msec * MRT_TIMER_FREQUENCY) + 1000UL / 2UL) / 1000UL :
+            ((msec + 1000UL / 2UL) / 1000UL) * MRT_TIMER_FREQUENCY ;
+}
+----
+
+[source,c]
+----
+<<arm7m static functions>>=
+static inline
+MRT_DelayTime
+mrtTicksToMsec(
+    MRT_DelayTime ticks)
+{
+    return ticks < MRT_MAX_CLOCK_TICKS / 1000UL ?
+        ((ticks * 1000UL) + MRT_TIMER_FREQUENCY / 2UL) / MRT_TIMER_FREQUENCY :
+        ((ticks + MRT_TIMER_FREQUENCY / 2UL) / MRT_TIMER_FREQUENCY) * 1000UL ;
+}
+----
+
+[source,c]
+----
+<<arm7m static functions>>=
+static void
+mrtSysTimerMask(void)
+{
+    RTC_IntDisable(RTC_IFC_COMP0) ;
+}
+----
+
+[source,c]
+----
+<<arm7m static functions>>=
+static void
+mrtSysTimerUnmask(void)
+{
+    RTC_IntEnable(RTC_IFC_COMP0) ;
+}
+----
+
+[source,c]
+----
+<<arm7m static functions>>=
+static void
+mrtSysTimerStart(
+    MRT_DelayTime time)
+{
+    RTC_CompareSet(0, ticks) ;
+    RTC_IntClear(RTC_IFC_COMP0) ;
+    mrtSysTimerUnmask() ;
+    RTC_Enable(true) ;
+}
+----
+
+[source,c]
+----
+<<arm7m static functions>>=
+static MRT_DelayTime
+mrtSysTimerStop(void)
+{
+    /*
+     * There is a race between when we read the CNT register and when we
+     * actually get the timer stopped where it may expire. If it expires, the
+     * interrupt flag will be set and we can use that as an indication that
+     * the CNT register is not valid (i.e. it was cleared to zero when the
+     * timer expired).  This is different than if we had just been enabled and
+     * requested to stop before one tick went by (in our case that's ~ 244
+     * microsecond) and count would have been zero. So this is a bit tricky in
+     * here.
+     */
+    MRT_DelayTime remain ;
+
+    mrtSysTimerMask() ;
+    if (RTC->CTRL & RTC_CTRL_EN) {
+        remain = RTC->COMP0 ;
+        remain -= RTC->CNT ;
+        /*
+         * Check that the timer didn't expire, as is indicated by the
+         * interrupt flag, while we were trying to read the registers.
+         */
+        if (RTC->IF & RTC_IF_COMP0) {
+            remain = 0 ;
+        }
+    } else {
+        remain = 0 ;
+    }
+    RTC_Enable(false) ; // timer disabled
+
+    return remain ;
+}
+----
+
+[source,c]
+----
+<<arm7m external functions>>=
+void
+RTC_IRQHandler(void)
+{
+    RTC_Enable(false) ; // timer disabled
+    RTC_IntClear(RTC_IFC_COMP0) ;
+    MRT_DelayTime nextTime = mrt_TimerExpireService() ;
+    if (nextTime != 0) {
+        mrtSysTimerStart(nextTime) ;
+    }
+}
+----
+
+[source,c]
+----
+<<arm7m static functions>>=
+static void
+mrtInitSysTimer(void)
+{
+    RTC_Reset() ;
+    /*
+     * Set RTC prescaler to divide by 8.
+     */
+    CMU_ClockDivSet(cmuClock_RTC, cmuClkDiv_8) ;
+    /*
+     * Enable Low Freq A Clock to run the RTC.
+     */
+    CMU_ClockEnable(cmuClock_RTC, true) ;
+    RTC_Init_TypeDef init = RTC_INIT_DEFAULT ;
+    init.enable = false ;
+    RTC_Init(&init) ;
+    /*
+     * Enable interrupt at the NVIC.
+     */
+    NVIC_ClearPendingIRQ(RTC_IRQn) ;
+    NVIC_EnableIRQ(RTC_IRQn) ;
+}
+----
+
+=== ARM 7M Async Execution Interface
+
+[source,c]
+----
+<<arm7m external functions>>=
+MRT_SyncParams *
+mrt_SyncRequest(
+    MRT_SyncFunc f)
+{
+    beginCriticalSection() ;
+    MRT_SyncParams *params = mrtSyncQueuePut(f, true) ;
+    endCriticalSection() ;
+    SCB->ICSR = SCB_ICSR_PENDSVSET_Msk ;
+    return params ;
+}
+----
+
+The alternate interface is also easily implemented.
+
+[source,c]
+----
+<<posix external functions>>=
+MRT_SyncParams *
+mrt_TrySyncRequest(
+    MRT_SyncFunc f)
+{
+    beginCriticalSection() ;
+    MRT_SyncParams *params = mrtSyncQueuePut(f, false) ;
+    endCriticalSection() ;
+    if (params) {
+        SCB->ICSR = SCB_ICSR_PENDSVSET_Msk ;
+    }
+    return params ;
+}
+----
+
+[source,c]
+----
+<<arm7m external functions>>=
+void
+PendSV_Handler(void)
+{
+    /*
+     * Empty the foreground / background
+     * synchronization queue.
+     */
+    for (MRT_SyncBlock blk = mrtSyncQueueGet() ; blk ; blk = syncQueueGet()) {
+        if (blk->function) {
+            blk->function(&blk->params) ;
+        }
+    }
+}
+----
+
+=== ARM 7M Suspending Execution
+
+[source,c]
+----
+<<arm7m static data>>=
+uint8_t sysEnergyMode = 2 ;
+----
+
+[source,c]
+----
+<<arm7m static functions>>=
+static void
+sysPowerUp(void)
+{
+}
+
+static void
+sysPowerDown(void)
+{
+    bool systick = (SysTick->CTRL & SysTick_CTRL_ENABLE_Msk) != 0 ;
+    SysTick->CTRL &= ~BITMASK(SysTick_CTRL_ENABLE_Pos) ;
+
+    switch (sysEnergyMode) {
+    case 1:
+        EMU_EnterEM1() ;
+        break ;
+
+    case 2:
+    default:
+        EMU_EnterEM2(true) ;
+        break ;
+
+    case 3:
+        EMU_EnterEM3(true) ;
+        break ;
+
+    case 4:
+        /*
+         * Only the reset pin or power cycle wakes us up after this.
+         */
+        EMU_EnterEM4() ;
+        break ;
+    }
+
+    if (systick) {
+        SysTick->CTRL |= BITMASK(SysTick_CTRL_ENABLE_Pos) ;
+    }
+}
+----
+
+[source,c]
+----
+<<arm7m static functions>>=
+static
+void
+mrtWait(void)
+{
+    beginCriticalSection() ;
+    if (mrtSyncQueueEmpty()) {
+        sysPowerDown() ;
+        __DSB() ;
+        __WFI() ;
+        sysPowerUp() ;
+    }
+    endCriticalSection() ;
+}
+----
+
+=== ARM 7M Initialization
+
+[source,c]
+----
+<<arm7m static functions>>=
+static void
+mrtPlatformInit(void)
+{
+    /*
+     * Make sure and set up the vector table in case it has been moved from its
+     * default location.
+     */
+    #pragma section=".intvec"
+    SCB->VTOR = (uint32_t)__section_begin(".intvec") ;
+    /*
+     * Set stack align, so ISR's are truly ordinary "C" functions.
+     */
+    SCB->CCR |= SCB_CCR_STKALIGN_Msk ;
+    /*
+     * Workaround for chip errata.
+     */
+    CHIP_Init() ;
+    /*
+     * Update the global notion of the system clock frequency.  The device
+     * drivers need this to calculate various dividers properly.
+     */
+    SystemCoreClockUpdate() ;
+    /*
+     * Bring the system clock down to 7 MHz.
+     */
+    CMU_HFRCOBandSet(cmuHFRCOBand_7MHz) ;
+    /*
+     * High frequency peripheral clock.
+     */
+    CMU_ClockDivSet(cmuClock_HFPER, cmuClkDiv_1) ;
+    CMU_ClockEnable(cmuClock_HFPER, true) ;
+    /*
+     * Enable the LF Crystal Oscillator.
+     */
+    CMU_OscillatorEnable(cmuOsc_LFXO, true, true) ;
+    /*
+     * Enable the low energy clock bus.
+     */
+    CMU_ClockEnable(cmuClock_CORELE, true) ;
+    /*
+     * Select the external crystal oscillator for the low frequency clocks.
+     */
+    CMU_ClockSelectSet(cmuClock_LFA, cmuSelect_LFXO) ;
+    CMU_ClockSelectSet(cmuClock_LFB, cmuSelect_LFXO) ;
+    /*
+     * Enable clocking the PRS.
+     */
+    CMU_ClockEnable(cmuClock_PRS, true) ;
+
+#ifndef RELEASE
+    /*
+     * We want to set up for SWO here.
+     * Enable the HF Peripheral Clock to the GPIO block.
+     */
+    CMU_ClockEnable(cmuClock_GPIO, true) ;
+    /*
+     * To use Serial Wire Viewer we need to enable the auxiliary clock and
+     * set up the I/O pins. SWO is wired to the location 0 pin out.
+     */
+    if (DBG_Connected()) {
+        DBG_SWOEnable(SWO_LOCATION) ;
+        /*
+         * Keep the aux clock running in EM2 mode.
+         */
+        BITBAND_Peripheral(&EMU->CTRL, _EMU_CTRL_EMVREG_SHIFT, 1) ;
+    }
+#endif /* RELEASE */
+}
+----
+
+[source,c]
+----
+<<arm7m external functions>>=
+void
+mrt_Initialize(void)
+{
+    mrtPlatformInit() ;
+    mrtEventPoolInit() ;
+    mrtInitCriticalSection() ;
+    mrtInitSysTimer() ;
+}
+----
+
 == Code Organization
+
+[source,c]
+----
+<<standard includes>>=
+#include <stdlib.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdalign.h>
+#include <stdnoreturn.h>
+#include <string.h>
+#include <assert.h>
+----
+
+[source,c]
+----
+<<common includes>>=
+#include "micca_rt.h"
+#include <inttypes.h>
+----
+
+[source,c]
+----
+<<common defines>>=
+#ifndef COUNTOF
+#define COUNTOF(a)  (sizeof(a) / sizeof(a[0]))
+#endif /* COUNTOF */
+----
+
+=== POSIX Files
 
 [source,c]
 ----
@@ -9723,56 +10180,6 @@ mrt_Initialize(void)
 <<posix external interfaces>>
 
 #endif /* MICCA_RT_H_ */
-----
-
-[source,c]
-----
-<<standard includes>>=
-#include <stdlib.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <stdbool.h>
-#include <stdarg.h>
-#include <stdio.h>
-#include <stdalign.h>
-#include <stdnoreturn.h>
-#include <string.h>
-#include <assert.h>
-----
-
-[source,c]
-----
-<<common includes>>=
-#include "micca_rt.h"
-#include <inttypes.h>
-----
-
-[source,c]
-----
-<<common defines>>=
-#ifndef COUNTOF
-#define COUNTOF(a)  (sizeof(a) / sizeof(a[0]))
-#endif /* COUNTOF */
-----
-
-[source,c]
-----
-<<micca_rt_arm7m.c>>=
-/*
-<<copyright info>>
-*/
-
-<<common includes>>
-----
-
-[source,c]
-----
-<<micca_rt_msp430.c>>=
-/*
-<<copyright info>>
-*/
-
-<<common includes>>
 ----
 
 [source,c]
@@ -9832,4 +10239,126 @@ mrt_Initialize(void)
 
 <<posix external functions>>
 <<mrt external functions>>
+----
+
+=== ARM 7M Files
+
+[source,c]
+----
+<<micca_rt_arm7m.h>>=
+/*
+<<copyright info>>
+*/
+
+#ifndef MICCA_RT_H_
+#define MICCA_RT_H_
+
+/*
+ * Standard Includes
+ */
+<<standard includes>>
+
+/*
+ * Preprocessor Defines
+ */
+<<common defines>>
+/*
+ * Constants
+ */
+<<mrt constants>>
+
+/*
+ * Data Types
+ */
+<<mrt interface simple types>>
+<<mrt interface aggregate types>>
+
+#   ifndef MRT_NO_TRACE
+<<mrt trace aggregate types>>
+#   endif /* MRT_NO_TRACE */
+
+/*
+ * Static Inline Functions
+ */
+<<mrt interface static inlines>>
+
+
+/*
+ * External Functions
+ */
+#   ifndef MRT_NO_TRACE
+<<mrt trace external interfaces>>
+#   endif /* MRT_NO_TRACE */
+
+<<mrt external interfaces>>
+
+#endif /* MICCA_RT_H_ */
+----
+
+[source,c]
+----
+<<micca_rt_arm7m.c>>=
+/*
+<<copyright info>>
+*/
+
+<<common includes>>
+<<arm7m includes>>
+
+/*
+ * Constants
+ */
+<<mrt implementation constants>>
+
+/*
+ * Data Types
+ */
+<<mrt implementation simple types>>
+<<mrt implementation aggregate types>>
+
+/*
+ * Forward References
+ */
+<<mrt forward references>>
+<<arm7m forward references>>
+
+/*
+ * Static Data
+ */
+#   ifndef MRT_NO_TRACE
+<<mrt trace static data>>
+#   endif /* MRT_NO_TRACE */
+
+<<mrt static data>>
+<<arm7m static data>>
+
+/*
+ * Static Functions
+ */
+#   ifndef MRT_NO_TRACE
+<<mrt trace static functions>>
+#   endif /* MRT_NO_TRACE */
+
+<<arm7m static functions>>
+<<mrt static functions>>
+
+/*
+ * External Functions
+ */
+#   ifndef MRT_NO_TRACE
+<<mrt trace external functions>>
+#   endif /* MRT_NO_TRACE */
+
+<<arm7m external functions>>
+<<mrt external functions>>
+----
+
+[source,c]
+----
+<<micca_rt_msp430.c>>=
+/*
+<<copyright info>>
+*/
+
+<<common includes>>
 ----
