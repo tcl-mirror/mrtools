@@ -20,7 +20,7 @@ vpath %.html $(DOCDIR)
 vpath %.test $(TESTDIR)
 vpath %.uxf $(IMAGEDIR)
 
-VERSION=1.0a2
+VERSION=1.0a3
 
 DOCSRC 	=\
 	rash.aweb\

@@ -55,7 +55,7 @@ namespace eval ::rash {
     namespace import ::ral::*
     namespace import ::ralutil::*
 
-    variable version 1.0a2
+    variable version 1.0a3
 
     relvar create APP {
         AppId string
@@ -64,7 +64,7 @@ namespace eval ::rash {
     } AppId Hull
     namespace eval APP {
         namespace path {::rash ::rosea::InstCmds ::rosea::Helpers}
-        proc create {appid hull {version 1.0a2}} {
+        proc create {appid hull {version 1.0a3}} {
             relvar eval {
                 set self [relvar insert ::rash::APP [list\
                     AppId       $appid\
@@ -991,7 +991,7 @@ namespace eval ::rash {
             ]]
             relation assign $self
             
-            set smrelvar [FullyQualifyDomain $Domain]::__${Class}__STATEINST
+            set smrelvar [FullyQualifyDomain $Domain]::${Class}__STATEINST
             set insts [relvar set $smrelvar]
             set attrs [relation attributes $insts]
             ttk::frame $Hull

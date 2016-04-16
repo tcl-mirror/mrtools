@@ -208,6 +208,9 @@ The run time support the following ``C'' preprocessor symbols:
 `__ARM_ARCH_7M__`::
     Defining this symbol compiles in the ARM Version 7-M specific
     code for executing sync requests from the foreground.
+`MRT_RELEASE`::
+    Defining this symbol removes code that is not meant for final product
+    release.
 
 == The Main Program
 
@@ -5826,30 +5829,39 @@ static
 bool
 mrtDispatchOneEvent(void)
 {
-    MRT_EventQueue *queue ;
+        #ifdef __ARM_ARCH_7M__
+    __set_BASEPRI(MRT_PENDSV_PRIORITY) ; // <1>
+        #endif /* __ARM_ARCH_7M__ */
 
-    if (!mrtEventQueueEmpty(&eventQueue)) {
-        queue = &eventQueue ;
-    } else {
+    MRT_EventQueue *queue ;
+    if (mrtEventQueueEmpty(&eventQueue)) {
         mrtEndTransaction() ;
-        if (!mrtEventQueueEmpty(&tocEventQueue)) {
-            queue = &tocEventQueue ;
-        } else {
-            return false ;
-        }
+        queue = mrtEventQueueEmpty(&tocEventQueue) ? NULL : &tocEventQueue ;
+    } else {
+        queue = &eventQueue ;
     }
 
-    MRT_ecb *ecb = queue->next ;
-    mrtEventQueueRemove(ecb) ;
-    mrtDispatchEvent(ecb) ;
-    /*
-     * Return the ECB to the pool.
-     */
-    mrtFreeEvent(ecb) ;
+    bool dispatched ;
+    if (queue != NULL) {
+        MRT_ecb *ecb = queue->next ;
+        mrtEventQueueRemove(ecb) ;
+        mrtDispatchEvent(ecb) ;
+        mrtFreeEvent(ecb) ; // Return the ECB to the pool.
 
-    return true ;
+        dispatched = true ;
+    } else {
+        dispatched = false ;
+    }
+
+        #ifdef __ARM_ARCH_7M__
+    __set_BASEPRI(0) ;
+        #endif /* __ARM_ARCH_7M__ */
+
+    return dispatched ;
 }
 ----
+<1> This is part of the exception processing that is used in the ARM 7M
+platform and is explained below.
 
 As we discussed above,
 there are three types of events.
@@ -9453,6 +9465,7 @@ mrtPrintTraceInfo(
 
     char const *sourceName ;
     char const *sourceClassName ;
+    char sourceIdNum[32] ;
 
     if (traceInfo->sourceInst == NULL) {
         sourceName = "none" ;
@@ -9461,31 +9474,18 @@ mrtPrintTraceInfo(
         sourceClassName = traceInfo->sourceInst->classDesc->name ;
         sourceName = traceInfo->sourceInst->name ;
         if (sourceName == NULL) {
-            MRT_iab *iab = traceInfo->sourceInst->classDesc->iab ;
-            if (iab && iab->storageStart != NULL) {
-                int32_t instid = ((uintptr_t)traceInfo->sourceInst -
-                    (uintptr_t)iab->storageStart) / iab->instanceSize ;
-                char idnumbuf[32] ;
-                snprintf(idnumbuf, sizeof(idnumbuf), "%" PRId32, instid) ;
-                sourceName = idnumbuf ;
-            } else {
-                sourceName = "unknown" ;
-            }
+            unsigned instid = mrt_InstanceIndex(traceInfo->sourceInst) ;
+            snprintf(sourceIdNum, sizeof(sourceIdNum), "%u", instid) ;
+            sourceName = sourceIdNum ;
         }
     }
     
     char const *targetName = traceInfo->targetInst->name ;
+    char targetIdNum[32] ;
     if (targetName == NULL) {
-        MRT_iab *iab = traceInfo->targetInst->classDesc->iab ;
-        if (iab && iab->storageStart != NULL) {
-            int32_t instid = ((uintptr_t)traceInfo->targetInst -
-                (uintptr_t)iab->storageStart) / iab->instanceSize ;
-            char idnumbuf[32] ;
-            snprintf(idnumbuf, sizeof(idnumbuf), "%" PRId32, instid) ;
-            targetName = idnumbuf ;
-        } else {
-            targetName = "unknown" ;
-        }
+        unsigned instid = mrt_InstanceIndex(traceInfo->targetInst) ;
+        snprintf(targetIdNum, sizeof(targetIdNum), "%u", instid) ;
+        targetName = targetIdNum ;
     }
 
     switch (traceInfo->eventType) {
@@ -9676,20 +9676,9 @@ mrt_Initialize(void)
 [source,c]
 ----
 <<arm7m includes>>=
-typedef enum IRQn {
-/******  Cortex-M3 Processor Exceptions Numbers **********/
-  NonMaskableInt_IRQn   = -14,   /* 2 Non Maskable */
-  HardFault_IRQn        = -13,   /* 3 Hard Fault */
-  MemoryManagement_IRQn = -12,   /* 4 Memory Management */
-  BusFault_IRQn         = -11,   /* 5 Bus Fault */
-  UsageFault_IRQn       = -10,   /* 6 Usage Fault */
-  SVCall_IRQn           = -5,    /* 11 SV Call */
-  DebugMonitor_IRQn     = -4,    /* 12 Debug Monitor */
-  PendSV_IRQn           = -2,    /* 14 Pend SV */
-  SysTick_IRQn          = -1,    /* 15 System Tick */
-} IRQn_Type ;
 #include "core_cm3.h"
-#include "bit_twiddle.h"
+#define__ARM_ARCH_7M__
+
 /*
  * Use the Energy Micro library functions for low level peripheral access.
  */
@@ -9699,6 +9688,9 @@ typedef enum IRQn {
 #include "em_rtc.h"
 #include "em_dbg.h"
 
+
+#define PENDSV_IRQN (-2)    /* 14 Pend SV */
+#define MRT_PENDSV_PRIORITY     0xff
 
 #define SWO_LOCATION 0
 #ifndef MRT_TIMER_FREQUENCY
@@ -9718,8 +9710,7 @@ static inline
 void
 mrtInitCriticalSection(void)
 {
-    #define MRT_PENDSV_PRIORITY     0xff
-    NVIC_SetPriority(PendSV_IRQn, MRT_PENDSV_PRIORITY) ;
+    NVIC_SetPriority(PENDSV_IRQN, MRT_PENDSV_PRIORITY) ;
 }
 static inline
 void
@@ -9906,7 +9897,7 @@ The alternate interface is also easily implemented.
 
 [source,c]
 ----
-<<posix external functions>>=
+<<arm7m external functions>>=
 MRT_SyncParams *
 mrt_TrySyncRequest(
     MRT_SyncFunc f)
@@ -9950,58 +9941,40 @@ uint8_t sysEnergyMode = 2 ;
 [source,c]
 ----
 <<arm7m static functions>>=
-static void
-sysPowerUp(void)
-{
-}
-
-static void
-sysPowerDown(void)
-{
-    bool systick = (SysTick->CTRL & SysTick_CTRL_ENABLE_Msk) != 0 ;
-    SysTick->CTRL &= ~BITMASK(SysTick_CTRL_ENABLE_Pos) ;
-
-    switch (sysEnergyMode) {
-    case 1:
-        EMU_EnterEM1() ;
-        break ;
-
-    case 2:
-    default:
-        EMU_EnterEM2(true) ;
-        break ;
-
-    case 3:
-        EMU_EnterEM3(true) ;
-        break ;
-
-    case 4:
-        /*
-         * Only the reset pin or power cycle wakes us up after this.
-         */
-        EMU_EnterEM4() ;
-        break ;
-    }
-
-    if (systick) {
-        SysTick->CTRL |= BITMASK(SysTick_CTRL_ENABLE_Pos) ;
-    }
-}
-----
-
-[source,c]
-----
-<<arm7m static functions>>=
 static
 void
 mrtWait(void)
 {
     beginCriticalSection() ;
     if (mrtSyncQueueEmpty()) {
-        sysPowerDown() ;
-        __DSB() ;
-        __WFI() ;
-        sysPowerUp() ;
+        bool systick = (SysTick->CTRL & SysTick_CTRL_ENABLE_Msk) != 0 ;
+        SysTick->CTRL &= ~SysTick_CTRL_ENABLE_Msk ;
+
+        switch (sysEnergyMode) {
+        case 1:
+            EMU_EnterEM1() ;
+            break ;
+
+        case 2:
+        default:
+            EMU_EnterEM2(true) ;
+            break ;
+
+        case 3:
+            EMU_EnterEM3(true) ;
+            break ;
+
+        case 4:
+            /*
+             * Only the reset pin or power cycle wakes us up after this.
+             */
+            EMU_EnterEM4() ;
+            break ;
+        }
+
+        if (systick) {
+            SysTick->CTRL |= SysTick_CTRL_ENABLE_Msk ;
+        }
     }
     endCriticalSection() ;
 }
@@ -10061,7 +10034,7 @@ mrtPlatformInit(void)
      */
     CMU_ClockEnable(cmuClock_PRS, true) ;
 
-#ifndef RELEASE
+#ifndef MRT_RELEASE
     /*
      * We want to set up for SWO here.
      * Enable the HF Peripheral Clock to the GPIO block.
@@ -10078,7 +10051,7 @@ mrtPlatformInit(void)
          */
         BITBAND_Peripheral(&EMU->CTRL, _EMU_CTRL_EMVREG_SHIFT, 1) ;
     }
-#endif /* RELEASE */
+#endif /* MRT_RELEASE */
 }
 ----
 
@@ -10089,6 +10062,350 @@ void
 mrt_Initialize(void)
 {
     mrtPlatformInit() ;
+    mrtEventPoolInit() ;
+    mrtInitCriticalSection() ;
+    mrtInitSysTimer() ;
+}
+----
+
+== MSP430 Specific Code
+
+[source,c]
+----
+<<msp430 includes>>=
+#include "msp430.h"
+
+#ifndef MRT_TIMER_FREQUENCY
+#   define MRT_TIMER_FREQUENCY     4096UL
+#endif /* MRT_TIMER_FREQUENCY */
+#define MRT_MAX_CLOCK_TICKS     (UINT32_MAX - 1)
+#define MRT_MAX_MSEC_DELAY\
+        ((MRT_MAX_CLOCK_TICKS / MRT_TIMER_FREQUENCY) * 1000UL)
+----
+
+=== MSP430 Critical Sections
+
+[source,c]
+----
+<<arm7m static functions>>=
+static inline
+void
+mrtInitCriticalSection(void)
+{
+}
+static inline
+void
+beginCriticalSection(void)
+{
+    __disable_interrupt() ;
+}
+static inline
+void
+endCriticalSection(void)
+{
+    __enable_interrupt() ;
+}
+----
+
+=== MSP430 Timing Interfaces
+
+[source,c]
+----
+<<msp430 static functions>>=
+static inline
+MRT_DelayTime
+mrtMsecToTicks(
+    MRT_DelayTime msec)
+{
+    if (msec > MRT_MAX_MSEC_DELAY) {
+        msec = MRT_MAX_MSEC_DELAY ;
+    }
+    /*
+     * We must avoid overflow if the requested number of
+     * msecs is large.
+     */
+    return msec < MRT_MAX_CLOCK_TICKS / MRT_TIMER_FREQUENCY ?
+            ((msec * MRT_TIMER_FREQUENCY) + 1000UL / 2UL) / 1000UL :
+            ((msec + 1000UL / 2UL) / 1000UL) * MRT_TIMER_FREQUENCY ;
+}
+----
+
+[source,c]
+----
+<<msp430 static functions>>=
+static inline
+MRT_DelayTime
+mrtTicksToMsec(
+    MRT_DelayTime ticks)
+{
+    return ticks < MRT_MAX_CLOCK_TICKS / 1000UL ?
+        ((ticks * 1000UL) + MRT_TIMER_FREQUENCY / 2UL) / MRT_TIMER_FREQUENCY :
+        ((ticks + MRT_TIMER_FREQUENCY / 2UL) / MRT_TIMER_FREQUENCY) * 1000UL ;
+}
+----
+
+[source,c]
+----
+<<msp430 static functions>>=
+static void
+mrtSysTimerMask(void)
+{
+    TACCTL0 &= ~CCIE ;
+}
+----
+
+[source,c]
+----
+<<msp430 static functions>>=
+static void
+mrtSysTimerUnmask(void)
+{
+    TACCTL0 &= ~CCIFG ;
+    TACCTL0 |= CCIE ;
+}
+----
+
+[source,c]
+----
+<<msp430 static functions>>=
+static void
+mrtSysTimerStart(
+    MRT_DelayTime time)
+{
+    clockCnts = ticks >> 16 ;
+    setNextTime(ticks) ;
+}
+----
+
+[source,c]
+----
+<<msp430 static data>>=
+/*
+ * We keep a higher precision time indication by counting Timer A overflows.
+ * This variable holds the number of Timer A overflow interrupts that have
+ * occurred. When concatenated with the value of the TAR register from
+ * Timer A and treated as a 32 bit quantity, the value represented is the
+ * time since the system started as a U(20,12) fixed radix point number
+ * in units of seconds (this is because we are running timer A off of the
+ * 32 KHz clock divided down by 8 ==> 4096 ticks / sec). For 20 integer bits of
+ * seconds, the clock time value rolls over after ~1,000,000 seconds or
+ * about 12.1 days.
+ *
+ * Use the function, "sysTimeTicks()" to obtain the time value.
+ */
+static uint16_t timerTicks ;
+static uint16_t clockCnts ;
+----
+
+[source,c]
+----
+<<msp430 static functions>>=
+static inline
+uint16_t
+readTimer(void)
+{
+#   define  SUCCESSIVE_MATCHES  3
+
+    uint16_t cmp1Reg ;
+    uint16_t cmp2Reg ;
+    uint8_t cnt ;
+
+    cnt = 1 ;
+    cmp1Reg = TAR ;
+    do {
+        cmp2Reg = TAR ;
+        cnt = cmp1Reg == cmp2Reg ? cnt + 1 : 1 ;
+        cmp1Reg = cmp2Reg ;
+    } while (cnt < SUCCESSIVE_MATCHES) ;
+
+    return cmp2Reg ;
+
+#   undef SUCCESSIVE_MATCHES
+}
+----
+
+[source,c]
+----
+<<msp430 static functions>>=
+/*
+ * To get a high resolution time value we combine the in memory counter that
+ * counts timer overflows with the current value of the timer register (TAR).
+ * However we must be careful here because the counter is shared with an
+ * interrupt service routine. So we make this function a "monitor" function and
+ * we must check that the interrupt flag is not set right after we read the
+ * timer value. If it is, then the memory counter will be off by one since
+ * there is a pending interrupt that has not been serviced.
+ */
+#pragma type_attribute=__monitor
+uint32_t
+sysTimeTicks(void)
+{
+    uint16_t tvalue = readTimer() ;
+    /*
+     * If the timer rolls over between the time we enter this function and the
+     * time we get here, then the interrupt flag will be set. In that case, the
+     * memory counter will be off by one (since the interrupt service routine
+     * will NOT have been run as we are in a "monitor" function).  Also we can
+     * assume the timer value is simply zero, reflecting the timer value when
+     * the roll over occurs (as it will not take a tick's worth of time to
+     * execute to here.
+     *
+     * If there is no roll over of the timer, then the time is simply the
+     * concatenation of the memory counter value and the timer value.
+     */
+    return (IFG1 & TAIFG) ?
+        (((uint32_t)timerTicks + 1) << 16) :
+        (((uint32_t)timerTicks << 16) | tvalue) ;
+}
+----
+
+[source,c]
+----
+<<msp430 static functions>>=
+#pragma type_attribute=__monitor
+static void
+setNextTime(
+    uint16_t clockTicks)
+{
+    if (clockTicks == 1) {
+        ++clockTicks ;
+    }
+    TACCR0 = readTimer() + clockTicks ;
+    mrtSysTimerUnmask() ;
+}
+----
+
+[source,c]
+----
+<<msp430 static functions>>=
+static MRT_DelayTime
+mrtSysTimerStop(void)
+{
+    MRT_DelayTime remain ;
+
+    mrtSysTimerMask() ;
+    uint16_t timer = readTimer() ;
+    /*
+     * Account that the timer might go off between when we
+     * stop it and when we read it.
+     */
+    if (TACCTL0 & CCIFG) {
+        remain = clockCnts ?
+                (MRT_DelayTime)(clockCnts - 1) << 16 : 0 ;
+    } else {
+        remain = TACCR0 - timer ;
+        remain += (MRT_DelayTime)clockCnts << 16 ;
+    }
+    return remain ;
+}
+----
+
+[source,c]
+----
+<<msp430 static functions>>=
+#pragma vector=TIMERA0_VECTOR
+static
+__interrupt
+void
+timerA0ISR(void)
+{
+    if (clockCnts == 0) {
+        MRT_DelayTime next = mrt_TimerExpireService() ;
+        if (next) {
+            mrtSysTimerStart(next) ;
+        }
+        __low_power_mode_off_on_exit() ;
+    } else {
+        /*
+         * Loading the compare register with the timer
+         * value causes us to count an entire 16 bits worth
+         * of ticks.
+         */
+        TACCR0 = TAR ;
+        --clockCnts ;
+    }
+}
+----
+
+[source,c]
+----
+<<msp430 static functions>>=
+static void
+mrtInitSysTimer(void)
+{
+    /*
+     * Stop and Clear the timer.
+     */
+    TACTL = TACLR ;
+    /*
+     * Set up clock source to ACLK and Divide down by 8.
+     */
+    TACTL |= TASSEL_1 | ID_3 ;
+    TACCTL0 = 0 ;
+    TACCTL1 = 0 ;
+    TACCTL2 = 0 ;
+    /*
+     * Start the timer in continuous mode. 
+     * Enable the timer overflow interrupt.
+     */
+    TACTL |= MC_2 | TAIE ;
+    /*
+     * Zero out the upper level counter that keeps track of ticks.
+     */
+    timerTicks = 0 ;
+}
+----
+
+=== MSP430 Async Execution Interface
+
+[source,c]
+----
+<<msp430 external functions>>=
+MRT_SyncParams *
+mrt_SyncRequest(
+    MRT_SyncFunc f)
+{
+    return mrtSyncQueuePut(f, true) ;
+}
+----
+
+[source,c]
+----
+<<msp430 external functions>>=
+MRT_SyncParams *
+mrt_TrySyncRequest(
+    MRT_SyncFunc f)
+{
+    return mrtSyncQueuePut(f, false) ;
+}
+----
+
+=== MSP430 Suspending Execution
+
+[source,c]
+----
+<<msp430 static functions>>=
+static
+void
+mrtWait(void)
+{
+    beginCriticalSection() ;
+    if (mrtSyncQueueEmpty()) {
+        __bis_SR_register(LPM0_bits | GIE) ;
+    } else {
+        endCriticalSection() ;
+    }
+}
+----
+
+=== MSP430 Initialization
+
+[source,c]
+----
+<<msp430 external functions>>=
+void
+mrt_Initialize(void)
+{
     mrtEventPoolInit() ;
     mrtInitCriticalSection() ;
     mrtInitSysTimer() ;
@@ -10353,6 +10670,60 @@ mrt_Initialize(void)
 <<mrt external functions>>
 ----
 
+=== MSP430 Files
+
+[source,c]
+----
+<<micca_rt_msp430.h>>=
+/*
+<<copyright info>>
+*/
+
+#ifndef MICCA_RT_H_
+#define MICCA_RT_H_
+
+/*
+ * Standard Includes
+ */
+<<standard includes>>
+
+/*
+ * Preprocessor Defines
+ */
+<<common defines>>
+/*
+ * Constants
+ */
+<<mrt constants>>
+
+/*
+ * Data Types
+ */
+<<mrt interface simple types>>
+<<mrt interface aggregate types>>
+
+#   ifndef MRT_NO_TRACE
+<<mrt trace aggregate types>>
+#   endif /* MRT_NO_TRACE */
+
+/*
+ * Static Inline Functions
+ */
+<<mrt interface static inlines>>
+
+
+/*
+ * External Functions
+ */
+#   ifndef MRT_NO_TRACE
+<<mrt trace external interfaces>>
+#   endif /* MRT_NO_TRACE */
+
+<<mrt external interfaces>>
+
+#endif /* MICCA_RT_H_ */
+----
+
 [source,c]
 ----
 <<micca_rt_msp430.c>>=
@@ -10361,4 +10732,52 @@ mrt_Initialize(void)
 */
 
 <<common includes>>
+<<msp430 includes>>
+
+/*
+ * Constants
+ */
+<<mrt implementation constants>>
+
+/*
+ * Data Types
+ */
+<<mrt implementation simple types>>
+<<mrt implementation aggregate types>>
+
+/*
+ * Forward References
+ */
+<<mrt forward references>>
+<<msp430 forward references>>
+
+/*
+ * Static Data
+ */
+#   ifndef MRT_NO_TRACE
+<<mrt trace static data>>
+#   endif /* MRT_NO_TRACE */
+
+<<mrt static data>>
+<<msp430 static data>>
+
+/*
+ * Static Functions
+ */
+#   ifndef MRT_NO_TRACE
+<<mrt trace static functions>>
+#   endif /* MRT_NO_TRACE */
+
+<<msp430 static functions>>
+<<mrt static functions>>
+
+/*
+ * External Functions
+ */
+#   ifndef MRT_NO_TRACE
+<<mrt trace external functions>>
+#   endif /* MRT_NO_TRACE */
+
+<<msp430 external functions>>
+<<mrt external functions>>
 ----
