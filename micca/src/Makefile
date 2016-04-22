@@ -10,17 +10,18 @@
 #
 
 DOCDIR	= ../doc
-CODEDIR	= ../code
 TESTDIR = ../tests
 PKGDIR	= ../../packages
 IMAGEDIR = ./images
+CODEDIR	= ../code
+
+VERSION=0.1
 
 vpath %.pdf $(DOCDIR)
 vpath %.html $(DOCDIR)
 vpath %.test $(TESTDIR)
 vpath %.uxf $(IMAGEDIR)
 vpath %.tcl $(CODEDIR)/tcl
-vpath %.c $(CODEDIR)/c/posix
 
 DOCSRC 	=\
 	micca.aweb\
@@ -30,6 +31,7 @@ DOCPARTS=\
 	bibliography.txt\
 	codeorg.txt\
 	configure.txt\
+	example.txt\
 	generate.txt\
 	litprog.txt\
 	platform.txt\
@@ -53,6 +55,10 @@ LSDIAGRAMS =\
 	pointer-example.uxf\
 	pointer-set-example.uxf\
 	assoc-decompose.uxf\
+	wmc-class-diagram.uxf\
+	wm-states.uxf\
+	ct-states.uxf\
+	main-loop.uxf\
 	$(NULL)
 
 IMAGES =\
@@ -64,9 +70,9 @@ TCLSRC	=\
      	$(patsubst %.aweb,%.tcl,$(DOCSRC))\
 	$(NULL)
 
-POSIXH	= $(CODEDIR)/c/posix/mrt_interface.h
-POSIXC	= $(CODEDIR)/c/posix/mrt_implementation.c
-POSIXOBJ	= $(CODEDIR)/c/posix/mrt_implementation.o
+POSIXH	= micca_rt.h
+POSIXC	= micca_rt.c
+POSIXOBJ = micca_rt.o
 
 PDF 	=\
      	$(DOCDIR)/$(patsubst %.aweb,%.pdf,$(DOCSRC))\
@@ -104,7 +110,7 @@ DBLATEX_PARAMS =\
 	index.numbered=0\
 	doc.publisher.show=0\
 	doc.lot.show=figure,table\
-	toc.section.depth=1\
+	toc.section.depth=2\
 	doc.section.depth=0\
 	$(NULL)
 
@@ -132,10 +138,9 @@ ASCIIDOC_OPTS =\
 	$(patsubst %,--attribute=%,$(ASCIIDOC_ATTRS))\
 	$(NULL)
 
-.PHONY : all doc code tests runtests
-.PHONY : posixcode posixh posixc
+.PHONY : all doc code tests runtests package
 
-all : doc code tests ccode
+all : doc code tests package
 
 doc : $(PDF)
 
@@ -146,21 +151,10 @@ tests : code $(TESTS)
 runtests : tests
 	cd $(TESTDIR) ; tclsh $(TESTS) -verbose bet -level debug
 
-posixcode : $(POSIXOBJ)
+package : $(PKGDIR)/package-micca-$(VERSION)-tcl.tm
 
-$(POSIXOBJ) : posixc posixh
-
-posixc : $(POSIXC)
-
-posixh : $(POSICH)
-
-$(POSIXOBJ) : $(POSIXH) $(POSIXC)
-
-$(POSIXH) : $(DOCSRC) $(DOCPARTS)
-	atangle $(ATANGLEOPTS) -line '#line %l% "%f%"' -root mrt_interface.h -output $@ $<
-
-$(POSIXC) : $(DOCSRC) $(DOCPARTS)
-	atangle $(ATANGLEOPTS) -line '#line %l% "%f%"' -root mrt_posix.c -output $@ $<
+$(PKGDIR)/package-micca-$(VERSION)-tcl.tm : code $(CODEDIR)/tcl/pkgIndex.tcl
+	teapot-pkg generate --output $(PKGDIR) $(CODEDIR)/tcl
 
 clean :
 	$(RM) $(CLEANFILES)
@@ -178,10 +172,6 @@ $(DOCDIR)/%.pdf : %.aweb
 	    --destination-dir=$(DOCDIR)\
 	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) $<
 	$(RM) $(DOCDIR)/*__[0-9].pdf
-
-mrt_interface.h : runtime.txt
-
-mrt_implementation.c : runtime.txt
 
 %.tcl : %.aweb
 	atangle $(ATANGLEOPTS) -root $@ -output $(CODEDIR)/tcl/$@ $<
@@ -211,6 +201,7 @@ builddoc :
 	    --destination-dir=$(DOCDIR)\
 	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) micca.aweb
 
+#atangle $(ATANGLEOPTS) -line '#line %l% "%f%"' -root micca_rt_test.c -output $@ $<
 #
 # vim :set sw=8 ts=8 sts=8 noexpandtab:
 #

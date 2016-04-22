@@ -1,0 +1,2474 @@
+// vim:set syntax=asciidoc:
+
+= Micca Run Time Testing
+
+== CUnit Setup
+
+[source,c]
+----
+<<micca_rt_test.c>>=
+#include <CUnit/CUnit.h>
+#include <CUnit/Basic.h>
+#include <setjmp.h>
+#include "micca_rt.h"
+#include "micca_rt.c"
+#include "testdomain.c"
+
+<<test functions>>
+
+<<suite tests>>
+
+static CU_SuiteInfo suites[] = {
+    <<test suites>>
+    CU_SUITE_INFO_NULL,
+} ;
+
+int
+main(
+    int argc,
+    char **argv)
+{
+    testdomain_initialize() ;
+
+    CU_initialize_registry() ;
+
+    CU_register_suites(suites) ;
+
+    // CU_basic_set_mode(CU_BRM_VERBOSE) ;
+    CU_basic_run_tests() ;
+
+    const CU_pFailureRecord failures = CU_get_failure_list() ;
+    CU_basic_show_failures(failures) ;
+
+    CU_cleanup_registry() ;
+}
+----
+
+== Test Domain
+
+[source,tcl]
+----
+<<testdomain.micca>>=
+source ../../tcl/micca.tcl
+
+micca configure {
+    domain testdomain {
+        <<test domain configuration>>
+
+        domainop void initialize {} {
+            testdomain__INIT() ;
+        }
+    }
+    population testdomain {
+        <<test domain population>>
+    }
+}
+
+micca generate
+----
+
+== Initialization
+
+[source,c]
+----
+<<test suites>>=
+{"initialization", NULL, NULL, NULL, NULL, initializationSuiteTests},
+----
+
+[source,c]
+----
+<<suite tests>>=
+<<initialization suite tests>>
+
+<<initialization suite tests>>=
+static CU_TestInfo initializationSuiteTests[] = {
+    <<initialization test cases>>
+    CU_TEST_INFO_NULL,
+} ;
+----
+
+[source,c]
+----
+<<initialization test cases>>=
+{"initialize run time", mrtTest_InitRunTime},
+
+<<test functions>>=
+static void
+mrtTest_InitRunTime(void)
+{
+    mrt_Initialize() ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&eventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&tocEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&delayedEventQueue)) ;
+    CU_ASSERT_FALSE(mrtEventQueueEmpty(&freeEventQueue)) ;
+}
+----
+
+== Event Dispatch
+
+[source,c]
+----
+<<test suites>>=
+{"event dispatch", NULL, NULL, NULL, NULL, eventDispatchSuiteTests},
+----
+
+[source,c]
+----
+<<suite tests>>=
+<<event dispatch suite tests>>
+
+<<event dispatch suite tests>>=
+static CU_TestInfo eventDispatchSuiteTests[] = {
+    <<event dispatch test cases>>
+    CU_TEST_INFO_NULL,
+} ;
+----
+
+=== Dispatch An Event with Parameters
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class A {
+    attribute count int -default 0
+    attribute ranctor bool -default false
+    attribute randtor bool -default false
+
+    constructor {
+        %<instance self attribute ranctor>% = true ;
+    }
+    destructor {
+        %<instance self attribute randtor>% = true ;
+    }
+
+    statemodel {
+        state s1 {b int} {
+            printf("In %s.%s, b = %d\n", MRT_CLASSNAME, MRT_STATENAME, b) ;
+            %<instance self attribute count>% += b ;
+        }
+        transition s1 - e1 -> s1
+    }
+}
+<<test domain population>>=
+class A {
+    instance a1
+    allocate 1
+}
+----
+
+[source,c]
+----
+<<event dispatch test cases>>=
+{"signal event", mrtTest_SignalEvent},
+
+<<test functions>>=
+static void
+mrtTest_SignalEvent(void)
+{
+    struct A *aref = &A__POOL[TESTDOMAIN_A_A1_INSTID] ;
+    CU_ASSERT_PTR_EQUAL(aref->base__INST.classDesc,
+        &testdomain__CLASSES[TESTDOMAIN_A_CLASSID]) ;
+    CU_ASSERT(aref->base__INST.alloc > 0) ;
+
+    bool didevent = mrt_ProcessOneEvent() ;
+    CU_ASSERT_FALSE(didevent) ;
+
+    union {
+        MRT_EventParams parameters ;
+        struct testdomain_A_e1__EPARAMS aparams ;
+    } params = {
+        .aparams = {
+            .b = 20
+        }
+    } ;
+    int pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_A_CLASSID,
+        TESTDOMAIN_A_A1_INSTID,
+        mrtTransitionEvent,
+        TESTDOMAIN_A_E1_EVENT,
+        params.parameters) ;
+    CU_ASSERT(pcode == 0) ;
+
+    CU_ASSERT_TRUE(mrt_EventAvailable()) ;
+
+    CU_ASSERT_FALSE(mrtEventQueueEmpty(&tocEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&eventQueue)) ;
+
+    didevent = mrt_ProcessOneEvent() ;
+    CU_ASSERT_TRUE(didevent) ;
+
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&tocEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&eventQueue)) ;
+
+    int count ;
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_A_CLASSID,
+        TESTDOMAIN_A_A1_INSTID,
+        TESTDOMAIN_A_COUNT_ATTRID,
+        &count, sizeof(count)) ;
+    CU_ASSERT(pcode == sizeof(count)) ;
+    CU_ASSERT(count == 20) ;
+}
+----
+
+=== Dispatch An Ignored Event
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class AA {
+    attribute count int -default 0
+    statemodel {
+        state s1 {} {
+            printf("In %s.%s\n", MRT_CLASSNAME, MRT_STATENAME) ;
+            %<instance self attribute count>% += 1 ;
+        }
+        transition s1 - e1 -> s1
+        transition s1 - e2 -> IG
+        transition s1 - e3 -> CH
+    }
+}
+<<test domain population>>=
+class AA {
+    instance a1
+}
+----
+
+[source,c]
+----
+<<event dispatch test cases>>=
+{"signal ignored event", mrtTest_SignalIgnoredEvent},
+
+<<test functions>>=
+static void
+mrtTest_SignalIgnoredEvent(void)
+{
+    struct AA *aref = &AA__POOL[TESTDOMAIN_AA_A1_INSTID] ;
+    CU_ASSERT_PTR_EQUAL(aref->base__INST.classDesc,
+        &testdomain__CLASSES[TESTDOMAIN_AA_CLASSID]) ;
+    CU_ASSERT(aref->base__INST.alloc > 0) ;
+
+    bool didevent = mrt_ProcessOneEvent() ;
+    CU_ASSERT_FALSE(didevent) ;
+
+    int pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_AA_CLASSID,
+        TESTDOMAIN_AA_A1_INSTID,
+        mrtTransitionEvent,
+        TESTDOMAIN_AA_E2_EVENT,
+        NULL) ;
+    CU_ASSERT(pcode == 0) ;
+
+    CU_ASSERT_FALSE(mrtEventQueueEmpty(&tocEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&eventQueue)) ;
+
+    didevent = mrt_ProcessOneEvent() ;
+    CU_ASSERT_TRUE(didevent) ;
+
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&tocEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&eventQueue)) ;
+
+    int count ;
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_AA_CLASSID,
+        TESTDOMAIN_AA_A1_INSTID,
+        TESTDOMAIN_AA_COUNT_ATTRID,
+        &count, sizeof(count)) ;
+    CU_ASSERT(pcode == sizeof(count)) ;
+    CU_ASSERT(count == 0) ;
+}
+----
+
+=== Dispatch Can't Happen Event
+
+[source,c]
+----
+<<test functions>>=
+static jmp_buf fatalbuf ;
+
+static void
+catchFatalErrorHandler(
+    MRT_ErrorCode errNum,
+    char const *fmt,
+    va_list alist)
+{
+    mrtDefaultFatalErrorHandler(errNum, fmt, alist) ;
+    longjmp(fatalbuf, errNum) ;
+}
+
+static MRT_FatalErrorHandler oldHandler ;
+
+static void catchFatal() {
+    oldHandler = mrt_SetFatalErrorHandler(catchFatalErrorHandler) ;
+}
+
+static void restoreFatal() {
+    mrt_SetFatalErrorHandler(oldHandler) ;
+}
+
+static int catchFatalDispatch() {
+    catchFatal() ;
+    int code = setjmp(fatalbuf) ;
+    if (code == 0) {
+        bool didevent = mrt_ProcessOneEvent() ;
+        CU_ASSERT_TRUE(didevent) ;
+    }
+    restoreFatal() ;
+
+    return code ;
+}
+----
+
+[source,c]
+----
+<<event dispatch test cases>>=
+{"signal can't happen event", mrtTest_SignalCantHappenEvent},
+
+<<test functions>>=
+static void
+mrtTest_SignalCantHappenEvent(void)
+{
+    struct AA *aref = &AA__POOL[TESTDOMAIN_AA_A1_INSTID] ;
+    CU_ASSERT_PTR_EQUAL(aref->base__INST.classDesc,
+        &testdomain__CLASSES[TESTDOMAIN_AA_CLASSID]) ;
+    CU_ASSERT(aref->base__INST.alloc > 0) ;
+
+    bool didevent = mrt_ProcessOneEvent() ;
+    CU_ASSERT_FALSE(didevent) ;
+
+    int pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_AA_CLASSID,
+        TESTDOMAIN_AA_A1_INSTID,
+        mrtTransitionEvent,
+        TESTDOMAIN_AA_E3_EVENT,
+        NULL) ;
+    CU_ASSERT(pcode == 0) ;
+
+    CU_ASSERT_FALSE(mrtEventQueueEmpty(&tocEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&eventQueue)) ;
+
+    int code = catchFatalDispatch() ;
+    CU_ASSERT(code == mrtCantHappen) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&tocEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&eventQueue)) ;
+
+    int count ;
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_AA_CLASSID,
+        TESTDOMAIN_AA_A1_INSTID,
+        TESTDOMAIN_AA_COUNT_ATTRID,
+        &count, sizeof(count)) ;
+    CU_ASSERT(pcode == sizeof(count)) ;
+    CU_ASSERT(count == 0) ;
+}
+----
+
+=== Event In Flight Error
+
+[source,c]
+----
+<<event dispatch test cases>>=
+{"event in flight error", mrtTest_EventInFlight},
+
+<<test functions>>=
+static void
+mrtTest_EventInFlight(void)
+{
+    struct AA *aref = &AA__POOL[TESTDOMAIN_AA_A1_INSTID] ;
+    CU_ASSERT_PTR_EQUAL(aref->base__INST.classDesc,
+        &testdomain__CLASSES[TESTDOMAIN_AA_CLASSID]) ;
+    CU_ASSERT(aref->base__INST.alloc > 0) ;
+
+    bool didevent = mrt_ProcessOneEvent() ;
+    CU_ASSERT_FALSE(didevent) ;
+
+    int pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_AA_CLASSID,
+        TESTDOMAIN_AA_A1_INSTID,
+        mrtTransitionEvent,
+        TESTDOMAIN_AA_E1_EVENT,
+        NULL) ;
+    CU_ASSERT(pcode == 0) ;
+
+    CU_ASSERT_FALSE(mrtEventQueueEmpty(&tocEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&eventQueue)) ;
+
+    // Tinker with the alloc field so that the dispatch will fail.
+    aref->base__INST.alloc++ ;
+
+    int code = catchFatalDispatch() ;
+    CU_ASSERT(code == mrtEventInFlight) ;
+
+    CU_ASSERT(code == mrtEventInFlight) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&tocEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&eventQueue)) ;
+
+    int count ;
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_AA_CLASSID,
+        TESTDOMAIN_AA_A1_INSTID,
+        TESTDOMAIN_AA_COUNT_ATTRID,
+        &count, sizeof(count)) ;
+    CU_ASSERT(pcode == sizeof(count)) ;
+    CU_ASSERT(count == 0) ;
+}
+----
+
+=== Event Dispatch Causes Further Generation
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class B {
+    attribute count int -default 0
+
+    statemodel {
+        state s1 {} {
+            printf("In %s\n", MRT_STATENAME) ;
+            %<instance self signal e2>%
+        }
+        transition s1 - e1 -> s1
+        transition s1 - e2 -> s2
+
+        state s2 {} {
+            (void)self ; // shut up compiler warning about unused self
+            printf("In %s\n", MRT_STATENAME) ;
+        }
+        transition s2 - e1 -> s1
+    }
+}
+
+<<test domain population>>=
+class B {
+    instance b1
+}
+----
+
+[source,c]
+----
+<<event dispatch test cases>>=
+{"cascade events", mrtTest_CascadeEvents},
+
+<<test functions>>=
+static void
+mrtTest_CascadeEvents(void)
+{
+    struct B *bref = &B__POOL[TESTDOMAIN_B_B1_INSTID] ;
+    CU_ASSERT_PTR_EQUAL(bref->base__INST.classDesc,
+        &testdomain__CLASSES[TESTDOMAIN_B_CLASSID]) ;
+    CU_ASSERT(bref->base__INST.alloc > 0) ;
+    CU_ASSERT(bref->base__INST.currentState == 0) ;
+
+    int pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_B_CLASSID,
+        TESTDOMAIN_B_B1_INSTID,
+        mrtTransitionEvent,
+        TESTDOMAIN_B_E1_EVENT, NULL) ;
+    CU_ASSERT(pcode == 0) ;
+
+    CU_ASSERT_FALSE(mrtEventQueueEmpty(&tocEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&eventQueue)) ;
+
+    bool didevent = mrt_ProcessOneEvent() ;
+    CU_ASSERT_TRUE(didevent) ;
+
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&tocEventQueue)) ;
+    CU_ASSERT_FALSE(mrtEventQueueEmpty(&eventQueue)) ;
+
+    didevent = mrt_ProcessOneEvent() ;
+    CU_ASSERT_TRUE(didevent) ;
+    CU_ASSERT(bref->base__INST.currentState == 1) ;
+}
+----
+
+=== Dispatch Polymorphic Event for Reference Generalization
+
+Simple dispatch across a single level hierarchy of a reference generalization.
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class C {
+    polymorphic e1
+}
+
+generalization R1 C D E
+
+class D {
+    attribute count int -default 0
+
+    statemodel {
+        state s1 {} {
+            printf("In %s.%s\n", MRT_CLASSNAME, MRT_STATENAME) ;
+            %<instance self attribute count>%++ ;
+        }
+        transition s1 - e1 -> s1
+    }
+}
+class E {
+    attribute count int -default 0
+
+    statemodel {
+        state s1 {} {
+            printf("In %s.%s\n", MRT_CLASSNAME, MRT_STATENAME) ;
+            %<instance self attribute count>%++ ;
+        }
+        transition s1 - e1 -> s1
+    }
+}
+
+<<test domain population>>=
+class C {
+    instance c1
+    instance c2
+}
+class D {
+    instance d1 R1 c1
+}
+class E {
+    instance e1 R1 c2
+}
+----
+
+[source,c]
+----
+<<event dispatch test cases>>=
+{"signal polymorphic event", mrtTest_SignalPoly},
+
+<<test functions>>=
+static void
+mrtTest_SignalPoly(void)
+{
+    struct C *cref = &C__POOL[TESTDOMAIN_C_C1_INSTID] ;
+    CU_ASSERT_PTR_EQUAL(cref->base__INST.classDesc,
+        &testdomain__CLASSES[TESTDOMAIN_C_CLASSID]) ;
+    CU_ASSERT(cref->base__INST.alloc > 0) ;
+
+    int pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_C_CLASSID,
+        TESTDOMAIN_C_C1_INSTID,
+        mrtPolymorphicEvent,
+        TESTDOMAIN_C_E1_POLYEVENT, NULL) ;
+    CU_ASSERT(pcode == 0) ;
+
+    CU_ASSERT_FALSE(mrtEventQueueEmpty(&tocEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&eventQueue)) ;
+
+    bool didevent = mrt_ProcessOneEvent() ;
+    CU_ASSERT_TRUE(didevent) ;
+
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&tocEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&eventQueue)) ;
+
+    int count ;
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_D_CLASSID,
+        TESTDOMAIN_D_D1_INSTID,
+        TESTDOMAIN_D_COUNT_ATTRID,
+        &count, sizeof(count)) ;
+    CU_ASSERT(pcode == sizeof(count)) ;
+    CU_ASSERT(count == 1) ;
+}
+----
+
+=== Polymorphic Dispatch across Repeated Generalization
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class F {
+    polymorphic e1
+}
+
+generalization R2 F G H
+
+class G {
+    statemodel {
+        state s1 {} {
+            (void)self ; // shut up compiler warning about unused self
+            printf("In %s.%s\n", MRT_CLASSNAME, MRT_STATENAME) ;
+        }
+        transition s1 - e1 -> s1
+    }
+}
+class H {}
+
+generalization R3 H I J
+
+class I {
+    statemodel {
+        state s1 {} {
+            (void)self ; // shut up compiler warning about unused self
+            printf("In %s.%s\n", MRT_CLASSNAME, MRT_STATENAME) ;
+        }
+        transition s1 - e1 -> s1
+    }
+}
+class J {}
+
+generalization R4 J K L
+
+class K {
+    attribute count int -default 0
+
+    statemodel {
+        state s1 {} {
+            printf("In %s.%s\n", MRT_CLASSNAME, MRT_STATENAME) ;
+            %<instance self attribute count>%++ ;
+        }
+        transition s1 - e1 -> s1
+    }
+}
+
+class L {
+    statemodel {
+        state s1 {} {
+        }
+        transition s1 - e1 -> s1
+    }
+}
+<<test domain population>>=
+class F {
+    instance f1
+}
+class H {
+    instance h1 R2 f1
+}
+class J {
+    instance j1 R3 h1
+}
+class K {
+    instance k1 R4 j1
+}
+class G {
+    allocate 1
+}
+class I {
+    allocate 1
+}
+class L {
+    allocate 1
+}
+----
+
+[source,c]
+----
+<<event dispatch test cases>>=
+{"signal repeated polymorphic event", mrtTest_SignalRepeatedPoly},
+
+<<test functions>>=
+static void
+mrtTest_SignalRepeatedPoly(void)
+{
+    struct F *fref = &F__POOL[TESTDOMAIN_F_F1_INSTID] ;
+    CU_ASSERT_PTR_EQUAL(fref->base__INST.classDesc,
+        &testdomain__CLASSES[TESTDOMAIN_F_CLASSID]) ;
+    CU_ASSERT(fref->base__INST.alloc > 0) ;
+
+    int pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_F_CLASSID,
+        TESTDOMAIN_F_F1_INSTID,
+        mrtPolymorphicEvent,
+        TESTDOMAIN_F_E1_POLYEVENT, NULL) ;
+    CU_ASSERT(pcode == 0) ;
+
+    CU_ASSERT_FALSE(mrtEventQueueEmpty(&tocEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&eventQueue)) ;
+
+    bool didevent = mrt_ProcessOneEvent() ;
+    CU_ASSERT_TRUE(didevent) ;
+
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&tocEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&eventQueue)) ;
+
+    int count ;
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_K_CLASSID,
+        TESTDOMAIN_K_K1_INSTID,
+        TESTDOMAIN_K_COUNT_ATTRID,
+        &count, sizeof(count)) ;
+    CU_ASSERT(pcode == sizeof(count)) ;
+    CU_ASSERT(count == 1) ;
+}
+----
+
+=== Polymorphic Dispatch across Compound Generalization
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class P {
+    polymorphic e1
+}
+generalization R6 P Q R
+class Q {
+    attribute count int -default 0
+
+    statemodel {
+        state s1 {} {
+            printf("In %s.%s\n", MRT_CLASSNAME, MRT_STATENAME) ;
+            %<instance self attribute count>%++ ;
+        }
+        transition s1 - e1 -> s1
+    }
+}
+class R {
+    attribute count int -default 0
+
+    statemodel {
+        state s1 {} {
+            printf("In %s.%s\n", MRT_CLASSNAME, MRT_STATENAME) ;
+            %<instance self attribute count>%++ ;
+        }
+        transition s1 - e1 -> s1
+    }
+}
+generalization R7 P S T
+class S {
+    attribute count int -default 0
+
+    statemodel {
+        state s1 {} {
+            printf("In %s.%s\n", MRT_CLASSNAME, MRT_STATENAME) ;
+            %<instance self attribute count>%++ ;
+        }
+        transition s1 - e1 -> s1
+    }
+}
+class T {
+    attribute count int -default 0
+
+    statemodel {
+        state s1 {} {
+            printf("In %s.%s\n", MRT_CLASSNAME, MRT_STATENAME) ;
+            %<instance self attribute count>%++ ;
+        }
+        transition s1 - e1 -> s1
+    }
+}
+<<test domain population>>=
+class P {
+    instance p1
+}
+class Q {
+    instance q1 R6 p1
+}
+class R {
+    allocate 1
+}
+class S {
+    instance s1 R7 p1
+}
+class T {
+    allocate 1
+}
+----
+
+[source,c]
+----
+<<event dispatch test cases>>=
+{"signal compound polymorphic event", mrtTest_SignalCompoundPoly},
+
+<<test functions>>=
+static void
+mrtTest_SignalCompoundPoly(void)
+{
+    int qcount = 0 ;
+    int pcode = mrt_PortalUpdateAttr(&testdomain__PORTAL,
+        TESTDOMAIN_Q_CLASSID,
+        TESTDOMAIN_Q_Q1_INSTID,
+        TESTDOMAIN_Q_COUNT_ATTRID,
+        &qcount, sizeof(qcount)) ;
+    CU_ASSERT(pcode == sizeof(qcount)) ;
+
+    int scount = 0 ;
+    pcode = mrt_PortalUpdateAttr(&testdomain__PORTAL,
+        TESTDOMAIN_S_CLASSID,
+        TESTDOMAIN_S_S1_INSTID,
+        TESTDOMAIN_S_COUNT_ATTRID,
+        &scount, sizeof(scount)) ;
+    CU_ASSERT(pcode == sizeof(scount)) ;
+
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&tocEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&eventQueue)) ;
+
+    pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_P_CLASSID,
+        TESTDOMAIN_P_P1_INSTID,
+        mrtPolymorphicEvent,
+        TESTDOMAIN_P_E1_POLYEVENT, NULL) ;
+    CU_ASSERT(pcode == 0) ;
+
+    CU_ASSERT_FALSE(mrtEventQueueEmpty(&tocEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&eventQueue)) ;
+
+    bool didevent = mrt_ProcessOneEvent() ;
+    CU_ASSERT_TRUE(didevent) ;
+
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&tocEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&eventQueue)) ;
+
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_Q_CLASSID,
+        TESTDOMAIN_Q_Q1_INSTID,
+        TESTDOMAIN_Q_COUNT_ATTRID,
+        &qcount, sizeof(qcount)) ;
+    CU_ASSERT(pcode == sizeof(qcount)) ;
+    CU_ASSERT(qcount == 1) ;
+
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_S_CLASSID,
+        TESTDOMAIN_S_S1_INSTID,
+        TESTDOMAIN_S_COUNT_ATTRID,
+        &scount, sizeof(scount)) ;
+    CU_ASSERT(pcode == sizeof(scount)) ;
+    CU_ASSERT(scount == 1) ;
+}
+----
+
+=== Dispatch Polymorphic Event for Union Generalization
+
+Simple dispatch across a single level hierarchy of a union generalization.
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class CC {
+    polymorphic e1
+}
+
+generalization R5 -union CC DD EE
+
+class DD {
+    attribute count int -default 0
+
+    statemodel {
+        state s1 {} {
+            printf("In %s.%s\n", MRT_CLASSNAME, MRT_STATENAME) ;
+            %<instance self attribute count>%++ ;
+        }
+        transition s1 - e1 -> s1
+    }
+}
+class EE {
+    statemodel {
+        state s1 {} {
+            (void)self ; // shut up compiler warning about unused self
+            printf("In %s.%s\n", MRT_CLASSNAME, MRT_STATENAME) ;
+        }
+        transition s1 - e1 -> s1
+    }
+}
+
+<<test domain population>>=
+class CC {
+    instance c1
+}
+class DD {
+    instance d1 R5 c1
+}
+----
+
+[source,c]
+----
+<<event dispatch test cases>>=
+{"signal polymorphic event for union gen", mrtTest_SignalPolyUnion},
+
+<<test functions>>=
+static void
+mrtTest_SignalPolyUnion(void)
+{
+    struct CC *cref = &CC__POOL[TESTDOMAIN_CC_C1_INSTID] ;
+    CU_ASSERT_PTR_EQUAL(cref->base__INST.classDesc,
+        &testdomain__CLASSES[TESTDOMAIN_CC_CLASSID]) ;
+    CU_ASSERT(cref->base__INST.alloc > 0) ;
+
+    int pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_CC_CLASSID,
+        TESTDOMAIN_CC_C1_INSTID,
+        mrtPolymorphicEvent,
+        TESTDOMAIN_CC_E1_POLYEVENT, NULL) ;
+    CU_ASSERT(pcode == 0) ;
+
+    CU_ASSERT_FALSE(mrtEventQueueEmpty(&tocEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&eventQueue)) ;
+
+    bool didevent = mrt_ProcessOneEvent() ;
+    CU_ASSERT_TRUE(didevent) ;
+
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&tocEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&eventQueue)) ;
+
+    int count ;
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_DD_CLASSID,
+        TESTDOMAIN_DD_D1_INSTID,
+        TESTDOMAIN_DD_COUNT_ATTRID,
+        &count, sizeof(count)) ;
+    CU_ASSERT(pcode == sizeof(count)) ;
+    CU_ASSERT(count == 1) ;
+}
+----
+
+=== Dispatch Delayed Event
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class M {
+    attribute count int -default 0
+    statemodel {
+        state s1 {} {
+            printf("In %s.%s\n", MRT_CLASSNAME, MRT_STATENAME) ;
+            %<instance self attribute count>% += 1 ;
+            mrt_SyncToEventLoop() ;
+        }
+        transition s1 - e1 -> s1
+    }
+}
+<<test domain population>>=
+class M {
+    instance m1
+}
+----
+
+[source,c]
+----
+<<event dispatch test cases>>=
+{"signal delayed event", mrtTest_SignalDelayedEvent},
+
+<<test functions>>=
+static void
+mrtTest_SignalDelayedEvent(void)
+{
+    int count = 0 ;
+    int pcode = mrt_PortalUpdateAttr(&testdomain__PORTAL,
+        TESTDOMAIN_M_CLASSID,
+        TESTDOMAIN_M_M1_INSTID,
+        TESTDOMAIN_M_COUNT_ATTRID,
+        &count, sizeof(count)) ;
+    CU_ASSERT(pcode == sizeof(count)) ;
+
+    bool didevent = mrt_ProcessOneEvent() ;
+    CU_ASSERT_FALSE(didevent) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&tocEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&eventQueue)) ;
+
+    pcode = mrt_PortalSignalDelayedEvent(&testdomain__PORTAL,
+        TESTDOMAIN_M_CLASSID,
+        TESTDOMAIN_M_M1_INSTID,
+        mrtTransitionEvent,
+        TESTDOMAIN_M_E1_EVENT, NULL,
+        100) ;
+    CU_ASSERT(pcode == 0) ;
+
+    CU_ASSERT_FALSE(mrtEventQueueEmpty(&delayedEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&tocEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&eventQueue)) ;
+
+    mrt_EventLoop() ;
+
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&delayedEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&tocEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&eventQueue)) ;
+
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_M_CLASSID,
+        TESTDOMAIN_M_M1_INSTID,
+        TESTDOMAIN_M_COUNT_ATTRID,
+        &count, sizeof(count)) ;
+    CU_ASSERT(pcode == sizeof(count)) ;
+    CU_ASSERT(count == 1) ;
+}
+----
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class N {
+    attribute count int -default 0
+    statemodel {
+        state s1 {} {
+            printf("In %s.%s\n", MRT_CLASSNAME, MRT_STATENAME) ;
+            %<instance self attribute count>% += 1 ;
+            mrt_SyncToEventLoop() ;
+        }
+        transition s1 - e1 -> s2
+
+        state s2 {} {
+            printf("In %s.%s\n", MRT_CLASSNAME, MRT_STATENAME) ;
+            %<instance self attribute count>% += 2 ;
+        }
+        transition s2 - e2 -> s3
+
+        state s3 {} {
+            printf("In %s.%s\n", MRT_CLASSNAME, MRT_STATENAME) ;
+            %<instance self attribute count>% += 3 ;
+        }
+        transition s3 - e3 -> s1
+    }
+}
+<<test domain population>>=
+class N {
+    instance n1
+}
+----
+
+[source,c]
+----
+<<event dispatch test cases>>=
+{"signal multiple delayed event", mrtTest_SignalMultDelayedEvent},
+
+<<test functions>>=
+static void
+mrtTest_SignalMultDelayedEvent(void)
+{
+    int count = 0 ;
+    int pcode = mrt_PortalUpdateAttr(&testdomain__PORTAL,
+        TESTDOMAIN_N_CLASSID,
+        TESTDOMAIN_N_N1_INSTID,
+        TESTDOMAIN_N_COUNT_ATTRID,
+        &count, sizeof(count)) ;
+    CU_ASSERT(pcode == sizeof(count)) ;
+
+    bool didevent = mrt_ProcessOneEvent() ;
+    CU_ASSERT_FALSE(didevent) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&delayedEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&tocEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&eventQueue)) ;
+
+    pcode = mrt_PortalSignalDelayedEvent(&testdomain__PORTAL,
+        TESTDOMAIN_N_CLASSID,
+        TESTDOMAIN_N_N1_INSTID,
+        mrtTransitionEvent,
+        TESTDOMAIN_N_E3_EVENT, NULL,
+        150) ;
+    CU_ASSERT(pcode == 0) ;
+    pcode = mrt_PortalSignalDelayedEvent(&testdomain__PORTAL,
+        TESTDOMAIN_N_CLASSID,
+        TESTDOMAIN_N_N1_INSTID,
+        mrtTransitionEvent,
+        TESTDOMAIN_N_E1_EVENT, NULL,
+        50) ;
+    CU_ASSERT(pcode == 0) ;
+    pcode = mrt_PortalSignalDelayedEvent(&testdomain__PORTAL,
+        TESTDOMAIN_N_CLASSID,
+        TESTDOMAIN_N_N1_INSTID,
+        mrtTransitionEvent,
+        TESTDOMAIN_N_E2_EVENT, NULL,
+        75) ;
+    CU_ASSERT(pcode == 0) ;
+    // repost duplicate to remove the previous one
+    // want to remove one in the middle
+    pcode = mrt_PortalSignalDelayedEvent(&testdomain__PORTAL,
+        TESTDOMAIN_N_CLASSID,
+        TESTDOMAIN_N_N1_INSTID,
+        mrtTransitionEvent,
+        TESTDOMAIN_N_E2_EVENT, NULL,
+        100) ;
+    CU_ASSERT(pcode == 0) ;
+
+    CU_ASSERT_FALSE(mrtEventQueueEmpty(&delayedEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&tocEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&eventQueue)) ;
+
+    mrt_EventLoop() ;
+
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&delayedEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&tocEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&eventQueue)) ;
+
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_N_CLASSID,
+        TESTDOMAIN_N_N1_INSTID,
+        TESTDOMAIN_N_COUNT_ATTRID,
+        &count, sizeof(count)) ;
+    CU_ASSERT(pcode == sizeof(count)) ;
+    CU_ASSERT(count == 6) ;
+}
+----
+
+=== Cancel Delayed Event
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class O {
+    attribute canceled bool -default false
+    attribute remain MRT_DelayTime -default 0
+    statemodel {
+        state s1 {} {
+            printf("In %s.%s\n", MRT_CLASSNAME, MRT_STATENAME) ;
+            %<instance self attribute canceled>% = false ;
+            mrt_SyncToEventLoop() ;
+        }
+        transition s1 - e1 -> s2
+
+        state s2 {} {
+            printf("In %s.%s\n", MRT_CLASSNAME, MRT_STATENAME) ;
+            %<instance self signal e2>%
+            %<instance self delaysignal 100 e3>%
+        }
+        transition s2 - e2 -> s3
+
+        state s3 {} {
+            printf("In %s.%s\n", MRT_CLASSNAME, MRT_STATENAME) ;
+            %<instance self attribute remain>% =
+                    %<instance self delayremaining e3 self>% ;
+            printf("remain = %u\n", %<instance self attribute remain>%) ;
+            %<instance self canceldelayed e3 self>%
+            %<instance self delaysignal 150 e4>%
+        }
+        transition s3 - e3 -> s1
+        transition s3 - e4 -> s4
+
+        state s4 {} {
+            printf("In %s.%s\n", MRT_CLASSNAME, MRT_STATENAME) ;
+            %<instance self attribute canceled>% = true ;
+            mrt_SyncToEventLoop() ;
+        }
+    }
+}
+<<test domain population>>=
+class O {
+    instance o1
+}
+----
+
+[source,c]
+----
+<<event dispatch test cases>>=
+{"cancel delayed event", mrtTest_CancelDelayedEvent},
+
+<<test functions>>=
+static void
+mrtTest_CancelDelayedEvent(void)
+{
+    bool canceled = false ;
+    int pcode = mrt_PortalUpdateAttr(&testdomain__PORTAL,
+        TESTDOMAIN_O_CLASSID,
+        TESTDOMAIN_O_O1_INSTID,
+        TESTDOMAIN_O_CANCELED_ATTRID,
+        &canceled, sizeof(canceled)) ;
+    CU_ASSERT(pcode == sizeof(canceled)) ;
+
+    bool didevent = mrt_ProcessOneEvent() ;
+    CU_ASSERT_FALSE(didevent) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&delayedEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&tocEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&eventQueue)) ;
+
+    pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_O_CLASSID,
+        TESTDOMAIN_O_O1_INSTID,
+        mrtTransitionEvent,
+        TESTDOMAIN_O_E1_EVENT, NULL) ;
+    CU_ASSERT(pcode == 0) ;
+
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&delayedEventQueue)) ;
+    CU_ASSERT_FALSE(mrtEventQueueEmpty(&tocEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&eventQueue)) ;
+
+    mrt_EventLoop() ;
+
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&delayedEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&tocEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&eventQueue)) ;
+
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_O_CLASSID,
+        TESTDOMAIN_O_O1_INSTID,
+        TESTDOMAIN_O_CANCELED_ATTRID,
+        &canceled, sizeof(canceled)) ;
+    CU_ASSERT(pcode == sizeof(canceled)) ;
+    CU_ASSERT_TRUE(canceled) ;
+
+    MRT_DelayTime remain ;
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_O_CLASSID,
+        TESTDOMAIN_O_O1_INSTID,
+        TESTDOMAIN_O_REMAIN_ATTRID,
+        &remain, sizeof(remain)) ;
+    CU_ASSERT(pcode == sizeof(remain)) ;
+    CU_ASSERT(remain >= 97 && remain <= 100) ;
+}
+----
+
+== Instance Management
+
+[source,c]
+----
+<<test suites>>=
+{"instance management", NULL, NULL, NULL, NULL, instanceManagementSuiteTests},
+----
+
+[source,c]
+----
+<<suite tests>>=
+<<instance management suite tests>>
+
+<<instance management suite tests>>=
+static CU_TestInfo instanceManagementSuiteTests[] = {
+    <<instance management test cases>>
+    CU_TEST_INFO_NULL,
+} ;
+----
+
+=== Synchronous Instance Creation and Deletion
+
+[source,c]
+----
+<<instance management test cases>>=
+{"create instance", mrtTest_CreateInstance},
+
+<<test functions>>=
+static void
+mrtTest_CreateInstance(void)
+{
+    int instid = mrt_PortalCreateInstance(&testdomain__PORTAL,
+        TESTDOMAIN_A_CLASSID, MRT_StateCode_IG) ;
+    CU_ASSERT(instid >= 0 && instid < TESTDOMAIN_A_INSTCOUNT) ;
+    CU_ASSERT_FALSE(mrt_InstanceAvailable(testdomain__PORTAL.classes +
+        TESTDOMAIN_A_CLASSID)) ;
+
+    struct A *aref = &A__POOL[instid] ;
+    CU_ASSERT_PTR_EQUAL(aref->base__INST.classDesc,
+        &testdomain__CLASSES[TESTDOMAIN_A_CLASSID]) ;
+    CU_ASSERT(aref->base__INST.alloc > 0) ;
+
+    bool ranctor ;
+    int pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_A_CLASSID,
+        instid,
+        TESTDOMAIN_A_RANCTOR_ATTRID,
+        &ranctor, sizeof(ranctor)) ;
+    CU_ASSERT(pcode == sizeof(ranctor)) ;
+    CU_ASSERT_TRUE(ranctor) ;
+
+    pcode = mrt_PortalDeleteInstance(&testdomain__PORTAL,
+        TESTDOMAIN_A_CLASSID, instid) ;
+    CU_ASSERT(pcode == 0) ;
+    // This is a technically a cheat since the instance is now gone.
+    CU_ASSERT(aref->base__INST.alloc == 0) ;
+    CU_ASSERT_TRUE(aref->randtor) ;
+}
+----
+
+=== Insufficient Space to Create Instance
+
+[source,c]
+----
+<<instance management test cases>>=
+{"no instance space", mrtTest_CreateInstanceFailure},
+
+<<test functions>>=
+static void
+mrtTest_CreateInstanceFailure(void)
+{
+    catchFatal() ;
+
+    int code = setjmp(fatalbuf) ;
+    if (code == 0) {
+        (void)mrt_PortalCreateInstance(&testdomain__PORTAL,
+            TESTDOMAIN_AA_CLASSID, MRT_StateCode_IG) ;
+    }
+
+    restoreFatal() ;
+    CU_ASSERT(code == mrtNoInstSlot) ;
+
+}
+----
+
+=== Asynchronous Instance Creation and Deletion
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class U {
+    attribute count int -default 0
+    statemodel {
+        state s1 {} {
+            printf("In %s.%s\n", MRT_CLASSNAME, MRT_STATENAME) ;
+            %<instance self attribute count>% += 1 ;
+        }
+        transition @ - e1 -> s1
+
+        terminal s2
+        state s2 {} {
+            printf("In %s.%s\n", MRT_CLASSNAME, MRT_STATENAME) ;
+            %<instance self attribute count>% += 1 ;
+        }
+        transition s1 - e2 -> s2
+    }
+}
+<<test domain population>>=
+class U {
+    allocate 1
+}
+----
+
+[source,c]
+----
+<<instance management test cases>>=
+{"async create instance", mrtTest_AsyncCreateInstance},
+
+<<test functions>>=
+static void
+mrtTest_AsyncCreateInstance(void)
+{
+    bool didevent = mrt_ProcessOneEvent() ;
+    CU_ASSERT_FALSE(didevent) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&tocEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&eventQueue)) ;
+
+    int instid = mrt_PortalCreateAsync(&testdomain__PORTAL,
+        TESTDOMAIN_U_CLASSID, TESTDOMAIN_U_E1_EVENT, NULL) ;
+    CU_ASSERT(instid >= 0 && instid < TESTDOMAIN_U_INSTCOUNT) ;
+    CU_ASSERT_FALSE(mrtEventQueueEmpty(&tocEventQueue)) ;
+
+    struct U *uref = &U__POOL[instid] ;
+    CU_ASSERT_PTR_EQUAL(uref->base__INST.classDesc,
+        &testdomain__CLASSES[TESTDOMAIN_U_CLASSID]) ;
+    CU_ASSERT(uref->base__INST.alloc < 0) ;
+
+    didevent = mrt_ProcessOneEvent() ;
+    CU_ASSERT_TRUE(didevent) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&tocEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&eventQueue)) ;
+
+    CU_ASSERT(uref->base__INST.alloc > 0) ;
+    CU_ASSERT(uref->count == 1) ;
+
+    int pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_U_CLASSID, instid, mrtTransitionEvent,
+        TESTDOMAIN_U_E2_EVENT, NULL) ;
+    CU_ASSERT(pcode == 0) ;
+    CU_ASSERT_FALSE(mrtEventQueueEmpty(&tocEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&eventQueue)) ;
+
+    didevent = mrt_ProcessOneEvent() ;
+    CU_ASSERT_TRUE(didevent) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&tocEventQueue)) ;
+    CU_ASSERT_TRUE(mrtEventQueueEmpty(&eventQueue)) ;
+
+    // This is a technically a cheat since the instance is now gone.
+    CU_ASSERT(uref->base__INST.alloc == 0) ;
+    CU_ASSERT(uref->count == 2) ;
+}
+----
+
+== Relationship Management
+
+[source,c]
+----
+<<test suites>>=
+{"relationship management", NULL, NULL, NULL, NULL, relationshipManagementSuiteTests},
+----
+
+[source,c]
+----
+<<suite tests>>=
+<<relationship management suite tests>>
+
+<<relationship management suite tests>>=
+static CU_TestInfo relationshipManagementSuiteTests[] = {
+    <<relationship management test cases>>
+    CU_TEST_INFO_NULL,
+} ;
+----
+
+=== Relate One To One Simple Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class V {}
+class X {}
+association R8 V 1--1 X
+
+<<test domain population>>=
+class V {
+    allocate 1
+}
+class X {
+    allocate 1
+}
+----
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void relateVtoX {} {
+    %<V create vref>%
+    %<X create xref>%
+    %<R8 relate vref xref>%
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"relate simple 1--1", mrtTest_RelateSimpleOneToOne},
+
+<<test functions>>=
+static void
+mrtTest_RelateSimpleOneToOne(void)
+{
+    testdomain_relateVtoX() ;
+    mrt_ProcessOneEvent() ;
+
+    struct V *vref = &V__POOL[0] ;
+    struct X *xref = &X__POOL[0] ;
+
+    CU_ASSERT_PTR_EQUAL(vref->R8, xref) ;
+    CU_ASSERT(vref->base__INST.refCount == 1) ;
+    CU_ASSERT_PTR_EQUAL(xref->R8__BACK, vref) ;
+    CU_ASSERT(xref->base__INST.refCount == 1) ;
+}
+----
+
+=== Unrelate One To One Simple Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void unrelateVfromX {} {
+    %<V foreachInstance vref>%
+        %<instance xref findOneRelated vref R8>%
+        %<~R8 unrelate xref vref>%
+        %<instance xref delete>%
+        %<instance vref delete>%
+    %<end>%
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"unrelate simple 1--1", mrtTest_UnrelateSimpleOneToOne},
+
+<<test functions>>=
+static void
+mrtTest_UnrelateSimpleOneToOne(void)
+{
+    testdomain_unrelateVfromX() ;
+    mrt_ProcessOneEvent() ;
+
+    struct V *vref = &V__POOL[0] ;
+    CU_ASSERT(vref->base__INST.alloc == 0) ;
+
+    struct X *xref = &X__POOL[0] ;
+    CU_ASSERT(xref->base__INST.alloc == 0) ;
+}
+----
+
+=== Relate Many To One Simple Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class MM {}
+class OO {}
+association R9 MM 1..*--1 OO
+
+<<test domain population>>=
+class MM {
+    allocate 2
+}
+class OO {
+    allocate 1
+}
+----
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void relateMMtoOO {} {
+    %<MM create mmref>%
+    %<OO create ooref>%
+    %<R9 relate mmref ooref>%
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"relate simple M--1", mrtTest_RelateSimpleManyToOne},
+
+<<test functions>>=
+static void
+mrtTest_RelateSimpleManyToOne(void)
+{
+    testdomain_relateMMtoOO() ;
+    mrt_ProcessOneEvent() ;
+
+    struct MM *mmref = &MM__POOL[0] ;
+    struct OO *ooref = &OO__POOL[0] ;
+
+    CU_ASSERT_PTR_EQUAL(mmref->R9, ooref) ;
+    CU_ASSERT(mmref->base__INST.refCount == 1) ;
+    CU_ASSERT_TRUE(mrtLinkRefNotEmpty(&ooref->R9__BACK)) ;
+    CU_ASSERT_PTR_EQUAL(ooref->R9__BACK.next, &mmref->R9__BLINKS) ;
+    CU_ASSERT(ooref->base__INST.refCount == 1) ;
+}
+----
+
+=== Unrelate Many To One Simple Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void unrelateMMfromOO {} {
+    %<MM foreachInstance mref>%
+        %<instance oref findOneRelated mref R9>%
+        %<R9 unrelate mref oref>%
+        %<instance mref delete>%
+        %<instance oref delete>%
+    %<end>%
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"unrelate class M--1", mrtTest_UnrelateSimpleManyToOne},
+
+<<test functions>>=
+static void
+mrtTest_UnrelateSimpleManyToOne(void)
+{
+    testdomain_unrelateMMfromOO() ;
+
+    struct MM *mref = &MM__POOL[0] ;
+    CU_ASSERT(mref->base__INST.alloc == 0) ;
+
+    struct OO *oref = &OO__POOL[0] ;
+    CU_ASSERT(oref->base__INST.alloc == 0) ;
+}
+----
+
+=== Relate One To One Class Based Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class YY {}
+class VV {}
+class XX {}
+association R10 -associator YY VV 1--1 XX
+
+<<test domain population>>=
+class YY {
+    allocate 1
+}
+class VV {
+    allocate 1
+}
+class XX {
+    allocate 1
+}
+----
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void relateVVtoXX {} {
+    %<VV create vref>%
+    %<XX create xref>%
+    %<YY create yref>%
+    %<R10 relate vref xref yref>%
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"relate class based 1--1", mrtTest_RelateClassOneToOne},
+
+<<test functions>>=
+static void
+mrtTest_RelateClassOneToOne(void)
+{
+    testdomain_relateVVtoXX() ;
+    mrt_ProcessOneEvent() ;
+
+    struct VV *vref = &VV__POOL[0] ;
+    struct XX *xref = &XX__POOL[0] ;
+    struct YY *yref = &YY__POOL[0] ;
+
+    CU_ASSERT_PTR_EQUAL(vref->R10__FORW, yref) ;
+    CU_ASSERT(vref->base__INST.refCount == 1) ;
+    CU_ASSERT_PTR_EQUAL(xref->R10__BACK, yref) ;
+    CU_ASSERT(xref->base__INST.refCount == 1) ;
+    CU_ASSERT_PTR_EQUAL(yref->R10.forward, xref) ;
+    CU_ASSERT_PTR_EQUAL(yref->R10.backward, vref) ;
+}
+----
+
+=== Unrelate One To One Class Based Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void unrelateVVtoXX {} {
+    %<YY foreachInstance yref>%
+        %<instance xref findOneRelated yref {R10 XX}>%
+        %<instance vref findOneRelated yref {~R10 VV}>%
+        %<R10 unrelate vref xref yref>%
+        %<instance vref delete>%
+        %<instance xref delete>%
+        %<instance yref delete>%
+    %<end>%
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"unrelate class based 1--1", mrtTest_UnrelateClassOneToOne},
+
+<<test functions>>=
+static void
+mrtTest_UnrelateClassOneToOne(void)
+{
+    testdomain_unrelateVVtoXX() ;
+    mrt_ProcessOneEvent() ;
+
+    struct VV *vref = &VV__POOL[0] ;
+    struct XX *xref = &XX__POOL[0] ;
+    struct YY *yref = &YY__POOL[0] ;
+
+    CU_ASSERT(vref->base__INST.alloc == 0) ;
+    CU_ASSERT_PTR_EQUAL(vref->R10__FORW, NULL) ;
+    CU_ASSERT(xref->base__INST.alloc == 0) ;
+    CU_ASSERT_PTR_EQUAL(xref->R10__BACK, NULL) ;
+    CU_ASSERT(yref->base__INST.alloc == 0) ;
+    CU_ASSERT_PTR_EQUAL(yref->R10.forward, NULL) ;
+    CU_ASSERT_PTR_EQUAL(yref->R10.backward, NULL) ;
+}
+----
+
+=== Relate Many To One Class Based Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class FF {}
+class GG {}
+class HH {}
+association R11 -associator FF GG 1..*--1 HH
+
+<<test domain population>>=
+class FF {
+    allocate 2
+}
+class GG {
+    allocate 2
+}
+class HH {
+    allocate 2
+}
+----
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void relateGGtoHH {} {
+    %<FF create fref>%
+    %<GG create gref>%
+    %<HH create href>%
+    %<R11 relate gref href fref>%
+    %<FF create fref>%
+    %<GG create gref>%
+    %<R11 relate gref href fref>%
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"relate class based M--1", mrtTest_RelateClassManyToOne},
+
+<<test functions>>=
+static void
+mrtTest_RelateClassManyToOne(void)
+{
+    testdomain_relateGGtoHH() ;
+    mrt_ProcessOneEvent() ;
+
+    struct FF *fref = &FF__POOL[0] ;
+    struct GG *gref = &GG__POOL[0] ;
+    struct HH *href = &HH__POOL[0] ;
+
+    CU_ASSERT_PTR_EQUAL(gref->R11__FORW, fref) ;
+    CU_ASSERT(gref->base__INST.refCount == 1) ;
+    CU_ASSERT_TRUE(mrtLinkRefNotEmpty(&href->R11__BACK)) ;
+    CU_ASSERT_PTR_EQUAL(href->R11__BACK.next, &fref->R11__BLINKS) ;
+    CU_ASSERT(href->base__INST.refCount == 2) ;
+    CU_ASSERT_PTR_EQUAL(fref->R11.forward, href) ;
+    CU_ASSERT_PTR_EQUAL(fref->R11.backward, gref) ;
+}
+----
+
+=== Unrelate Many To One Class Based Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void unrelateGGtoHH {} {
+    %<GG foreachInstance gref>%
+        %<instance fref findOneRelated gref {R11 FF}>%
+        %<instance href findOneRelated fref {R11 HH}>%
+        %<R11 unrelate gref href fref>%
+        %<instance gref delete>%
+        %<instance href delete>%
+        %<instance fref delete>%
+    %<end>%
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"unrelate class based M--1", mrtTest_UnrelateClassManyToOne},
+
+<<test functions>>=
+static void
+mrtTest_UnrelateClassManyToOne(void)
+{
+    testdomain_unrelateGGtoHH() ;
+    mrt_ProcessOneEvent() ;
+
+    struct FF *fref = &FF__POOL[0] ;
+    struct GG *gref = &GG__POOL[0] ;
+    struct HH *href = &HH__POOL[0] ;
+
+    CU_ASSERT(gref->base__INST.alloc == 0) ;
+    CU_ASSERT_PTR_EQUAL(gref->R11__FORW, NULL) ;
+    CU_ASSERT(href->base__INST.alloc == 0) ;
+    CU_ASSERT_TRUE(mrtLinkRefEmpty(&href->R11__BACK)) ;
+    CU_ASSERT(fref->base__INST.alloc == 0) ;
+    CU_ASSERT_PTR_EQUAL(fref->R11.forward, NULL) ;
+    CU_ASSERT_PTR_EQUAL(fref->R11.backward, NULL) ;
+}
+----
+
+=== Relate Many To Many Class Based Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class II {}
+class JJ {}
+class KK {}
+association R12 -associator II JJ 1..*--1..* KK
+
+<<test domain population>>=
+class II {
+    allocate 2
+}
+class JJ {
+    allocate 2
+}
+class KK {
+    allocate 1
+}
+----
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void relateJJtoKK {} {
+    %<II create iref>%
+    %<JJ create jref>%
+    %<KK create kref>%
+    %<R12 relate jref kref iref>%
+    %<II create iref>%
+    %<JJ create jref>%
+    %<R12 relate jref kref iref>%
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"relate class based M--M", mrtTest_RelateClassManyToMany},
+
+<<test functions>>=
+static void
+mrtTest_RelateClassManyToMany(void)
+{
+    testdomain_relateJJtoKK() ;
+    mrt_ProcessOneEvent() ;
+
+    struct II *iref1 = &II__POOL[0] ;
+    struct II *iref2 = &II__POOL[1] ;
+    struct JJ *jref1 = &JJ__POOL[0] ;
+    struct JJ *jref2 = &JJ__POOL[1] ;
+    struct KK *kref1 = &KK__POOL[0] ;
+
+    CU_ASSERT_TRUE(mrtLinkRefNotEmpty(&jref1->R12__FORW)) ;
+    CU_ASSERT_PTR_EQUAL(jref1->R12__FORW.next, &iref1->R12__FLINKS) ;
+
+    CU_ASSERT_TRUE(mrtLinkRefNotEmpty(&jref2->R12__FORW)) ;
+    CU_ASSERT_PTR_EQUAL(jref2->R12__FORW.next, &iref2->R12__FLINKS) ;
+
+    CU_ASSERT_TRUE(mrtLinkRefNotEmpty(&kref1->R12__BACK)) ;
+    CU_ASSERT_PTR_EQUAL(kref1->R12__BACK.next, &iref1->R12__BLINKS) ;
+    CU_ASSERT_PTR_EQUAL(kref1->R12__BACK.prev, &iref2->R12__BLINKS) ;
+
+    CU_ASSERT_PTR_EQUAL(iref1->R12.forward, kref1) ;
+    CU_ASSERT_PTR_EQUAL(iref1->R12.backward, jref1) ;
+    CU_ASSERT_PTR_EQUAL(iref2->R12.forward, kref1) ;
+    CU_ASSERT_PTR_EQUAL(iref2->R12.backward, jref2) ;
+}
+----
+
+=== Unrelate Many To Many Class Based Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void unrelateJJtoKK {} {
+    %<JJ foreachInstance jref>%
+        %<instance iref foreachRelated jref {R12 II}>%
+            %<instance kref findOneRelated iref {R12 KK}>%
+            %<R12 unrelate jref kref iref>%
+            %<instance jref delete>%
+            %<instance kref delete>%
+            %<instance iref delete>%
+        %<end>%
+    %<end>%
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"unrelate class based M--M", mrtTest_UnrelateClassManyToMany},
+
+<<test functions>>=
+static void
+mrtTest_UnrelateClassManyToMany(void)
+{
+    testdomain_unrelateJJtoKK() ;
+    mrt_ProcessOneEvent() ;
+
+    struct II *iref1 = &II__POOL[0] ;
+    struct II *iref2 = &II__POOL[1] ;
+    struct JJ *jref1 = &JJ__POOL[0] ;
+    struct JJ *jref2 = &JJ__POOL[1] ;
+    struct KK *kref1 = &KK__POOL[0] ;
+
+    CU_ASSERT(iref1->base__INST.alloc == 0) ;
+    CU_ASSERT(iref2->base__INST.alloc == 0) ;
+    CU_ASSERT(jref1->base__INST.alloc == 0) ;
+    CU_ASSERT(jref2->base__INST.alloc == 0) ;
+    CU_ASSERT(kref1->base__INST.alloc == 0) ;
+}
+----
+
+=== Relate Reference Subclass
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class PP {}
+class QQ {}
+class RR {
+    attribute typechanged bool -default false
+}
+generalization R13 PP QQ RR
+
+<<test domain population>>=
+class PP {
+    allocate 1
+}
+class QQ {
+    allocate 1
+}
+class RR {
+    allocate 1
+}
+----
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void relatePPtoQQ {} {
+    %<PP create pref>%
+    %<QQ create qref>%
+    %<R13 relate qref pref>%
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"relate reference generalization", mrtTest_RelateRefGen},
+
+<<test functions>>=
+static void
+mrtTest_RelateRefGen(void)
+{
+    testdomain_relatePPtoQQ() ;
+    mrt_ProcessOneEvent() ;
+
+    struct PP *pref = &PP__POOL[0] ;
+    struct QQ *qref = &QQ__POOL[0] ;
+
+    CU_ASSERT_PTR_EQUAL(pref->R13, qref) ;
+    CU_ASSERT(pref->base__INST.refCount == 1) ;
+    CU_ASSERT_PTR_EQUAL(qref->R13, pref) ;
+    CU_ASSERT(qref->base__INST.refCount == 1) ;
+}
+----
+
+=== Reclassify Reference Subclass
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void reclassifyPPtoRR {} {
+    %<PP foreachInstance pref>%
+        %<R13 reclassify pref RR rref typechanged true>%
+    %<end>%
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"reclassify reference generalization", mrtTest_ReclassifyRefGen},
+
+<<test functions>>=
+static void
+mrtTest_ReclassifyRefGen(void)
+{
+    testdomain_reclassifyPPtoRR() ;
+    mrt_ProcessOneEvent() ;
+
+    struct PP *pref = &PP__POOL[0] ;
+    struct QQ *qref = &QQ__POOL[0] ;
+    struct RR *rref = &RR__POOL[0] ;
+
+    CU_ASSERT_PTR_EQUAL(pref->R13, rref) ;
+    CU_ASSERT(rref->base__INST.refCount == 1) ;
+    CU_ASSERT_PTR_EQUAL(rref->R13, pref) ;
+    CU_ASSERT(rref->base__INST.refCount == 1) ;
+    CU_ASSERT(qref->base__INST.alloc == 0) ;
+
+    bool typechanged ;
+    int pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_RR_CLASSID,
+        0,
+        TESTDOMAIN_RR_TYPECHANGED_ATTRID,
+        &typechanged, sizeof(typechanged)) ;
+    CU_ASSERT(pcode == sizeof(typechanged)) ;
+    CU_ASSERT_TRUE(typechanged) ;
+}
+----
+
+=== Unrelate Reference Subclass
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void unrelatePPtoQQ {} {
+    %<RR foreachInstance rref>%
+        %<instance pref findOneRelated rref R13>%
+        %<R13 unrelate rref pref>%
+        %<instance rref delete>%
+        %<instance pref delete>%
+    %<end>%
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"unrelate reference generalization", mrtTest_UnrelateRefGen},
+
+<<test functions>>=
+static void
+mrtTest_UnrelateRefGen(void)
+{
+    testdomain_unrelatePPtoQQ() ;
+    mrt_ProcessOneEvent() ;
+
+    struct PP *pref = &PP__POOL[0] ;
+    struct RR *rref = &RR__POOL[0] ;
+
+    CU_ASSERT(pref->base__INST.alloc == 0) ;
+    CU_ASSERT(rref->base__INST.alloc == 0) ;
+}
+----
+
+=== Reclassify Union Subclass
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class SS {
+    attribute sum int -default 0
+}
+class TT {
+}
+class UU {}
+generalization R14 -union SS TT UU
+
+class ZZ {
+    attribute count int -default 2
+}
+
+association R16 ZZ 0..1--1 TT
+
+<<test domain population>>=
+class SS {
+    allocate 3
+}
+class ZZ {
+    allocate 1
+}
+----
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void reclassifySStoTT {} {
+    %<SS create sref>%
+    %<R14 reclassify sref TT tref>%
+    %<ZZ create zref>%
+    %<~R16 relate tref zref>%
+    %<SS foreachInstance sref>%
+        %<instance xref findOneRelated sref {~R14 TT} ~R16>%
+        if (xref != NULL) {
+            %<instance sref attribute sum>% += %<instance xref attribute count>% ;
+        }
+    %<end>%
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"reclassify union generalization", mrtTest_ReclassifyUnionGen},
+
+<<test functions>>=
+static void
+mrtTest_ReclassifyUnionGen(void)
+{
+    testdomain_reclassifySStoTT() ;
+    mrt_ProcessOneEvent() ;
+
+    struct SS *sref = &SS__POOL[0] ;
+    struct TT *tref = &sref->R14.TT ;
+    struct ZZ *zref = tref->R16__BACK ;
+
+    CU_ASSERT(sref->base__INST.alloc > 0) ;
+    CU_ASSERT(tref->base__INST.alloc > 0) ;
+    CU_ASSERT_PTR_EQUAL(tref->base__INST.classDesc,
+        &testdomain__CLASSES[TESTDOMAIN_TT_CLASSID]) ;
+    CU_ASSERT(zref->count == 2) ;
+}
+----
+
+== Referential Integrity
+
+[source,c]
+----
+<<test suites>>=
+{"referential integrity", NULL, NULL, NULL, NULL, refIntegritySuiteTests},
+----
+
+[source,c]
+----
+<<suite tests>>=
+<<referential integrity suite tests>>
+
+<<referential integrity suite tests>>=
+static CU_TestInfo refIntegritySuiteTests[] = {
+    <<referential integrity test cases>>
+    CU_TEST_INFO_NULL,
+} ;
+----
+
+[source,c]
+----
+<<test functions>>=
+static int catchFatalTransaction() {
+    catchFatal() ;
+    int code = setjmp(fatalbuf) ;
+    if (code == 0) {
+        mrt_ProcessOneEvent() ;
+    }
+    restoreFatal() ;
+
+    return code ;
+}
+----
+
+=== Referential Failure For One To One Simple Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void badrelateVtoX {} {
+    %<V create vref>%
+    (void)vref ; // make the compiler quiet
+}
+----
+
+[source,c]
+----
+<<referential integrity test cases>>=
+{"failure for simple 1--1", mrtTest_RefFailSimpleOneToOne},
+
+<<test functions>>=
+static void
+mrtTest_RefFailSimpleOneToOne(void)
+{
+    testdomain_badrelateVtoX() ;
+    catchFatalTransaction() ;
+
+    mrt_DeleteInstance(&V__POOL[0]) ;
+}
+----
+
+=== Referential Failure For Many To One Simple Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void badrelateMMtoOO {} {
+    %<MM create mmref>%
+    %<OO create ooref>%
+    %<R9 relate mmref ooref>%
+    %<MM create mmref>%
+}
+
+domainop void badrelateOOtoMM {} {
+    %<OO create ooref>%
+    (void)ooref ; // make compiler quiet
+}
+----
+
+[source,c]
+----
+<<referential integrity test cases>>=
+{"failure for simple M--1", mrtTest_RefFailSimpleManyToOne},
+
+<<test functions>>=
+static void
+mrtTest_RefFailSimpleManyToOne(void)
+{
+    testdomain_badrelateMMtoOO() ;
+    catchFatalTransaction() ;
+
+    mrt_DeleteInstance(&MM__POOL[0]) ;
+    mrt_DeleteInstance(&MM__POOL[1]) ;
+    mrt_DeleteInstance(&OO__POOL[0]) ;
+
+    testdomain_badrelateOOtoMM() ;
+    catchFatalTransaction() ;
+    mrt_DeleteInstance(&OO__POOL[0]) ;
+}
+----
+
+=== Referential Failure For Many To One Static Simple Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class FFF {
+}
+class GGG {
+}
+association R18 -static FFF 1..*--1 GGG
+
+<<test domain population>>=
+class FFF {
+    instance f1 R18 g1
+    instance f2 R18 g1
+    instance f3 R18 g2
+    allocate 1
+}
+class GGG {
+    instance g1
+    instance g2
+}
+----
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void badcreateFFF {} {
+    %<FFF create fref>%
+    (void)fref ; // keep compiler quiet
+}
+----
+
+[source,c]
+----
+<<referential integrity test cases>>=
+{"failure for static simple M--1", mrtTest_RefFailStaticSimpleManyToOne},
+
+<<test functions>>=
+static void
+mrtTest_RefFailStaticSimpleManyToOne(void)
+{
+    testdomain_badcreateFFF() ;
+    catchFatalTransaction() ;
+
+    mrt_DeleteInstance(&FFF__POOL[3]) ;
+}
+----
+
+=== Referential Failure For One To One Class Based Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void badrelateVVtoXX {} {
+    %<VV create vref>%
+    %<XX create xref>%
+    %<YY create yref>%
+    (void)vref ; // make compiler quiet
+    (void)xref ; // make compiler quiet
+    (void)yref ; // make compiler quiet
+}
+----
+
+[source,c]
+----
+<<referential integrity test cases>>=
+{"failure for class 1--1", mrtTest_RefFailClassOneToOne},
+
+<<test functions>>=
+static void
+mrtTest_RefFailClassOneToOne(void)
+{
+    testdomain_badrelateVVtoXX() ;
+    catchFatalTransaction() ;
+
+    mrt_DeleteInstance(&VV__POOL[0]) ;
+    mrt_DeleteInstance(&XX__POOL[0]) ;
+    mrt_DeleteInstance(&YY__POOL[0]) ;
+}
+----
+
+=== Referential Failure For Many To One Class Based Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void badrelateGGtoHH {} {
+    %<FF create fref>%
+    %<GG create gref>%
+    %<HH create href>%
+    %<R11 relate gref href fref>%
+    %<HH create href>%
+}
+----
+
+[source,c]
+----
+<<referential integrity test cases>>=
+{"failure for class M--1", mrtTest_RefFailClassManyToOne},
+
+<<test functions>>=
+static void
+mrtTest_RefFailClassManyToOne(void)
+{
+    testdomain_badrelateGGtoHH() ;
+    catchFatalTransaction() ;
+
+    mrt_DeleteInstance(&FF__POOL[0]) ;
+    mrt_DeleteInstance(&FF__POOL[1]) ;
+    mrt_DeleteInstance(&GG__POOL[0]) ;
+    mrt_DeleteInstance(&GG__POOL[1]) ;
+    mrt_DeleteInstance(&HH__POOL[0]) ;
+    mrt_DeleteInstance(&HH__POOL[1]) ;
+}
+----
+
+=== Referential Failure For Reference Generalization
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void badrelatePPtoQQ {} {
+    %<PP create pref>%
+    (void)pref ; // keep compiler quiet
+}
+----
+
+[source,c]
+----
+<<referential integrity test cases>>=
+{"failure for reference generalization", mrtTest_RefFailRefGen},
+
+<<test functions>>=
+static void
+mrtTest_RefFailRefGen(void)
+{
+    testdomain_badrelatePPtoQQ() ;
+    catchFatalTransaction() ;
+
+    mrt_DeleteInstance(&PP__POOL[0]) ;
+}
+----
+
+== Instance Sets
+
+[source,c]
+----
+<<test suites>>=
+{"instance sets", NULL, NULL, NULL, NULL, instanceSetsSuiteTests},
+----
+
+[source,c]
+----
+<<suite tests>>=
+<<instance sets suite tests>>
+
+<<instance sets suite tests>>=
+static CU_TestInfo instanceSetsSuiteTests[] = {
+    <<instance set test cases>>
+    CU_TEST_INFO_NULL,
+} ;
+----
+
+=== Generating and Iterating Instance Sets
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class AAA {
+    attribute Size int
+}
+class BBB {
+    attribute Sum int -default 0
+}
+association R15 AAA 0..*--0..1 BBB
+
+<<test domain population>>=
+class AAA {
+    instance a1 Size 1 R15 b1
+    instance a2 Size 2 R15 b1
+    instance a3 Size 3 R15 b2
+    instance a4 Size 4 R15 b2
+    instance a5 Size 5
+    instance a6 Size 6
+}
+class BBB {
+    instance b1
+    instance b2
+}
+----
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void sumB1s {} {
+    %<BBB findByName b1 bref>%
+    %<AAA instset aset>%
+    %<instance aref foreachRelated bref ~R15>%
+        %<instset aset add aref>%
+    %<end>%
+    CU_ASSERT_FALSE(%<instset aset empty>%) ;
+    %<instset aset foreachSelected aref>%
+        %<instance bref attribute Sum>% += %<instance aref attribute Size>% ;
+    %<end>%
+}
+----
+
+[source,c]
+----
+<<instance set test cases>>=
+{"generate instance set", mrtTest_GenerateInstanceSet},
+
+<<test functions>>=
+static void
+mrtTest_GenerateInstanceSet(void)
+{
+    testdomain_sumB1s() ;
+
+    struct BBB *bref = &BBB__POOL[0] ;
+
+    CU_ASSERT(bref->Sum == 3) ;
+}
+----
+
+=== Instance Set Operations
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class CCC {}
+class DDD {}
+class EEE {}
+
+generalization R17 CCC DDD EEE
+
+<<test domain population>>=
+class CCC {
+    instance c1
+    instance c2
+    instance c3
+    instance c4
+    instance c5
+}
+class DDD {
+    instance d1 R17 c1
+    instance d2 R17 c2
+}
+class EEE {
+    instance e1 R17 c3
+    instance e2 R17 c4
+    instance e3 R17 c5
+}
+----
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void instsetops {} {
+    %<CCC instset dset>%
+    %<DDD foreachInstance dref>%
+        %<instance cref findOneRelated dref R17>%
+        %<instset dset add cref>%
+    %<end>%
+    %<CCC instset eset>%
+    %<EEE foreachInstance eref>%
+        %<instance cref findOneRelated eref R17>%
+        %<instset eset add cref>%
+    %<end>%
+    %<CCC instset cset>%
+    %<CCC foreachInstance cref>%
+        %<instset cset add cref>%
+    %<end>%
+
+    CU_ASSERT_TRUE(%<instset dset notempty>%) ;
+    CU_ASSERT_TRUE(%<instset eset notempty>%) ;
+    %<instset iset intersect dset eset>%
+    CU_ASSERT_TRUE(%<instset iset empty>%) ;
+    %<instset uset union dset eset>%
+    CU_ASSERT_TRUE(%<instset uset equal cset>%) ;
+    %<instset mset minus cset uset>%
+    CU_ASSERT_TRUE(%<instset mset empty>%) ;
+}
+----
+
+[source,c]
+----
+<<instance set test cases>>=
+{"instance set operations", mrtTest_InstanceSetOps},
+
+<<test functions>>=
+static void
+mrtTest_InstanceSetOps(void)
+{
+   testdomain_instsetops() ;
+}
+----

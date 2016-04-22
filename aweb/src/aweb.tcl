@@ -440,7 +440,7 @@ namespace eval ::aweb {
             relvar set Chunk |
             relation restrictwith ~ {$Name ne $root} |
             relation semiminus ~ [relvar set ChunkRef]\
-                    -using {Name RefToChunk} |
+                    -using {Name RefToChunk FileName FileName} |
             relation extend ~ rf "Referenced At Line" int {\
                 [tuple extract $rf ChunkLineNum] +\
                 [tuple extract $rf ChunkOffset] +\
