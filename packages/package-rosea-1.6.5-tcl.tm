@@ -2,7 +2,7 @@
 # -- Tcl Module
 
 # @@ Meta Begin
-# Package rosea 1.6.2
+# Package rosea 1.6.5
 # Meta description Rosea is a data and execution architecture for
 # Meta description translating XUML models using Tcl as the implementation
 # Meta description language.
@@ -30,7 +30,7 @@ package require lambda
 
 # ACTIVESTATE TEAPOT-PKG BEGIN DECLARE
 
-package provide rosea 1.6.2
+package provide rosea 1.6.5
 
 # ACTIVESTATE TEAPOT-PKG END DECLARE
 # ACTIVESTATE TEAPOT-PKG END TM
@@ -113,7 +113,7 @@ namespace eval ::rosea {
     
     namespace ensemble create
 
-    variable version 1.6.2
+    variable version 1.6.5
 
     logger::initNamespace [namespace current]
 
@@ -1340,6 +1340,8 @@ namespace eval ::rosea {
             UNKNOWN_ASSIGNER    {unknown assigner instance, "%s", for relationship, "%s"}
             UNKNOWN_LINKAGE {unknown relationship, "%s", for class, "%s"}
             PATH_ERROR      {relationship, "%s", from "%s" to "%s", does not end at "%s"}
+            GEN_PATH_ERROR  {navigating from superclass, "%s", along generalization "%s",\
+                            does not have "%s" as a subclass}
             ARG_ERROR           {attribute updates must be name / value pairs, got "%s"}
             ID_UPDATE           {cannot update identifying attributes, "%s"}
             UNKNOWN_ATTRIBUTE   {unknown attribute, "%s"}
@@ -1863,7 +1865,7 @@ namespace eval ::rosea {
                     set partdst [relvar restrictone ${domain}::__Arch_PartitionDst\
                         Name $lname SrcClass $class DstClass $dst]
                     if {[relation isempty $partdst]} {
-                        tailcall DeclError PATH_ERROR $lname $class $DstClass $dst
+                        tailcall DeclError GEN_PATH_ERROR $class $lname $dst
                     }
                     relation assign $partdst DstClass Attrs
                     set related [eval $relatedQuery]
@@ -1917,7 +1919,7 @@ namespace eval ::rosea {
                 if {![dict exists $heading $attr]} {
                     tailcall DeclError UNKNOWN_ATTRIBUTE $attr
                 }
-                lappend extcmd $attr [dict get $heading $attr] \"$value\"
+                lappend extcmd $attr [dict get $heading $attr] \{$value\}
             }
             relvar updateper $relvar [eval $extcmd]
             return
@@ -1963,7 +1965,7 @@ namespace eval ::rosea {
             foreach attr $attrnames var $varnames {
                 if {[uplevel 1 [list info exists $var]]} {
                     upvar 1 $var varvalue
-                    lappend extcmd $attr [dict get $heading $attr] \"$varvalue\"
+                    lappend extcmd $attr [dict get $heading $attr] \{$varvalue\}
                 }
             }
             relvar updateper $relvar [eval $extcmd]
@@ -2308,12 +2310,12 @@ namespace eval ::rosea {
             # We use the class commands to delete the old subclass instance and create
             # the new one. This will make sure that if the subclass has a state model
             # that the initial state is set correctly.
-            relvar eval {
-                ::rosea::InstCmds::delete $instref
-                set ref [::rosea::ClassCmds::create ${domns}::$subclass\
-                        {*}[dict merge $args $refedvalues]]
-            }
-            return $ref
+            # N.B. this is _not_ done in a relvar transaction. The transaction
+            # boundaries should be set by the current thread of control or domain
+            # operation.
+            ::rosea::InstCmds::delete $instref
+            return [::rosea::ClassCmds::create ${domns}::$subclass\
+                    {*}[dict merge $args $refedvalues]]
         }
         proc signalAssigner {rname event args} {
             SplitRelvarName $rname domain relationship
