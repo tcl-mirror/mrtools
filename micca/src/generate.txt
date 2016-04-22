@@ -209,13 +209,8 @@ Here we set up that command and specify some options to it.
 ----
 <<miccaGenerate: set up template expansion>>=
 textutil::expander expand
-expand setbrackets %< >% ; # <1>
 expand errmode [dict get $options expanderror]
 ----
-<1> The default way to embed commands in the template is with
-the conventional Tcl brackets ([ ]).
-Those characters are inconvenient in ``C'' so we use bracket strings
-that create less interference.
 
 Generating the files happens by iterating over all the domains and
 generating a header file and a code file for each one.
@@ -472,20 +467,20 @@ Each embedded command is then shown in the following sections.
 ----
 <<generation data>>=
 set headerTemplate [textutil::adjust::undent {
-    %<banner>%
-    #ifndef %<headerFileGuard>%
-    #define %<headerFileGuard>%
-    %<interface>%
+    [banner]
+    #ifndef [headerFileGuard]
+    #define [headerFileGuard]
+    [interface]
     #include <stddef.h>
     #include <stdint.h>
     #include <stdbool.h>
-    %<interfaceTypeAliases>%
-    %<domainOpDeclarations>%
-    %<externalOpDeclarations>%
-    %<eventParamDeclarations>%
-    %<portalIds>%
-    %<portalDeclaration>%
-    #endif /* %<headerFileGuard>% */
+    [interfaceTypeAliases]
+    [domainOpDeclarations]
+    [externalOpDeclarations]
+    [eventParamDeclarations]
+    [portalIds]
+    [portalDeclaration]
+    #endif /* [headerFileGuard] */
 }]
 ----
 
@@ -578,7 +573,8 @@ There are three circumstances where a type is needed external to the domain:
 
 . As the return type or parameter type of a domain operation.
 . As the return type or parameter type of an external operation.
-. As an argument to an event (as events can be signaled by bridge operations).
+. As an argument to an event (since events can be signaled by the
+portal operations).
 
 We will have need to compute the type aliases needed by the interface
 more than once, so we factor the code into a procedure.
@@ -600,6 +596,11 @@ proc FindInterfaceTypeAliases {domain} {
 }
 ----
 
+We compute a list of all the type alias names.
+This is used below in the queries for the various types
+of parameters types to determine if they are indeed one of the
+type aliases.
+
 [source,tcl]
 ----
 <<FindInterfaceTypeAliases:: find type alias names>>=
@@ -609,6 +610,8 @@ set aliasNames [pipe {
     relation list % TypeName
 } {} |%]
 ----
+
+Query the return types and parameters of the domain operations.
 
 [source,tcl]
 ----
@@ -623,6 +626,8 @@ set dopRefs [pipe {
 } {} |%]
 ----
 
+The same type of query is needed for the external operations.
+
 [source,tcl]
 ----
 <<FindInterfaceTypeAliases:: find aliases in external operations>>=
@@ -636,6 +641,8 @@ set eopRefs [pipe {
 } {} |%]
 ----
 
+And finally, we examine the event parameters.
+
 [source,tcl]
 ----
 <<FindInterfaceTypeAliases:: find aliases in events>>=
@@ -647,6 +654,9 @@ set argRefs [pipe {
     ::rosea::Helpers::ToRef ::micca::TypeAlias ~
 }]
 ----
+
+The union of these sets is then the set of type aliases that will need
+to be made available outside of the domain.
 
 [source,tcl]
 ----
@@ -749,7 +759,7 @@ the operation.
 proc GenOperationDeclarations {opRefs paramRel {suffix {}}} {
     set result {}
 
-    set params [deRef [findRelated $opRefs $paramRel]]
+    set params [deRef [findRelated $opRefs $paramRel]] ; # <1>
     set ops [pipe {
         deRef $opRefs |
         relation rename ~ Name Operation |
@@ -766,12 +776,19 @@ proc GenOperationDeclarations {opRefs paramRel {suffix {}}} {
             "extern $ReturnDataType "\
             $Domain _ $Operation $suffix \(\
             [join [relation list $Parameters DataType] {, }]\
-            "\) ;\n"
+            "\) ;\n" ; # <2>
     }
 
     return $result
 }
 ----
+<1> Passing in a relationship name as an argument may appear unconventional,
+but this is Tcl and queries need not be composed strictly of constant
+data.
+<2> Note that we prepend the domain name to the operation name
+in order to avoid naming conflicts in the global namespace.
+Naming conventions are necessary when dealing with a language like
+``C'' which does not have support for name spaces.
 
 Given a procedure to emit the operation declaration,
 then the template expansion for the domain operations just invokes
@@ -811,6 +828,8 @@ test headergen-3.0 {
             } {
                 pointer type parameters
             }
+            externalop void ext1 {b int c {void *}}
+            externalop void ext2 {d char e unsigned}
             class c1 {
                 attribute color int -default 20
             }
@@ -823,7 +842,6 @@ test headergen-3.0 {
     }
 } -cleanup {
     cleanupDomain
-    validateutils forgetFiles
 } -body {
     testConditions\
         {[validateutils matchLines header3.h {
@@ -861,11 +879,32 @@ proc externalOpDeclarations {} {
 }
 ----
 
+[source,tcl]
+.Tests
+----
+<<generate command tests>>=
+test headergen-3.1 {
+    External operation declarations in header file
+} -setup {
+} -cleanup {
+    validateutils forgetFiles
+} -body {
+    testConditions\
+        {[validateutils matchLines header3.h {
+            extern void header3_ext1__EOP(int, void *) ;
+        }]}\
+        {[validateutils matchLines header3.h {
+            extern void header3_ext2__EOP(char, unsigned) ;
+        }]}
+} -result {1}
+----
+
 === Portal Function Constants
 
-The runtime code provides a set of functions that allow bridge code
-to tunnel simple model level operations, such a signaling an event,
-into a domain.
+The run time code provides a set of
+<<portal-access-functions,portal functions>>
+that allow bridge code to tunnel simple model level operations, such a
+signaling an event, into a domain.
 The functions require integer constants that encode identifiers
 for the various entities that can be accessed via the portal.
 Those constants are placed in the generated header file.
@@ -958,6 +997,10 @@ forAllRefs inst $instRefs {
 }
 ----
 
+The encoding for event numbers is obtained straight from the platform
+model as they are numbered there.
+In this case we query the *TransitioningEvent* class.
+
 [source,tcl]
 ----
 <<portalIds:: generate event information>>=
@@ -981,6 +1024,9 @@ relation foreach tevent $tevents -ascending Model {
     }
 }
 ----
+
+Similarly,
+for polymorphic events we query the *DeferredEvent* class.
 
 [source,tcl]
 ----
@@ -1054,7 +1100,9 @@ test headergen-4.0 {
 
 === Portal Data Structure Declaration
 
-The portal functions require a data structure and we must emit the
+The portal functions require a
+<<portal-data-structures,data structure>>
+and we must emit the
 declaration of that data structure.
 
 (((micca,Header Generation,portalDeclaration)))
@@ -1111,7 +1159,7 @@ since we do not know in which activity it might be invoked.
 ----
 <<generation data>>=
 set codeTemplate [textutil::adjust::undent {
-    %<banner>%
+    [banner]
     #include "micca_rt.h"
     #ifdef MRT_INSTRUMENT
         #ifndef MRT_INSTRUMENT_ENTRY
@@ -1121,37 +1169,37 @@ set codeTemplate [textutil::adjust::undent {
     #else
         #define MRT_INSTRUMENT_ENTRY
     #endif /* MRT_INSTRUMENT */
-    %<domainInclude>%
-    %<prologueDeclarations>%
-    %<implementationTypeAliases>%
-    %<forwardClassDeclarations>%
-    %<forwardRelationshipDeclaration>%
-    %<classDeclarations>%
-    %<assignerDeclarations>%
-    %<stateParamDeclarations>%
-    %<operationDeclarations>%
-    %<ctorDeclarations>%
-    %<dtorDeclarations>%
-    %<activityDeclarations>%
-    %<storageDeclarations>%
-    %<nameDefinitions>%
-    %<iabDefinitions>%
-    %<edbDefinitions>%
-    %<pdbDefinitions>%
-    %<classDefinitions>%
-    %<assignerDefinitions>%
-    %<relationshipDefinitions>%
-    %<classInstanceDefinitions>%
-    %<assignerInstanceDefinitions>%
-    %<operationDefinitions>%
-    %<ctorDefinitions>%
-    %<dtorDefinitions>%
-    %<activityDefinitions>%
-    %<domainCtorDefinition>%
-    %<domainOpDefinitions>%
-    %<externalOpDefinitions>%
-    %<portalDefinition>%
-    %<epilogueDeclarations>%
+    [domainInclude]
+    [prologueDeclarations]
+    [implementationTypeAliases]
+    [forwardClassDeclarations]
+    [forwardRelationshipDeclaration]
+    [classDeclarations]
+    [assignerDeclarations]
+    [stateParamDeclarations]
+    [operationDeclarations]
+    [ctorDeclarations]
+    [dtorDeclarations]
+    [activityDeclarations]
+    [storageDeclarations]
+    [nameDefinitions]
+    [iabDefinitions]
+    [edbDefinitions]
+    [pdbDefinitions]
+    [classDefinitions]
+    [assignerDefinitions]
+    [relationshipDefinitions]
+    [classInstanceDefinitions]
+    [assignerInstanceDefinitions]
+    [operationDefinitions]
+    [ctorDefinitions]
+    [dtorDefinitions]
+    [activityDefinitions]
+    [domainCtorDefinition]
+    [domainOpDefinitions]
+    [externalOpDefinitions]
+    [portalDefinition]
+    [epilogueDeclarations]
 }]
 ----
 
@@ -1159,6 +1207,8 @@ In the following sections, we show the procedures that are
 invoked as part of the code template expansion.
 
 === Including the Domain Header File
+
+The generated code file includes the generated header file automatically.
 
 (((micca,Code Generation,domainInclude)))
 [source,tcl]
@@ -1198,9 +1248,7 @@ proc prologueDeclarations {} {
 test codegen-1.0 {
     Generated code file with prologue and epilogue
 } -setup {
-    makeFile {} codegen1.h
-    makeFile {} codegen1.c
-    micca configure {
+    validateutils genMiccaFile codegen1 {
         domain codegen1 {
             prologue {#include mySpecial.h}
             prologue {#include theSpecial.h}
@@ -1215,26 +1263,32 @@ test codegen-1.0 {
                 attribute color int -default 10
                 attribute temp double -default 2.0
             }
-            class c2 {
-                attribute color int -default 10
-                attribute temp double -default 2.0
-            }
         }
         population codegen1 {
             class c1 {
-                instance fred1
-            }
-            class c2 {
                 instance fred1
             }
         }
     }
 } -cleanup {
     cleanupDomain
+    validateutils forgetFiles
 } -body {
-    micca generate
-    llength [fileutil::grep {Special} codegen1.c]
-} -result {2}
+    testConditions\
+        {[validateutils matchLines codegen1.c {
+            #include mySpecial.h
+        }]}\
+        {[validateutils matchLines codegen1.c {
+            #include theSpecial.h
+        }]}\
+        {[validateutils matchLines codegen1.c {
+            static int count(
+                int a)
+            {
+                return a + 1 ;
+            }
+        }]}\
+} -result {1}
 ----
 
 === Implementation Type Aliases
@@ -1269,10 +1323,17 @@ in the domain interface is the set that we are interested in here.
 
 === Forward Class Declarations
 
-We need to introduce the structure names for the classes.
+We need to introduce the structure names for the classes early in
+the generated code file.
 No definition of the structure is given here.
 That will come later, but since class structures have pointers to
 other class structures we need to tell the compiler about the names.
+Sometimes the pointer references between classes are so direct
+that we have no choice but to forward declare the class.
+Rather than attempting to figure out some order does not reference
+a class structure name before it is defined,
+we just emit forward declarations for all the classes.
+There is no reason to do the compiler's job here.
 
 (((micca,Code Generation,forwardClassDeclarations)))
 [source,tcl]
@@ -1298,6 +1359,11 @@ proc forwardClassDeclarations {} {
 
 === Forward Relationshp Declaration
 
+The same reasoning applies to the array that holds the
+relationship description information.
+Class definitions will make reference to and we need to have its name
+known to the compiler.
+
 (((micca,Code Generation,forwardRelationshipDeclaration)))
 [source,tcl]
 .Implementation
@@ -1321,6 +1387,20 @@ Because the class structure of union based generalization nests
 the subclasses as part of the superclass structure,
 we must emit the union subclass declarations in the correct order
 for the compiler.
+Otherwise,
+the compiler will complain as it must know the size of every member of a
+structure as it is being defined.
+
+The strategy here is start with the ultimate superclasses and find
+those ultimate superclasses that are part of a union based generalization.
+An ultimate superclass is one at the top of a generalization hierarchy,
+_i.e._ a superclass that is not also a subclass of some other generalization
+relationship.
+For those ultimate superclasses that are part of a union based
+generalization we can emit the class declarations in the tree in
+reverse order.
+After dealing with the union superclasses then the non-union ones can be
+declared in an arbitrary order.
 
 (((micca,Code Generation,classDeclarations)))
 [source,tcl]
@@ -1347,6 +1427,13 @@ proc classDeclarations {} {
 }
 ----
 
+Since the union subclasses form a tree,
+we will use a recursive procedure to walk the implied tree.
+The order of traversal will be depth first which insures that
+union subclasses are defined before they must be used in the
+definition of the including union superclass.
+
+(((micca,Code Generation,DeclareUnionSubclassStructures)))
 [source,tcl]
 ----
 <<generation code commands>>=
@@ -1362,133 +1449,27 @@ proc DeclareUnionSubclassStructures {superRefs} {
             relation semijoin ~ $::micca::UnionSuperclass\
                 -using {Domain Domain Class Class} |
             ::rosea::Helpers::ToRef ::micca::UnionSuperclass ~
-        }]
+        }] ; # <1>
 
-        append result [DeclareUnionSubclassStructures $newsupers]
+        append result [DeclareUnionSubclassStructures $newsupers] ; # <2>
 
-        append result [DeclareClassStructure [findRelated $subRef R47 R40 R41]]
+        append result [DeclareClassStructure [findRelated $subRef R47 R40 R41]] ; # <3>
     }
 
     return $result
 }
 ----
+<1> By performing the `semijoin` only across the Domain and Class attributes,
+we in effect are asking if the union subclass is also a union superclass
+regardless of the relationship.
+<2> Recursively define the subclass structures first
+so we get a depth first walk.
+<3> Emit the declaration for the current subclass node.
 
-[source,tcl]
-----
-<<generation code commands>>=
-proc DeclareClassStructure {classRef} {
-    assignAttribute $classRef {Name className}
+We can find the classes not part of a union generalization by the difference
+of all the classes and those that are union subclasses.
 
-    append result\
-        "struct $className \{\n"\
-        "    MRT_Instance base__INST ;\n"
-
-    set compRefs [findRelated $classRef ~R20]
-
-    # Attributes first
-    forAllRefs attrRef [findRelated $compRefs {~R25 PopulatedComponent}\
-            {~R21 Attribute}] {
-        assignAttribute $attrRef {Name attrName} DataType Dimension
-        append result "    $DataType $attrName"
-        if {$Dimension > 0} {
-            append result "\[$Dimension\]"
-        }
-        append result " ;\n"
-    }
-
-    # References second
-    set refRefs [findRelated $compRefs {~R25 PopulatedComponent}\
-            {~R21 Reference}]
-
-    # Superclass References
-    forAllRefs superRef [findRelated $refRefs {~R23 SuperclassReference}\
-            ~R91 {~R47 ReferringSubclass} R37 ~R36] {
-        assignAttribute $superRef {Relationship attrName} {Class className}
-        append result "    [GetClassProperty $className Reference]$attrName ;\n"
-    }
-
-    # Associator Reference
-    forAllRefs atorRef [findRelated $refRefs {~R23 AssociatorReference}\
-            ~R93 R42] {
-        assignAttribute $atorRef {Name attrName}
-
-        set sourceDecl [pipe {
-            findRelated $atorRef ~R34 |
-            readAttribute % Class |
-            GetClassProperty % Reference
-        } {} |%]
-        set targetDecl [pipe {
-            findRelated $atorRef ~R35 |
-            readAttribute % Class |
-            GetClassProperty % Reference
-        } {} |%]
-
-        append result\
-            "    struct \{\n"\
-            "        ${targetDecl}forward ;\n"\
-            "        ${sourceDecl}backward ;\n"\
-            "    \} $attrName ;\n"
-    }
-
-    # Association Reference
-    forAllRefs assocRef [findRelated $refRefs {~R23 AssociationReference}\
-            ~R90 R32 ~R33] {
-        assignAttribute $assocRef {Relationship attrName} {Class className}
-        append result "    [GetClassProperty $className Reference]$attrName ;\n"
-    }
-
-    set genRefs [findRelated $compRefs {~R25 GeneratedComponent}]
-
-    # Subclass References
-    forAllRefs subRef [findRelated $genRefs {~R24 SubclassReference}] {
-        assignAttribute $subRef {Name attrName}
-        append result "    void *$attrName ;\n"
-    }
-
-    # Subclass container
-    # Union supertypes will contain a superclass container.
-    forAllRefs contRef [findRelated $genRefs {~R24 SubclassContainer}] {
-        assignAttribute $contRef {Name attrName}
-
-        set subRefs [findRelated $contRef ~R96 R44 ~R45]
-        append result "    union \{\n"
-        foreach subName [relation list [deRef $subRefs] Class] {
-            append result "        "\
-                "[GetClassProperty $subName Declaration] $subName ;\n"
-        }
-        append result "    \} $attrName ;\n"
-    }
-
-    # Link Containers
-    forAllRefs linkRef [findRelated $genRefs {~R24 LinkContainer}] {
-        append result "    MRT_LinkRef [readAttribute $linkRef Name] ;\n"
-    }
-
-    # Complementary References
-    forAllRefs complRef [findRelated $genRefs {~R24 ComplementaryReference}] {
-        set singRef [findRelated $complRef {~R26 SingularReference} R26]
-        if {[isNotEmptyRef $singRef]} {
-            append result [SingularReferenceMember $singRef]
-            continue
-        }
-
-        set arrayRef [findRelated $complRef {~R26 ArrayReference} R26]
-        if {[isNotEmptyRef $arrayRef]} {
-            append result [ArrayReferenceMember $arrayRef]
-            continue
-        }
-
-        set linkRef [findRelated $complRef {~R26 LinkReference} R26]
-        if {[isNotEmptyRef $linkRef]} {
-            append result [LinkReferenceMember $linkRef]
-            continue
-        }
-    }
-
-    append result "\} ;\n"
-}
-----
-
+(((micca,Code Generation,FindNonUnionSubclasses)))
 [source,tcl]
 ----
 <<generation helper commands>>=
@@ -1503,39 +1484,228 @@ proc FindNonUnionSubclasses {domain} {
 }
 ----
 
+Class structure definitions consist of three components:
+
+. The base
+<<instance-data,instance data structure>>
+as required and defined by the run time code.
+. Attributes defined by the class.
+. References used to implement relationship navigation.
+
+Of the three, references are the most complicated in that they come
+in a larger number of types.
+
+(((micca,Code Generation,DeclareClassStructure)))
 [source,tcl]
 ----
-<<generation helper commands>>=
-proc SingularReferenceMember {singRef} {
-    set attrName [readAttribute $singRef Name]
-    set refedClass [FindReferencedClass $singRef]
-    return "    [GetClassProperty $refedClass Reference]$attrName ;\n"
+<<generation code commands>>=
+proc DeclareClassStructure {classRef} {
+    assignAttribute $classRef {Name className}
+
+    append result\
+        "struct $className \{\n"\
+        "    MRT_Instance base__INST ;\n"
+
+    set compRefs [findRelated $classRef ~R20] ; # <1>
+
+    <<DeclareClassStructure: attribute declarations>>
+    <<DeclareClassStructure: reference declarations>>
+
+    append result "\} ;\n"
 }
 ----
+<1> Find all the class components for the given class.
 
 [source,tcl]
 ----
-<<generation helper commands>>=
-proc ArrayReferenceMember {arrayRef} {
-    set attrName [readAttribute $arrayRef Name]
-    set classref [GetClassProperty [FindReferencedClass $arrayRef] Reference]
-    return [indentCode [string cat\
-        "struct \{\n" [indentCode [string cat\
-            "${classref}const *links ;\n"\
-            "unsigned count ;\n"]]\
-        "\} $attrName ;\n"]]
+<<DeclareClassStructure: attribute declarations>>=
+set attrRefs [findRelated $compRefs {~R25 PopulatedComponent} {~R21 Attribute}] ; # <1>
+forAllRefs attrRef $attrRefs {
+    assignAttribute $attrRef {Name attrName} DataType Dimension
+    append result "    $DataType $attrName"
+    if {$Dimension > 0} { # <2>
+        append result "\[$Dimension\]"
+    }
+    append result " ;\n"
 }
 ----
+<1> This query finds all the attributes of the class.
+<2> Check if we need to make this attribute an array.
+
+
+As can be seen from the portion of the platform model that
+<<classes-subsystem-discussion,deals with classes>>
+there are a lot of different types of references.
+In the code below we assiduously consider each different type.
 
 [source,tcl]
 ----
-<<generation helper commands>>=
-proc LinkReferenceMember {linkRef} {
-    set attrName [readAttribute $linkRef Name]
-    return "    MRT_LinkRef $attrName ;\n"
+<<DeclareClassStructure: reference declarations>>=
+set refRefs [findRelated $compRefs {~R25 PopulatedComponent} {~R21 Reference}] ; # <1>
+<<DeclareClassStructure: superclass references>>
+<<DeclareClassStructure: associator references>>
+<<DeclareClassStructure: association references>>
+
+set genRefs [findRelated $compRefs {~R25 GeneratedComponent}] ; # <2>
+<<DeclareClassStructure: subclass references>>
+<<DeclareClassStructure: subclass containers>>
+<<DeclareClassStructure: link containers>>
+<<DeclareClassStructure: complementary references>>
+----
+<1> First we deal with those references that can be populated.
+Referring to the platform model will make this clearer.
+<2> The other references are generated to support navigating relationships
+in both directions.
+
+A superclass reference declaration takes the form of a simple pointer to the
+superclass structure.
+[source,tcl]
+----
+<<DeclareClassStructure: superclass references>>=
+set superRefs [findRelated $refRefs {~R23 SuperclassReference} ~R91\
+        {~R47 ReferringSubclass} R37 ~R36]
+forAllRefs superRef $superRefs {
+    assignAttribute $superRef {Relationship attrName} {Class className}
+    append result "    [GetClassProperty $className Reference]$attrName ;\n"
 }
 ----
 
+Associative classes make two references which are composed together in
+an unnamed structure.
+
+[source,tcl]
+----
+<<DeclareClassStructure: associator references>>=
+set atorRefs [findRelated $refRefs {~R23 AssociatorReference} ~R93 R42]
+forAllRefs atorRef $atorRefs {
+    assignAttribute $atorRef {Name attrName}
+
+    set sourceDecl [pipe {
+        findRelated $atorRef ~R34 |
+        readAttribute % Class |
+        GetClassProperty % Reference
+    } {} |%]
+    set targetDecl [pipe {
+        findRelated $atorRef ~R35 |
+        readAttribute % Class |
+        GetClassProperty % Reference
+    } {} |%]
+
+    append result\
+        "    struct \{\n"\
+        "        ${targetDecl}forward ;\n"\
+        "        ${sourceDecl}backward ;\n"\
+        "    \} $attrName ;\n"
+}
+----
+
+Simple association references also resolve to a single pointer declaration
+to the referenced class.
+
+[source,tcl]
+----
+<<DeclareClassStructure: association references>>=
+set assocRefs [findRelated $refRefs {~R23 AssociationReference} ~R90 R32 ~R33]
+forAllRefs assocRef $assocRefs {
+    assignAttribute $assocRef {Relationship attrName} {Class className}
+    append result "    [GetClassProperty $className Reference]$attrName ;\n"
+}
+----
+
+Generated references deal with the "other" side of a relationship.
+When a class serves as a superclass,
+it has a pointer to its related subclass instance.
+For the superclass,
+we use a `void` pointer since the type of the subclass instance varies.
+
+[source,tcl]
+----
+<<DeclareClassStructure: subclass references>>=
+set subRefs [findRelated $genRefs {~R24 SubclassReference}]
+forAllRefs subRef $subRefs {
+    assignAttribute $subRef {Name attrName}
+    append result "    void *$attrName ;\n"
+}
+----
+
+Union superclasses use a union to serve as the container for
+subclass instances.
+
+[source,tcl]
+----
+<<DeclareClassStructure: subclass containers>>=
+set contRefs [findRelated $genRefs {~R24 SubclassContainer}]
+forAllRefs contRef $contRefs {
+    assignAttribute $contRef {Name attrName}
+
+    set subRefs [findRelated $contRef ~R96 R44 ~R45]
+    append result "    union \{\n"
+    foreach subName [relation list [deRef $subRefs] Class] {
+        append result "        "\
+            "[GetClassProperty $subName Declaration] $subName ;\n"
+    }
+    append result "    \} $attrName ;\n"
+}
+----
+
+For class instances that are part of a linked list,
+we have to provide storage in the class structure for the list links.
+
+[source,tcl]
+----
+<<DeclareClassStructure: link containers>>=
+set linkRefs [findRelated $genRefs {~R24 LinkContainer}]
+forAllRefs linkRef $linkRefs {
+    append result "    MRT_LinkRef [readAttribute $linkRef Name] ;\n"
+}
+----
+
+Complementary references are used by associations to implement the
+back references.
+There are several types depending upon the multiplicity and
+whether the association is static.
+
+[source,tcl]
+----
+<<DeclareClassStructure: complementary references>>=
+set complRefs [findRelated $genRefs {~R24 ComplementaryReference}]
+forAllRefs complRef $complRefs {
+    set singRef [findRelated $complRef {~R26 SingularReference} R26]
+    if {[isNotEmptyRef $singRef]} {
+        set attrName [readAttribute $singRef Name]
+        set refedClass [FindReferencedClass $singRef]
+        append result\
+            "    [GetClassProperty $refedClass Reference]$attrName ;\n"
+        continue
+    }
+
+    set arrayRef [findRelated $complRef {~R26 ArrayReference} R26]
+    if {[isNotEmptyRef $arrayRef]} {
+        set attrName [readAttribute $arrayRef Name]
+        set classref [GetClassProperty [FindReferencedClass $arrayRef] Reference]
+        append result\
+            "    struct \{\n"\
+            "        ${classref}const *links ;\n"\
+            "        unsigned count ;\n"\
+            "    \} $attrName ;\n"
+        continue
+    }
+
+    set linkRef [findRelated $complRef {~R26 LinkReference} R26]
+    if {[isNotEmptyRef $linkRef]} {
+        set attrName [readAttribute $linkRef Name]
+        append result "    MRT_LinkRef $attrName ;\n"
+        continue
+    }
+}
+----
+
+For complementary references,
+we need to be able to find the class to which they refer.
+We factor out the mucking around the platform model that is necessary
+to determine the class referenced by a complementary reference.
+
+(((micca,Code Generation,FindReferencedClass)))
 [source,tcl]
 ----
 <<generation helper commands>>=
@@ -1563,16 +1733,25 @@ proc FindReferencedClass {compRef} {
 }
 ----
 
+=== Assigner Declarations
+
+An assigner are declared in much the same manner as a class.
+This gives us the ability to deal with the state model of an assigner
+using the same code as for classes.
+There are a few different rules for assigners:
+
+* Single assigners have no attributes and are never created dynamically.
+* Multiple assigners have a single attribute and may be created dynamically.
+
 [source,tcl]
 ----
 <<generation code commands>>=
 proc assignerDeclarations {} {
     variable domain
-    set result {}
 
-    set singles [SingleAssigner findWhere {$Domain eq $domain}]
     append result [comment "Single Assigner Structure Declarations"]
 
+    set singles [SingleAssigner findWhere {$Domain eq $domain}]
     forAllRefs assigner $singles {
         assignAttribute $assigner
         append result\
@@ -1581,9 +1760,9 @@ proc assignerDeclarations {} {
             "\} ;\n"
     }
 
-    set multis [MultipleAssigner findWhere {$Domain eq $domain}]
     append result [comment "Multiple Assigner Structure Declarations"]
 
+    set multis [MultipleAssigner findWhere {$Domain eq $domain}]
     forAllRefs assigner $multis {
         assignAttribute $assigner
         append result\
@@ -1603,9 +1782,7 @@ proc assignerDeclarations {} {
 test codegen-2.0 {
     Generated code file supertype and subtype references
 } -setup {
-    # makeFile {} codegen2.h
-    # makeFile {} codegen2.c
-    micca configure {
+    validateutils genMiccaFile codegen2 {
         domain codegen2 {
             class super {}
             class sub1 {}
@@ -1627,10 +1804,21 @@ test codegen-2.0 {
     }
 } -cleanup {
     cleanupDomain
+    validateutils forgetFiles
 } -body {
-    micca generate
     testConditions\
-        {[llength [fileutil::grep {struct super \*R1} codegen2.c]] == 2}
+        {[validateutils matchLines codegen2.c {
+            struct super {
+                MRT_Instance base__INST ;
+                void *R1 ;
+            } ;
+        }]}\
+        {[validateutils matchLines codegen2.c {
+            struct sub1 {
+                MRT_Instance base__INST ;
+                struct super *R1 ;
+            } ;
+        }]}
 } -result {1}
 ----
 
@@ -1640,9 +1828,7 @@ test codegen-2.0 {
 test codegen-3.0 {
     Generated code file associative class references
 } -setup {
-    # makeFile {} codegen3.h
-    # makeFile {} codegen3.c
-    micca configure {
+    validateutils genMiccaFile codegen3 {
         domain codegen3 {
             class A {}
             class X {}
@@ -1666,10 +1852,27 @@ test codegen-3.0 {
     }
 } -cleanup {
     cleanupDomain
+    validateutils forgetFiles
 } -body {
-    micca generate
     testConditions\
-        {[llength [fileutil::grep {R1} codegen3.c]] == 27}
+        {[validateutils matchLines codegen3.c {
+            struct A {
+                MRT_Instance base__INST ;
+                struct {
+                    struct Y *forward ;
+                    struct X *backward ;
+                } R1 ;
+            } ;
+        }]}\
+        {[validateutils matchLines codegen3.c {
+            struct X {
+                MRT_Instance base__INST ;
+                struct {
+                    struct A *const *links ;
+                    unsigned count ;
+                } R1__FORW ;
+            } ;
+        }]}
 } -result {1}
 ----
 
@@ -1679,9 +1882,7 @@ test codegen-3.0 {
 test codegen-20.0 {
     Generated code file associative class references
 } -setup {
-    # makeFile {} codegen20.h
-    # makeFile {} codegen20.c
-    micca configure {
+    validateutils genMiccaFile codegen20 {
         domain codegen20 {
             class A {}
             class X {}
@@ -1705,10 +1906,24 @@ test codegen-20.0 {
     }
 } -cleanup {
     cleanupDomain
+    validateutils forgetFiles
 } -body {
-    micca generate
     testConditions\
-        {[llength [fileutil::grep {R1} codegen20.c]] == 19}
+        {[validateutils matchLines codegen20.c {
+            struct A {
+                MRT_Instance base__INST ;
+                struct {
+                    struct Y *forward ;
+                    struct X *backward ;
+                } R1 ;
+            } ;
+        }]}\
+        {[validateutils matchLines codegen20.c {
+            struct X {
+                MRT_Instance base__INST ;
+                struct A *R1__FORW ;
+            } ;
+        }]}
 } -result {1}
 ----
 
@@ -2102,7 +2317,11 @@ test codegen-23.0 {
 } -result {1}
 ----
 
+=== Event Parameter Declarations
+
+(((micca,Code Generation,eventParamDeclarations)))
 [source,tcl]
+.Implementation
 ----
 <<generation header commands>>=
 proc eventParamDeclarations {} {
@@ -2169,6 +2388,9 @@ proc eventParamDeclarations {} {
 }
 ----
 
+=== State Parameter Declarations
+
+(((micca,Code Generation,stateParamDeclarations)))
 [source,tcl]
 ----
 <<generation code commands>>=
@@ -2287,6 +2509,9 @@ test codegen-10.0 {
 } -result {1}
 ----
 
+=== Operation Declarations
+
+(((micca,Code Generation,operationDeclarations)))
 [source,tcl]
 ----
 <<generation code commands>>=
@@ -2361,6 +2586,9 @@ test codegen-11.0 {
 } -result {1}
 ----
 
+=== Constructor Declarations
+
+(((micca,Code Generation,ctorDeclarations)))
 [source,tcl]
 ----
 <<generation code commands>>=
@@ -2382,6 +2610,9 @@ proc ctorDeclarations {} {
 }
 ----
 
+=== Destructor Declarations
+
+(((micca,Code Generation,dtorDeclarations)))
 [source,tcl]
 ----
 <<generation code commands>>=
@@ -2403,6 +2634,9 @@ proc dtorDeclarations {} {
 }
 ----
 
+=== Activity Declarations
+
+(((micca,Code Generation,activityDeclarations)))
 [source,tcl]
 ----
 <<generation code commands>>=
@@ -2435,6 +2669,9 @@ proc activityDeclarations {} {
 }
 ----
 
+=== Storage Declarations
+
+(((micca,Code Generation,storageDeclarations)))
 [source,tcl]
 ----
 <<generation code commands>>=
@@ -2473,8 +2710,9 @@ proc storageDeclarations {} {
 }
 ----
 
-Put out all the naming information.
+=== Name Definitions
 
+(((micca,Code Generation,nameDefinitions)))
 [source,tcl]
 ----
 <<generation code commands>>=
@@ -2724,7 +2962,7 @@ proc GenerateTransitionTable {smodel} {
     }]
     # puts [relformat $statetrans statetrans]
     set nontrans [pipe {
-        Non-StateTransition findWhere {$Domain eq $domain && $Model eq $className} |
+        NonStateTransition findWhere {$Domain eq $domain && $Model eq $className} |
         deRef ~ |
         relation rename ~ TransRule NewState
     }]
@@ -2970,7 +3208,7 @@ proc pdbDefinitions {} {
     # puts [relformat $deferred deferred]
 
     set nonlocals [pipe {
-        Non-LocalEvent findWhere {$Domain eq $domain} |
+        NonLocalEvent findWhere {$Domain eq $domain} |
         deRef % |
         relation join % $::micca::Relationship\
             -using {Domain Domain Relationship Name} |
@@ -4845,7 +5083,7 @@ the macro to access the *Color* attribute of an instance could be written
 as:
 
 *****
-ColorType c = %<instance self attribute Color>% ;
+ColorType c = %<my attribute Color>% ;
 *****
 
 The code generator would then expand the commands contained between the
@@ -4855,13 +5093,16 @@ value of the *self* variable.
 This is a very simple case, but even here the code generator
 performs a number of significant checks in an attempt to discover
 errors before code is sent to the compiler.
-In this case, the code generator insures that the value of *self* is
-a reference to a class instance and that class contains an attribute
-named *Color*.
+In this case, the code generator insures that the attribute named
+*Color* exists for the class in which the action is run.
 
-There are many of these macro commands.
+There are many of these macro commands to handle common model level
+processing.
 State activities are then a mix of ``C'' code and macros to accomplish
 the purpose of the activity.
+The straight ``C'' contains the algorithmic processing and the
+expanded macros handle the model level actions such as navigating
+relationships, finding instances and dealing with attribute updates.
 Since the code generator has access to the populated platform model,
 it performs many consistency checks that would otherwise result in
 compiler errors.
@@ -4878,16 +5119,29 @@ takes care of the semicolon punctuation.
 . A macro command may expand to a value in ``C''.
 For value macros,
 the code generator just replaces the macro and does not add any punctuation.
-This enable a value macro to be used inside of another ``C'' expression.
+This enables a value macro to be used inside of another ``C'' expression.
 . A macro command may expand to a loop construct in ``C''.
 For looping macros,
 additional ``C'' code is included in the loop body and the end of the
 loop is given by invoking the `%<end>%` macro.
-Typically, the looping macros allow iteration over sets of instances.
+Typically, the looping macros allow iteration over sets of instances
+and the loop body performs the per instance computation.
 
 In the descriptions below we state the expansion type of each macro.
 
 === Expanding the Activities Macros
+
+Just as we have been using the `textutil::expander` command to perform
+macro expansion for generating the header and code files,
+we will use it to expand the embedded macros in the state activities.
+We will use a separate instance of the the expander and will direct
+this expansion to happen in its own namespace.
+The namespace will allow us to define the macro commands so that the commands
+will resolve with unqualified names.
+We will also use a namespace to handle the details of the expansion code
+itself.
+Following our usual pattern,
+we define the namespace for the generation of the embedded macros.
 
 [source,tcl]
 ----
@@ -4909,7 +5163,7 @@ namespace eval GenSupport {
     upvar #0 ::micca::@Gen@::errcount errcount
 
     textutil::expander actexpand
-    actexpand setbrackets %< >%
+    actexpand setbrackets %< >% ; # <1>
     actexpand evalcmd "namespace eval [namespace parent]::GenActivity"
     actexpand errmode fail
     actexpand textcmd [namespace current]::ProcessCodeLines
@@ -4918,6 +5172,10 @@ namespace eval GenSupport {
     <<generation support commands>>
 }
 ----
+<1> The default way to embed commands in the template is with
+the conventional Tcl brackets ([ ]).
+Those characters are inconvenient in ``C'' so we use bracket strings
+that create less interference.
 
 === Creating the Macro Commands
 
@@ -5108,11 +5366,30 @@ set cmdmap [dict create\
     operation ${suppns}::InstanceOperation\
     foreachRelated ${suppns}::InstanceForeachRelated\
     findOneRelated ${suppns}::InstanceFindOneRelated\
-    instid [list ${suppns}::InstanceRefToId]\
+    instid ${suppns}::InstanceRefToId\
+    instref ${suppns}::InstanceIdToRef\
 ]
 namespace ensemble create\
     -command ${actns}::instance\
     -parameters instref\
+    -map $cmdmap
+----
+
+[source,tcl]
+----
+<<CreateActivityCommands: instances>>=
+set cmdmap [dict create\
+    attribute [list ${suppns}::InstanceAttribute self]\
+    signal [list ${suppns}::InstanceSignal self]\
+    delaysignal [list ${suppns}::InstanceDelaySignal self]\
+    canceldelayed [list ${suppns}::InstanceCancelSignal self]\
+    delayremaining [list ${suppns}::InstanceRemainingTime self]\
+    delete [list ${suppns}::InstanceDelete self]\
+    operation [list ${suppns}::InstanceOperation self]\
+    instid [list ${suppns}::InstanceRefToId self]\
+]
+namespace ensemble create\
+    -command ${actns}::my\
     -map $cmdmap
 ----
 
@@ -5474,8 +5751,10 @@ proc InstanceOperation {instref opName args} {
         error "unknown instance operation, $opName, for class, $className"
     }
 
+    append result\
+        [linecomment "instance $instref operation $opName [list $args]"]\
+        "${className}_$opName\("
     dict set args self $instref
-    append result "${className}_$opName\("
     set pset {}
     set paramRefs [findRelated $opRef ~R4]
     relation foreach param [deRef $paramRefs] -ascending Number {
@@ -5502,7 +5781,7 @@ proc InstanceForeachRelated {instref startref args} {
     set startClass [dict get $startsym Class]
     set startlevel [GetBlock]
     set result [IndentToBlock\
-        [linecomment "instance $instref foreachRelated $startref $args"]\
+        [linecomment "instance $instref foreachRelated $startref [list $args]"]\
     ]
 
     foreach relspec $args {
@@ -6355,7 +6634,7 @@ proc InstanceFindOneRelated {instref startref args} {
     set startsym [CheckInstRefSymbol $startref]
     set startClass [dict get $startsym Class]
     set heading [IndentToBlock\
-        [linecomment "instance $instref findOneRelated $startref $args"]\
+        [linecomment "instance $instref findOneRelated $startref [list $args]"]\
     ]
     set startlevel [GetBlock]
     set isCond false
@@ -6534,6 +6813,20 @@ proc InstanceRemainingTime {instref event {sourceref {}}} {
 proc InstanceRefToId {instref} {
     CheckInstRefSymbol $instref
     return "mrt_InstanceIndex($instref)"
+}
+----
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc InstanceIdToRef {instref className instid} {
+    variable domain
+
+    set classDesc [GetClassDescriptor $domain $className]
+    append result\
+        [CreateInstRefSymbol $className $instref]\
+        "$instref = mrt_InstanceReference($classDesc, $instid) ;\n"
+    return [IndentToBlock $result] ;
 }
 ----
 
@@ -6725,7 +7018,7 @@ proc InstanceSetOperation {label op opset set1 set2 args} {
 
     set classDesc [GetClassDescriptor $domain $className]
     append result\
-        [linecomment "instset $opset $label $set1 $args"]\
+        [linecomment "instset $opset $label $set1 [list $args]"]\
         [CreateInstSetSymbol $className $opset]\
         "mrt_InstSetInitialize(&$opset, &$classDesc) ;\n"\
         "$op\(&$set1, &$set2, &$opset\) ;\n"
@@ -6768,7 +7061,7 @@ proc ClassCreate {className instref args} {
     set attrvalues [GetAttrInitialValues $className $args]
 
     append result\
-        [linecomment "$className create $instref $args"]\
+        [linecomment "$className create $instref [list $args]"]\
         [CreateInstRefSymbol $className $instref]\
         "$instref = mrt_CreateInstance(&$classDesc, MRT_StateCode_IG) ;\n"\
         [AssignAttributeValues $className $instref $attrvalues]
@@ -7032,7 +7325,7 @@ proc ClassCreateIn {className instref state args} {
     set attrvalues [GetAttrInitialValues $className $args]
 
     append result\
-        [linecomment "$className createin $instref $state $args"]\
+        [linecomment "$className createin $instref $state [list $args]"]\
         [CreateInstRefSymbol $className $instref]\
         "$instref = mrt_CreateInstance(&$classDesc, $statenum) ;\n"\
         [AssignAttributeValues $className $instref $attrvalues]

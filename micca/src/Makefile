@@ -15,6 +15,8 @@ PKGDIR	= ../../packages
 IMAGEDIR = ./images
 CODEDIR	= ../code
 
+VERSION=0.1
+
 vpath %.pdf $(DOCDIR)
 vpath %.html $(DOCDIR)
 vpath %.test $(TESTDIR)
@@ -136,9 +138,9 @@ ASCIIDOC_OPTS =\
 	$(patsubst %,--attribute=%,$(ASCIIDOC_ATTRS))\
 	$(NULL)
 
-.PHONY : all doc code tests runtests
+.PHONY : all doc code tests runtests package
 
-all : doc code tests
+all : doc code tests package
 
 doc : $(PDF)
 
@@ -148,6 +150,11 @@ tests : code $(TESTS)
 
 runtests : tests
 	cd $(TESTDIR) ; tclsh $(TESTS) -verbose bet -level debug
+
+package : $(PKGDIR)/package-micca-$(VERSION)-tcl.tm
+
+$(PKGDIR)/package-micca-$(VERSION)-tcl.tm : code $(CODEDIR)/tcl/pkgIndex.tcl
+	teapot-pkg generate --output $(PKGDIR) $(CODEDIR)/tcl
 
 clean :
 	$(RM) $(CLEANFILES)
