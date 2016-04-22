@@ -71,7 +71,7 @@ namespace eval ::umletsync {
     namespace export substAsciidocFile
     namespace ensemble create
 
-    variable version 1.1
+    variable version 1.2
 }
 
 # All the work is done here.
@@ -344,7 +344,7 @@ proc ::umletsync::substAsciidocFile {ifile level report nodiffs} {
                 # Select the nodes that hold a State. The "panel_attributes"
                 # element contains the text shown in the state node.
                 set selected [$doc selectNodes\
-                    {/diagram[@program='umlet']/element[type='com.umlet.element.custom.State']/panel_attributes}]
+                    {/diagram[@program='umlet']/element[id='UMLState']/panel_attributes}]
 
                 foreach pa $selected {
                     # The text of the node has be parsed to separate the name
