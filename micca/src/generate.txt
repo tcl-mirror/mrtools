@@ -93,7 +93,7 @@ namespace eval @Gen@ {
 }
 ----
 
-== Generating Run Time Data
+=== Generating Run Time Data
 
 `Micca` creates two ``C'' files for each domain.
 The first is a header file that contains interfacing information
@@ -1250,8 +1250,8 @@ test codegen-1.0 {
 } -setup {
     validateutils genMiccaFile codegen1 {
         domain codegen1 {
-            prologue {#include mySpecial.h}
-            prologue {#include theSpecial.h}
+            prologue {#include "mySpecial.h"}
+            prologue {#include "theSpecial.h"}
             epilogue {
                 static int count(
                     int a)
@@ -1276,10 +1276,10 @@ test codegen-1.0 {
 } -body {
     testConditions\
         {[validateutils matchLines codegen1.c {
-            #include mySpecial.h
+            #include "mySpecial.h"
         }]}\
         {[validateutils matchLines codegen1.c {
-            #include theSpecial.h
+            #include "theSpecial.h"
         }]}\
         {[validateutils matchLines codegen1.c {
             static int count(
@@ -1599,234 +1599,12 @@ forAllRefs atorRef $atorRefs {
 }
 ----
 
-Simple association references also resolve to a single pointer declaration
-to the referenced class.
-
 [source,tcl]
-----
-<<DeclareClassStructure: association references>>=
-set assocRefs [findRelated $refRefs {~R23 AssociationReference} ~R90 R32 ~R33]
-forAllRefs assocRef $assocRefs {
-    assignAttribute $assocRef {Relationship attrName} {Class className}
-    append result "    [GetClassProperty $className Reference]$attrName ;\n"
-}
-----
-
-Generated references deal with the "other" side of a relationship.
-When a class serves as a superclass,
-it has a pointer to its related subclass instance.
-For the superclass,
-we use a `void` pointer since the type of the subclass instance varies.
-
-[source,tcl]
-----
-<<DeclareClassStructure: subclass references>>=
-set subRefs [findRelated $genRefs {~R24 SubclassReference}]
-forAllRefs subRef $subRefs {
-    assignAttribute $subRef {Name attrName}
-    append result "    void *$attrName ;\n"
-}
-----
-
-Union superclasses use a union to serve as the container for
-subclass instances.
-
-[source,tcl]
-----
-<<DeclareClassStructure: subclass containers>>=
-set contRefs [findRelated $genRefs {~R24 SubclassContainer}]
-forAllRefs contRef $contRefs {
-    assignAttribute $contRef {Name attrName}
-
-    set subRefs [findRelated $contRef ~R96 R44 ~R45]
-    append result "    union \{\n"
-    foreach subName [relation list [deRef $subRefs] Class] {
-        append result "        "\
-            "[GetClassProperty $subName Declaration] $subName ;\n"
-    }
-    append result "    \} $attrName ;\n"
-}
-----
-
-For class instances that are part of a linked list,
-we have to provide storage in the class structure for the list links.
-
-[source,tcl]
-----
-<<DeclareClassStructure: link containers>>=
-set linkRefs [findRelated $genRefs {~R24 LinkContainer}]
-forAllRefs linkRef $linkRefs {
-    append result "    MRT_LinkRef [readAttribute $linkRef Name] ;\n"
-}
-----
-
-Complementary references are used by associations to implement the
-back references.
-There are several types depending upon the multiplicity and
-whether the association is static.
-
-[source,tcl]
-----
-<<DeclareClassStructure: complementary references>>=
-set complRefs [findRelated $genRefs {~R24 ComplementaryReference}]
-forAllRefs complRef $complRefs {
-    set singRef [findRelated $complRef {~R26 SingularReference} R26]
-    if {[isNotEmptyRef $singRef]} {
-        set attrName [readAttribute $singRef Name]
-        set refedClass [FindReferencedClass $singRef]
-        append result\
-            "    [GetClassProperty $refedClass Reference]$attrName ;\n"
-        continue
-    }
-
-    set arrayRef [findRelated $complRef {~R26 ArrayReference} R26]
-    if {[isNotEmptyRef $arrayRef]} {
-        set attrName [readAttribute $arrayRef Name]
-        set classref [GetClassProperty [FindReferencedClass $arrayRef] Reference]
-        append result\
-            "    struct \{\n"\
-            "        ${classref}const *links ;\n"\
-            "        unsigned count ;\n"\
-            "    \} $attrName ;\n"
-        continue
-    }
-
-    set linkRef [findRelated $complRef {~R26 LinkReference} R26]
-    if {[isNotEmptyRef $linkRef]} {
-        set attrName [readAttribute $linkRef Name]
-        append result "    MRT_LinkRef $attrName ;\n"
-        continue
-    }
-}
-----
-
-For complementary references,
-we need to be able to find the class to which they refer.
-We factor out the mucking around the platform model that is necessary
-to determine the class referenced by a complementary reference.
-
-(((micca,Code Generation,FindReferencedClass)))
-[source,tcl]
-----
-<<generation helper commands>>=
-proc FindReferencedClass {compRef} {
-    set destRef [findRelated $compRef {~R28 BackwardReference} ~R94]
-
-    # backward, simple
-    set refing [findRelated $destRef {~R38 SimpleReferencedClass} R33 ~R32]
-    if {[isNotEmptyRef $refing]} {
-        set refedClass [readAttribute $refing Class]
-    } else {
-        # backward, target
-        set src [findRelated $destRef {~R38 TargetClass} R35 ~R42]
-        if {[isNotEmptyRef $src]} {
-            set refedClass [readAttribute $src Class]
-        } else {
-            # forward, source
-            set trg [findRelated $compRef {~R28 ForwardReference} ~R95 R34 ~R42]
-            if {[isNotEmptyRef $trg]} {
-                set refedClass [readAttribute $trg Class]
-            }
-        }
-    }
-    return $refedClass
-}
-----
-
-=== Assigner Declarations
-
-An assigner are declared in much the same manner as a class.
-This gives us the ability to deal with the state model of an assigner
-using the same code as for classes.
-There are a few different rules for assigners:
-
-* Single assigners have no attributes and are never created dynamically.
-* Multiple assigners have a single attribute and may be created dynamically.
-
-[source,tcl]
-----
-<<generation code commands>>=
-proc assignerDeclarations {} {
-    variable domain
-
-    append result [comment "Single Assigner Structure Declarations"]
-
-    set singles [SingleAssigner findWhere {$Domain eq $domain}]
-    forAllRefs assigner $singles {
-        assignAttribute $assigner
-        append result\
-            "struct $Association \{\n"\
-            "    MRT_Instance base__INST ;\n"\
-            "\} ;\n"
-    }
-
-    append result [comment "Multiple Assigner Structure Declarations"]
-
-    set multis [MultipleAssigner findWhere {$Domain eq $domain}]
-    forAllRefs assigner $multis {
-        assignAttribute $assigner
-        append result\
-            "struct $Association \{\n"\
-            "    MRT_Instance base__INST ;\n"\
-            "    [GetClassProperty $Class Reference] idinstance ;\n"\
-            "\} ;\n"
-    }
-
-    return $result
-}
-----
-
-[source,tcl]
-----
-<<generate command tests>>=
-test codegen-2.0 {
-    Generated code file supertype and subtype references
-} -setup {
-    validateutils genMiccaFile codegen2 {
-        domain codegen2 {
-            class super {}
-            class sub1 {}
-            class sub2 {}
-            generalization R1 super sub1 sub2
-        }
-        population codegen2 {
-            class super {
-                instance fred1
-                instance fred2
-            }
-            class sub1 {
-                instance s1 R1 fred1
-            }
-            class sub2 {
-                instance s2 R1 fred2
-            }
-        }
-    }
-} -cleanup {
-    cleanupDomain
-    validateutils forgetFiles
-} -body {
-    testConditions\
-        {[validateutils matchLines codegen2.c {
-            struct super {
-                MRT_Instance base__INST ;
-                void *R1 ;
-            } ;
-        }]}\
-        {[validateutils matchLines codegen2.c {
-            struct sub1 {
-                MRT_Instance base__INST ;
-                struct super *R1 ;
-            } ;
-        }]}
-} -result {1}
-----
-
-[source,tcl]
+.Tests
 ----
 <<generate command tests>>=
 test codegen-3.0 {
-    Generated code file associative class references
+    Generated code file associator class references
 } -setup {
     validateutils genMiccaFile codegen3 {
         domain codegen3 {
@@ -1927,110 +1705,110 @@ test codegen-20.0 {
 } -result {1}
 ----
 
+Simple association references also resolve to a single pointer declaration
+to the referenced class.
+
 [source,tcl]
 ----
+<<DeclareClassStructure: association references>>=
+set assocRefs [findRelated $refRefs {~R23 AssociationReference} ~R90 R32 ~R33]
+forAllRefs assocRef $assocRefs {
+    assignAttribute $assocRef {Relationship attrName} {Class className}
+    append result "    [GetClassProperty $className Reference]$attrName ;\n"
+}
+----
+
+Generated references deal with the "other" side of a relationship.
+When a class serves as a superclass,
+it has a pointer to its related subclass instance.
+For the superclass,
+we use a `void` pointer since the type of the subclass instance varies.
+
+[source,tcl]
+----
+<<DeclareClassStructure: subclass references>>=
+set subRefs [findRelated $genRefs {~R24 SubclassReference}]
+forAllRefs subRef $subRefs {
+    assignAttribute $subRef {Name attrName}
+    append result "    void *$attrName ;\n"
+}
+----
+
+[source,tcl]
+.Tests
+----
 <<generate command tests>>=
-test codegen-4.0 {
-    Generated code file reflexive class references
+test codegen-2.0 {
+    Generated code file supertype and subtype references
 } -setup {
-    # makeFile {} codegen4.h
-    # makeFile {} codegen4.c
-    micca configure {
-        domain codegen4 {
-            class X {}
-            association R1 X 0..1--0..1 X
+    validateutils genMiccaFile codegen2 {
+        domain codegen2 {
+            class super {}
+            class sub1 {}
+            class sub2 {}
+            generalization R1 super sub1 sub2
         }
-        population codegen4 {
-            class X {
-                instance x1 R1 x2
-                instance x2
+        population codegen2 {
+            class super {
+                instance fred1
+                instance fred2
+            }
+            class sub1 {
+                instance s1 R1 fred1
+            }
+            class sub2 {
+                instance s2 R1 fred2
             }
         }
     }
 } -cleanup {
     cleanupDomain
+    validateutils forgetFiles
 } -body {
-    micca generate
     testConditions\
-        {[llength [fileutil::grep {R1} codegen4.c]] == 12}
+        {[validateutils matchLines codegen2.c {
+            struct super {
+                MRT_Instance base__INST ;
+                void *R1 ;
+            } ;
+        }]}\
+        {[validateutils matchLines codegen2.c {
+            struct sub1 {
+                MRT_Instance base__INST ;
+                struct super *R1 ;
+            } ;
+        }]}
 } -result {1}
 ----
 
+Union superclasses use a union to serve as the container for
+subclass instances.
+
 [source,tcl]
 ----
-<<generate command tests>>=
-test codegen-5.0 {
-    Generated code file reflexive associative class references
-} -setup {
-    # makeFile {} codegen5.h
-    # makeFile {} codegen5.c
-    micca configure {
-        domain codegen5 {
-            class A {}
-            class X {}
-            association R1 -associator A X 0..*--0..* X
-        }
-        population codegen5 {
-            class A {
-                instance a1 R1 {forward x2 backward x1}
-            }
-            class X {
-                instance x1
-                instance x2
-            }
-        }
+<<DeclareClassStructure: subclass containers>>=
+set contRefs [findRelated $genRefs {~R24 SubclassContainer}]
+forAllRefs contRef $contRefs {
+    assignAttribute $contRef {Name attrName}
+
+    set subRefs [findRelated $contRef ~R96 R44 ~R45]
+    append result "    union \{\n"
+    foreach subName [relation list [deRef $subRefs] Class] {
+        append result "        "\
+            "[GetClassProperty $subName Declaration] $subName ;\n"
     }
-} -cleanup {
-    cleanupDomain
-} -body {
-    micca generate
-    testConditions\
-        {[llength [fileutil::grep {R1} codegen5.c]] == 37}
-} -result {1}
+    append result "    \} $attrName ;\n"
+}
 ----
 
 [source,tcl]
-----
-<<generate command tests>>=
-test codegen-21.0 {
-    Generated code file reflexive associative class references -- static
-} -setup {
-    # makeFile {} codegen21.h
-    # makeFile {} codegen21.c
-    micca configure {
-        domain codegen21 {
-            class A {}
-            class X {}
-            association R1 -static -associator A X 0..*--0..* X
-        }
-        population codegen21 {
-            class A {
-                instance a1 R1 {forward x2 backward x1}
-            }
-            class X {
-                instance x1
-                instance x2
-            }
-        }
-    }
-} -cleanup {
-    cleanupDomain
-} -body {
-    micca generate
-    testConditions\
-        {[llength [fileutil::grep {R1} codegen21.c]] == 21}
-} -result {1}
-----
-
-[source,tcl]
+.Tests
 ----
 <<generate command tests>>=
 test codegen-6.0 {
     Generated code file union generalization
 } -setup {
-    # makeFile {} codegen6.h
-    # makeFile {} codegen6.c
-    micca configure {
+    validateutils genMiccaFile codegen6 {
         domain codegen6 {
             class super {}
             class sub1 {
@@ -2086,11 +1864,250 @@ test codegen-6.0 {
     }
 } -cleanup {
     cleanupDomain
+    validateutils forgetFiles
 } -body {
-    micca generate
     testConditions\
-        {[llength [fileutil::grep {R1} codegen6.c]] == 13}\
-        {[llength [fileutil::grep {R2} codegen6.c]] == 11}
+        {[validateutils matchLines codegen6.c {
+            struct super {
+                MRT_Instance base__INST ;
+                union {
+                    struct sub1 sub1 ;
+                    struct sub2 sub2 ;
+                } R1 ;
+            } ;
+        }]}\
+        {[validateutils matchLines codegen6.c {
+            struct sub1 {
+                MRT_Instance base__INST ;
+                int color ;
+                union {
+                    struct sub3 sub3 ;
+                    struct sub4 sub4 ;
+                } R2 ;
+                union {
+                    struct sub5 sub5 ;
+                    struct sub6 sub6 ;
+                } R3 ;
+            } ;
+        }]}
+} -result {1}
+----
+
+For class instances that are part of a linked list,
+we have to provide storage in the class structure for the list links.
+
+[source,tcl]
+----
+<<DeclareClassStructure: link containers>>=
+set linkRefs [findRelated $genRefs {~R24 LinkContainer}]
+forAllRefs linkRef $linkRefs {
+    append result "    MRT_LinkRef [readAttribute $linkRef Name] ;\n"
+}
+----
+
+Complementary references are used by associations to implement the
+back references.
+There are several types depending upon the multiplicity and
+whether the association is static.
+
+[source,tcl]
+----
+<<DeclareClassStructure: complementary references>>=
+set complRefs [findRelated $genRefs {~R24 ComplementaryReference}]
+forAllRefs complRef $complRefs {
+    set singRef [findRelated $complRef {~R26 SingularReference} R26]
+    if {[isNotEmptyRef $singRef]} {
+        set attrName [readAttribute $singRef Name]
+        set refedClass [FindReferencedClass $singRef]
+        append result\
+            "    [GetClassProperty $refedClass Reference]$attrName ;\n"
+        continue
+    }
+
+    set arrayRef [findRelated $complRef {~R26 ArrayReference} R26]
+    if {[isNotEmptyRef $arrayRef]} {
+        set attrName [readAttribute $arrayRef Name]
+        set classref [GetClassProperty [FindReferencedClass $arrayRef] Reference]
+        append result\
+            "    struct \{\n"\
+            "        ${classref}const *links ;\n"\
+            "        unsigned count ;\n"\
+            "    \} $attrName ;\n"
+        continue
+    }
+
+    set linkRef [findRelated $complRef {~R26 LinkReference} R26]
+    if {[isNotEmptyRef $linkRef]} {
+        set attrName [readAttribute $linkRef Name]
+        append result "    MRT_LinkRef $attrName ;\n"
+        continue
+    }
+}
+----
+
+For complementary references,
+we need to be able to find the class to which they refer.
+We factor out the mucking around the platform model that is necessary
+to determine the class referenced by a complementary reference.
+
+(((micca,Code Generation,FindReferencedClass)))
+[source,tcl]
+----
+<<generation helper commands>>=
+proc FindReferencedClass {compRef} {
+    set destRef [findRelated $compRef {~R28 BackwardReference} ~R94]
+
+    # backward, simple
+    set refing [findRelated $destRef {~R38 SimpleReferencedClass} R33 ~R32]
+    if {[isNotEmptyRef $refing]} {
+        set refedClass [readAttribute $refing Class]
+    } else {
+        # backward, target
+        set src [findRelated $destRef {~R38 TargetClass} R35 ~R42]
+        if {[isNotEmptyRef $src]} {
+            set refedClass [readAttribute $src Class]
+        } else {
+            # forward, source
+            set trg [findRelated $compRef {~R28 ForwardReference} ~R95 R34 ~R42]
+            if {[isNotEmptyRef $trg]} {
+                set refedClass [readAttribute $trg Class]
+            }
+        }
+    }
+    return $refedClass
+}
+----
+
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-4.0 {
+    Generated code file reflexive class references
+} -setup {
+    validateutils genMiccaFile codegen4 {
+        domain codegen4 {
+            class X {}
+            association R1 X 0..1--0..1 X
+        }
+        population codegen4 {
+            class X {
+                instance x1 R1 x2
+                instance x2
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    testConditions\
+        {[validateutils matchLines codegen4.c {
+            struct X {
+                MRT_Instance base__INST ;
+                struct X *R1 ;
+                struct X *R1__BACK ;
+            } ;
+        }]}
+} -result {1}
+----
+
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-5.0 {
+    Generated code file reflexive associative class references
+} -setup {
+    validateutils genMiccaFile codegen5 {
+        domain codegen5 {
+            class A {}
+            class X {}
+            association R1 -associator A X 0..*--0..* X
+        }
+        population codegen5 {
+            class A {
+                instance a1 R1 {forward x2 backward x1}
+            }
+            class X {
+                instance x1
+                instance x2
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    testConditions\
+        {[validateutils matchLines codegen5.c {
+            struct A {
+                MRT_Instance base__INST ;
+                struct {
+                    struct X *forward ;
+                    struct X *backward ;
+                } R1 ;
+                MRT_LinkRef R1__FLINKS ;
+                MRT_LinkRef R1__BLINKS ;
+            } ;
+        }]}\
+        {[validateutils matchLines codegen5.c {
+            struct X {
+                MRT_Instance base__INST ;
+                MRT_LinkRef R1__FORW ;
+                MRT_LinkRef R1__BACK ;
+            } ;
+        }]}
+} -result {1}
+----
+
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-21.0 {
+    Generated code file reflexive associative class references -- static
+} -setup {
+    validateutils genMiccaFile codegen21 {
+        domain codegen21 {
+            class A {}
+            class X {}
+            association R1 -static -associator A X 0..*--0..* X
+        }
+        population codegen21 {
+            class A {
+                instance a1 R1 {forward x2 backward x1}
+            }
+            class X {
+                instance x1
+                instance x2
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    testConditions\
+        {[validateutils matchLines codegen21.c {
+            struct A {
+                MRT_Instance base__INST ;
+                struct {
+                    struct X *forward ;
+                    struct X *backward ;
+                } R1 ;
+            } ;
+        }]}\
+        {[validateutils matchLines codegen21.c {
+            struct X {
+                MRT_Instance base__INST ;
+                struct {
+                    struct A *const *links ;
+                    unsigned count ;
+                } R1__FORW ;
+                struct {
+                    struct A *const *links ;
+                    unsigned count ;
+                } R1__BACK ;
+            } ;
+        }]}
 } -result {1}
 ----
 
@@ -2100,9 +2117,7 @@ test codegen-6.0 {
 test codegen-7.0 {
     Generated code file associative class references -- non static
 } -setup {
-    # makeFile {} codegen7.h
-    # makeFile {} codegen7.c
-    micca configure {
+    validateutils genMiccaFile codegen7 {
         domain codegen7 {
             class A {}
             class X {}
@@ -2128,10 +2143,26 @@ test codegen-7.0 {
     }
 } -cleanup {
     cleanupDomain
+    validateutils forgetFiles
 } -body {
-    micca generate
     testConditions\
-        {[llength [fileutil::grep {R1_} codegen7.c]] == 48}
+        {[validateutils matchLines codegen7.c {
+            struct A {
+                MRT_Instance base__INST ;
+                struct {
+                    struct Y *forward ;
+                    struct X *backward ;
+                } R1 ;
+                MRT_LinkRef R1__FLINKS ;
+                MRT_LinkRef R1__BLINKS ;
+            } ;
+        }]}\
+        {[validateutils matchLines codegen7.c {
+            struct X {
+                MRT_Instance base__INST ;
+                MRT_LinkRef R1__FORW ;
+            } ;
+        }]}
 } -result {1}
 ----
 
@@ -2141,9 +2172,7 @@ test codegen-7.0 {
 test codegen-8.0 {
     Generated code file reflexive associative class references -- non static
 } -setup {
-    # makeFile {} codegen8.h
-    # makeFile {} codegen8.c
-    micca configure {
+    validateutils genMiccaFile codegen8 {
         domain codegen8 {
             class A {}
             class X {}
@@ -2168,10 +2197,27 @@ test codegen-8.0 {
     }
 } -cleanup {
     cleanupDomain
+    validateutils forgetFiles
 } -body {
-    micca generate
     testConditions\
-        {[llength [fileutil::grep {R1_} codegen8.c]] == 72}
+        {[validateutils matchLines codegen8.c {
+            struct A {
+                MRT_Instance base__INST ;
+                struct {
+                    struct X *forward ;
+                    struct X *backward ;
+                } R1 ;
+                MRT_LinkRef R1__FLINKS ;
+                MRT_LinkRef R1__BLINKS ;
+            } ;
+        }]}\
+        {[validateutils matchLines codegen8.c {
+            struct X {
+                MRT_Instance base__INST ;
+                MRT_LinkRef R1__FORW ;
+                MRT_LinkRef R1__BACK ;
+            } ;
+        }]}
 } -result {1}
 ----
 
@@ -2179,11 +2225,9 @@ test codegen-8.0 {
 ----
 <<generate command tests>>=
 test codegen-9.0 {
-    Generated code file reflexive class references
+    Generated code file simple reflexive class references
 } -setup {
-    # makeFile {} codegen9.h
-    # makeFile {} codegen9.c
-    micca configure {
+    validateutils genMiccaFile codegen9 {
         domain codegen9 {
             class X {}
             association R1 X 0..*--0..1 X
@@ -2198,22 +2242,72 @@ test codegen-9.0 {
     }
 } -cleanup {
     cleanupDomain
+    validateutils forgetFiles
 } -body {
-    micca generate
     testConditions\
-        {[llength [fileutil::grep {LINKS} codegen9.c]] == 13}
+        {[validateutils matchLines codegen9.c {
+            struct X {
+                MRT_Instance base__INST ;
+                struct X *R1 ;
+                MRT_LinkRef R1__BLINKS ;
+                MRT_LinkRef R1__BACK ;
+            } ;
+        }]}
 } -result {1}
+----
+
+=== Assigner Declarations
+
+An assigner is declared in much the same manner as a class.
+This gives us the ability to deal with the state model of an assigner
+using the same code as for classes.
+There are a few different rules for assigners:
+
+* Single assigners have no attributes and are never created dynamically.
+Their single instance is created as part of the initial instance population.
+* Multiple assigners have a single attribute and may be created dynamically.
+
+(((micca,Code Generation,assignerDeclarations)))
+[source,tcl]
+----
+<<generation code commands>>=
+proc assignerDeclarations {} {
+    variable domain
+
+    append result [comment "Single Assigner Structure Declarations"]
+
+    set singles [SingleAssigner findWhere {$Domain eq $domain}]
+    forAllRefs assigner $singles {
+        assignAttribute $assigner
+        append result\
+            "struct $Association \{\n"\
+            "    MRT_Instance base__INST ;\n"\
+            "\} ;\n"
+    }
+
+    append result [comment "Multiple Assigner Structure Declarations"]
+
+    set multis [MultipleAssigner findWhere {$Domain eq $domain}]
+    forAllRefs assigner $multis {
+        assignAttribute $assigner
+        append result\
+            "struct $Association \{\n"\
+            "    MRT_Instance base__INST ;\n"\
+            "    [GetClassProperty $Class Reference] idinstance ;\n"\
+            "\} ;\n"
+    }
+
+    return $result
+}
 ----
 
 [source,tcl]
 ----
 <<generate command tests>>=
 test codegen-22.0 {
-    Generate a single assigner
+    Generate a single assigner declaration
 } -setup {
-    # makeFile {} codegen22.h
-    # makeFile {} codegen22.c
-    micca configure {
+    validateutils genMiccaFile codegen22 {
         domain codegen22 {
             class clerk {}
             class client {}
@@ -2246,10 +2340,14 @@ test codegen-22.0 {
     }
 } -cleanup {
     cleanupDomain
+    validateutils forgetFiles
 } -body {
-    micca generate
     testConditions\
-        {[llength [fileutil::grep {R1__POOL} codegen22.c]] == 1}
+        {[validateutils matchLines codegen22.c {
+            struct R1 {
+                MRT_Instance base__INST ;
+            } ;
+        }]}\
 } -result {1}
 ----
 
@@ -2257,11 +2355,9 @@ test codegen-22.0 {
 ----
 <<generate command tests>>=
 test codegen-23.0 {
-    Generate a multi assigner
+    Generate a multi assigner declaration
 } -setup {
-    # makeFile {} codegen23.h
-    # makeFile {} codegen23.c
-    micca configure {
+    validateutils genMiccaFile codegen23 {
         domain codegen23 {
             class clerk {}
             class client {}
@@ -2310,10 +2406,15 @@ test codegen-23.0 {
     }
 } -cleanup {
     cleanupDomain
+    validateutils forgetFiles
 } -body {
-    micca generate
     testConditions\
-        {[llength [fileutil::grep {R1__POOL} codegen23.c]] == 5}
+        {[validateutils matchLines codegen23.c {
+            struct R1 {
+                MRT_Instance base__INST ;
+                struct department * idinstance ;
+            } ;
+        }]}
 } -result {1}
 ----
 
@@ -5398,6 +5499,7 @@ namespace ensemble create\
 <<CreateActivityCommands: instance sets>>=
 set cmdmap [dict create\
     foreachSelected ${suppns}::InstanceSetForeachSelected\
+    selectRelated ${suppns}::InstanceSetSelectRelated\
     empty ${suppns}::InstanceSetEmpty\
     notempty ${suppns}::InstanceSetNotEmpty\
     equal ${suppns}::InstanceSetEqual\
@@ -5752,7 +5854,6 @@ proc InstanceOperation {instref opName args} {
     }
 
     append result\
-        [linecomment "instance $instref operation $opName [list $args]"]\
         "${className}_$opName\("
     dict set args self $instref
     set pset {}
@@ -5775,16 +5876,38 @@ proc InstanceOperation {instref opName args} {
 ----
 <<generation support commands>>=
 proc InstanceForeachRelated {instref startref args} {
-    variable domain
-
-    set startsym [CheckInstRefSymbol $startref]
-    set startClass [dict get $startsym Class]
     set startlevel [GetBlock]
     set result [IndentToBlock\
         [linecomment "instance $instref foreachRelated $startref [list $args]"]\
     ]
 
-    foreach relspec $args {
+    lassign [TraverseRelChain $startref $args] chaincode targetclass targetref
+    append result $chaincode
+    append result [IndentToBlock [string cat\
+        [CreateInstRefSymbol $targetclass $instref]\
+        "$instref = $targetref ;\n"]]
+
+    PushContext InstanceForeachRelated depth [expr {[GetBlock] - $startlevel}]
+
+    return $result
+}
+----
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc TraverseRelChain {startref relspecs} {
+    variable domain
+
+    if {[llength $relspecs] == 0} {
+        error "empty relationship chain specification"
+    }
+
+    set result {}
+    set startsym [CheckInstRefSymbol $startref]
+    set startClass [dict get $startsym Class]
+
+    foreach relspec $relspecs {
         set relinfo [LookUpRelationship $relspec]
         while {[llength $relinfo] != 0} {
             # puts "relinfo = \"$relinfo\""
@@ -5914,13 +6037,8 @@ proc InstanceForeachRelated {instref startref args} {
             set startref $targetref
         }
     }
-    append result [IndentToBlock [string cat\
-        [CreateInstRefSymbol $targetclass $instref]\
-        "$instref = $targetref ;\n"]]
 
-    PushContext InstanceForeachRelated depth [expr {[GetBlock] - $startlevel}]
-
-    return $result
+    return [list $result $targetclass $targetref]
 }
 ----
 
@@ -6986,6 +7104,89 @@ proc InstanceSetAdd {set inst} {
         "mrt_InstSetAddInstance(&$set, $inst) ;\n"\
     ]]
 }
+----
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc InstanceSetSelectRelated {set startref args} {
+    variable domain
+
+    set startlevel [GetBlock]
+    set result [IndentToBlock\
+        [linecomment "instset $set selectedRelated $startref [list $args]"]\
+    ]
+
+    lassign [TraverseRelChain $startref $args] chaincode targetclass targetref
+    set targetclassDesc [GetClassDescriptor $domain $targetclass]
+    append chaincode\
+        [IndentToBlock "mrt_InstSetAddInstance(&$set, $targetref) ;\n"]
+
+    set depth [expr {[GetBlock] - $startlevel}]
+    for {set i 0} {$i < $depth} {incr i} {
+        PopBlock
+        append chaincode [IndentToBlock "\}\n"]
+    }
+
+    append result [IndentToBlock [string cat\
+        [CreateInstSetSymbol $targetclass $set]\
+        "mrt_InstSetInitialize(&$set, &$targetclassDesc) ;\n"]]
+    append result $chaincode
+
+    return $result
+}
+----
+
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-48.0 {
+    Generated code file to select related instances
+} -setup {
+    validateutils genMiccaFile codegen48 {
+        domain codegen48 {
+            class X {
+                attribute color int -default 20
+            }
+            class Y {
+                attribute temp int -default 30
+            }
+            association R1 Y 1..*--1 X
+            class Z {
+                attribute pressure int -default 40
+            }
+            association R2 Z 0..1--1 Y
+            domainop void find {} {
+                %<X findByName x1 xref>%
+                %<instset zset selectRelated xref ~R1 ~R2>%
+            }
+        }
+        population codegen48 {
+            class X {
+                instance x1
+            }
+            class Y {
+                instance y1 R1 x1 temp 31
+                instance y2 R1 x1 temp 32
+                instance y3 R1 x1 temp 33
+                instance y4 R1 x1 temp 34
+            }
+            class Z {
+                instance z1 R2 y1 pressure 41
+                instance z2 R2 y2 pressure 42
+                instance z3 R2 y3 pressure 43
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    testConditions\
+        {[validateutils matchLines codegen48.c {
+            MRT_InstSet zset ;
+        }]}
+} -result {1}
 ----
 
 [source,tcl]

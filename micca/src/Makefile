@@ -52,8 +52,22 @@ LSDIAGRAMS =\
 	platform-relation.uxf\
 	platform-statemodel.uxf\
 	platform-transition.uxf\
-	pointer-example.uxf\
-	pointer-set-example.uxf\
+	rel-simp-nr-1-1.uxf\
+	rel-simp-r-1-1.uxf\
+	rel-simp-nr-M-1-dyn.uxf\
+	rel-simp-r-M-1-dyn.uxf\
+	rel-simp-nr-M-1-static.uxf\
+	rel-simp-r-M-1-static.uxf\
+	rel-assoc-nr-1-1.uxf\
+	rel-assoc-r-1-1.uxf\
+	rel-assoc-nr-M-1-dyn.uxf\
+	rel-assoc-r-M-1-dyn.uxf\
+	rel-assoc-nr-M-1-static.uxf\
+	rel-assoc-r-M-1-static.uxf\
+	rel-assoc-nr-M-M-dyn.uxf\
+	rel-assoc-r-M-M-dyn.uxf\
+	rel-assoc-nr-M-M-static.uxf\
+	rel-assoc-r-M-M-static.uxf\
 	assoc-decompose.uxf\
 	wmc-class-diagram.uxf\
 	wm-states.uxf\
