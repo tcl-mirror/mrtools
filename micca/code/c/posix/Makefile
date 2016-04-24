@@ -31,7 +31,6 @@ A2XOPTS =\
 	$(NULL)
 
 ATANGLEOPTS =\
-	-report\
 	$(NULL)
 
 DBLATEX_PARAMS =\
@@ -106,8 +105,15 @@ CLEANFILES =\
 	micca_rt_test.c\
 	micca_rt.c\
 	micca_rt.h\
+	micca_rt.o\
+	testdomain.micca\
 	testdomain.c\
 	testdomain.h\
+	testdomain.o\
+	$(PDF)\
+	*.gcov\
+	*.gcda\
+	*.gcno\
 	$(NULL)
 
 clean :

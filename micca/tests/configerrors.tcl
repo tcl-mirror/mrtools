@@ -43,9 +43,6 @@ catch {
     }
 }
 
-if 0 {
-    # This causes some problem.
-    # Needs more investigation.
 catch {
     micca configure {
         domain d4 {
@@ -59,7 +56,6 @@ catch {
             }
         }
     }
-}
 }
 
 catch {
@@ -105,6 +101,20 @@ catch {
                     }
                 }
             }
+        }
+    }
+}
+
+catch {
+    micca configure {
+        domain d8 {
+            class c1 {
+                attribute id int
+            }
+            class c2 {
+                attribute id int
+            }
+            association R1 c1 0..1--1 c3
         }
     }
 }

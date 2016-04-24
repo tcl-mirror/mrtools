@@ -349,6 +349,12 @@ The `mrt_EventLoop` function enters the micca run time event loop
 and dispatches event to cause the system to run.
 Control remains in the event loop unless specifically requested to
 exit via the `mrt_SyncToEventLoop` function.
+
+[IMPORTANT]
+The `mrt_EventLoop` function must not be called recursively, _i.e._
+`mrt_EventLoop` is not to be invoked as part of an activity.
+The system must remain in the event loop until properly exited.
+Only after the event loop has been exited may it be re-entered.
 *****
 
 To a first approximation,
@@ -376,12 +382,6 @@ As we see,
 the flow of control loops,
 processing one event at a time as long as it has not been requested to exit the
 loop.
-
-[IMPORTANT]
-The `mrt_EventLoop` function must not be called recursively, _i.e._
-`mrt_EventLoop` is not to be invoked as part of an activity.
-The system must remain in the event loop until properly exited.
-Only after the event loop has been exited may it be re-entered.
 
 Testing and other considerations mean that we may want to exit the
 event loop to gain control of the program.
@@ -454,6 +454,13 @@ event and then return to the caller.
 The return value for `mrt_ProcessOneEvent` indicates if an event
 was actually dispatched.
 A return value of `false` indicates that the event queue is empty.
+
+[IMPORTANT]
+The function `mrt_ProcessOneEvent` is not to be invoked while in the
+event loop, _i.e._ `mrt_ProcessOneEvent` is not to be invoked by
+domain activities.
+It is only valid to invoke this function if the program is not currently
+running under the control of the event loop.
 *****
 
 This function is used by the event loop but can also be invoked on it own.
@@ -472,13 +479,6 @@ but when migrating an older system to a `micca` translated system
 a transition period is unavoidable.
 We provide the ability to micro-manage the event dispatch with the full
 realization that the capablity will be abused by some projects.
-
-[IMPORTANT]
-The function `mrt_ProcessOneEvent` is not to be invoked while in the
-event loop, _i.e._ `mrt_ProcessOneEvent` is not to be invoked by
-domain activities.
-It is only valid to invoke this function if the program is not currently
-running under the control of the event loop.
 
 (((micca,Run Time Function,mtr_ProcessOneEvent)))
 [source,c]
@@ -4169,6 +4169,7 @@ mrtFatalError(mrtRelationshipLinkage) ;
 
 === Reclassifying Subclasses
 
+*****
 [source,c]
 ----
 <<mrt external interfaces>>=
@@ -4179,8 +4180,34 @@ mrt_Reclassify(
     MRT_Class const *newSubclass) ;
 ----
 
+`rel`::
+    A pointer to a relationship description for the relationship
+    across which the reclassify operation is to happen.
+`super`::
+    A pointer to a class instance that serves the superclass role in the
+    relationship.
+`newSubclass`::
+    A pointer to the class description to which the currently related
+    subclass instance is to be reclassified.
+
+The `mrt_Reclassify` function migrates the class of the instance
+currently related to `super` along the `rel` generalization to be of
+the new class, `newSubclass`.
+Conceptually,
+reclassification implies that the currently related subclass instance
+is unrelated and deleted and a new instance of `newSubclass` is created
+and related to `super`.
+
+The return value of the function is an instance pointer to the newly
+created subclass instance.
+*****
+
+Since we support two different ways to store subclass instances,
+the reclassification considers each type separately.
+
 (((micca,Run Time Function,mrt_Reclassify)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 void *
@@ -4205,35 +4232,62 @@ mrt_Reclassify(
 }
 ----
 
+For reference type generalizations,
+we must perform the complete unrelate / delete / create sequence.
+
 [source,c]
 ----
 <<mrt_Reclassify: reclassify reference generalization>>=
 struct mrtrefgeneralization const *gen = &rel->relInfo.refGeneralization ;
 
+/*
+ * Check that we have the correct superclass.
+ */
 MRT_Class const *superclassClass = ((MRT_Instance *)super)->classDesc ;
 if (gen->superclass.classDesc != superclassClass) {
     mrtFatalError(mrtRelationshipLinkage) ;
 }
 
+/*
+ * Find the subclass code of the newly requested subclass.
+ */
 int subclassCode = mrtFindRefGenSubclassCode(newSubclass, gen->subclasses,
         gen->subclassCount) ;
 
+/*
+ * Offset into the superclass instance to where the pointer to the
+ * subclass instance is located.
+ */
 MRT_Instance **superref =
     (MRT_Instance **)((uintptr_t)super + gen->superclass.storageOffset) ;
 MRT_Instance *oldsubinst = *superref ;
 assert(oldsubinst != NULL) ;
 if (oldsubinst == NULL) {
-    return NULL ;
+    mrtFatalError(mrtRelationshipLinkage) ;
 }
-mrt_DeleteInstance(oldsubinst) ;
 
+/*
+ * Delete the old subclass instance and create a new one of the new class.
+ */
+mrt_DeleteInstance(oldsubinst) ;
 newSubInst = mrt_CreateInstance(newSubclass, MRT_StateCode_IG) ;
 *superref = newSubInst ;
 
+/*
+ * Fix up the instance reference pointer to the superclass instance that is in
+ * the subclass instance.
+ */
 MRT_Instance **subref = (MRT_Instance **)((uintptr_t)newSubInst +
         gen->subclasses[subclassCode].storageOffset) ;
 *subref = super ;
 ----
+
+For generalizations implemented as unions,
+the reclassification sequence is much simpler.
+There is no need to delete and create a new instance of the new
+subclass.
+We need only transform the currently related instance into the new
+subclass.
 
 [source,c]
 ----
@@ -4244,12 +4298,25 @@ MRT_Class const *superclassClass = ((MRT_Instance *)super)->classDesc ;
 if (gen->superclass.classDesc != superclassClass) {
     mrtFatalError(mrtRelationshipLinkage) ;
 }
+/*
+ * Check that the new subclass is one that is part of this generalization.
+ * We don't actually need the subclass code itself.
+ */
+mrtFindUnionGenSubclassCode(newSubclass, gen->subclasses, gen->subclassCount) ;
 
 newSubInst = (MRT_Instance *)((uintptr_t)super + gen->superclass.storageOffset) ;
+/*
+ * Set up the memory for the subclass instance according to the new subclass.
+ */
 mrtInitializeInstance(newSubInst, newSubclass, MRT_StateCode_IG) ;
 ----
 
 === Linked List Operations
+
+The run time supplies a set of linked list operations for use
+in manipulating the lists of instance pointers used to realize and
+navigate associations.
+They are the usual circularly, doubly linked list manipulations.
 
 [source,c]
 ----
@@ -4833,6 +4900,7 @@ mrtFindEvent(
 Finally, we can get to functions that the run time provide for
 a state activity to signal an event.
 
+*****
 [source,c]
 ----
 <<mrt external interfaces>>=
@@ -4843,11 +4911,24 @@ extern MRT_ecb *mrt_NewEvent(
     void *source) ;
 ----
 
+`event`::
+    The numerical code for the event.
+`type`::
+    The type of the event.
+`target`::
+    A pointer to the instance that is to receive the event.
+`source`::
+    A pointer to the instance that is sending the event.
+    If the event is being sent outside of the context of a class instance,
+    then this argument should be set to `NULL`.
+
 The `mrt_NewEvent` function allocates an ECB structure,
 fills in the elements and returns the newly minted ECB.
+*****
 
 (((micca,Run Time Function,mrt_NewEvent)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 MRT_ecb *
@@ -4999,8 +5080,7 @@ mrt_PostEvent(
          */
         MRT_ecb *iter ;
         for (iter = mrtEventQueueBegin(&eventQueue) ;
-                iter != mrtEventQueueEnd(&eventQueue) ;
-                iter = iter->next) {
+                iter != mrtEventQueueEnd(&eventQueue) ; iter = iter->next) {
             if (iter->sourceInst != iter->targetInst) {
                 break ;
             }
@@ -5067,6 +5147,25 @@ is used and there is no periodic execution activity.
 The cost of meeting these criteria is the price paid
 to find the appropriate place in the delayed event queue when a
 delayed event is requested.
+
+There is sometimes a temptation for analysts to try to use delayed
+events for precise timing control over external interactions.
+For example,
+you could conceive of using delayed events as a means of generating
+a pulse width modulated (PWM) square wave to control a motor.
+Delayed events are generally *not* suitable for high speed, high precision
+timing such as that required by motor control.
+Since we are using only a single timing resource that is shared
+in the system,
+we are not able to achieve the precise jitter free timing that would be
+needed for a PWM.
+Most microcontrollers have many timing resources available in hardware
+and they should be used for functions that require high precision.
+What delayed events are most useful for is time outs for interactions
+in the millisecond to minutes range and for those functions
+where some jitter in the timing is acceptable (_e.g._ blinking an LED).
+The delayed event time is only guaranteed to be the minimum amount
+of time that is to elapse before the event is delivered.
 
 There are three functions supplied for dealing with delayed events:
 
@@ -5155,7 +5254,8 @@ There are five main actions of this function.
 . Convert the delay value from millisecond units to
 units of `ticks`.
 A tick is platform specific.
-Computers often don't typically keep time in conventional human units.
+Computers sometimes don't typically keep time in conventional human units,
+particularly small embedded systems as we are dealing with.
 However, we would like to run the delayed event queue in system
 specific units to avoid as much unnecessary conversion as we can.
 This conversion will be described below for each supported platform.
@@ -5848,6 +5948,30 @@ we have been concerned with signaling events,
 _i.e._ queuing events to be delivered.
 Now we examine the means by which events are delivered to target instances.
 
+First,
+we must clarify that despite the fact we have been discussing the
+_event queue_ as if it were a single entity,
+there are in fact two queues used for dispatching events.
+The reason for two queues is that we need a way to determine the boundaries
+of a _thread of control_.
+
+All events that originate outside of a state activity or are the
+result of a delayed event start a thread of control.
+The thread of control ends when all the subsequent events that originate
+from the event starting the thread of control have been dispatched.
+A thread of control is an important concept because its boundaries
+determine when the data model must be consistent and when we can
+check the referential integrity.
+
+So our strategy is to use one queue to hold events that start a
+thread of control and another queue to hold the events that are awaiting
+dispatch for the ongoing thread of control.
+When the queue for the ongoing thread of control is empty,
+then we can start a new thread of control by using events queued
+to the thread of control queue.
+When all the queues are empty,
+there is no work to be done.
+
 (((micca,Run Time Function,mrtDispatchOneEvent)))
 [source,c]
 ----
@@ -5862,7 +5986,7 @@ mrtDispatchOneEvent(void)
 
     MRT_EventQueue *queue ;
     if (mrtEventQueueEmpty(&eventQueue)) {
-        mrtEndTransaction() ;
+        mrtEndTransaction() ; // <2>
         queue = mrtEventQueueEmpty(&tocEventQueue) ? NULL : &tocEventQueue ;
     } else {
         queue = &eventQueue ;
@@ -5889,10 +6013,12 @@ mrtDispatchOneEvent(void)
 ----
 <1> This is part of the exception processing that is used in the ARM 7M
 platform and is explained below.
+<2> Here we discover that the thread of control is over and we examine
+the data model to insure referential integrity.
 
 As we discussed above,
 there are three types of events.
-We provide separate functions to dispatch each type of event.
+We provide separate functions to dispatch each event type.
 
 [source,c]
 ----
@@ -5903,6 +6029,7 @@ static void mrtDispatchCreationEvent(MRT_ecb *ecb) ;
 ----
 
 We use a table to resolve the function selection at run time.
+This table is the ``C'' equivalent of a virtual function table.
 
 [source,c]
 ----
@@ -5946,8 +6073,8 @@ we consider the dispatch of each particular event type.
 
 === Transition Event Dispatch
 
-Far and away the most common activity is to dispatch a transitioning event
-to a state machine.
+The most frequent event type to dispatch is that of a transitioning event to a
+state machine.
 We refer to these event types, _transition_, only to distinguish them from the
 more complicated and less frequent polymorphic and creation event types.
 
@@ -5974,7 +6101,7 @@ then it is declared as a can't happen event.
 In the micca run time,
 a can't happen transition is treated as a fatal system error.
 This is a policy decision of the architecture,
-so don't assume that _can't happen_ means
+so *do not* assume that _can't happen_ means
 _shouldn't happen_ or _has a low probability of happening_.
 In this architecture, can't happen means absolutely impossible to
 happen and if it does happen then there has been a tear in the
@@ -5983,7 +6110,8 @@ give up and declare a fatal error.
 
 The data structure used for transitioning event dispatch
 is called an *Event Dispatch Block* (EDB).
-The code generator supplies an EDB for each class that has a state model.
+The code generator supplies an EDB for each class (and assigner)
+that has a state model.
 Below we will see how all this ties together.
 For now, we discuss the data structure and how it is used.
 
@@ -6056,7 +6184,7 @@ The entry in the transition matrix is the new state.
 Notice the very simple data structures required for Moore state machines.
 
 The new state is used as an index into the `activityTable`.
-The action table is an array of function pointers to the activity associated
+The activity table is an array of function pointers to the activity associated
 with each state.
 
 (((micca,Run Time Data,MRT_ActivityFunction)))
@@ -6081,8 +6209,7 @@ parameter values are discarded after the state action completes.
 
 One other feature of the state machine dispatch rules regards terminal states.
 A state may be marked as terminal and if so,
-then the run time will cause the instance to be destroyed when the state action
-is completed.
+then the run time will destroy the instance when the state action is completed.
 The `terminalStates` member points to an array, indexed by state number,
 that specifies if a particular state is indeed a terminal state.
 As is frequently the case, the class may have no terminal states.
@@ -6116,7 +6243,7 @@ mrtDispatchTransitionEvent(
     if (targetInst->alloc != ecb->alloc) {
 #           ifndef MRT_NO_NAMES
         mrtFatalError(mrtEventInFlight,
-                ecb->sourceInst ? ecb->sourceInst->name : "",
+                ecb->sourceInst ? ecb->sourceInst->classDesc->name : "none",
                 ecb->sourceInst ? ecb->sourceInst->name : "none",
                 targetInst->classDesc->edb->eventNames[ecb->eventNumber],
                 targetInst->classDesc->name,
@@ -6208,7 +6335,7 @@ the delivery of an event to an instance that has been deleted.
 Because events are queued,
 it is possible for an event to be generated for an instance and then
 while the event is on the queue awaiting to be delivered,
-the target instance is deleted by some other action code executing.
+the target instance is deleted by some other code executing.
 For a single threaded architecture,
 this is considered an analysis error.
 Deliverying events to deleted instances should never happen!
@@ -6230,6 +6357,9 @@ The strategy used here is to vary the number in the
 `alloc` field of the instance each time it is allocated.
 Then a copy of the `alloc` field is placed in the ECB
 when the event is queued.
+In effect,
+the real identifier of an instance is its pointer plus the value of
+the `alloc` field.
 When dispatched, the values of the `alloc` fields in the
 two structures must match or else the target instance has
 been destroyed and re-created in the same memory slot.
@@ -6244,9 +6374,10 @@ This is considered such a remote possibility as to be of no practical concern.
 Polymorphic events in their full generality can be complex,
 but they are based on a simple idea.
 In fact, there is nothing going on in the dispatch of polymorphic events
-that could not otherwise be handled in the action code of a state.
-So, polymorphic events must be considered an optimization, but a
-very convenient and significant one.
+that could not otherwise be handled in the state activity.
+Strictly speaking,
+polymorphic events must be considered an optimization,
+but a very convenient and significant one.
 Previously,
 we have described the rules concerning polymorphic events.
 
@@ -6330,7 +6461,7 @@ relationship,
 a given polymorphic event may be mapped into a normal event where it will be
 consumed by the state machine of the class or it may be delegated further down
 the hierarchy.
-To be further delegated implies that a polymorphic event will be mapped
+To be delegated further implies that a polymorphic event will be mapped
 into yet another polymorphic event to be further mapped in a subsequent
 dispatch.
 Thus the entries in the `eventMap` matrix contain both a new
@@ -6347,9 +6478,9 @@ typedef struct mrtpolyeventmap {
 ----
 
 Now we can tie it all together.
-A superclass class that has associated polymorphic events must
-supply a Polymorphic Dispatch Block (PDB) to direct the run time
-as to how to perform the mapping of polymorphic events to transitioning events.
+For a superclass class that has associated polymorphic events the code
+generator supplies a Polymorphic Dispatch Block (PDB) to direct the run time as
+to how to perform the mapping of polymorphic events to transitioning events.
 
 (((micca,Run Time Data,MRT_pdb)))
 [source,c]
@@ -6412,7 +6543,7 @@ mrtDispatchPolymorphicEvent(
     MRT_EventCode origEvent = ecb->eventNumber ;
     MRT_Instance *origTarget = ecb->targetInst ;
     /*
-     * Each generalization that originates at the superclass has an event
+     * For each generalization that originates at the superclass an event is
      * generated down that generalization to one of the subclasss.
      */
     MRT_gdb const *sdb = pdb->genDispatch ;
@@ -6764,11 +6895,13 @@ Negative return values indicate errors as described below.
      // Class does not have a state model.
 #define MICCA_PORTAL_NO_STATE_MODEL (-5)
      // No such event for the class.
-#define MICCA_PORTAL_NO_SUCH_EVENT  (-6)
+#define MICCA_PORTAL_NO_EVENT       (-6)
+     // No such state for the class.
+#define MICCA_PORTAL_NO_STATE       (-7)
      // Bad event type parameter
-#define MICCA_PORTAL_BAD_EVENT_TYPE (-7)
+#define MICCA_PORTAL_BAD_EVENT_TYPE (-8)
      // Class does not support dynamic instances.
-#define MICCA_PORTAL_NO_DYNAMIC     (-8)
+#define MICCA_PORTAL_NO_DYNAMIC     (-9)
 ----
 
 Internally,
@@ -7127,13 +7260,13 @@ mrtPortalNewECB(
                 if (classDesc->edb != NULL) {
                     eventCount = classDesc->edb->eventCount ;
                 } else {
-                    return MICCA_PORTAL_NO_SUCH_EVENT ;
+                    return MICCA_PORTAL_NO_EVENT ;
                 }
             } else if (eventType == mrtPolymorphicEvent) {
                 if (classDesc->pdb != NULL) {
                     eventCount = classDesc->pdb->eventCount ;
                 } else {
-                    return MICCA_PORTAL_NO_SUCH_EVENT ;
+                    return MICCA_PORTAL_NO_EVENT ;
                 }
             } else {
                 return MICCA_PORTAL_BAD_EVENT_TYPE ;
@@ -7150,7 +7283,7 @@ mrtPortalNewECB(
                 }
                 result = 0 ;
             } else {
-                result = MICCA_PORTAL_NO_SUCH_EVENT ;
+                result = MICCA_PORTAL_NO_EVENT ;
             }
         } else {
             result = MICCA_PORTAL_UNALLOC ;
@@ -7549,6 +7682,105 @@ mrt_PortalClassInstanceCount(
 [source,c]
 ----
 <<mrt external interfaces>>=
+extern int
+mrt_PortalClassEventCount(
+    MRT_DomainPortal const *portal,
+    MRT_ClassId classId) ;
+----
+
+(((micca,Run Time Function,mrt_PortalClassEventCount)))
+[source,c]
+----
+<<mrt external functions>>=
+int
+mrt_PortalClassEventCount(
+    MRT_DomainPortal const *portal,
+    MRT_ClassId classId)
+{
+    assert(portal != NULL) ;
+
+    int result ;
+    if (classId < portal->classCount) {
+        MRT_Class const *class = portal->classes + classId ;
+        MRT_edb const *edb = class->edb ;
+        result = edb != NULL ? edb->eventCount : MICCA_PORTAL_NO_STATE_MODEL ;
+    } else {
+        result = MICCA_PORTAL_NO_CLASS ;
+    }
+
+    return result ;
+}
+----
+
+[source,c]
+----
+<<mrt external interfaces>>=
+extern int
+mrt_PortalClassPolyEventCount(
+    MRT_DomainPortal const *portal,
+    MRT_ClassId classId) ;
+----
+
+(((micca,Run Time Function,mrt_PortalClassPolyEventCount)))
+[source,c]
+----
+<<mrt external functions>>=
+int
+mrt_PortalClassPolyEventCount(
+    MRT_DomainPortal const *portal,
+    MRT_ClassId classId)
+{
+    assert(portal != NULL) ;
+
+    int result ;
+    if (classId < portal->classCount) {
+        MRT_Class const *class = portal->classes + classId ;
+        MRT_pdb const *pdb = class->pdb ;
+        result = pdb != NULL ? pdb->eventCount : MICCA_PORTAL_NO_STATE_MODEL ;
+    } else {
+        result = MICCA_PORTAL_NO_CLASS ;
+    }
+
+    return result ;
+}
+----
+
+[source,c]
+----
+<<mrt external interfaces>>=
+extern int
+mrt_PortalClassStateCount(
+    MRT_DomainPortal const *portal,
+    MRT_ClassId classId) ;
+----
+
+(((micca,Run Time Function,mrt_PortalStateCount)))
+[source,c]
+----
+<<mrt external functions>>=
+int
+mrt_PortalClassStateCount(
+    MRT_DomainPortal const *portal,
+    MRT_ClassId classId)
+{
+    assert(portal != NULL) ;
+
+    int result ;
+    if (classId < portal->classCount) {
+        MRT_Class const *class = portal->classes + classId ;
+        MRT_edb const *edb = class->edb ;
+        result = edb != NULL ? edb->stateCount : MICCA_PORTAL_NO_STATE_MODEL ;
+    } else {
+        result = MICCA_PORTAL_NO_CLASS ;
+    }
+
+    return result ;
+}
+----
+
+[source,c]
+----
+<<mrt external interfaces>>=
 #   ifndef MRT_NO_NAMES
 extern int
 mrt_PortalClassAttributeName(
@@ -7629,6 +7861,162 @@ mrt_PortalClassAttributeSize(
 
     return result ;
 }
+----
+
+[source,c]
+----
+<<mrt external interfaces>>=
+#   ifndef MRT_NO_NAMES
+extern int
+mrt_PortalClassEventName(
+    MRT_DomainPortal const *portal,
+    MRT_ClassId classId,
+    MRT_EventCode eventCode,
+    char const **nameRef) ;
+#   endif /* MRT_NO_NAMES */
+----
+
+(((micca,Run Time Function,mrt_PortalClassEventName)))
+[source,c]
+----
+<<mrt external functions>>=
+#   ifndef MRT_NO_NAMES
+int
+mrt_PortalClassEventName(
+    MRT_DomainPortal const *portal,
+    MRT_ClassId classId,
+    MRT_EventCode eventCode,
+    char const **nameRef)
+{
+    assert(portal != NULL) ;
+
+    int result ;
+    if (classId < portal->classCount) {
+        MRT_Class const *class = portal->classes + classId ;
+        MRT_edb const *edb = class->edb ;
+        if (edb != NULL) {
+            if (eventCode >= 0 && eventCode < edb->eventCount) {
+                if (nameRef) {
+                    *nameRef = edb->eventNames[eventCode] ;
+                }
+                result = 0 ;
+            } else {
+                result = MICCA_PORTAL_NO_EVENT ;
+            }
+        } else {
+            result = MICCA_PORTAL_NO_STATE_MODEL ;
+        }
+    } else {
+        result = MICCA_PORTAL_NO_CLASS ;
+    }
+
+    return result ;
+}
+#   endif /* MRT_NO_NAMES */
+----
+
+[source,c]
+----
+<<mrt external interfaces>>=
+#   ifndef MRT_NO_NAMES
+extern int
+mrt_PortalClassPolyEventName(
+    MRT_DomainPortal const *portal,
+    MRT_ClassId classId,
+    MRT_EventCode eventCode,
+    char const **nameRef) ;
+#   endif /* MRT_NO_NAMES */
+----
+
+(((micca,Run Time Function,mrt_PortalClassPolyEventName)))
+[source,c]
+----
+<<mrt external functions>>=
+#   ifndef MRT_NO_NAMES
+int
+mrt_PortalClassPolyEventName(
+    MRT_DomainPortal const *portal,
+    MRT_ClassId classId,
+    MRT_EventCode eventCode,
+    char const **nameRef)
+{
+    assert(portal != NULL) ;
+
+    int result ;
+    if (classId < portal->classCount) {
+        MRT_Class const *class = portal->classes + classId ;
+        MRT_pdb const *pdb = class->pdb ;
+        if (pdb != NULL) {
+            if (eventCode >= 0 && eventCode < pdb->eventCount) {
+                if (nameRef) {
+                    *nameRef = pdb->eventNames[eventCode] ;
+                }
+                result = 0 ;
+            } else {
+                result = MICCA_PORTAL_NO_EVENT ;
+            }
+        } else {
+            result = MICCA_PORTAL_NO_STATE_MODEL ;
+        }
+    } else {
+        result = MICCA_PORTAL_NO_CLASS ;
+    }
+
+    return result ;
+}
+#   endif /* MRT_NO_NAMES */
+----
+
+[source,c]
+----
+<<mrt external interfaces>>=
+#   ifndef MRT_NO_NAMES
+extern int
+mrt_PortalClassStateName(
+    MRT_DomainPortal const *portal,
+    MRT_ClassId classId,
+    MRT_StateCode stateCode,
+    char const **nameRef) ;
+#   endif /* MRT_NO_NAMES */
+----
+
+(((micca,Run Time Function,mrt_PortalClassStateName)))
+[source,c]
+----
+<<mrt external functions>>=
+#   ifndef MRT_NO_NAMES
+int
+mrt_PortalClassStateName(
+    MRT_DomainPortal const *portal,
+    MRT_ClassId classId,
+    MRT_StateCode stateCode,
+    char const **nameRef)
+{
+    assert(portal != NULL) ;
+
+    int result ;
+    if (classId < portal->classCount) {
+        MRT_Class const *class = portal->classes + classId ;
+        MRT_edb const *edb = class->edb ;
+        if (edb != NULL) {
+            if (stateCode >= 0 && stateCode < edb->stateCount) {
+                if (nameRef) {
+                    *nameRef = edb->stateNames[stateCode] ;
+                }
+                result = 0 ;
+            } else {
+                result = MICCA_PORTAL_NO_STATE ;
+            }
+        } else {
+            result = MICCA_PORTAL_NO_STATE_MODEL ;
+        }
+    } else {
+        result = MICCA_PORTAL_NO_CLASS ;
+    }
+
+    return result ;
+}
+#   endif /* MRT_NO_NAMES */
 ----
 
 == Asynchronous Execution
@@ -10539,6 +10927,7 @@ mrt_Initialize(void)
 /*
 <<copyright info>>
 */
+#define _POSIX_C_SOURCE 200112L
 
 <<common includes>>
 <<posix includes>>
@@ -10603,6 +10992,8 @@ mrt_Initialize(void)
 
 #ifndef MICCA_RT_H_
 #define MICCA_RT_H_
+
+#define MRT_ARM_ARCH_7M
 
 /*
  * Standard Includes

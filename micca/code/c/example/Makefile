@@ -20,11 +20,10 @@ DOCSRC 	=\
 	$(NULL)
 
 ATANGLEOPTS =\
-	-report\
 	$(NULL)
 
-wmctrl-trace.txt : wmctrl
-	./wmctrl | tee ../../../src/$@
+../../../src/wmctrl-trace.txt : wmctrl
+	./wmctrl | tee $@
 
 wmctrl : wmctrl.o micca_rt.o
 
@@ -52,7 +51,7 @@ CLEANFILES =\
 	wmctrl.micca\
 	wmctrl_pop.micca\
 	build_wmctrl.tcl\
-	wmctrl-trace.txt\
+	../../../src/wmctrl-trace.txt\
 	$(NULL)
 
 clean :
