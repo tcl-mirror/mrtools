@@ -23,6 +23,20 @@ DOCSRC 	=\
 	$(MICCADIR)/example.txt\
 	$(NULL)
 
+RTSRC 	=\
+	$(MICCADIR)/micca.aweb\
+	$(MICCADIR)/bibliography.txt\
+	$(MICCADIR)/codeorg.txt\
+	$(MICCADIR)/configure.txt\
+	$(MICCADIR)/example.txt\
+	$(MICCADIR)/generate.txt\
+	$(MICCADIR)/litprog.txt\
+	$(MICCADIR)/platform.txt\
+	$(MICCADIR)/preface.txt\
+	$(MICCADIR)/runtime.txt\
+	$(MICCADIR)/translation.txt\
+	$(NULL)
+
 ATANGLEOPTS =\
 	$(NULL)
 
@@ -46,6 +60,15 @@ wmctrl_pop.micca : $(DOCSRC)
 	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
 
 micca_rt.o : micca_rt.c micca_rt.h
+
+micca_rt.h : $(RTSRC)
+	cd $(MICCADIR) ; atangle $(ATANGLEOPTS) -root micca_rt_posix.h\
+	    	-output $@ micca.aweb
+	mv $(MICCADIR)/micca_rt.h .
+
+micca_rt.c : $(RTSRC)
+	cd $(MICCADIR) ; atangle $(ATANGLEOPTS) -root micca_rt_posix.c -output $@ micca.aweb
+	mv $(MICCADIR)/micca_rt.c .
 
 CLEANFILES =\
 	wmctrl\
