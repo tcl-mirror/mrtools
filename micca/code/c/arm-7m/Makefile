@@ -31,7 +31,6 @@ A2XOPTS =\
 	$(NULL)
 
 ATANGLEOPTS =\
-	-report\
 	$(NULL)
 
 DBLATEX_PARAMS =\
