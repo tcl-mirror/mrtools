@@ -20,10 +20,6 @@ LDFLAGS = -g
 # LDFLAGS =
 
 DOCSRC 	=\
-	$(MICCADIR)/example.txt\
-	$(NULL)
-
-RTSRC 	=\
 	$(MICCADIR)/micca.aweb\
 	$(MICCADIR)/bibliography.txt\
 	$(MICCADIR)/codeorg.txt\
@@ -40,7 +36,7 @@ RTSRC 	=\
 ATANGLEOPTS =\
 	$(NULL)
 
-../../../src/wmctrl-trace.txt : wmctrl
+$(MICCADIR)/wmctrl-trace.txt : wmctrl
 	./wmctrl | tee $@
 
 wmctrl : wmctrl.o micca_rt.o
@@ -51,22 +47,28 @@ wmctrl.c : wmctrl.micca wmctrl_pop.micca build_wmctrl.tcl
 	tclsh build_wmctrl.tcl
 
 build_wmctrl.tcl : $(DOCSRC)
-	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
+	cd $(MICCADIR) ; atangle $(ATANGLEOPTS) -root build_wmctrl.tcl\
+	    -output build_wmctrl.tcl micca.aweb
+	mv $(MICCADIR)/$@ .
 
 wmctrl.micca : $(DOCSRC)
-	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
+	cd $(MICCADIR) ; atangle $(ATANGLEOPTS) -root wmctrl.micca\
+	    -output wmctrl.micca micca.aweb
+	mv $(MICCADIR)/$@ .
 
 wmctrl_pop.micca : $(DOCSRC)
-	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
+	cd $(MICCADIR) ; atangle $(ATANGLEOPTS) -root wmctrl_pop.micca\
+	    -output wmctrl_pop.micca micca.aweb
+	mv $(MICCADIR)/$@ .
 
 micca_rt.o : micca_rt.c micca_rt.h
 
-micca_rt.h : $(RTSRC)
+micca_rt.h : $(DOCSRC)
 	cd $(MICCADIR) ; atangle $(ATANGLEOPTS) -root micca_rt_posix.h\
 	    	-output $@ micca.aweb
 	mv $(MICCADIR)/micca_rt.h .
 
-micca_rt.c : $(RTSRC)
+micca_rt.c : $(DOCSRC)
 	cd $(MICCADIR) ; atangle $(ATANGLEOPTS) -root micca_rt_posix.c -output $@ micca.aweb
 	mv $(MICCADIR)/micca_rt.c .
 
@@ -78,7 +80,8 @@ CLEANFILES =\
 	wmctrl.micca\
 	wmctrl_pop.micca\
 	build_wmctrl.tcl\
-	../../../src/wmctrl-trace.txt\
+	micca_rt.h\
+	micca_rt.c\
 	$(NULL)
 
 clean :
