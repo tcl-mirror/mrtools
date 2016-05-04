@@ -68,6 +68,8 @@ LSDIAGRAMS =\
 	rel-assoc-r-M-M-dyn.uxf\
 	rel-assoc-nr-M-M-static.uxf\
 	rel-assoc-r-M-M-static.uxf\
+	rel-gen-ref.uxf\
+	rel-gen-union.uxf\
 	assoc-decompose.uxf\
 	wmc-class-diagram.uxf\
 	wm-states.uxf\
