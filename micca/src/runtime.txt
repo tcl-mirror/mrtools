@@ -4886,10 +4886,13 @@ mrtAllocEvent(void)
 
     MRT_ecb *ecb = freeEventQueue.next ;
     mrtEventQueueRemove(ecb) ;
-    memset(ecb, 0, sizeof(*ecb)) ;
+    memset(ecb, 0, sizeof(*ecb)) ; // <1>
     return ecb ;
 }
 ----
+<1> We zero out the ECB. Although not strictly necessary,
+it is convenient for debugging, especially when there are event
+parameters involved.
 
 (((micca,Run Time Function,mrtFreeEvent)))
 [source,c]
@@ -4938,8 +4941,12 @@ mrtFindEvent(
 
 === Event Signaling
 
-Finally, we can get to functions that the run time provide for
-a state activity to signal an event.
+Signaling an event is a very common operation for a state activity.
+In this section,
+we describe the code to accomplish event signaling.
+As we mentioned before,
+before an event can be signaled, we must obtain and fill in an ECB.
+We start our description with a function that does just that.
 
 *****
 [source,c]
@@ -4999,6 +5006,80 @@ mrt_NewEvent(
 }
 ----
 
+=== Posting an Event
+
+Once you have obtained an ECB initialized for the proper type of the
+event, then you need to fill in any event parameter data.
+Frequently, there are none.
+Then the ECB is ready to be placed on a queue.
+There is a distinction between events an instance sends to itself and those
+that an instance sends to a different instance.
+Self directed events are placed on the front of the event queue
+so that they are dispatched in preference to the non-self directed events.
+This is one of the fundamental execution rules.
+Posting an event involves both determining the correct queue to which the
+event is to be placed and determining the correct place in the queue
+for the ECB.
+The decisions can be made based on the ECB content.
+
+*****
+[source,c]
+----
+<<mrt external interfaces>>=
+extern void
+mrt_PostEvent(
+    MRT_ecb *ecb) ;
+----
+
+`ecb`::
+    A pointer to an Event Control Block (ECB) that is to be queued
+    for dispatch.
+
+The `mrt_PostEvent` function queues the ECB pointed to by `ecb` to
+an appropriate event queue.
+*****
+
+(((micca,Run Time Function,mrt_PostEvent)))
+[source,c]
+----
+<<mrt external functions>>=
+void
+mrt_PostEvent(
+    MRT_ecb *ecb)
+{
+    assert(ecb != NULL) ;
+    assert(ecb->targetInst != NULL) ;
+
+        /*
+         * The place in some event queue where the ECB will be inserted.
+         */
+    MRT_ecb *place ;
+
+    if (ecb->sourceInst == NULL) { // <1>
+        place = (MRT_ecb *)&tocEventQueue ;
+    } else {
+        place = (MRT_ecb *)&eventQueue ;
+        if (ecb->sourceInst == ecb->targetInst) { // <2>
+            while (place != mrtEventQueueEnd(&eventQueue) &&
+                    place->sourceInst == place->targetInst) {
+                place = place->next ;
+            }
+        }
+    }
+
+    mrtEventQueueInsert(ecb, place) ;
+}
+----
+<1> All events that are signaled outside of a state activity start a
+new thread of control.
+<2> Ordinary transitioning events directed between distinct instances
+are queued to the end of the event queue.
+For self directed events we have to find the appropriate place.
+That place is the first event in the queue that is not self directed.
+The loop preserves the order of event dispatch in the unlikely
+(but not illegal) case that a state activity sends multiple
+self directed events.
+
 === Asynchronous Instance Creation
 
 As we mentioned earlier,
@@ -5007,6 +5088,7 @@ creating an instance and then sending it an event.
 The transition caused by the event then causes a state activity to be
 executed.
 
+*****
 [source,c]
 ----
 <<mrt external interfaces>>=
@@ -5019,6 +5101,20 @@ mrt_CreateAsync(
     void *sourceInst) ;
 ----
 
+`targetClass`::
+    A pointer to the class description for the instance that is to
+    be created.
+`event`::
+    The number of the event to signal to the newly created instance.
+`eventparams`::
+    A pointer to the event parameters for the creation event.
+`paramsize`::
+    The number of bytes of event parameter data pointed to by `eventparams`.
+`sourceInst`::
+    A pointer to the class instance that is the source of the creation
+    event. If the creation event is signaled outside of a state activity,
+    then this value should be `NULL`.
+
 The `mrt_CreateAsync` function asynchronously creates an instance of the
 class described by `targetClass` and arranges for `event` to be
 signaled to the new instance.
@@ -5028,6 +5124,7 @@ the instance has been created in an inactive state and the event
 has been posted.
 The return value is the pointer to the newly created instance and
 can be used to initialize the values of attribute of the instance.
+*****
 
 (((micca,Run Time Function,mrt_CreateAsync)))
 [source,c]
@@ -5077,66 +5174,6 @@ During event dispatch, this value will be turned back into a positive one.
 <3> We mark this as a creation event so that some additional processing
 can be done before the event is dispatched.
 
-=== Posting an Event
-
-Once you have obtained an ECB initialized for the proper type of the
-event, then you need to fill in any event parameter data.
-Frequently, there are none.
-Then the ECB is ready to be placed on a queue.
-As mentioned before, there is a distinction between events an
-instance sends to itself and those that an instance sends to a different
-instance.
-Self directed events are placed on the front of the event queue
-so that they are dispatched in preference to the non-self directed events.
-This is one of the fundamental execution rules.
-Posting an event involves both determining the correct queue to which the
-event is to be placed and determining the correct place in the queue
-for the ECB.
-The decisions can be made based on the ECB content.
-
-[source,c]
-----
-<<mrt external interfaces>>=
-extern void
-mrt_PostEvent(
-    MRT_ecb *ecb) ;
-----
-
-(((micca,Run Time Function,mrt_PostEvent)))
-[source,c]
-----
-<<mrt external functions>>=
-void
-mrt_PostEvent(
-    MRT_ecb *ecb)
-{
-    assert(ecb != NULL) ;
-    assert(ecb->targetInst != NULL) ;
-
-    MRT_ecb *place ;
-
-    if (ecb->sourceInst == NULL) { // <1>
-        place = (MRT_ecb *)&tocEventQueue ;
-    } else {
-        place = (MRT_ecb *)&eventQueue ;
-        if (ecb->sourceInst == ecb->targetInst) { // <2>
-            while (place != mrtEventQueueEnd(&eventQueue) &&
-                    place->sourceInst == place->targetInst) {
-                place = place->next ;
-            }
-        }
-    }
-
-    mrtEventQueueInsert(ecb, place) ;
-}
-----
-<1> All events that are signaled outside of a state activity start a
-new thread of control.
-<2> Ordinary transitioning events directed between distinct instances
-are queued to the end of the event queue.
-For self directed events we have to find the appropriate place.
-That place is the first event in the queue that is not self directed.
-
 === Delayed Events
 
 The concept of a delayed event is to request the run time to post
@@ -5156,7 +5193,7 @@ and the source instance.
 There are a number of ways to interpret an attempt to generate
 what amounts to a duplicate delayed event.
 It could be considered an error, but that is inconvenient
-and goes against the grain of our attempts to minimize run-time errors.
+and goes against the grain of our attempts to minimize run time errors.
 So the run time regards an attempt to generate a delayed event
 of the same name between the same sending and receiving pair as
 a request to cancel the original event and create the new one
@@ -5215,6 +5252,7 @@ There are three functions supplied for dealing with delayed events:
 
 The unit of time for delayed events is milliseconds.
 
+*****
 [source,c]
 ----
 <<mrt external interfaces>>=
@@ -5224,11 +5262,19 @@ mrt_PostDelayedEvent(
     MRT_DelayTime time) ;
 ----
 
+`ecb`::
+    A pointer to an Event Control Block (ECB) that is to be queued
+    for dispatch.
+`time`::
+    The minimum number of milliseconds of time that must elapse before
+    the event given by `ecb` is posted for dispatch.
+
 The `mrt_PostDelayedEvent` function requests that the event given by
 `ecb` be dispatched no sooner than `time` milliseconds from now.
 The value of the `time` argument may be 0,
 in which case the event is posted for dispatch immediately.
 All delayed events start a new thread of control.
+*****
 
 (((micca,Run Time Function,mrt_PostDelayedEvent)))
 [source,c]
@@ -5245,10 +5291,12 @@ mrt_PostDelayedEvent(
     if (time != 0) {
         mrtQueueDelayedEvent(ecb) ;
     } else {
-        mrtEventQueueInsert(ecb, (MRT_ecb *)&tocEventQueue) ;
+        mrtEventQueueInsert(ecb, (MRT_ecb *)&tocEventQueue) ; // <1>
     }
 }
 ----
+<1> All delayed events start a new thread of control,
+even those which have had no delay.
 
 ==== Posting Delayed Events
 
@@ -5336,6 +5384,7 @@ it has already been delivered.
 This is not an error.
 Unfortunately, the run time code cannot turn time backwards.
 
+*****
 [source,c]
 ----
 <<mrt external interfaces>>=
@@ -5353,6 +5402,12 @@ mrt_CancelDelayedEvent(
 `sourceInst`::
     A pointer to the instance structure that is sending the event.
     Events generated outside of a class instance set this argument to `NULL`.
+
+The `mrt_CancelDelayedEvent` function cancels the delayed event
+given by `event` and signaled from `source` to `target`.
+After the return from this function the event is guaranteed not to be
+delivered.
+*****
 
 (((micca,Run Time Function,mrt_CancelDelayedEvent)))
 [source,c]
@@ -5426,6 +5481,7 @@ The only special case here is what to do if we don't find the
 delayed event at all.
 In that case, zero is returned.
 
+*****
 [source,c]
 ----
 <<mrt external interfaces>>=
@@ -5443,6 +5499,14 @@ mrt_RemainingDelayTime(
 `sourceInst`::
     A pointer to the instance structure that is sending the event.
     Events generated outside of a class instance set this argument to `NULL`.
+
+The `mrt_RemainingDelayTime` function returns the amount of time
+remaining before the `event` is posted from `source` to `target`.
+The remaining time will be 0 if the event has already been posted or
+is such a delayed event does not exist.
+A return value of 0 does _not_ imply that the event has already been
+dispatched.
+*****
 
 The algorithm for computing the remaining time is to simply walk the
 delayed event queue from the beginning, summing up the
@@ -5590,19 +5654,38 @@ mrtRemoveDelayedEvent(
 }
 ----
 
+==== Expired Events in the Delayed Event Queue
+
 When the delay time expires there are several ways to deal with the events
 that need to be dispatched.
-One temptation would be to simply sync to the background and let code
+One approach would be simply to sync to the background and let code
 run there to remove expired events from the delayed event queue
 and restart the timer.
-Unfortunately, that would introduce considerable jitter into the timing.
-We need to deal with the expired events and restart the timer quickly
-and in a deterministic way.
+Such a design is subject to problematic, unpredictable timing skew.
+After the timer source has expired and posted the synchronization request,
+the background may not execute immediately.
+Either a currently executing state action or a previously queued
+sync function would delay the transfer of expired events from the delayed
+queue to the event queue.
+If there if another delayed event to expire,
+we would like to start the expiration timing without inserting some
+unpredictable time in between.
+Essentially, we would like to overlap the timing of the next delayed
+event with the time it takes to complete the current activities and
+execute the timer sync request.
+
 This design chooses to mark the events in the delayed event queue as
 expired and that provides a means of knowing which events in the delayed
 queue are active.
+The question then is how to signify that an event in the delayed event queue
+has expired.
 Since a delay value of 0 is meaningful, we use a delay value of
 the maximum for a delay time as the expired marker.
+We mark the `delay` member of the ECB with a special value to indicated that
+it has expired but not yet been removed from the delayed event queue.
+This allows us to keep track of the state of the ECB in the delayed
+event queue and still find the next timer interval during the timer
+interrupt service routine.
 
 [source,c]
 ----
@@ -5827,36 +5910,6 @@ situation where we just lost the race.
 So, just in case, we transfer any events on the delay queue that happen
 to show zero delay times to the event queue.
 
-==== Expired Events in the Delayed Event Queue
-
-One could simply expire the timer,
-notify the background via a sync function
-and then allow background processing to remove the expired entries
-from the delayed event queue directly to the main event queue for
-dispatching.
-After the expired entries are queued, then the timer would be restarted
-for the next expiration time.
-
-Such a design is subject to problematic, unpredictable timing skew.
-After the timer source has expired and posted the synchronization request,
-the background may not execute immediately.
-Either a currently executing state action or a previously queued
-sync function would delay the transfer of expired events from the delayed
-queue to the event queue.
-If there if another delayed event to expire,
-we would like to start that expiration without inserting some
-unpredictable time in between.
-Essentially, we would like to overlap the timing of the next delayed
-event with the time it takes to complete the current activities and
-execute the timer sync request.
-
-The question then is how to signify that an event in the delayed event queue
-has expired.
-We mark its `delay` member with a special value to indicated that
-it has expired but not yet been removed from the delayed event queue.
-This allows us to keep track of the state of the ECB in the delayed
-event queue and still find the next timer interval during the timer
-interrupt service routine.
 
 The `mrt_TimerExpireService` function is provided
 for the asynchronous timer execution to call that performs task of expiring
@@ -5923,11 +5976,12 @@ remain stopped.
 Notice that the function `mechExpiredEventService` is queued
 as as sync function to perform the last step of moving
 the expired events to the event queue.
-The mechanisms use their own internal facilities to post this
+The run time uses its own internal facilities to post this
 function as a sync function.
 This insures that delayed event posting is no different than
 any other interrupt synchronization and preserves the notion that the event
-queues are not accessed by asynchronous execution.
+queues are not accessed by interrupt service code and therefore do
+not need to be guarded by a critical section.
 
 (((micca,Run Time Function,mrtExpiredEventService)))
 [source,c]
@@ -5941,11 +5995,12 @@ mrtExpiredEventService(
      * Since the expired event queue is accessed here, we must make sure that
      * the timer interrupt does not go off.
      */
-    mrtSysTimerMask() ;
+    mrtSysTimerMask() ; // <1>
     mrtTransferExpiredEvents() ;
     mrtSysTimerUnmask() ;
 }
 ----
+<1> We do have to guard the delayed event queue from any timer interrupt.
 
 ==== Timing Considerations
 
@@ -5998,7 +6053,8 @@ of a _thread of control_.
 All events that originate outside of a state activity or are the
 result of a delayed event start a thread of control.
 The thread of control ends when all the subsequent events that originate
-from the event starting the thread of control have been dispatched.
+from the event starting the thread of control have been dispatched
+and any activities resulting from the event dispatch has been run.
 A thread of control is an important concept because its boundaries
 determine when the data model must be consistent and when we can
 check the referential integrity.
@@ -6009,8 +6065,9 @@ dispatch for the ongoing thread of control.
 When the queue for the ongoing thread of control is empty,
 then we can start a new thread of control by using events queued
 to the thread of control queue.
-When all the queues are empty,
-there is no work to be done.
+When both queues are empty,
+there is no work to be done and we must wait for subsequent
+interactions of the system with the outside world.
 
 (((micca,Run Time Function,mrtDispatchOneEvent)))
 [source,c]
@@ -6068,13 +6125,12 @@ static void mrtDispatchPolymorphicEvent(MRT_ecb *ecb) ;
 static void mrtDispatchCreationEvent(MRT_ecb *ecb) ;
 ----
 
-We use a table to resolve the function selection at run time.
-This table is the ``C'' equivalent of a virtual function table.
+We use a ``jump'' table to resolve the function selection at run time.
 
 [source,c]
 ----
 <<mrt static data>>=
-static void (* const mrtDispatchFuncs[])(MRT_ecb *) = {
+static void (* const mrtEventDispatchFuncs[])(MRT_ecb *) = {
     [mrtTransitionEvent] = mrtDispatchTransitionEvent,
     [mrtPolymorphicEvent] = mrtDispatchPolymorphicEvent,
     [mrtCreationEvent] = mrtDispatchCreationEvent
@@ -6102,9 +6158,9 @@ mrtDispatchEvent(
     assert(ecb != NULL) ;
     assert(ecb->targetInst != NULL) ;
     assert(ecb->targetInst->classDesc != NULL) ;
-    assert(ecb->eventType < COUNTOF(mrtDispatchFuncs)) ;
+    assert(ecb->eventType < COUNTOF(mrtEventDispatchFuncs)) ;
 
-    mrtDispatchFuncs[ecb->eventType](ecb) ;
+    mrtEventDispatchFuncs[ecb->eventType](ecb) ;
 }
 ----
 
@@ -6115,8 +6171,9 @@ we consider the dispatch of each particular event type.
 
 The most frequent event type to dispatch is that of a transitioning event to a
 state machine.
-We refer to these event types, _transition_, only to distinguish them from the
-more complicated and less frequent polymorphic and creation event types.
+We refer to these event types as, _transition_, only to distinguish them from
+the more complicated and less frequent used polymorphic and creation event
+types.
 
 Dispatching an event in its simplest terms involves using the
 current state of the instance and the event number contained in
@@ -6124,10 +6181,10 @@ an ECB as indices into the transition matrix.
 The transition matrix is the same for all instances of a class.
 The entry in the transition matrix is the new state to which a
 transition is to be made.
-There are a few complications such as the need to
+There are a few additional rules needed to
 account for _ignored_ and _can't happen_ events.
 
-Ignored events cause no transition.
+Ignored events (IG) cause no transition.
 Events that are ignored can be thought of as an optimization
 on the state transition graph.
 Ignored events could be handled by adding a new state to which
@@ -6137,7 +6194,7 @@ Clearly, having the concept of ignored events saves much clutter
 in the state transition graph.
 
 When the analyst considers a transition to be a logical impossibility,
-then it is declared as a can't happen event.
+then it is declared as a can't happen (CH) event.
 In the micca run time,
 a can't happen transition is treated as a fatal system error.
 This is a policy decision of the architecture,
@@ -6145,7 +6202,7 @@ so *do not* assume that _can't happen_ means
 _shouldn't happen_ or _has a low probability of happening_.
 In this architecture, can't happen means absolutely impossible to
 happen and if it does happen then there has been a tear in the
-space / time continuum and the only course available is to
+logic / space / time continuum and the only course available is to
 give up and declare a fatal error.
 
 The data structure used for transitioning event dispatch
@@ -6215,8 +6272,8 @@ typedef uint8_t MRT_DispatchCount ;
 The transition table is in state major order,
 _i.e._ the current state is used to index conceptual rows and the event number
 is used to index conceptual columns.
-The dimensions are captured in the EDB to allow run time bounds checking
-during event dispatch.
+The dimensions of the transition table are captured in the EDB to allow run
+time bounds checking during event dispatch.
 
 The basic transition algorithm is to use the current state of an instance and
 the event number of an event as the indices into the transition matrix.
@@ -6240,7 +6297,7 @@ that code segment is supplied as a function matching the prototype above.
 The first argument is a pointer to the instance receiving the event.
 It is `void` typed and state activities are expected to recover
 the correct type by casting the pointer to the be of the proper
-instance data structure.
+class data structure.
 The second argument is a pointer to the event parameters.
 Again, the correct type is recovered in the state activity to match
 the parameter signature of the activity.
@@ -6277,7 +6334,7 @@ mrtDispatchTransitionEvent(
     /*
      * Check for the "event-in-flight" error. This occurs when an instance is
      * deleted while there is an event for that instance in the event queue.
-     * For this architecture, such occurrences are considered as run-time
+     * For this architecture, such occurrences are considered as run time
      * detected analysis errors.
      */
     if (targetInst->alloc != ecb->alloc) {
@@ -6380,9 +6437,9 @@ the target instance is deleted by some other code executing.
 For a single threaded architecture,
 this is considered an analysis error.
 Deliverying events to deleted instances should never happen!
-The model is responsible for insuring that instance deletion is accomplished
-only after there are no events awaiting to be delivered.
-However, it can happen and the mechanisms detect and catch this.
+The analytical model is responsible for insuring that instance deletion is
+accomplished only after there are no events awaiting to be delivered.
+However, it can happen and the run time detect and catch this.
 
 A significant difficulty arises in systems that use distinct memory pools
 for the instances of each class.
@@ -6758,8 +6815,8 @@ The concept of a domain is very much related to the concept of
 _separation of concerns_.
 But that which is separated must be combined if we are to obtain a
 useful system.
-The difference in the semantic points of view of domains must be
-bridged by translating the requirements and dependencies of one domain
+The difference in the semantic view points of domains must be
+bridged by translating the assumptions and dependencies of one domain
 into the services provided by other domains.
 
 There are several approaches to bridging.
@@ -6774,7 +6831,7 @@ the reactor vessel set point attribute we would want the temperature
 to be transferred to output point number 57 of the Signal I/O domain.
 The advantage of this type of bridging is that the individual domains are
 not modified and the domain semantics are not disturbed.
-The bridge interactions are defined outside of the domain itsefl.
+The bridge interactions are defined outside of the domain itself.
 It is then a code generator's task to generate the domain code so that
 the bridge mapping is implemented.
 The disadvantage of this type of bridging is that it is very difficult
@@ -6786,11 +6843,11 @@ In this form,
 a domain makes explicit invocations to an _external entity_.
 The invocations demonstrate the explicit requirements that the domain
 delegates and the service it requires.
-Bridges then map the external entity invocations the interactions
+Bridges then map the external entity invocations to interactions
 with other domains that provide the required service.
 Explicit bridging is a workable technique but can lead to
 a large number of domain operations being needed to service a client
-domain's requirements.
+domain's dependencies.
 Often,
 a client domain and service domain will have _counterpart classes_.
 These are classes that represent different aspects of the same entity
@@ -6816,17 +6873,22 @@ albeit in a very controlled manner.
 `Micca` takes the follow view of bridging:
 
 * Domain designs should provide domain operations for those computations that
-cannot be accomplished by a single simple model level operation
-such as involve navigating a relationship or other more complicated activities
-of instance creation and relationship linkage.
+cannot be accomplished by a single simple model level operation.
+Operations such as involve navigating a relationship or other more complicated
+activities of instance creation and relationship linkage require
+processing code to accomplish and that code is best gathered in
+a domain operation.
 * The `micca` code generator provides the means to break encapsulation
 of a domain for simple model level actions such as signaling an event
 or reading a class instance attribute.
 * A domain must be populated before it can be bridged.
+If there is an initial instance population,
+bridges usually must account for that.
+If the population of instances for a class is static,
+this will usually greatly simplify the bridge.
 * Bridge operation code is manually coded to map the semantics of one
-domain onto another and, in general, is _not_ reusable.
-The context of how domains interact is specific to the use of the domains
-in building the overall system.
+domain onto another and, in general, is specific to the use of
+the bridged domains in a particular system and, therfore, _not_ reusable.
 * Dynamic activity in one domain may have to be reflected in the bridge.
 For example, instance creation in one domain may have to result in
 creating an instance of a counterpart class in a service domain.
@@ -8104,10 +8166,10 @@ mrt_PortalClassStateName(
 When the main loop was discussed,
 we made a brief mention of asynchronous execution in the context
 of executing synchronization functions.
-It is now time to discuss how the mechanisms deal with asynchronous
+It is now time to discuss how the run time deals with asynchronous
 execution.
 First we discuss some background and then present the means used by
-the mechanisms to synchronize the two execution contexts.
+the run time to synchronize the two execution contexts.
 
 Until now, the discussion of data management and execution
 sequencing have assumed that we have a single execution context.
@@ -8153,9 +8215,9 @@ However, it is usually necessary for an interrupt to communicate
 back to the domain models.
 Usually, the interrupt signals some change of condition
 in the environment that has been detected by the hardware.
-The interrupt may be able to do everything required to handle the situation and
-frequently additional computation is required to resolve what has happened.
-So the mechanisms provide a way for an interrupt to request
+The interrupt may not be able to do everything required to handle the situation
+and frequently additional computation is required to resolve what has happened.
+The run time provides a way for an interrupt to request
 synchronization with the running background.
 This is accomplished by having the interrupt service code
 perform a synchronization request.
@@ -8172,10 +8234,10 @@ As we saw before,
 the synchronization functions are executed in between state actions
 to insure that the domain data are in a coherent state.
 
-The mechanisms provide a sync queue where interrupts may place
+The run time provides a sync queue where interrupts may place
 their requests for background synchronization execution.
 We do this with a simple queue that is implemented in an array.
-Like all resources in the mechanisms,
+Like all resources in the run time,
 the storage required for the queue is fixed at compile time.
 
 [source,c]
@@ -8195,18 +8257,18 @@ to the background sync functions.
 This is often data that must be sampled coincident with the interrupt
 in order to capture the correct external state.
 To avoid problems with variable life times,
-data is passed by copying it into a parameter area.
-Clearly, this is not a good strategy for passing a large amount of
-data.
+data is passed by value by placing it in a parameter area.
+
+This is not a good strategy for passing a large amount of
+data from the interrupt context to the background.
 In those cases, it is necessary to manage memory between the
 background and the interrupts.
-No facilities are provided by the mechanisms to do this as it usually
+No facilities are provided by the run time to do this as it usually
 must to be constructed _ad hoc_ to suit the particular needs of the
 data transfer.
-Usually it is sufficient to manage a pool in the background and use
-the synchronization mechanism to allow interrupt service to return memory
+It is often sufficient to manage a memory pool in the background and use the
+synchronization to the background to allow interrupt service to return memory
 to the pool when it is no longer needed.
-
 The architypical example is communications buffers.
 Background code can manage a buffer pool.
 When outgoing messages are transmitted,
@@ -8219,8 +8281,9 @@ to be processed and returned to the pool.
 For our purposes here, it is only necessary to define some data structure
 that can be used by the interrupt service code to place data that
 will be delivered to the background function.
-The same considerations that were discussed for event
-parameters apply for sync parameters.
+The same considerations that were discussed for
+<<event-parameter-storage,event parameters>>
+apply for sync function parameters.
 So we use the same strategy.
 
 (((micca,Run Time Data,MRT_SyncParams)))
@@ -8309,6 +8372,8 @@ Inserting a function into the synchronization queue is an activity
 that may only be performed from interrupt service level.
 *N.B.* that this function does *not* implement a critical section
 around access to the sync queue.
+It assumes that it is being invoked from an interrupt context already
+and will not be preempted by any other execution.
 
 [source,c]
 ----
@@ -8508,6 +8573,8 @@ translate the numbers into strings that are meaningful to a human.
 
 Because tracing also affects the performance of the run time code,
 it may also be excluded by defining the `MRT_NO_TRACE` macro.
+Most projects will want to define `MRT_NO_TRACE` in code compiled
+for a release.
 
 
 === Trace Information
@@ -8601,7 +8668,7 @@ argument.
 typedef void (*MRT_TraceHandler)(MRT_TraceInfo const *) ;
 ----
 
-The function is registered with the mechanisms by invoking:
+The function is registered with the run time by invoking:
 
 [source,c]
 ----
@@ -8636,7 +8703,7 @@ The implementation of registering a handler is simply to record the
 function pointer in a variable.
 
 For each type of event dispatch,
-the mechanisms call a specific function to determine if tracing
+the run time calls a specific function to determine if tracing
 is enabled and to marshal the trace information into the proper
 data structure.
 
@@ -8756,7 +8823,7 @@ This type of data is so system specific that it is left to the
 tracing callback to supply.
 If you have a free running cycle counter in your system,
 this can be a good indicator of relative time and the trace callback
-function can add this to the data set supplied by the mechanisms.
+function can add this to the data set supplied by the run time.
 Your system may also have source of clocked timing data that can also
 be used as a timing reference.
 In either case, augmenting the trace data with some sort of relative
@@ -8766,15 +8833,14 @@ Tracing can also be used as a framework for testing.
 If a domain is built to run in a testing framework where tracing is enabled,
 then recording all the trace information allows one to determine
 the amount of _transition_ coverage a test set causes.
-The goal is to develop test sets that
-drive the domain by invoking the domain interface functions with
-appropriate data so that all state transitions are taken.
+The goal is to develop test sets that drive the domain with appropriate data so
+that all state transitions are taken.
 Tracing allows the recording of what transitions a given thread of control
 causes.
 Since in most well designed state machines,
-state action code is small and does not contain complicated or intricate
+state activity code is small and does not contain complicated or intricate
 internal program flow,
-causing all state actions to be executed is often close to complete
+causing all state activities to be executed is often close to complete
 statement coverage.
 As an added benefit,
 state machines can be considered as directed graphs.
@@ -8802,7 +8868,7 @@ The details of the error handling policy will vary between
 software architectures, so it is important to state them clearly.
 For the `micca` run time, the following principles guide error handling.
 
-* To that extent possible, the mechanisms operations should not report
+* To that extent possible, the run time operations should not report
 errors back to the application.
 For implementation languages that do not support exception handling,
 the usual technique of returning error codes is not very effective.
@@ -8812,7 +8878,7 @@ recourse for the application.
 For example,
 it does little good to know that we are unable to generate an
 event because we do not have sufficient ECB resources when there
-is nothing a state action can do to free up the required resources.
+is nothing a state activity can do to free up the required resources.
 * Errors that result from exhausted resources or analysis errors
 detected at run time are *fatal*.
 Exactly how fatal errors are acted upon is platform dependent and may
@@ -8821,7 +8887,7 @@ Regardless of the consequence of a fatal error, the assumption is
 that the program can no longer continue to run.
 
 With these principles in mind, we define a set of error conditions
-that are detected by the mechanism.
+that are detected by the run time.
 All these conditions are fatal and are handled by invoking a fatal
 error handler.
 
@@ -8882,7 +8948,7 @@ static char const * const errMsgs[] = {
 } ;
 ----
 
-Everywhere else the mechanisms operations have been crafted to
+Everywhere else the run time operations have been crafted to
 avoid error possibilities.
 For example, as discussed in delayed event generation,
 we interpret the attempt to generate a duplicate delayed event
@@ -8915,9 +8981,8 @@ mrtDefaultFatalErrorHandler(
     va_list ap) ;
 ----
 
-The system provides a default fatal error handler.
-Assuming that standard I/O is included, we print a message to the
-standard error.
+The system provides a default fatal error handler,
+a message is printed to the standard error stream.
 
 [source,c]
 ----
@@ -8968,7 +9033,7 @@ mrt_SetFatalErrorHandler(
 }
 ----
 
-The mechanisms internally call `mrtFatalError`.
+The run time internally calls `mrtFatalError`.
 This function is presented next.
 
 [source,c]
@@ -8980,7 +9045,8 @@ static noreturn void mrtFatalError(MRT_ErrorCode errNum, ...) ;
 [source,c]
 ----
 <<mrt static functions>>=
-static noreturn void
+static noreturn
+void
 mrtFatalError(
     MRT_ErrorCode errNum,
     ...)
@@ -9015,7 +9081,7 @@ Finally,
 == Avoiding Fatalities
 
 In this error handling strategy,
-every mechanism detected error is fatal.
+every run time detected error is fatal.
 Although the details of the processing for fatal errors can be delegated,
 in most systems of the class we consider here,
 fatal errors usually result in a system reset.
@@ -9028,7 +9094,7 @@ error is not the desired behavior.
 Consider the case where some external stimulus results in an event
 being generated.
 If the stimulus occurs more frequently than events can be processed,
-then the mechanisms will run out of event control blocks causing a
+then the run time will run out of event control blocks causing a
 fatal error.
 As an example,
 consider the arrival of a communications packet.
@@ -9042,7 +9108,7 @@ protocol deal with the necessary retries, etc.
 It is then necessary to be able to determine if generating an event
 would be successful.
 
-In this section we describe functions that can be used to avoid mechanisms
+In this section we describe functions that can be used to avoid run time
 requests that would exhaust an underlying resource and therefore
 cause a fatal system error.
 It should be emphasized that these functions are *not*
@@ -9081,7 +9147,7 @@ appropriate to the system must be taken.
 It can be a difficult problem to solve and the functions provided here
 are too generic to be used indescrimately.
 
-There are three internal mechanisms resources that can be exhausted.
+There are three internal run time resources that can be exhausted.
 
 * Class instances can be dynamically created and each class has its own instance
 pool.
@@ -9164,7 +9230,7 @@ code and must now begin to account for the platform differences
 in the way timing and asynchronous execution is handled.
 This software architecture can be run on a conventional POSIX platform.
 This includes Linux, Mac OS X and even Cygwin.
-The primary purpose of making the mechanisms run in a POSIX environment
+The primary purpose of making the run time function in a POSIX environment
 is simulation.
 Often, a domain can be executed for testing and simulation purposes on
 a conventional computer more easily than in the target environment.
@@ -9191,16 +9257,16 @@ We will need a number of POSIX specific include files.
 We start with a discussion of how to implement a critical section
 in POSIX.
 In POSIX,
-the `signal` is the mechanism of asynchronous execution.
+the `signal` is the means of asynchronous execution.
 There are times when we must insure that execution is _not_
 interrupted by asynchronous signal execution.
 The functions in this section accomplish that.
 
 The technique here is to maintain a signal mask of all the signals
-that are under control of the mechanisms.
+that are under control of the run time.
 This signal mask can then be used to control signal execution as necessary.
 Note that an application can call low level signal handling primitives
-and manage subsets of signals outside of the mechanisms.
+and manage subsets of signals outside of the run time.
 This is definitely discouraged.
 
 [source,c]
@@ -9544,7 +9610,7 @@ This is simplifies keeping track of what is going on.
 === POSIX I/O Interface
 
 On POSIX platforms,
-the mechanisms must also supply services to handle I/O.
+the run time must also supply services to handle I/O.
 The reason for this is that there are two means of awakening a sleeping
 process, receiving a signal and servicing a I/O file
 descriptor.footnote:[ There are other ways to integrate signals and I/O in
@@ -9572,7 +9638,7 @@ typedef void (*MRT_FDServiceFunc)(int) ;
 When the callback is invoked,
 it is passed the value of the file descriptor that requires service.
 
-The mechanisms provide two functions for I/O.
+The run time provide two functions for I/O.
 One registers the callbacks for a file descriptor and the other removes 
 a file descriptor from consideration.
 
@@ -9833,7 +9899,7 @@ mrtInitFDService(void)
 The main loop detects when there is nothing left to do and
 suspends execution.
 Here we present how that suspension happens for the POSIX version of the
-mechanisms.
+run time.
 
 This design is based on using `pselect` to suspend a process until
 either a signal occurs or a file descriptor requires service.
