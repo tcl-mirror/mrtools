@@ -313,16 +313,23 @@ an ordinary namespace variables
 proc GatherDomainProperties {domain} {
     variable ClassProperties
 
-    set sassigners [pipe {
-        SingleAssigner findWhere {$Domain eq $domain} |
+    set assigners [pipe {
+        AssignerStateModel findWhere {$Domain eq $domain} |
         deRef ~ |
-        relation project ~ Association |
-        relation rename ~ Association Name |
-        relation tag ~ Number -ascending Name |
+        ralutil::rvajoin ~ $::micca::SingleAssigner Single |
+        ralutil::rvajoin ~ $::micca::MultipleAssigner Multiple |
+        relation tag ~ Number -ascending Association |
         relation extend ~ stup\
-            Declaration string {"struct [tuple extract $stup Name]"}\
-            Reference string {"struct [tuple extract $stup Name] *"}\
-            StorageVariable string {"[tuple extract $stup Name]__POOL"}\
+            Declaration string {"struct [tuple extract $stup Association]"}\
+            Reference string {"struct [tuple extract $stup Association] *"}\
+            StorageVariable string {"[tuple extract $stup Association]__POOL"}
+    }]
+
+    set sassigners [pipe {
+        relation restrictwith $assigners {[relation isnotempty $Single]} |
+        relation eliminate ~ Domain Single Multiple |
+        relation rename ~ Association Name |
+        relation extend ~ stup\
             Allocation int {0}\
             InitialInstance int {1}\
             TotalInstance int {1}
@@ -330,24 +337,17 @@ proc GatherDomainProperties {domain} {
     # puts [relformat $sassigners sassigners]
 
     set massigners [pipe {
-        MultipleAssigner findWhere {$Domain eq $domain} |
-        deRef ~ |
-        relation tag ~ AssignerNumber -ascending Association |
+        relation restrictwith $assigners {[relation isnotempty $Multiple]} |
+        relation rename ~ Number AssignerNumber |
         ralutil::rvajoin ~ $::micca::MultipleAssignerInstance Instances |
-        ralutil::rvajoin ~ $::micca::ClassInstance Allocations |
+        relation ungroup ~ Multiple |
+        relation join ~ $::micca::ClassPopulation |
         relation extend ~ stup\
-            Declaration string {"struct [tuple extract $stup Association]"}\
-            Reference string {"struct [tuple extract $stup Association] *"}\
-            StorageVariable string {"[tuple extract $stup Association]__POOL"}\
-            Allocation int\
-                {[relation cardinality [tuple extract $stup Allocations]]}\
             InitialInstance int\
                 {[relation cardinality [tuple extract $stup Instances]]}\
-            TotalInstance int\
-                {[relation cardinality [tuple extract $stup Allocations]] +\
-                [relation cardinality [tuple extract $stup Instances]]} |
-            relation eliminate ~ Domain Class Allocations Instances |
-            relation rename ~ Association Name AssignerNumber Number
+            TotalInstance int {[tuple extract $stup Allocation]} |
+        relation eliminate ~ Domain Single Class Instances |
+        relation rename ~ Association Name AssignerNumber Number
     }]
     # puts [relformat $massigners massigners]
 
@@ -393,7 +393,7 @@ proc GatherDomainProperties {domain} {
         relation rename ~ ClassNumber Number |
         relation union ~ $sassigners $massigners
     }]
-    # puts [relformat $ClassProperties ClassProperties]
+    puts [relformat $ClassProperties ClassProperties]
 
     return
 }
@@ -3882,61 +3882,66 @@ proc classDefinitions {} {
 proc assignerDefinitions {} {
     variable domain
 
-    append result [comment "Single Assigner Class Description Definitions"]
-    set assignerRefs [SingleAssigner findWhere {$Domain eq $domain}]
-    forAllRefs assigner $assignerRefs {
-        assignAttribute $assigner
+    append result [comment "Assigner Class Description Definitions"]
+    set assigners [pipe {
+        AssignerStateModel findWhere {$Domain eq $domain} |
+        deRef ~ |
+        ralutil::rvajoin ~ $::micca::SingleAssigner Single |
+        ralutil::rvajoin ~ $::micca::MultipleAssigner Multiple
+    }]
+
+    set result {}
+    set attrResult {}
+    if {[relation isnotempty $assigners]} {
+        set nassign [relation cardinality $assigners]
         append result\
-            "static MRT_Class const ${Association}__CLASS = \{\n"\
-            "    .iab = NULL,\n"\
-            "    .edb = &${Association}__EDB,\n"\
-            "    .pdb = NULL,\n"\
-            "    .relCount = 0,\n"\
-            "    .classRels = NULL,\n"\
-            "    .attrCount = 0,\n"\
-            "    .classAttrs = NULL,\n"\
-            "    .instCount = 1,\n"\
-            "    .containment = NULL,\n"\
-            "        #ifndef MRT_NO_NAMES\n"\
-            "    .name = ${Association}__NAME,\n"\
-            "        #endif /* MRT_NO_NAMES */\n"\
-            "\} ;\n"
+            "static MRT_Class const ${domain}__ASSIGNERS\[$nassign\]= \{\n"\
+
+        relation foreach assigner $assigners -ascending Association {
+            relation assign $assigner
+            append result\
+                "    \{ // $Association\n"
+            if {[relation isnotempty $Single]} {
+                append result\
+                    "        .iab = NULL,\n"\
+                    "        .edb = &${Association}__EDB,\n"\
+                    "        .attrCount = 0,\n"\
+                    "        .classAttrs = NULL,\n"\
+                    "        .instCount = 1,\n"\
+            } else {
+                relation assign $Multiple
+                append attrResult\
+                    "static MRT_Attribute const ${Association}__CATTRS\[1\] = \{\n"\
+                    "    \{\n"\
+                    "        .offset = offsetof(struct $Association, idinstance),\n"\
+                    "        .size = sizeof([GetClassProperty $Class Reference]),\n"\
+                    "            #ifndef MRT_NO_NAMES\n"\
+                    "        .name = multi_assigner_attribute__NAME\n"\
+                    "            #endif /* MRT_NO_NAMES */\n"\
+                    "    \}\n"\
+                    "\} ;\n"
+                set ninst [GetClassProperty $Association TotalInstance]
+                append result\
+                    "        .iab = &${Association}__IAB,\n"\
+                    "        .edb = &${Association}__EDB,\n"\
+                    "        .attrCount = 1,\n"\
+                    "        .classAttrs = ${Association}__CATTRS,\n"\
+                    "        .instCount = $ninst,\n"
+            }
+            append result\
+                "        .pdb = NULL,\n"\
+                "        .relCount = 0,\n"\
+                "        .classRels = NULL,\n"\
+                "        .containment = NULL,\n"\
+                "            #ifndef MRT_NO_NAMES\n"\
+                "        .name = ${Association}__NAME,\n"\
+                "            #endif /* MRT_NO_NAMES */\n"\
+                "    \},\n"
+        }
+        append result "\} ;\n"
     }
 
-    append result [comment "Multiple Assigner Class Description Definitions"]
-    set assignerRefs [MultipleAssigner findWhere {$Domain eq $domain}]
-    forAllRefs assigner $assignerRefs {
-        assignAttribute $assigner
-        append result\
-            "static MRT_Attribute const ${Association}__CATTRS\[1\] = \{\n"\
-            "    \{\n"\
-            "        .offset = offsetof(struct $Association, idinstance),\n"\
-            "        .size = sizeof([GetClassProperty $Class Reference]),\n"\
-            "            #ifndef MRT_NO_NAMES\n"\
-            "        .name = multi_assigner_attribute__NAME\n"\
-            "            #endif /* MRT_NO_NAMES */\n"\
-            "    \}\n"\
-            "\} ;\n"
-
-        set instRefs [findRelated $assigner ~R106]
-        append result\
-            "static MRT_Class const ${Association}__CLASS = \{\n"\
-            "    .iab = &${Association}__IAB,\n"\
-            "    .edb = &${Association}__EDB,\n"\
-            "    .pdb = NULL,\n"\
-            "    .relCount = 0,\n"\
-            "    .classRels = NULL,\n"\
-            "    .attrCount = 1,\n"\
-            "    .classAttrs = ${Association}__CATTRS,\n"\
-            "    .instCount = [refMultiplicity $instRefs],\n"\
-            "    .containment = NULL,\n"\
-            "        #ifndef MRT_NO_NAMES\n"\
-            "    .name = ${Association}__NAME,\n"\
-            "        #endif /* MRT_NO_NAMES */\n"\
-            "\} ;\n"
-    }
-
-    return $result
+    return [string cat $attrResult $result]
 }
 ----
 
@@ -4641,11 +4646,12 @@ proc assignerInstanceDefinitions {} {
             readAttribute ~ Number
         }]
         assignAttribute $assigner
+        set instnum [GetClassProperty $Association Number]
         append result\
             "static struct $Association ${Association}__POOL\[1\] = \{\n"\
             "    \{\n"\
             "        .base__INST = \{\n"\
-            "            .classDesc = &${Association}__CLASS,\n"\
+            "            .classDesc = &${domain}__ASSIGNERS\[$instnum\],\n"\
             "            .alloc = 1,\n"\
             "            .currentState = $initstate,\n"\
             "            .refCount = 0,\n"\
@@ -4660,7 +4666,7 @@ proc assignerInstanceDefinitions {} {
     append result [comment "Multiple Assigner Instance Definitions"]
     set multis [MultipleAssigner findWhere {$Domain eq $domain}]
     forAllRefs multi $multis {
-        assignAttribute $multi {Association assoc}
+        assignAttribute $multi
         set initstate [pipe {
             findRelated $multi R53 R50 R58 R57 |
             readAttribute ~ Number
@@ -4668,17 +4674,17 @@ proc assignerInstanceDefinitions {} {
 
         set multiinsts [findRelated $multi ~R106]
         if {[isNotEmptyRef $multiinsts]} {
-            set totalinsts [GetClassProperty [readAttribute $multi Class]\
-                    TotalInstance]
-            append result "static struct $assoc\
-                    ${assoc}__POOL\[$totalinsts\] = \{\n"
+            set totalinsts [GetClassProperty $Class TotalInstance]
+            set instnum [GetClassProperty $Association Number]
+            append result "static struct $Association\
+                    ${Association}__POOL\[$totalinsts\] = \{\n"
             forAllRefs assigner $multiinsts {
                 assignAttribute $assigner
                 set allocnum 0
                 append result\
                     "    \[$Number\] = \{\n"\
                     "        .base__INST = \{\n"\
-                    "            .classDesc = &${Association}__CLASS,\n"\
+                    "            .classDesc = &${domain}__ASSIGNERS\[$instnum\],\n"\
                     "            .alloc = [incr allocnum],\n"\
                     "            .currentState = $initstate,\n"\
                     "            .refCount = 0,\n"\
@@ -5197,11 +5203,16 @@ proc portalDefinition {} {
     variable domain
 
     set classRefs [Class findWhere {$Domain eq $domain}]
+    set assignRefs [AssignerStateModel findWhere {$Domain eq $domain}]
+    set acount [refMultiplicity $assignRefs]
+    set aptr [expr {$acount == 0 ? "NULL" : "${domain}__ASSIGNERS"}]
     append result\
         [comment "Domain Portal Definition"]\
         "MRT_DomainPortal ${domain}__PORTAL = \{\n"\
         "    .classCount = [refMultiplicity $classRefs],\n"\
         "    .classes = ${domain}__CLASSES,\n"\
+        "    .assignerCount = $acount,\n"\
+        "    .assigners = $aptr,\n"\
         "        #ifndef MRT_NO_NAMES\n"\
         "    .name = \"$domain\"\n"\
         "        #endif /* MRT_NO_NAMES */\n"\
@@ -8660,7 +8671,7 @@ proc MultiAssignerCreate {relName instref idinst} {
     set idClass [readAttribute $maRef Class]
     CheckInstRefSymbol $idinst Class $idClass
 
-    set assignerClass ${relName}__CLASS
+    set assignerClass ${domain}__ASSIGNERS\[[GetClassProperty $relName Number]\]
     append result\
         [linecomment "$relName create $instref $idinst"]\
         [CreateInstRefSymbol $relName $instref]\
