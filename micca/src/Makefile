@@ -27,6 +27,10 @@ DOCSRC 	=\
 	micca.aweb\
 	$(NULL)
 
+CODEFILE =\
+	  $(CODEDIR)/tcl/micca.tcl\
+	  $(NULL)
+
 DOCPARTS=\
 	bibliography.txt\
 	codeorg.txt\
@@ -159,16 +163,16 @@ all : doc code tests package
 
 doc : $(PDF)
 
-code : $(TCLSRC)
+code : $(CODEFILE)
 
 tests : code $(TESTS)
 
 runtests : tests
 	cd $(TESTDIR) ; tclsh $(TESTS) -verbose bet -level debug
 
-package : $(PKGDIR)/package-micca-$(VERSION)-tcl.tm
+package : $(PKGDIR)/package-micca-$(VERSION)-tcl.zip
 
-$(PKGDIR)/package-micca-$(VERSION)-tcl.tm : code $(CODEDIR)/tcl/pkgIndex.tcl
+$(PKGDIR)/package-micca-$(VERSION)-tcl.zip : $(CODEFILE) $(CODEDIR)/tcl/pkgIndex.tcl
 	teapot-pkg generate --output $(PKGDIR) $(CODEDIR)/tcl
 
 clean :
@@ -181,6 +185,9 @@ $(PDF) : $(DOCSRC) $(DOCPARTS) $(EXTRAS) $(IMAGES)
 $(TCLSRC) : $(DOCSRC) $(DOCPARTS)
 
 $(TESTS) : $(DOCSRC) $(DOCPARTS)
+
+$(CODEFILE) : $(DOCSRC) $(DOCPARTS)
+	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $@ $<
 
 $(DOCDIR)/%.pdf : %.aweb
 	a2x $(A2XOPTS) --doctype=book  --format=pdf\
