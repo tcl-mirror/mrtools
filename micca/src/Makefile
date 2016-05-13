@@ -79,6 +79,8 @@ LSDIAGRAMS =\
 	wm-states.uxf\
 	ct-states.uxf\
 	main-loop.uxf\
+	auto-translation.uxf\
+	micca-translation.uxf\
 	$(NULL)
 
 IMAGES =\
@@ -201,8 +203,13 @@ $(DOCDIR)/%.pdf : %.aweb
 %.test : %.aweb
 	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $(TESTDIR)/$@ $<
 
-
 $(IMAGEDIR)/platform-%.pdf : platform-%.uxf
+	umlet -action=convert -format=pdf\
+		-filename=$< -output=$(basename $@)-cvt
+	pdftk $(basename $@)-cvt.pdf cat 1left output $@
+	$(RM) $(basename $@)-cvt.pdf
+
+$(IMAGEDIR)/%-translation.pdf : %-translation.uxf
 	umlet -action=convert -format=pdf\
 		-filename=$< -output=$(basename $@)-cvt
 	pdftk $(basename $@)-cvt.pdf cat 1left output $@

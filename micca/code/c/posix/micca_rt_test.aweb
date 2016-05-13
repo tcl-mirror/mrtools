@@ -7,10 +7,18 @@
 [source,c]
 ----
 <<micca_rt_test.c>>=
+#include "micca_rt.h"
+#include <stdlib.h>
+#include <setjmp.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <CUnit/CUnit.h>
 #include <CUnit/Basic.h>
-#include <setjmp.h>
-#include "micca_rt.h"
+
+static void readSlave(int) ;
+
 #include "micca_rt.c"
 #include "testdomain.c"
 
@@ -2460,6 +2468,16 @@ domainop void instsetops {} {
     CU_ASSERT_TRUE(%<instset uset equal cset>%) ;
     %<instset mset minus cset uset>%
     CU_ASSERT_TRUE(%<instset mset empty>%) ;
+    %<CCC findByName c1 c1ref>%
+    %<instset cset remove c1ref>%
+    unsigned csetCount = %<instset cset cardinality>% ;
+    CU_ASSERT(csetCount == 4) ;
+
+    %<DDD findByName d1 d1ref>%
+    %<instset relcs selectRelated d1ref R17>%
+    unsigned rcount = %<instset relcs cardinality>% ;
+    CU_ASSERT(rcount == 1) ;
+    CU_ASSERT_TRUE(%<instset relcs member c1ref>%) ;
 }
 ----
 
@@ -2771,5 +2789,322 @@ mrtTest_GetStateName(void)
     result = mrt_PortalClassStateName(&testdomain__PORTAL,
             TESTDOMAIN_H_CLASSID, 0, &stateName) ;
     CU_ASSERT(result == MICCA_PORTAL_NO_STATE_MODEL) ;
+}
+----
+
+=== Domain Access Functions
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class clerk {
+    attribute clerkAvailable bool -default true
+}
+class client {
+    attribute clerkNeeded bool -default true
+}
+association R19 clerk 0..1--0..1 client {
+    statemodel {
+        defaulttrans IG
+
+        state waitingForClient {} {
+            // Find a client that needs a clerk
+            %<client foreachInstance clref>%
+                if (%<instance clref attribute clerkNeeded>%) {
+                    %<my signal clientReady>%
+                    break ;
+                }
+            %<end>%
+        }
+        transition waitingForClient - clientReady -> waitingForClerk
+
+        state waitingForClerk {} {
+            // Find a clerk that is available
+            %<clerk foreachInstance ckref>%
+                if (%<instance ckref attribute clerkAvailable>%) {
+                    %<my signal clerkReady>%
+                    break ;
+                }
+            %<end>%
+        }
+        transition waitingForClerk - clerkReady -> assigningClerk
+
+        state assigningClerk {} {
+            // Find a ready client
+            %<client instref rcl>%
+            %<client foreachInstance rcl>%
+                if (%<instance rcl attribute clerkNeeded>%) {
+                    %<instance rcl attribute clerkNeeded>% = false ;
+                    break ;
+                }
+            %<end>%
+            // Find an available clerk
+            %<clerk instref rck>%
+            %<clerk foreachInstance rck>%
+                if (%<instance rck attribute clerkAvailable>%) {
+                    %<instance rck attribute clerkAvailable>% = false ;
+                    break ;
+                }
+            %<end>%
+            // Assign the clerk to the client
+            %<R19 relate rck rcl>%
+            // Go back to look for more
+            %<my signal clerkAssigned>%
+            // End the test case
+            mrt_SyncToEventLoop() ;
+        }
+        transition assigningClerk - clerkAssigned -> waitingForClerk
+    }
+}
+
+<<test domain population>>=
+class clerk {
+    instance clerk1
+}
+class client {
+    instance client1
+}
+----
+
+[source,c]
+----
+<<portal functions test cases>>=
+{"signal assigner", mrtTest_SignalAssigner},
+
+<<test functions>>=
+static void
+mrtTest_SignalAssigner(void)
+{
+    int pcode = mrt_PortalSignalEventAssigner(&testdomain__PORTAL,
+        TESTDOMAIN_R19_ASSIGNERID,
+        0,
+        TESTDOMAIN_R19_CLIENTREADY_EVENT,
+        NULL) ;
+    CU_ASSERT(pcode == 0) ;
+
+    mrt_EventLoop() ;
+
+    bool status ;
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_CLERK_CLASSID,
+        TESTDOMAIN_CLERK_CLERK1_INSTID,
+        TESTDOMAIN_CLERK_CLERKAVAILABLE_ATTRID,
+        &status, sizeof(status)) ;
+    CU_ASSERT(pcode == sizeof(status)) ;
+    CU_ASSERT_FALSE(status) ;
+
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_CLIENT_CLASSID,
+        TESTDOMAIN_CLIENT_CLIENT1_INSTID,
+        TESTDOMAIN_CLIENT_CLERKNEEDED_ATTRID,
+        &status, sizeof(status)) ;
+    CU_ASSERT(pcode == sizeof(status)) ;
+    CU_ASSERT_FALSE(status) ;
+
+    pcode = mrt_PortalSignalEventAssigner(&testdomain__PORTAL,
+        100,
+        0,
+        TESTDOMAIN_R19_CLIENTREADY_EVENT,
+        NULL) ;
+    CU_ASSERT(pcode == MICCA_PORTAL_NO_CLASS) ;
+
+    pcode = mrt_PortalSignalEventAssigner(&testdomain__PORTAL,
+        TESTDOMAIN_R19_ASSIGNERID,
+        1,
+        TESTDOMAIN_R19_CLIENTREADY_EVENT,
+        NULL) ;
+    CU_ASSERT(pcode == MICCA_PORTAL_NO_INST) ;
+
+    pcode = mrt_PortalSignalEventAssigner(&testdomain__PORTAL,
+        TESTDOMAIN_R19_ASSIGNERID,
+        0,
+        100,
+        NULL) ;
+    CU_ASSERT(pcode == MICCA_PORTAL_NO_EVENT) ;
+}
+----
+
+== POSIX File Descriptor Access
+
+[source,c]
+----
+<<test suites>>=
+{"posix I/O", NULL, NULL, NULL, NULL, posixIOSuiteTests},
+----
+
+[source,c]
+----
+<<suite tests>>=
+<<posix io suite tests>>
+
+<<posix io suite tests>>=
+static CU_TestInfo posixIOSuiteTests[] = {
+    <<posix io test cases>>
+    CU_TEST_INFO_NULL,
+} ;
+----
+
+=== Reading Input
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class HHH {
+    attribute master_fd int -default -1
+    attribute slave_name {char const *} -default NULL
+    attribute slave_fd int -default -1
+
+    statemodel {
+        state closed {} {
+            mrt_UnregisterFDService(%<my attribute slave_fd>%, true, true, true) ;
+            close(%<my attribute slave_fd>%) ;
+            close(%<my attribute master_fd>%) ;
+        }
+        transition closed - open -> opening
+        transition closed - close -> IG
+
+        state opening {} {
+            %<my attribute master_fd>% = posix_openpt(O_RDWR | O_NOCTTY) ;
+            CU_ASSERT_FATAL(%<my attribute master_fd>% != -1) ;
+
+            int status = grantpt(%<my attribute master_fd>%) ;
+            CU_ASSERT_FATAL(status == 0) ;
+
+            status = unlockpt(%<my attribute master_fd>%) ;
+            CU_ASSERT_FATAL(status == 0) ;
+
+            %<my attribute slave_name>% = ptsname(%<my attribute master_fd>%) ;
+            CU_ASSERT_PTR_NOT_NULL_FATAL(%<my attribute slave_name>%) ;
+            printf("slave device at %s\n", %<my attribute slave_name>%) ;
+
+            %<my attribute slave_fd>% = open(
+                %<my attribute slave_name>%, O_RDWR | O_NOCTTY) ;
+            CU_ASSERT_FATAL(%<my attribute slave_fd>% != -1) ;
+
+            mrt_RegisterFDService(%<my attribute slave_fd>%,
+                readSlave, NULL, NULL) ;
+        }
+        transition opening - write -> writing
+        transition opening - close -> closed
+
+        state writing {ch char} {
+            int status = write(%<my attribute master_fd>%, &ch, sizeof(ch)) ;
+            CU_ASSERT_FATAL(status != -1) ;
+        }
+        transition writing - read -> reading
+        transition writing - close -> closed
+
+        state reading {} {
+            char ch ;
+
+            int status = read(%<my attribute slave_fd>%, &ch, sizeof(ch)) ;
+            CU_ASSERT_FATAL(status != -1) ;
+
+            if (status > 0) {
+                printf("%s: read '%c'\n", __func__, ch) ;
+            } else {
+                // status == 0
+                %<my signal close>%
+            }
+            mrt_SyncToEventLoop() ;
+        }
+        transition reading - write -> writing
+        transition reading - read -> reading
+        transition reading - close -> closed
+    }
+}
+
+<<test domain population>>=
+class HHH {
+    instance hhh1
+}
+----
+
+[source,c]
+----
+<<micca_rt_test.c>>=
+static void
+readSlave(
+    int fd)
+{
+    int pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_HHH_CLASSID,
+        TESTDOMAIN_HHH_HHH1_INSTID,
+        mrtTransitionEvent,
+        TESTDOMAIN_HHH_READ_EVENT,
+        NULL) ;
+    CU_ASSERT(pcode == 0) ;
+    printf("read on %d\n", fd) ;
+}
+----
+
+[source,c]
+----
+<<posix io test cases>>=
+{"read input", mrtTest_ReadInput},
+
+<<test functions>>=
+static void
+mrtTest_ReadInput(void)
+{
+    int pcode ;
+    bool didevent ;
+
+    pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_HHH_CLASSID,
+        TESTDOMAIN_HHH_HHH1_INSTID,
+        mrtTransitionEvent,
+        TESTDOMAIN_HHH_OPEN_EVENT,
+        NULL) ;
+    CU_ASSERT(pcode == 0) ;
+    didevent = mrt_ProcessOneEvent() ;
+    CU_ASSERT_TRUE(didevent) ;
+
+    int fd ;
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_HHH_CLASSID,
+        TESTDOMAIN_HHH_HHH1_INSTID,
+        TESTDOMAIN_HHH_MASTER_FD_ATTRID,
+        &fd, sizeof(fd)) ;
+    CU_ASSERT(pcode == sizeof(fd)) ;
+    CU_ASSERT(fd > 0) ;
+    printf("master fd = %d\n", fd) ;
+
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_HHH_CLASSID,
+        TESTDOMAIN_HHH_HHH1_INSTID,
+        TESTDOMAIN_HHH_SLAVE_FD_ATTRID,
+        &fd, sizeof(fd)) ;
+    CU_ASSERT(pcode == sizeof(fd)) ;
+    CU_ASSERT(fd > 0) ;
+    printf("slave fd = %d\n", fd) ;
+
+    union {
+        MRT_EventParams parameters ;
+        struct testdomain_HHH_write__EPARAMS hw ;
+    } params = {
+        .hw = {
+            .ch = '\r'
+        }
+    } ;
+    pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_HHH_CLASSID,
+        TESTDOMAIN_HHH_HHH1_INSTID,
+        mrtTransitionEvent,
+        TESTDOMAIN_HHH_WRITE_EVENT,
+        params.parameters) ;
+    CU_ASSERT(pcode == 0) ;
+
+    mrt_EventLoop() ;
+
+    pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_HHH_CLASSID,
+        TESTDOMAIN_HHH_HHH1_INSTID,
+        mrtTransitionEvent,
+        TESTDOMAIN_HHH_CLOSE_EVENT,
+        NULL) ;
+    CU_ASSERT(pcode == 0) ;
+    didevent = mrt_ProcessOneEvent() ;
+    CU_ASSERT_TRUE(didevent) ;
 }
 ----
