@@ -1035,14 +1035,14 @@ In this case we query the *TransitioningEvent* class.
 <<portalIds:: generate event information>>=
 append result [comment "Numeric encoding of event numbers\
         used by the portal functions"]
-set tevents [pipe {
-    TransitioningEvent findWhere {$Domain eq $domain} |
+set mevents [pipe {
+    Event findWhere {$Domain eq $domain} |
     deRef ~ |
-    relation eliminate ~ Domain |
+    relation eliminate ~ Domain PSigID |
     relation group ~ Events Event Number
 }]
-relation foreach tevent $tevents -ascending Model {
-    relation assign $tevent
+relation foreach mevent $mevents -ascending Model {
+    relation assign $mevent
     append result [comment "Class: $Model"]
     append result "#define [string toupper ${domain}_${Model}_EVENTCOUNT]\
         [relation cardinality $Events]\n"
@@ -1050,33 +1050,6 @@ relation foreach tevent $tevents -ascending Model {
         relation assign $event
         append result "#define\
             [string toupper ${domain}_${Model}_${Event}_EVENT] $Number\n"
-    }
-}
-----
-
-Similarly,
-for polymorphic events we query the *DeferredEvent* class.
-
-[source,tcl]
-----
-<<portalIds:: generate polymorphic event information>>=
-append result [comment "Numeric encoding of polymorphic event numbers\
-        used by the portal functions"]
-set pevents [pipe {
-    DeferredEvent findWhere {$Domain eq $domain} |
-    deRef ~ |
-    relation eliminate ~ Domain |
-    relation group ~ Events Event Number
-}]
-relation foreach pevent $pevents -ascending Model {
-    relation assign $pevent
-    append result [comment "Class: $Model"]
-    append result "#define [string toupper ${domain}_${Model}_POLYEVENTCOUNT]\
-        [relation cardinality $Events]\n"
-    relation foreach event $Events -ascending Number {
-        relation assign $event
-        append result "#define\
-            [string toupper ${domain}_${Model}_${Event}_POLYEVENT] $Number\n"
     }
 }
 ----
@@ -3091,7 +3064,7 @@ proc edbDefinitions {} {
         append result [GenerateActivityTable $smodel]
         set termstates [GenerateTerminalStates $smodel result]
 
-        append result [GenerateModelNames $smodel]
+        append result [GenerateStateNames $smodel]
 
         append result "static MRT_edb const ${className}__EDB = \{\n"
 
@@ -3118,7 +3091,6 @@ proc edbDefinitions {} {
         append result\
             "        #ifndef MRT_NO_NAMES\n"\
             "    .stateNames = ${className}__SNAMES,\n"\
-            "    .eventNames = ${className}__ENAMES,\n"\
             "        #endif /* MRT_NO_NAMES */\n"
 
         append result\
@@ -3151,8 +3123,9 @@ proc GenerateTransitionTable {smodel} {
     # puts [relformat $states states]
 
     set events [pipe {
-        findRelated $smodel ~R87 |
-        deRef %
+        findRelated $smodel ~R87 R80 |
+        deRef % |
+        relation eliminate % PSigID
     } {} |%]
     # puts [relformat $events events]
 
@@ -3350,7 +3323,7 @@ proc GenerateTerminalStates {smodel resultVar} {
 [source,tcl]
 ----
 <<generation code commands>>=
-proc GenerateModelNames {smodel} {
+proc GenerateStateNames {smodel} {
     variable domain
     assignAttribute $smodel {Model className}
 
@@ -3368,19 +3341,7 @@ proc GenerateModelNames {smodel} {
         set Name [string map {@ AT} $Name]
         append result "    ${className}_${Name}__SNAME,\n"
     }
-    append result "\} ;\n"
 
-    set events [pipe {
-        TransitioningEvent findWhere\
-                {$Domain eq $domain && $Model eq $className} |
-        deRef ~
-    }]
-
-    append result "static char const * const ${className}__ENAMES\[\] = \{\n"
-    relation foreach event $events -ascending Number {
-        relation assign $event Event
-        append result "    ${className}_${Event}__ENAME,\n"
-    }
     append result\
         "\} ;\n"\
         "#endif /* MRT_NO_NAMES */\n"
@@ -3395,7 +3356,6 @@ proc GenerateModelNames {smodel} {
 proc pdbDefinitions {} {
     variable domain
 
-    set enames {}
     set rnames {}
     set pmaps {}
     set gdbs {}
@@ -3410,8 +3370,8 @@ proc pdbDefinitions {} {
     set deferred [pipe {
         findRelated $superRefs {R86 DeferralPath} |
         deRef ~ |
-        relation join ~ $::micca::DeferredEvent |
-        relation eliminate ~ Domain Role |
+        relation join ~ $::micca::DeferredEvent $::micca::Event |
+        relation eliminate ~ Domain Role PSigID |
         relation rename ~ Model Superclass Number SuperNumber
     }]
     # puts [relformat $deferred deferred]
@@ -3425,23 +3385,19 @@ proc pdbDefinitions {} {
     } {} |%]
     # puts [relformat $nonlocals nonlocals]
 
-    set polys [pipe {
-        relation join $nonlocals $::micca::DeferredEvent |
-        relation extend ~ ptup Type string {"mrtPolymorphicEvent"}
-    }]
+    set polys [relation join $nonlocals\
+            $::micca::DeferredEvent $::micca::Event]
     # puts [relformat $polys polys]
 
-    set trans [pipe {
-        relation join $nonlocals $::micca::TransitioningEvent |
-        relation extend ~ ptup Type string {"mrtTransitionEvent"}
-    }]
+    set trans [relation join $nonlocals\
+            $::micca::TransitioningEvent $::micca::Event]
     # puts [relformat $trans trans]
 
     set supers [pipe {
         relation union $polys $trans |
-        relation eliminate ~ Domain Role |
+        relation eliminate ~ Domain Role PSigID |
         relation join ~ $deferred |
-        relation group ~ EventMap Event SuperNumber Number Type |
+        relation group ~ EventMap Event SuperNumber Number |
         relation group ~ SubMap Model EventMap |
         relation group ~ Generalizations Relationship RelNumber SubMap
     }]
@@ -3462,16 +3418,13 @@ proc pdbDefinitions {} {
             append rnames "    ${Relationship}__NAME,\n"
 
             set pmapvar ${Superclass}_${Relationship}__PMAP
-            append pmaps "static MRT_PolyEventMap const $pmapvar\[\] = \{\n"
+            append pmaps "static MRT_EventCode const $pmapvar\[\] = \{\n"
 
             relation foreach submap $SubMap -ascending Model {
                 relation assign $submap
-                relation foreach eventmap $EventMap {
+                relation foreach eventmap $EventMap -ascending Number {
                     relation assign $eventmap
-                    append pmaps\
-                        "    "\
-                        "\{.event = $Number, .eventType = $Type\},"\
-                        "// $Event for $Model\n"
+                    append pmaps "    $Number, // $Event for $Model\n"
                 }
             }
             append pmaps "\} ;\n"
@@ -3485,21 +3438,12 @@ proc pdbDefinitions {} {
         append rnames "\} ;\n"
         append gdbs "\} ;\n"
 
-        set enamesvar ${Superclass}__PENAMES
-        append enames "static char const *const $enamesvar\[\] = \{\n"
-        relation foreach eventmap $EventMap {
-            relation assign $eventmap Event
-            append enames "    ${Superclass}_${Event}__ENAME,\n"
-        }
-        append enames "\} ;\n"
-
         append pdbs\
             "static MRT_pdb const ${Superclass}__PDB = \{\n"\
             "    .eventCount = [relation cardinality $EventMap],\n"\
             "    .genCount = [relation cardinality $Generalizations],\n"\
             "    .genDispatch = $gdbvar,\n"\
             "        #ifndef MRT_NO_NAMES\n"\
-            "    .eventNames = $enamesvar,\n"\
             "    .genNames = $rnamesvar,\n"\
             "        #endif /* MRT_NO_NAMES */\n"\
             "\} ;\n"
@@ -3509,7 +3453,7 @@ proc pdbDefinitions {} {
     append result\
         [comment "Polymorphic Event Dispatch Block Definitions"]\
         "#ifndef MRT_NO_NAMES\n"\
-        $enames $rnames\
+        $rnames\
         "#endif /* MRT_NO_NAMES */\n"\
         $pmaps $gdbs $pdbs
 
@@ -3824,21 +3768,33 @@ proc classDefinitions {} {
     } {} |%]
     # puts [relformat $usubs usubs]
 
+    set allevents [pipe {
+        Event findWhere {$Domain eq $domain} |
+        deRef ~ |
+        relation rename ~ Model Name Number EvtNumber |
+        relation eliminate ~ PSigID
+    }]
+    # puts [relformat $allevents allevents]
+
     set classes [pipe {
         deRef $classRefs |
         relation extend ~ ctup IAB string {"&[tuple extract $ctup Name]__IAB"} |
+        ralutil::rvajoin ~ $allevents AEvents |
         ralutil::rvajoin ~\
-            [relation rename $::micca::StateModel Model Name] SModel |
-        relation extend ~ etup EDB string {
-            [relation cardinality [tuple extract $etup SModel]] == 0 ?\
-            "NULL" : "&[tuple extract $etup Name]__EDB"} |
+            [relation rename $::micca::TransitioningEvent Model Name] TEvents |
         ralutil::rvajoin ~\
-            [relation rename $::micca::DeferredEvent Model Name Number EvtNum]\
-                PEvents |
-        relation extend ~ ptup PDB string {
-            [relation cardinality [tuple extract $ptup PEvents]] == 0 ?\
-            "NULL" : "&[tuple extract $ptup Name]__PDB"} |
-        relation eliminate ~ SModel PEvents |
+            [relation rename $::micca::DeferredEvent Model Name] PEvents |
+        relation extend ~ etup\
+            EDB string {
+                [relation isempty [tuple extract $etup TEvents]] ?\
+                "NULL" : "&[tuple extract $etup Name]__EDB"}\
+            PDB string {
+                [relation isempty [tuple extract $etup PEvents]] ?\
+                "NULL" : "&[tuple extract $etup Name]__PDB"}\
+            eventNames string {
+                [relation isempty [tuple extract $etup AEvents]] ? "NULL" :\
+                "[tuple extract $etup Name]__ENAMES"} |
+        relation eliminate ~ TEvents PEvents |
         ralutil::rvajoin ~ $rels Relationships |
         relation extend ~ rtup\
             relCount int {
@@ -3851,12 +3807,12 @@ proc classDefinitions {} {
             attrCount int {
                 [relation cardinality [tuple extract $atup Attributes]]}\
             classAttrs string {
-                [relation cardinality [tuple extract $atup Attributes]] == 0 ?\
+                [relation isempty [tuple extract $atup Attributes]] ?\
                 "NULL" : "[tuple extract $atup Name]__CATTRS"} |
         ralutil::rvajoin ~ $usubs UnionSubs |
         relation extend ~ utup\
             containment string {
-                [relation cardinality [tuple extract $utup UnionSubs]] == 0 ?\
+                [relation isempty [tuple extract $utup UnionSubs]] ?\
                 "NULL" :\
                 "&${domain}__RSHIPS\[[relation extract\
                     [tuple extract $utup UnionSubs]\
@@ -3871,6 +3827,7 @@ proc classDefinitions {} {
 
     set relrefs {}
     set attrrefs {}
+    set namerefs {}
     relation foreach class $classes {
         relation assign $class
 
@@ -3916,9 +3873,24 @@ proc classDefinitions {} {
             append attrrefs "\} ;\n"
         }
 
+        if {[relation isnotempty $AEvents]} {
+            append namerefs\
+                "static char const *const ${Name}__ENAMES\["\
+                [relation cardinality $AEvents]\
+                "\] = \{\n"
+
+            relation foreach event $AEvents -ascending EvtNumber {
+                relation assign $event {Event eventName}
+                append namerefs "    ${Name}_${eventName}__ENAME,\n"
+            }
+
+            append namerefs "\} ;\n"
+        }
+
         append result\
             "    \[$Number\] = \{ // $Name\n"\
             "        .iab = $IAB,\n"\
+            "        .eventCount = [relation cardinality $AEvents],\n"\
             "        .edb = $EDB,\n"\
             "        .pdb = $PDB,\n"\
             "        .relCount = $relCount,\n"\
@@ -3928,14 +3900,15 @@ proc classDefinitions {} {
             "        .instCount = [GetClassProperty $Name TotalInstance],\n"\
             "        .containment = $containment,\n"\
             "            #ifndef MRT_NO_NAMES\n"\
-            "        .name = ${Name}__NAME\n"\
+            "        .name = ${Name}__NAME,\n"\
+            "        .eventNames = $eventNames,\n"\
             "            #endif /* MRT_NO_NAMES */\n"\
             "    \},\n"
     }
 
     append result "\} ;\n"
 
-    return [string cat $front $relrefs $attrrefs $result]
+    return [string cat $front $namerefs $relrefs $attrrefs $result]
 }
 ----
 
@@ -3946,15 +3919,26 @@ proc assignerDefinitions {} {
     variable domain
 
     append result [comment "Assigner Class Description Definitions"]
+
+    set events [pipe {
+        TransitioningEvent findWhere {$Domain eq $domain} |
+        deRef ~ |
+        relation join ~ $::micca::Event |
+        relation eliminate ~ PSigID |
+        relation rename ~ Model Association
+    }]
     set assigners [pipe {
         AssignerStateModel findWhere {$Domain eq $domain} |
         deRef ~ |
         ralutil::rvajoin ~ $::micca::SingleAssigner Single |
-        ralutil::rvajoin ~ $::micca::MultipleAssigner Multiple
+        ralutil::rvajoin ~ $::micca::MultipleAssigner Multiple |
+        relation join ~ $events |
+        relation group ~ Events Event Number
     }]
 
     set result {}
     set attrResult {}
+    set enameResult {}
     if {[relation isnotempty $assigners]} {
         set nassign [relation cardinality $assigners]
         append result\
@@ -3962,9 +3946,23 @@ proc assignerDefinitions {} {
 
         relation foreach assigner $assigners -ascending Association {
             relation assign $assigner
+
+            append enameResult\
+                "static char const *const ${Association}__ENAMES\["\
+                [relation cardinality $Events]\
+                "\] = \{\n"
+
+            relation foreach event $Events -ascending Number {
+                relation assign $event {Event eventName}
+                append enameResult "    ${Association}_${eventName}__ENAME,\n"
+            }
+
+            append enameResult "\} ;\n"
+
             append result\
                 "    \{ // $Association\n"\
                 "        .iab = &${Association}__IAB,\n"\
+                "        .eventCount = [relation cardinality $Events],\n"\
                 "        .edb = &${Association}__EDB,\n"\
                 "        .pdb = NULL,\n"
             if {[relation isnotempty $Single]} {
@@ -3995,13 +3993,14 @@ proc assignerDefinitions {} {
                 "        .containment = NULL,\n"\
                 "            #ifndef MRT_NO_NAMES\n"\
                 "        .name = ${Association}__NAME,\n"\
+                "        .eventNames = ${Association}__ENAMES,\n"\
                 "            #endif /* MRT_NO_NAMES */\n"\
                 "    \},\n"
         }
         append result "\} ;\n"
     }
 
-    return [string cat $attrResult $result]
+    return [string cat $enameResult $attrResult $result]
 }
 ----
 
@@ -7484,16 +7483,7 @@ proc InstanceNewECB {instref event arglist} {
         if {[isEmptyRef $eventRef]} {
             error "event, $event, is not a known event for class, $Class"
         }
-
-        set transRef [findRelated $eventRef {~R80 TransitioningEvent}]
-        if {[isNotEmptyRef $transRef]} {
-            assignAttribute $transRef {Number eventNum}
-            set eventType mrtTransitionEvent
-        } else {
-            set deferredRef [findRelated $eventRef {~R80 DeferredEvent}]
-            assignAttribute $deferredRef {Number eventNum}
-            set eventType mrtPolymorphicEvent
-        }
+        set eventNum [readAttribute $eventRef Number]
 
         set psig [findRelated $eventRef R69]
         set params [FindParamsFromSig $psig]
@@ -7504,8 +7494,8 @@ proc InstanceNewECB {instref event arglist} {
         set result {}
         set sourceinst [expr {[LookUpSymbol self] eq {} ? "NULL" : "self"}]
         set ecbvar [CreateTempSymbol Ctype {MRT_ecb *} Type ECB Class $Class]
-        append result "MRT_ecb *$ecbvar = mrt_NewEvent($eventNum,\
-            $eventType, $instref, $sourceinst) ;\n"
+        append result "MRT_ecb *$ecbvar =\
+                mrt_NewEvent($eventNum, $instref, $sourceinst) ;\n"
         if {[llength $required] != 0} {
             set eparamsname ${domain}_${Class}_${event}__EPARAMS
             set ptrparams [CreateTempSymbol Ctype "struct *$eparamsname"\
@@ -7564,7 +7554,7 @@ test codegen-50.0 {
     validateutils compileFiles codegen50.c
     testConditions\
         {[validateutils matchLines codegen50.c {
-            MRT_ecb *t__T1 = mrt_NewEvent(0, mrtTransitionEvent, xref, NULL) ;
+            MRT_ecb *t__T1 = mrt_NewEvent(0, xref, NULL) ;
             struct codegen50_X_E1__EPARAMS *const t__T2 =
                 (struct codegen50_X_E1__EPARAMS *)t__T1->eventParameters ;
             t__T2->incr = 30 ;
@@ -7636,14 +7626,7 @@ proc FindEventNumber {class event} {
     if {[isEmptyRef $eventRef]} {
         error "event, $event, is not a known event for class, $Class"
     }
-
-    set transRef [findRelated $eventRef {~R80 TransitioningEvent}]
-    if {[isNotEmptyRef $transRef]} {
-        return [readAttribute $transRef Number]
-    } else {
-        set deferredRef [findRelated $eventRef {~R80 DeferredEvent}]
-        return [readAttribute $deferredRef Number]
-    }
+    return [readAttribute $eventRef Number]
 }
 ----
 
@@ -8315,8 +8298,7 @@ proc ClassCreateAsync {className event eventparams args} {
         error "event parameters must be given as name / value pairs, got:\
             \"$eventparams\""
     }
-    set eventRef [TransitioningEvent findById Domain $domain Model $className\
-            Event $event]
+    set eventRef [Event findById Domain $domain Model $className Event $event]
     if {[isEmptyRef $eventRef]} {
         error "class, $className, has no event named, $event"
     }
@@ -8326,7 +8308,7 @@ proc ClassCreateAsync {className event eventparams args} {
         [linecomment "$className createasync $event [list $eventparams]\
             [list $args]"]
 
-    set psig [findRelated $eventRef R80 R69]
+    set psig [findRelated $eventRef R69]
     set params [FindParamsFromSig $psig]
     if {[relation isnotempty $params]} {
         set required [relation list $params Name]

@@ -698,6 +698,7 @@ in which the instances participate and many other pieces of information.
 <<mrt interface aggregate types>>=
 typedef struct mrtclass {
     struct mrtinstallocblock *iab ;
+    unsigned eventCount ;
     struct mrteventdispatchblock const *edb ;
     struct mrtpolydispatchblock const *pdb ;
     unsigned relCount ;
@@ -709,6 +710,7 @@ typedef struct mrtclass {
 
 #       ifndef MRT_NO_NAMES
     char const *name ;
+    char const *const *eventNames ;
 #       endif /* MRT_NO_NAMES */
 } MRT_Class ;
 ----
@@ -716,6 +718,9 @@ typedef struct mrtclass {
 `iab`::
     A pointer to an instance allocation block (IAB).
     The IAB is used to dynamically allocation class instances.
+`eventCount`::
+    The total number of transitioning and polymorphic events to which
+    the class responds.
 `edb`::
     A pointer to an event dispatch block (EDB).
     The EDB is used to dispatch events to a state machine.
@@ -747,6 +752,10 @@ typedef struct mrtclass {
     For other classes, the value is `NULL`.
 `name`::
     A pointer to a `NUL` terminated string containing the name of the class.
+`eventNames`::
+    A pointer to an array of character pointers to the names of the
+    class events.
+    This information is used in tracing event dispatch.
 
 When generically describing classes,
 the subclasses of union based generalizations pose a special situation.
@@ -4635,7 +4644,6 @@ typedef struct mrtecb {
     struct mrtecb *prev ;
     MRT_EventCode eventNumber ;
     MRT_AllocStatus alloc ;
-    MRT_EventType eventType ;
     MRT_Instance *targetInst ;
     MRT_Instance *sourceInst ;
     MRT_DelayTime delay ;
@@ -4660,9 +4668,6 @@ typedef struct mrtecb {
     counter for the instance that is the target of the event.
     So when an event is generated, a copy of the current value of
     the `alloc` member of the instance is stored in the ECB.
-`eventType`::
-    The `eventType` member describes which of the two
-    types of events this ECB is being used for.
 `targetInst`::
     A pointer to the instance that is to receive the event.
 `sourceInst`::
@@ -4685,7 +4690,7 @@ Event codes are captured by small integer values.
 [source,c]
 ----
 <<mrt interface simple types>>=
-typedef int8_t MRT_EventCode ;
+typedef uint8_t MRT_EventCode ;
 ----
 
 Delay times are in milliseconds and we wish to have a wide dynamic
@@ -5052,15 +5057,12 @@ We start our description with a function that does just that.
 <<mrt external interfaces>>=
 extern MRT_ecb *mrt_NewEvent(
     MRT_EventCode event,
-    MRT_EventType type,
     void *target,
     void *source) ;
 ----
 
 `event`::
     The numerical code for the event.
-`type`::
-    The type of the event.
 `target`::
     A pointer to the instance that is to receive the event.
 `source`::
@@ -5080,7 +5082,6 @@ fills in the elements and returns the newly minted ECB.
 MRT_ecb *
 mrt_NewEvent(
     MRT_EventCode event,
-    MRT_EventType type,
     void *target,
     void *source)
 {
@@ -5089,13 +5090,22 @@ mrt_NewEvent(
 
     assert(targetInst != NULL) ;
     assert(targetInst->alloc != 0) ;
-    assert(targetInst->classDesc != NULL) ;
+    assert(event < targetInst->classDesc->eventCount) ;
+
+    if (targetInst == NULL ||
+            targetInst->alloc == 0 ||
+            event >= targetInst->classDesc->eventCount) {
+#           ifndef MRT_NO_NAMES
+        mrtFatalError(mrtNoEvent, event, targetInst->classDesc->name) ;
+#           else
+        mrtFatalError(mrtNoEvent, event, targetInst->classDesc) ;
+#           endif /* MRT_NO_NAMES */
+    }
 
     MRT_ecb *ecb = mrtAllocEvent() ;
 
     ecb->eventNumber = event ;
     ecb->alloc = targetInst->alloc ;
-    ecb->eventType = type ;
     ecb->targetInst = targetInst ;
     ecb->sourceInst = sourceInst ;
     ecb->delay = 0 ;
@@ -5247,7 +5257,6 @@ mrt_CreateAsync(
     MRT_ecb *ecb = mrtAllocEvent() ;
     ecb->eventNumber = event ;
     ecb->alloc = targetInst->alloc ;
-    ecb->eventType = mrtCreationEvent ; // <3>
     ecb->targetInst = targetInst ;
     ecb->sourceInst = sourceInst ;
     ecb->delay = 0 ;
@@ -5269,8 +5278,6 @@ the dispatch of a creation event.
 Effectively the negative `alloc` value signals that the memory is reserved
 but the instance is not yet active.
 During event dispatch, this value will be turned back into a positive one.
-<3> We mark this as a creation event so that some additional processing
-can be done before the event is dispatched.
 
 === Delayed Events
 
@@ -6223,25 +6230,10 @@ static void mrtDispatchPolymorphicEvent(MRT_ecb *ecb) ;
 static void mrtDispatchCreationEvent(MRT_ecb *ecb) ;
 ----
 
-We use a ``jump'' table to resolve the function selection at run time.
-
-[source,c]
-----
-<<mrt static data>>=
-static void (* const mrtEventDispatchFuncs[])(MRT_ecb *) = {
-    [mrtTransitionEvent] = mrtDispatchTransitionEvent,
-    [mrtPolymorphicEvent] = mrtDispatchPolymorphicEvent,
-    [mrtCreationEvent] = mrtDispatchCreationEvent
-} ;
-----
-
-The general function to dispatch an event just selects the specific
-dispatch function based on the event type using the above table.
-
 [source,c]
 ----
 <<mrt forward references>>=
-static inline void mrtDispatchEvent(MRT_ecb *ecb) ;
+static void mrtDispatchEvent(MRT_ecb *ecb) ;
 ----
 
 (((micca,Run Time Function,mrtDispatchEvent)))
@@ -6255,10 +6247,28 @@ mrtDispatchEvent(
 {
     assert(ecb != NULL) ;
     assert(ecb->targetInst != NULL) ;
-    assert(ecb->targetInst->classDesc != NULL) ;
-    assert(ecb->eventType < COUNTOF(mrtEventDispatchFuncs)) ;
 
-    mrtEventDispatchFuncs[ecb->eventType](ecb) ;
+    MRT_Class const *classDesc = ecb->targetInst->classDesc ;
+    assert(classDesc != NULL) ;
+
+    MRT_edb const *edb = classDesc->edb ;
+    if (edb == NULL) {
+        mrtDispatchPolymorphicEvent(ecb) ;
+    } else {
+        if (ecb->eventNumber < edb->eventCount) {
+            if (ecb->targetInst->currentState == edb->creationState) {
+                mrtDispatchCreationEvent(ecb) ;
+            } else {
+                mrtDispatchTransitionEvent(ecb) ;
+            }
+        } else {
+            MRT_pdb const *pdb = classDesc->pdb ;
+            assert(pdb != NULL) ;
+            ecb->eventNumber -= edb->eventCount ;
+            assert(ecb->eventNumber < pdb->eventCount) ;
+            mrtDispatchPolymorphicEvent(ecb) ;
+        }
+    }
 }
 ----
 
@@ -6325,7 +6335,6 @@ typedef struct mrteventdispatchblock {
 
 #       ifndef MRT_NO_NAMES
     char const *const *stateNames ;
-    char const *const *eventNames ;
 #       endif /* MRT_NO_NAMES */
 } MRT_edb ;
 ----
@@ -6350,10 +6359,6 @@ typedef struct mrteventdispatchblock {
 `stateNames`::
     A pointer to an array of character pointers to the names of the
     class states.
-    This information is used in tracing event dispatch.
-`eventNames`::
-    A pointer to an array of character pointers to the names of the
-    class events.
     This information is used in tracing event dispatch.
 
 The dimensions of the state transition matrix are `stateCount` rows
@@ -6440,7 +6445,7 @@ mrtDispatchTransitionEvent(
         mrtFatalError(mrtEventInFlight,
                 ecb->sourceInst ? ecb->sourceInst->classDesc->name : "none",
                 ecb->sourceInst ? ecb->sourceInst->name : "none",
-                targetInst->classDesc->edb->eventNames[ecb->eventNumber],
+                targetInst->classDesc->eventNames[ecb->eventNumber],
                 targetInst->classDesc->name,
                 targetInst->name ? targetInst->name : "unknown") ;
 #           else
@@ -6452,7 +6457,8 @@ mrtDispatchTransitionEvent(
      * Fetch the new state from the transition table.
      */
     MRT_StateCode newState = *(edb->transitionTable +
-            targetInst->currentState * edb->eventCount + ecb->eventNumber) ;
+            targetInst->currentState * edb->eventCount * sizeof(MRT_StateCode) +
+            ecb->eventNumber) ;
 
 #       ifndef MRT_NO_TRACE
     /*
@@ -6470,7 +6476,7 @@ mrtDispatchTransitionEvent(
         mrtFatalError(mrtCantHappen, targetInst->classDesc->name,
                 targetInst->name ? targetInst->name : "unknown",
                 targetInst->classDesc->edb->stateNames[targetInst->currentState],
-                targetInst->classDesc->edb->eventNames[ecb->eventNumber]) ;
+                targetInst->classDesc->eventNames[ecb->eventNumber]) ;
 #           else
         mrtFatalError(mrtCantHappen, targetInst, targetInst->currentState,
                 ecb->eventNumber) ;
@@ -6640,7 +6646,7 @@ The data structure required for this is given by:
 <<mrt interface aggregate types>>=
 typedef struct mrtgendispatchblock {
     struct mrtrelationship const *relship ;
-    struct mrtpolyeventmap const *eventMap ;
+    MRT_EventCode const *eventMap ;
 } MRT_gdb ;
 ----
 
@@ -6661,18 +6667,6 @@ the hierarchy.
 To be delegated further implies that a polymorphic event will be mapped
 into yet another polymorphic event to be further mapped in a subsequent
 dispatch.
-Thus the entries in the `eventMap` matrix contain both a new
-event number and an indication of the type of the new event.
-
-(((micca,Run Time Data,MRT_PolyEventMap)))
-[source,c]
-----
-<<mrt interface aggregate types>>=
-typedef struct mrtpolyeventmap {
-    MRT_EventCode event ;
-    MRT_EventType eventType ;
-} MRT_PolyEventMap ;
-----
 
 Now we can tie it all together.
 For a superclass class that has associated polymorphic events the code
@@ -6689,7 +6683,6 @@ typedef struct mrtpolydispatchblock {
     struct mrtgendispatchblock const *genDispatch ;
 
 #       ifndef MRT_NO_NAMES
-    char const *const *eventNames ;
     char const *const *genNames ;
 #       endif /* MRT_NO_NAMES */
 } MRT_pdb ;
@@ -6708,9 +6701,6 @@ typedef struct mrtpolydispatchblock {
     The `genDispatch` member holds a pointer to an array of
     Generalization Dispatch Blocks.
     The array contains `genCount` elements.
-`eventNames`::
-    A pointer to an array of polymorphic event names.
-    The array is of length, `eventCount`.
 `genNames`::
     A pointer to an array of generalization relationship names.
     The array is of length, `genCount`.
@@ -6777,18 +6767,18 @@ mrtDispatchPolymorphicEvent(
         } else {
             mrtFatalError(mrtRelationshipLinkage) ;
         }
-        MRT_PolyEventMap const *pem = &sdb->eventMap[subclassCode] ;
+        ecb->eventNumber = *(sdb->eventMap +
+                subclassCode * pdb->eventCount * sizeof(MRT_EventCode) +
+                origEvent) ;
 
 #           ifndef MRT_NO_TRACE
         /*
          * Trace the transition.
          */
         mrtTracePolyEvent(origEvent, ecb->sourceInst, origTarget,
-                subclassCode, gnum, pem->event, pem->eventType) ;
+                subclassCode, gnum, ecb->eventNumber) ;
 #           endif /* MRT_NO_TRACE */
 
-        ecb->eventNumber = pem->event ;
-        ecb->eventType = pem->eventType ;
         ecb->alloc = ecb->targetInst->alloc ;
         assert(ecb->alloc != 0) ;
 
@@ -6868,10 +6858,6 @@ mrtDispatchCreationEvent(
      * Negate the alloc member to show that the instance is now active.
      */
     ecb->alloc = ecb->targetInst->alloc = -ecb->targetInst->alloc ;
-    /*
-     * Change the event type to represent a transition event.
-     */
-    ecb->eventType = mrtTransitionEvent ;
     /*
      * Dispatch the event.
      */
@@ -7113,10 +7099,8 @@ Negative return values indicate errors as described below.
 #define MICCA_PORTAL_NO_EVENT       (-6)
      // No such state for the class.
 #define MICCA_PORTAL_NO_STATE       (-7)
-     // Bad event type parameter
-#define MICCA_PORTAL_BAD_EVENT_TYPE (-8)
      // Class does not support dynamic instances.
-#define MICCA_PORTAL_NO_DYNAMIC     (-9)
+#define MICCA_PORTAL_NO_DYNAMIC     (-8)
 ----
 
 Internally,
@@ -7400,7 +7384,6 @@ mrt_PortalSignalEvent(
     MRT_DomainPortal const *portal,
     MRT_ClassId classId,
     MRT_InstId instId,
-    MRT_EventType eventType,
     MRT_EventCode eventNumber,
     MRT_EventParams eventParameters) ;
 ----
@@ -7413,10 +7396,6 @@ mrt_PortalSignalEvent(
 `instId`::
     The number of the instance. Instance numbers are consecutive non-negative
     integers up to the maximum number of instances defined for the class.
-`eventType`::
-    The type of the event to generate. This should be either
-    `mrtTransitionEvent` or `mrtPolymorphicEvent`. Creation events are
-    not signaled by this function.
 `eventNumber`::
     The event number of the event to signal.
 `eventParameters`::
@@ -7438,14 +7417,13 @@ mrt_PortalSignalEvent(
     MRT_DomainPortal const *portal,
     MRT_ClassId classId,
     MRT_InstId instId,
-    MRT_EventType eventType,
     MRT_EventCode eventNumber,
     MRT_EventParams eventParameters)
 {
     int result ;
     MRT_ecb *ecb ;
 
-    result = mrtPortalNewECB(portal, classId, instId, eventType, eventNumber,
+    result = mrtPortalNewECB(portal, classId, instId, eventNumber,
             eventParameters, &ecb) ;
     if (result == 0) {
         mrt_PostEvent(ecb) ;
@@ -7466,7 +7444,6 @@ mrtPortalNewECB(
     MRT_DomainPortal const *portal,
     MRT_ClassId classId,
     MRT_InstId instId,
-    MRT_EventType eventType,
     MRT_EventCode eventNumber,
     MRT_EventParams eventParameters,
     MRT_ecb **ecbRef)
@@ -7481,24 +7458,23 @@ mrtPortalNewECB(
             MRT_ecb *ecb = NULL ;
             MRT_DispatchCount eventCount ;
 
-            if (eventType == mrtTransitionEvent) {
-                if (classDesc->edb != NULL) {
-                    eventCount = classDesc->edb->eventCount ;
-                } else {
+            if (classDesc->edb == NULL) {
+                if (classDesc->pdb == NULL) {
                     return MICCA_PORTAL_NO_EVENT ;
-                }
-            } else if (eventType == mrtPolymorphicEvent) {
-                if (classDesc->pdb != NULL) {
+                } else {
                     eventCount = classDesc->pdb->eventCount ;
-                } else {
-                    return MICCA_PORTAL_NO_EVENT ;
                 }
             } else {
-                return MICCA_PORTAL_BAD_EVENT_TYPE ;
+                if (classDesc->pdb == NULL) {
+                    eventCount = classDesc->edb->eventCount ;
+                } else {
+                    eventCount = classDesc->edb->eventCount +
+                            classDesc->pdb->eventCount ;
+                }
             }
 
             if (eventNumber < eventCount) {
-                ecb = mrt_NewEvent(eventNumber, eventType, instref, NULL) ;
+                ecb = mrt_NewEvent(eventNumber, instref, NULL) ;
                 if (eventParameters) {
                     memcpy(ecb->eventParameters, eventParameters,
                         sizeof(ecb->eventParameters)) ;
@@ -7530,7 +7506,6 @@ mrt_PortalSignalDelayedEvent(
     MRT_DomainPortal const *portal,
     MRT_ClassId classId,
     MRT_InstId instId,
-    MRT_EventType eventType,
     MRT_EventCode eventNumber,
     MRT_EventParams eventParameters,
     MRT_DelayTime delay) ;
@@ -7544,10 +7519,6 @@ mrt_PortalSignalDelayedEvent(
 `instId`::
     The number of the instance. Instance numbers are consecutive non-negative
     integers up to the maximum number of instances defined for the class.
-`eventType`::
-    The type of the event to generate. This should be either
-    `mrtTransitionEvent` or `mrtPolymorphicEvent`. Creation events are
-    not signaled by this function.
 `eventNumber`::
     The event number of the event to signal.
 `eventParameters`::
@@ -7566,7 +7537,6 @@ mrt_PortalSignalDelayedEvent(
     MRT_DomainPortal const *portal,
     MRT_ClassId classId,
     MRT_InstId instId,
-    MRT_EventType eventType,
     MRT_EventCode eventNumber,
     MRT_EventParams eventParameters,
     MRT_DelayTime delay)
@@ -7574,7 +7544,7 @@ mrt_PortalSignalDelayedEvent(
     int result ;
     MRT_ecb *ecb ;
 
-    result = mrtPortalNewECB(portal, classId, instId, eventType, eventNumber,
+    result = mrtPortalNewECB(portal, classId, instId, eventNumber,
             eventParameters, &ecb) ;
     if (result == 0) {
         mrt_PostDelayedEvent(ecb, delay) ;
@@ -7843,8 +7813,7 @@ mrt_PortalSignalEventAssigner(
             if (target->alloc > 0) {
                 MRT_edb const *edb = passigner->edb ;
                 if (eventNumber < edb->eventCount) {
-                    MRT_ecb *ecb = mrt_NewEvent(eventNumber, mrtTransitionEvent,
-                        target, NULL) ;
+                    MRT_ecb *ecb = mrt_NewEvent(eventNumber, target, NULL) ;
                     if (eventParameters) {
                         memcpy(ecb->eventParameters, eventParameters,
                             sizeof(ecb->eventParameters)) ;
@@ -8071,41 +8040,7 @@ mrt_PortalClassEventCount(
     int result ;
     if (classId < portal->classCount) {
         MRT_Class const *class = portal->classes + classId ;
-        MRT_edb const *edb = class->edb ;
-        result = edb != NULL ? edb->eventCount : MICCA_PORTAL_NO_STATE_MODEL ;
-    } else {
-        result = MICCA_PORTAL_NO_CLASS ;
-    }
-
-    return result ;
-}
-----
-
-[source,c]
-----
-<<mrt external interfaces>>=
-extern int
-mrt_PortalClassPolyEventCount(
-    MRT_DomainPortal const *portal,
-    MRT_ClassId classId) ;
-----
-
-(((micca,Run Time Function,mrt_PortalClassPolyEventCount)))
-[source,c]
-----
-<<mrt external functions>>=
-int
-mrt_PortalClassPolyEventCount(
-    MRT_DomainPortal const *portal,
-    MRT_ClassId classId)
-{
-    assert(portal != NULL) ;
-
-    int result ;
-    if (classId < portal->classCount) {
-        MRT_Class const *class = portal->classes + classId ;
-        MRT_pdb const *pdb = class->pdb ;
-        result = pdb != NULL ? pdb->eventCount : MICCA_PORTAL_NO_STATE_MODEL ;
+        result = class->eventCount ;
     } else {
         result = MICCA_PORTAL_NO_CLASS ;
     }
@@ -8138,7 +8073,7 @@ mrt_PortalClassStateCount(
     if (classId < portal->classCount) {
         MRT_Class const *class = portal->classes + classId ;
         MRT_edb const *edb = class->edb ;
-        result = edb != NULL ? edb->stateCount : MICCA_PORTAL_NO_STATE_MODEL ;
+        result = edb != NULL ? edb->stateCount : 0 ;
     } else {
         result = MICCA_PORTAL_NO_CLASS ;
     }
@@ -8259,64 +8194,12 @@ mrt_PortalClassEventName(
     int result ;
     if (classId < portal->classCount) {
         MRT_Class const *class = portal->classes + classId ;
-        MRT_edb const *edb = class->edb ;
-        if (edb != NULL) {
-            if (eventCode >= 0 && eventCode < edb->eventCount) {
+        char const *const *eventNames = class->eventNames ;
+        if (eventNames != NULL) {
+            if (eventCode >= 0 && eventCode < class->eventCount) {
                 if (nameRef) {
 #                       ifndef MRT_NO_NAMES
-                    *nameRef = edb->eventNames[eventCode] ;
-#                       else
-                    *nameRef = NULL ;
-#                       endif /* MRT_NO_NAMES */
-                }
-                result = 0 ;
-            } else {
-                result = MICCA_PORTAL_NO_EVENT ;
-            }
-        } else {
-            result = MICCA_PORTAL_NO_STATE_MODEL ;
-        }
-    } else {
-        result = MICCA_PORTAL_NO_CLASS ;
-    }
-
-    return result ;
-}
-----
-
-[source,c]
-----
-<<mrt external interfaces>>=
-extern int
-mrt_PortalClassPolyEventName(
-    MRT_DomainPortal const *portal,
-    MRT_ClassId classId,
-    MRT_EventCode eventCode,
-    char const **nameRef) ;
-----
-
-(((micca,Run Time Function,mrt_PortalClassPolyEventName)))
-[source,c]
-----
-<<mrt external functions>>=
-int
-mrt_PortalClassPolyEventName(
-    MRT_DomainPortal const *portal,
-    MRT_ClassId classId,
-    MRT_EventCode eventCode,
-    char const **nameRef)
-{
-    assert(portal != NULL) ;
-
-    int result ;
-    if (classId < portal->classCount) {
-        MRT_Class const *class = portal->classes + classId ;
-        MRT_pdb const *pdb = class->pdb ;
-        if (pdb != NULL) {
-            if (eventCode >= 0 && eventCode < pdb->eventCount) {
-                if (nameRef) {
-#                       ifndef MRT_NO_NAMES
-                    *nameRef = pdb->eventNames[eventCode] ;
+                    *nameRef = eventNames[eventCode] ;
 #                       else
                     *nameRef = NULL ;
 #                       endif /* MRT_NO_NAMES */
@@ -8837,7 +8720,6 @@ typedef struct mrttraceinfo {
             MRT_SubclassCode subcode ;
             MRT_DispatchCount genNumber ;
             MRT_EventCode mappedEvent ;
-            MRT_EventType mappedType ;
         } polyTrace ;
         struct creationtrace {
             MRT_Class const *targetClass ;
@@ -8872,8 +8754,6 @@ Data common to all event dispatch traces.
     The number of the generalization down which the event was dispatched.
 `mappedNumber`:::
     The new event number to which the polymorphic event mapped.
-`mappedType`:::
-    The new event type corresponding to `mappedNumber`.
 
 `creationTrace`::
     Data for creation event dispatch traces.
@@ -8972,8 +8852,7 @@ mrtTracePolyEvent(
     MRT_Instance *target,
     MRT_SubclassCode subclass,
     MRT_DispatchCount genNumber,
-    MRT_EventCode newEvent,
-    MRT_EventType newEventType)
+    MRT_EventCode newEvent)
 {
     if (mrtTraceHandler) {
         MRT_TraceInfo trace ;
@@ -8985,7 +8864,6 @@ mrtTracePolyEvent(
         trace.info.polyTrace.subcode = subclass ;
         trace.info.polyTrace.genNumber = genNumber ;
         trace.info.polyTrace.mappedEvent = newEvent ;
-        trace.info.polyTrace.mappedType = newEventType ;
 
         mrtTraceHandler(&trace) ;
     }
@@ -9132,6 +9010,7 @@ typedef enum {
     mrtTransOverflow,
     mrtStaticRelationship,
     mrtRelationshipLinkage,
+    mrtNoEvent,
 
 #       ifdef _POSIX_C_SOURCE
     mrtTimerOpFailed,
@@ -9160,11 +9039,13 @@ static char const * const errMsgs[] = {
     [mrtEventInFlight] = "event-in-flight error: %s.%s - %s -> %s.%s\n",
     [mrtNoInstSlot] = "no available instance slots: %s\n",
     [mrtRefIntegrity] = "referential integrity check failed: %s\n",
+    [mrtNoEvent] = "no such event, %u, for class %s\n",
 #       else
     [mrtCantHappen] = "can't happen transition: %p: %u - %u -> CH\n",
     [mrtEventInFlight] = "event-in-flight error: %p - %u -> %p\n",
     [mrtNoInstSlot] = "no available instance slots: %p\n",
     [mrtRefIntegrity] = "referential integrity check failed: %p\n",
+    [mrtNoEvent] = "no such event, %u, for class %p\n",
 #       endif /* MRT_NO_NAMES */
 
 #       ifdef _POSIX_C_SOURCE
@@ -10252,12 +10133,6 @@ void
 mrtPrintTraceInfo(
     MRT_TraceInfo const *traceInfo)
 {
-    static char const * const eventTypeNames[] = {
-        [mrtTransitionEvent] = "Transition",
-        [mrtPolymorphicEvent] = "Polymorphic",
-        [mrtCreationEvent] = "Creation"
-    } ;
-
     char const *sourceName ;
     char const *sourceClassName ;
     char sourceIdNum[32] ;
@@ -10298,8 +10173,7 @@ mrtPrintTraceInfo(
 
         printf("%s: Transition: %s.%s - %s -> %s.%s: %s ==> %s\n",
             mrtTimestamp(), sourceClassName, sourceName,
-            traceInfo->targetInst->classDesc->edb->eventNames[
-                traceInfo->eventNumber],
+            traceInfo->targetInst->classDesc->eventNames[traceInfo->eventNumber],
             traceInfo->targetInst->classDesc->name, targetName,
             traceInfo->targetInst->classDesc->edb->stateNames[
                 traceInfo->info.transitionTrace.currentState],
@@ -10310,43 +10184,28 @@ mrtPrintTraceInfo(
     case mrtPolymorphicEvent: {
         MRT_Relationship const *rel = traceInfo->targetInst->classDesc->pdb->
                 genDispatch[traceInfo->info.polyTrace.genNumber].relship ;
+        MRT_Class const *subclass ;
         char const *subname = NULL ;
-        char const *mappedname = NULL ;
         if (rel->relType == mrtRefGeneralization) {
-            MRT_Class const *subclass = rel->relInfo.refGeneralization.
+            subclass = rel->relInfo.refGeneralization.
                 subclasses[traceInfo->info.polyTrace.subcode].classDesc ;
             subname = subclass->name ;
-            if (traceInfo->info.polyTrace.mappedType == mrtTransitionEvent) {
-                mappedname = subclass->edb->eventNames[
-                    traceInfo->info.polyTrace.mappedEvent] ;
-            } else {
-                mappedname = subclass->pdb->eventNames[
-                    traceInfo->info.polyTrace.mappedEvent] ;
-            }
         } else if (rel->relType == mrtUnionGeneralization) {
-            MRT_Class const *subclass = rel->relInfo.unionGeneralization.
+            subclass = rel->relInfo.unionGeneralization.
                 subclasses[traceInfo->info.polyTrace.subcode] ;
             subname = subclass->name ;
-            if (traceInfo->info.polyTrace.mappedType == mrtTransitionEvent) {
-                mappedname = subclass->edb->eventNames[
-                    traceInfo->info.polyTrace.mappedEvent] ;
-            } else {
-                mappedname = subclass->pdb->eventNames[
-                    traceInfo->info.polyTrace.mappedEvent] ;
-            }
         } else {
             printf("%s: bad relationship type in polymorphic event, %d\n",
                 mrtTimestamp(), rel->relType) ;
             break ;
         }
-        printf("%s: Polymorphic: %s.%s - %s -> %s.%s: %s ==> %s(%s) %s\n",
+        printf("%s: Polymorphic: %s.%s - %s -> %s.%s: %s - %s -> %s\n",
             mrtTimestamp(), sourceClassName, sourceName,
-            traceInfo->targetInst->classDesc->pdb->eventNames[
-                traceInfo->eventNumber],
+            traceInfo->targetInst->classDesc->eventNames[traceInfo->eventNumber],
             traceInfo->targetInst->classDesc->name, targetName,
             traceInfo->targetInst->classDesc->pdb->genNames[
                 traceInfo->info.polyTrace.genNumber],
-            mappedname, eventTypeNames[traceInfo->info.polyTrace.mappedType],
+            subclass->eventNames[traceInfo->info.polyTrace.mappedEvent],
             subname) ;
     }
         break ;
@@ -10354,8 +10213,7 @@ mrtPrintTraceInfo(
     case mrtCreationEvent:
         printf("%s: Creation: %s.%s - %s -> %s ==> %s\n",
             mrtTimestamp(), sourceClassName, sourceName,
-            traceInfo->targetInst->classDesc->edb->eventNames[
-                traceInfo->eventNumber],
+            traceInfo->targetInst->classDesc->eventNames[traceInfo->eventNumber],
             traceInfo->info.creationTrace.targetClass->name,
             targetName) ;
         break ;
@@ -10382,10 +10240,9 @@ mrtPrintTraceInfo(
         break ;
 
     case mrtPolymorphicEvent:
-        printf("%s: Polymorphic: %p - %u -> %p: %u ==> %u(%u) %p\n",
+        printf("%s: Polymorphic: %p - %u -> %p: %u - %u -> %p\n",
                 mrtTimestamp(), traceInfo->sourceInst, traceInfo->eventNumber,
                 traceInfo->targetInst,traceInfo->info.polyTrace.genNumber,
-                traceInfo->info.polyTrace.mappedType,
                 traceInfo->info.polyTrace.mappedEvent,
                 traceInfo->info.polyTrace.subcode) ;
         break ;
