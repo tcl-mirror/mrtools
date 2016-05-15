@@ -6174,6 +6174,13 @@ When both queues are empty,
 there is no work to be done and we must wait for subsequent
 interactions of the system with the outside world.
 
+==== Dispatching One Event
+
+When the run time needs to dispatch an event it invokes the
+`mrtDispatchOneEvent` function.
+This function deals with the two event queues and determines if we
+are at the end of a thread of control.
+
 (((micca,Run Time Function,mrtDispatchOneEvent)))
 [source,c]
 ----
@@ -6218,8 +6225,49 @@ platform and is explained below.
 <2> Here we discover that the thread of control is over and we examine
 the data model to insure referential integrity.
 
-As we discussed above,
-there are three types of events.
+There are two distinct types of events: transitioning events and
+polymorphic events.
+The event types are distinct in that the numerical encoding of the
+events is used in different ways.
+In the platform model,
+all the events for a given state model must have distinct names.
+The distinction in the platform model between Transitioning Event
+and Deferred Event is the difference we now see between an ordinary
+transition event and a polymorphic event.
+The code generator will assign a unique integer to each event.
+The set of transition events will be encoded sequentiall
+starting at 0 up to N - 1,
+where N is the number of transitioning events in the state model.
+Polymorphic events for the class are then encoded started at N
+up to M - 1, where M is the number of polymorphic events.
+Note that only superclass classes that have both polymorphic events
+(either defined or inherited) and
+a state model of its own will have both transition events and
+polymorphic events defined for it.
+
+Encoding the event number in this fashion makes it convenient to
+identify an event for a class when, for example, it is in a delayed
+event queue.
+As we will see below,
+at dispatch time, any polymorphic event numbers will have the number
+of transition events for the class (N in the discussion above)
+subtracted from their encoded number so that they can be used as an
+array index into the data structures used for polymorphic event mapping.
+
+There is a secondary usage of transition events for asynchronous
+instance creation.
+A transition event that is dispatched when the current state of the
+instance is the pseudo-initial creation state is deemed a creation event.
+We wish to treat creation events separately because of the
+design strategy we have used to implement asynchronous instance creation.
+The strategy used is to create the instance in an inactive state
+and queue the creation event.
+Then when the creation event is dispatched, the instance is marked as
+active and an ordinary event dispatch may happen.
+By marking the instance as inactive, but allocated, we can make sure
+the instance data is not accessed during the time between when it
+was created and when the creation event is actually dispatched.
+
 We provide separate functions to dispatch each event type.
 
 [source,c]
@@ -6229,6 +6277,10 @@ static void mrtDispatchTransitionEvent(MRT_ecb *ecb) ;
 static void mrtDispatchPolymorphicEvent(MRT_ecb *ecb) ;
 static void mrtDispatchCreationEvent(MRT_ecb *ecb) ;
 ----
+
+Once an event has been chosen for dispatch,
+the logic to determine the type of the event and, therefore,
+which dispatch function to invoke is shown below.
 
 [source,c]
 ----
@@ -6240,7 +6292,7 @@ static void mrtDispatchEvent(MRT_ecb *ecb) ;
 [source,c]
 ----
 <<mrt static functions>>=
-static inline
+static
 void
 mrtDispatchEvent(
     MRT_ecb *ecb)
@@ -6262,15 +6314,26 @@ mrtDispatchEvent(
                 mrtDispatchTransitionEvent(ecb) ;
             }
         } else {
-            MRT_pdb const *pdb = classDesc->pdb ;
-            assert(pdb != NULL) ;
-            ecb->eventNumber -= edb->eventCount ;
-            assert(ecb->eventNumber < pdb->eventCount) ;
+            assert(classDesc->pdb != NULL) ;
+            assert(ecb->eventNumber - edb->eventCount <
+                    classDesc->pdb->eventCount) ;
             mrtDispatchPolymorphicEvent(ecb) ;
         }
     }
 }
 ----
+
+Event typing is discovered by first determining if there are any
+transition events.
+If not, then we must have a polymorphic event (and consequently,
+its numbering will have started at 0).
+Otherwise,
+if the event number falls in the range of transition events,
+then it must be either an ordinary transition event or a transition
+event used as a creation event.
+Finally, for the case where there are both transition and polymorphic
+events, 
+polymorphic event number before dispatching.
 
 In the sections below,
 we consider the dispatch of each particular event type.
@@ -6457,8 +6520,7 @@ mrtDispatchTransitionEvent(
      * Fetch the new state from the transition table.
      */
     MRT_StateCode newState = *(edb->transitionTable +
-            targetInst->currentState * edb->eventCount * sizeof(MRT_StateCode) +
-            ecb->eventNumber) ;
+            targetInst->currentState * edb->eventCount + ecb->eventNumber) ;
 
 #       ifndef MRT_NO_TRACE
     /*
@@ -6718,9 +6780,16 @@ mrtDispatchPolymorphicEvent(
     MRT_pdb const *pdb = ecb->targetInst->classDesc->pdb ;
 
     assert(pdb != NULL) ;
-    assert(ecb->eventNumber < pdb->eventCount) ;
     assert(pdb->genCount > 0) ;
 
+    /*
+     * Compute the base offset for polymorphic event numbering.
+     * This base offset will be used to transform the polymorphic event
+     * number into an array index.
+     */
+    MRT_edb const *edb = ecb->targetInst->classDesc->edb ;
+    MRT_EventCode eventOffset = edb == NULL ?  0 : edb->eventCount ;
+    assert(ecb->eventNumber - eventOffset < pdb->eventCount) ;
     /*
      * Save the original event number and target instance pointer.  We intend
      * to reuse the same ECB for each event we dispatch and will need these
@@ -6768,8 +6837,7 @@ mrtDispatchPolymorphicEvent(
             mrtFatalError(mrtRelationshipLinkage) ;
         }
         ecb->eventNumber = *(sdb->eventMap +
-                subclassCode * pdb->eventCount * sizeof(MRT_EventCode) +
-                origEvent) ;
+                subclassCode * pdb->eventCount + origEvent - eventOffset) ;
 
 #           ifndef MRT_NO_TRACE
         /*
