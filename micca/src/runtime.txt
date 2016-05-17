@@ -4051,7 +4051,7 @@ of the subclass roles in the relationship description.
 [source,c]
 ----
 <<mrt static functions>>=
-int
+static int
 mrtFindRefGenSubclassCode(
     MRT_Class const *subclassClass,
     struct mrtrefsubclassrole const *subclasses,
@@ -4066,8 +4066,6 @@ mrtFindRefGenSubclassCode(
     }
 
     mrtFatalError(mrtRelationshipLinkage) ;
-
-    return -1 ;
 }
 ----
 
@@ -4090,7 +4088,7 @@ we also need to search union generalization subclasses for a role match.
 [source,c]
 ----
 <<mrt static functions>>=
-int
+static int
 mrtFindUnionGenSubclassCode(
     MRT_Class const *subclassClass,
     MRT_Class const * const *subclasses,
@@ -4105,8 +4103,6 @@ mrtFindUnionGenSubclassCode(
     }
 
     mrtFatalError(mrtRelationshipLinkage) ;
-
-    return -1 ;
 }
 ----
 
@@ -6850,37 +6846,76 @@ mrtDispatchPolymorphicEvent(
     MRT_gdb const *sdb = pdb->genDispatch ;
     for (unsigned gnum = 0 ; gnum < pdb->genCount ; ++sdb, ++gnum) {
         MRT_Relationship const *rel = sdb->relship ;
+        MRT_Instance *targetInst ;
         int subclassCode ;
 
+        /*
+         * Find the target instance reference and the class of the target
+         * instance. How we do this depends upon how the generalization is
+         * stored in the superclass instance.
+         */
         if (rel->relType == mrtRefGeneralization) {
-            struct mrtrefgeneralization const *gen = &rel->relInfo.refGeneralization ;
             /*
              * When the generalization is implemented via a pointer, we need an
              * extra level of indirection to fetch the address of the subclass.
              */
-            ecb->targetInst =
-                *(MRT_Instance **)((uintptr_t)origTarget + gen->superclass.storageOffset) ;
-            assert(ecb->targetInst != NULL) ;
-            assert(ecb->targetInst->classDesc != NULL) ;
-            subclassCode = mrtFindRefGenSubclassCode(ecb->targetInst->classDesc,
+            struct mrtrefgeneralization const *gen =
+                    &rel->relInfo.refGeneralization ;
+            targetInst = *(MRT_Instance **)((uintptr_t)origTarget +
+                    gen->superclass.storageOffset) ;
+            assert(targetInst != NULL) ;
+            /*
+             * We must also guard against the possibility that the subclass was
+             * unrelated from the superclass before the polymorphic event was
+             * dispatched.
+             */
+            if (targetInst == NULL) {
+#                   ifndef MRT_NO_NAMES
+                mrtFatalError(mrtRefIntegrity, rel->name) ;
+#                   else
+                mrtFatalError(mrtRefIntegrity, rel) ;
+#                   endif /* MRT_NO_NAMES */
+            }
+            assert(targetInst->classDesc != NULL) ;
+            subclassCode = mrtFindRefGenSubclassCode(targetInst->classDesc,
                     gen->subclasses, gen->subclassCount) ;
-            assert(subclassCode >= 0) ;
         } else if (rel->relType == mrtUnionGeneralization) {
-            struct mrtuniongeneralization const *gen = &rel->relInfo.unionGeneralization ;
             /*
              * When the generalization is implemented by a union, we need only
-             * point to the address of the subclass as it is contained in the
-             * superclass.
+             * point to the address of the subclass since it is contained
+             * within the superclass.
              */
-            ecb->targetInst =
-                (MRT_Instance *)((uintptr_t)origTarget + gen->superclass.storageOffset) ;
-            assert(ecb->targetInst->classDesc != NULL) ;
-            subclassCode = mrtFindUnionGenSubclassCode(ecb->targetInst->classDesc,
+            struct mrtuniongeneralization const *gen =
+                    &rel->relInfo.unionGeneralization ;
+            targetInst = (MRT_Instance *)((uintptr_t)origTarget +
+                    gen->superclass.storageOffset) ;
+            assert(targetInst->classDesc != NULL) ;
+            subclassCode = mrtFindUnionGenSubclassCode(targetInst->classDesc,
                     gen->subclasses, gen->subclassCount) ;
-            assert(subclassCode >= 0) ;
         } else {
             mrtFatalError(mrtRelationshipLinkage) ;
         }
+        /*
+         * Check that our subclass instance is indeed allocated and usable.  We
+         * are trying to guard against the possiblity that the subclass
+         * instance was deleted before the polymorphic event was signaled.
+         */
+        assert(targetInst->alloc > 0) ;
+        if (targetInst->alloc <= 0) {
+#               ifndef MRT_NO_NAMES
+            mrtFatalError(mrtEventInFlight,
+                    ecb->sourceInst ? ecb->sourceInst->classDesc->name : "?",
+                    ecb->sourceInst ? ecb->sourceInst->name : "?",
+                    targetInst->classDesc->eventNames[origEvent],
+                    targetInst->classDesc->name,
+                    targetInst->name ? targetInst->name : "?") ;
+#            else
+            mrtFatalError(mrtEventInFlight, ecb->sourceInst, origEvent,
+                    targetInst) ;
+#           endif /* MRT_NO_NAMES */
+        }
+        ecb->targetInst = targetInst ;
+        ecb->alloc = targetInst->alloc ;
         /*
          * Fetch the event number for the subclass from the polymorphic
          * mapping.  The class of the subclass related to the superclass
@@ -6890,25 +6925,6 @@ mrtDispatchPolymorphicEvent(
          */
         ecb->eventNumber = *(sdb->eventMap +
                 subclassCode * pdb->eventCount + origEvent - eventOffset) ;
-
-        /*
-         * Check that our subclass instance is indeed allocated and usable.
-         */
-        assert(ecb->targetInst->alloc > 0) ;
-        if (ecb->targetInst->alloc < 0) {
-#               ifndef MRT_NO_NAMES
-            mrtFatalError(mrtEventInFlight,
-                    ecb->sourceInst ? ecb->sourceInst->classDesc->name : "?",
-                    ecb->sourceInst ? ecb->sourceInst->name : "?",
-                    ecb->targetInst->classDesc->eventNames[ecb->eventNumber],
-                    ecb->targetInst->classDesc->name,
-                    ecb->targetInst->name ? ecb->targetInst->name : "?") ;
-#            else
-            mrtFatalError(mrtEventInFlight, ecb->sourceInst, ecb->eventNumber,
-                 targetInst) ;
-#           endif /* MRT_NO_NAMES */
-        }
-        ecb->alloc = ecb->targetInst->alloc ;
 
 #           ifndef MRT_NO_TRACE
         /*
@@ -6990,16 +7006,11 @@ mrtDispatchCreationEvent(
     assert(ecb->targetInst->currentState ==
         ecb->targetInst->classDesc->edb->creationState) ;
 
-    /*
-     * Negate the alloc member to show that the instance is now active.
-     */
-    ecb->alloc = ecb->targetInst->alloc = -ecb->targetInst->alloc ;
-    /*
-     * Dispatch the event.
-     */
+    ecb->alloc = ecb->targetInst->alloc = -ecb->targetInst->alloc ; // <1>
     mrtDispatchTransitionEvent(ecb) ;
 }
 ----
+<1> By negating the `alloc` value, we show that the instance is now active.
 
 == Bridging Domains
 
@@ -9114,8 +9125,8 @@ errors back to the application.
 For implementation languages that do not support exception handling,
 the usual technique of returning error codes is not very effective.
 Either by accident or sloth, many error codes are not checked.
-Even then the error code is checked, there is little recovery
-recourse for the application.
+Even when the error code is checked,
+there is little recovery recourse for the application.
 For example,
 it does little good to know that we are unable to generate an
 event because we do not have sufficient ECB resources when there
