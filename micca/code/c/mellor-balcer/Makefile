@@ -10,6 +10,13 @@
 #*--
 #
 
+CFLAGS	= -std=c11 -g -Og -Wall
+CPPFLAGS =\
+	 -D_POSIX_C_SOURCE=200112L\
+	 -D_ISOC11_SOURCE\
+	 -DMRT_ECB_PARAM_SIZE=64\
+	 $(NULL)
+
 DOCSRC 	=\
 	simplebookstore.aweb\
 	$(NULL)
@@ -93,7 +100,16 @@ all : doc code
 
 doc : $(PDF)
 
-code : $(ROOTS)
+code : bookstore
+
+bookstore : bookstore.c micca_rt.c
+
+bookstore.c : bookstore.h micca_rt.h
+
+micca_rt.c : micca_rt.h
+
+bookstore.c : simplebookstore.micca sbs_population.micca
+	micca -stubexternalops simplebookstore.micca sbs_population.micca
 
 runtests : $(ROOTS) $(TESTS)
 	for test in $(TESTS) ; do tclsh $$test ; done

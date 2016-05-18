@@ -327,7 +327,7 @@ The Product Specification Subsytem consists of the following classes.
 <<Product Class Definition>>=
 class Product {
     attribute productID char -dimension 32
-    attribute productName char -dimension 32
+    attribute productName char -dimension 64
     attribute copyright char -dimension 16
     attribute unitPrice unsigned
     attribute description char -dimension 256
@@ -363,7 +363,6 @@ class Publisher {
     attribute website char -dimension 256
 }
 ----
-<1> Per the model, there are two identifying attributes.
 
 === Author Class [[authorclass,Author]]
 
@@ -396,8 +395,8 @@ instances of the participating classes.
 ----
 <<Authorship Class Definition>>=
 class Authorship {
-    attribute preCredit char -dimension 64
-    attribute postCredit char -dimension 64
+    attribute preCredit char -dimension 64 -default {""}
+    attribute postCredit char -dimension 64 -default {""}
 }
 ----
 
@@ -439,13 +438,6 @@ class BookProduct {
     attribute subtitle char -dimension 128
 }
 ----
-<1> All subclasses of a generalization have a referential attribute
-back to the superclass of the generalization.
-Since there is a one-to-one correspondence between a subclass and
-its superclass, the referential attribute is also an identifying attribute.
-The fact that an attribute can serve many roles happens often
-and is another facet of the ability of referential attributes and
-identity constraints to constraint the instance attribute values properly.
 
 === Recording Product Class [[recordingproductclass,Recording Product]]
 
@@ -462,9 +454,6 @@ class RecordingProduct {
     attribute runningTime unsigned
 }
 ----
-<1> Here we introduce the referential attribute for the generalization.
-<2> Here are the referential attributes for the role of `RecordingProduct`
-as an associator class.
 
 (((Product Specification,Relationships,R16)))
 [source,tcl]
@@ -490,7 +479,7 @@ class SoftwareProduct {
 ----
 <<Software Product Class Definition>>=
 association R19 SoftwareProduct 1..*--1 Platform
-association R20 SoftwareProduct 1..*--1 ComputerSoftware
+association R20 ComputerSoftware 1..*--1 SoftwareProduct
 ----
 
 === Special Order Product Class [[specialorderproductclass,Special Order Product]]
@@ -566,7 +555,7 @@ class Artist {
 ----
 <<Performance Credit Class Definition>>=
 class PerformanceCredit {
-    attribute role char -dimension 32
+    attribute role char -dimension 32 -default {""}
 }
 ----
 
@@ -638,6 +627,16 @@ class Customer {
     attribute shippingAddress char -dimension 64
     attribute phone char -dimension 32
     attribute purchasesMade unsigned -default 0 ; # <1>
+
+    classop {struct Customer *} findByEmail {email {char const *}} {
+        %<Customer foreachInstance customer>%
+            if (strcmp(%<instance customer attribute email>%, email) == 0) {
+                return customer ;
+            }
+        %<end>%
+
+        return NULL ;
+    }
 }
 ----
 <1> When Customer instances are created, they have certainly not made
@@ -695,32 +694,44 @@ out of which a creation event transitions.
 ----
 <<Order State Model>>=
 state EstablishingCustomerandVerifyingPayment {
-        cart accountNumber billingAddress cardExpirationDate
-        cardholderName customerEmail} {
-    R10 link $self $cart
+        cart {struct ShoppingCart *}
+        accountNumber {char const *}
+        billingAddress {char const *}
+        cardExpirationDate {char const *}
+        cardholderName {char const *}
+        customerEmail {char const *}} {
+    %<ShoppingCart instref mycart>% // this is a problem
+    mycart = cart ;
+    %<R10 relate self mycart>%
 
-    set customer [Customer findById email $customerEmail]
-    assignAttribute $self recipient deliveryAddress contactPhone
-    if {[isEmptyRef $customer]} {
-        set customer [Customer create\
-            email $customerEmail\
-            name $recipient\
-            shippingAddress $deliveryAddress\
-            phone $contactPhone
-        ]
+    char const *recipient = %<my attribute recipient>% ;
+    char const *deliveryAddress = %<my attribute deliveryAddress>% ;
+    char const *contactPhone = %<my attribute contactPhone>% ;
+
+    %<Customer instref customer>%
+    customer = %<Customer operation findByEmail email customerEmail>% ;
+    if (customer == NULL) {
+        %<Customer create customer\
+            email customerEmail\
+            name recipient\
+            shippingAddress deliveryAddress\
+            phone contactPhone>%
     } else {
-        updateAttribute $customer\
-            name $recipient\
-            shippingAddress $deliveryAddress\
-            phone $contactPhone
+        strcmp(%<instance customer attribute name>%, recipient) ;
+        strcmp(%<instance customer attribute shippingAddress>%, deliveryAddress) ;
+        strcmp(%<instance customer attribute phone>%, contactPhone) ;
     }
 
-    R5 link $self $customer
+    %<R5 relate self customer>%
+    time_t now ;
+    time(&now) ;
+    strcpy(%<my attribute dateOrderPlaced>%, ctime(&now)) ;
 
-    updateAttribute $self dateOrderPlaced [clock format [clock seconds]]
-
-    signal $self submitCharge $accountNumber $billingAddress\
-        $cardExpirationDate $cardholderName
+    %<my signal submitCharge\
+        accountNumber accountNumber\
+        billingAddress billingAddress\
+        cardExpirationDate cardExpirationDate\
+        cardholderName cardholderName>%
 }
 
 transition EstablishingCustomerandVerifyingPayment - submitCharge ->\
@@ -738,14 +749,21 @@ and updating the attributes of an existing instance.
 [source,tcl]
 ----
 <<Order State Model>>=
-state SubmittingCharge {accountNumber billingAddress cardExpirationDate
-        cardholderName} {
-    CreditCardCharge createasync makeCharge [list $self]\
-        accountNumber $accountNumber\
-        cardholderName $cardholderName\
-        billingAddress $billingAddress\
-        cardExpirationDate $cardExpirationDate\
-        chargeAmount [readAttribute $self totalValue] ; # <1>
+state SubmittingCharge {
+        accountNumber {char const *}
+        billingAddress {char const *}
+        cardExpirationDate {char const *}
+        cardholderName {char const *}} {
+    unsigned totalValue = %<my attribute totalValue>% ;
+    unsigned chargeID = %<CreditCardCharge operation genChargeID>% ;
+    MRT_ClassId orderid = %<my instid>% ;
+    %<CreditCardCharge createasync makeCharge {order orderid}\
+        chargeID chargeID\
+        accountNumber accountNumber\
+        billingAddress billingAddress\
+        cardholderName cardholderName\
+        cardExpirationDate cardExpirationDate\
+        chargeAmount totalValue>%
 }
 
 transition SubmittingCharge - paymentApproved -> BeingPackedandShipped
@@ -774,10 +792,9 @@ to be translated into a different set of idoms in Tcl.
 ----
 <<Order State Model>>=
 state PaymentNotApproved {} {
-    set customer [findRelated $self R5]
-    # generate chargeDeclined(customerEmail: customer.email)
-    #       to EE_OnlineCustomer
-    EE_OnLineCustomer::chargeDeclined [readAttribute $customer email] ; # <1>
+    %<instance customer findOneRelated self R5>%
+    char const *email = %<instance customer attribute email>% ;
+    %<external OnlineCustomer_chargeDeclined email email>% ;
 }
 
 transition PaymentNotApproved - subCharge -> SubmittingCharge
@@ -788,7 +805,7 @@ above.
 entities.
 Instead,
 we create explict bridge operations, in this case 
-`EE_OnLineCustomer::chargeDeclined`, passing the required parameters.
+`EE_OnlineCustomer::chargeDeclined`, passing the required parameters.
 That bridge operation can then map the semantics of a _declined charge_
 onto the appropriate operation of the domain that represents the
 Online Customer external entity.
@@ -803,20 +820,10 @@ We will see examples of this in the <<externalentities>> section below.
 ----
 <<Order State Model>>=
 state BeingPackedandShipped {} {
-    set customer [findRelated $self R5]
-    EE_OnLineCustomer::chargeApproved [readAttribute $customer email]
-
-    assignAttribute $self recipient deliveryAddress contactPhone
-    Shipment createasync requestShipment [list $self]\
-        recipient $recipient\
-        deliveryAddress $deliveryAddress\
-        contactPhone $contactPhone
 }
 transition BeingPackedandShipped - orderDelivered -> DeliveredtoCustomer
 
 state DeliveredtoCustomer {} {
-    set customer [findRelated $self R5] ; # <1>
-    EE_OnLineCustomer::orderReportedDelivered [readAttribute $customer email]
 }
 ----
 <1> So the question arises as to whether we should test the `customer`
@@ -861,8 +868,6 @@ class ProductSelection {
     }
 }
 ----
-<1> Note the referential attributes needed for the class association
-and those attributes form an identifier.
 
 (((Ordering,Relationships,R4)))
 [source,tcl]
@@ -887,14 +892,10 @@ so we want to be explicit about the initial state.
 <<Product Selection State Model>>=
 transition @ - addSelection -> NewSelection
 
-state NewSelection {cartID unsigned productID unsigned quantity unsigned} {
-    set product [Product findById productID $productID]
-    updateAttribute $self\
-        productID $productID\
-        cartID $cartID\
-        unitPriceOfSelection [readAttribute $product unitPrice] ; # <1>
-
-    signal $self changeQuantity $quantity
+state NewSelection {
+    cartID unsigned
+    productID unsigned
+    quantity unsigned} {
 }
 transition NewSelection - changeQuantity -> ChangingQuantity
 ----
@@ -930,28 +931,10 @@ See the <<shoppingcartclass>> for the definition of the operation.
 ----
 <<Product Selection State Model>>=
 state ChangingQuantity {quantityOfSelection unsigned} {
-    withAttribute $self quantity unitPriceOfSelection selectionValue {
-        set quantity $quantityOfSelection
-        set selectionValue [expr {$quantity * $unitPriceOfSelection}]
-    }
-    if {$quantity == 0} {
-        signal $self removeSelection
-    } else {
-        set cart [findRelated $self ~R4]
-        instop $cart cartUpdated
-    }
 }
 transition ChangingQuantity - removeSelection -> RemovingSelection
 
 state RemovingSelection {} {
-    set cart [findRelated $self ~R4]
-    R4 unlink $self
-    set remainingProduct [findRelated $cart R4]
-    if {[isEmptyRef $remainingProduct]} {
-        signal $cart cancel
-    } else {
-        instop $cart cartUpdated
-    }
 }
 terminal RemovingSelection
 ----
@@ -970,11 +953,6 @@ class ShoppingCart {
     }
 
     instop void cartUpdated {} {
-        updateAttribute $self totalValue [tcl::mathop::+ {*}[pipe {
-                findRelated $self {R4 ProductSelection} |
-                deRef ~ selectionValue |
-                relation list ~ selectionValue
-            }]]
     } ; # <1>
 }
 ----
@@ -1010,23 +988,15 @@ how those commands work.
 <<Shopping Cart State Model>>=
 transition @ - startCart -> NewOrder
 
-state NewOrder {productID quantity} {
-    signal $self addSelection $productID $quantity
+state NewOrder {
+    productID unsigned
+    quantity unsigned} {
 }
 transition NewOrder - addSelection -> AddingSelectiontoOrder
 
-state AddingSelectiontoOrder {productID quantity} {
-    set product [Product findById productID $productID]
-    set unitprice [readAttribute $product unitPrice]
-    set selectionvalue [expr {$unitprice * $quantity}]
-    set newSelection [R4 link $self $product\
-        quantity $quantity\
-        unitPriceOfSelection $unitprice\
-        selectionValue $selectionvalue\
-    ] ; # <1>
-    withAttribute $self totalValue {
-        incr totalValue $selectionvalue
-    }
+state AddingSelectiontoOrder {
+    productID unsigned
+    quantity unsigned} {
 }
 transition AddingSelectiontoOrder - addSelection -> AddingSelectiontoOrder
 transition AddingSelectiontoOrder - cancel -> CancelingEntireOrder
@@ -1045,8 +1015,6 @@ by the `R4 link` command.
 ----
 <<Shopping Cart State Model>>=
 state CancelingEntireOrder {} {
-    set selections [findRelated $self {R4 ProductSelection}]
-    R4 unlink $selections
 }
 terminal CancelingEntireOrder ; # <1>
 ----
@@ -1057,20 +1025,25 @@ will be automatically deleted when the state activity finishes.
 ----
 <<Shopping Cart State Model>>=
 state EstablishingCustomerandVerifyingPayment {
-        accountNumber billingAddress cardExpirationDate
-        cardholderName customerEmail customerName customerPhone
-        shippingAddress} {
-    Order createasync checkOut [list $self $accountNumber\
-        $billingAddress $cardExpirationDate $cardholderName\
-        $customerEmail]\
-        totalValue [readAttribute $self totalValue]\
-        recipient $customerName\
-        deliveryAddress $shippingAddress\
-        contactPhone $customerPhone
+        accountNumber {char const *}
+        billingAddress {char const *}
+        cardExpirationDate {char const *}
+        cardholderName {char const *}
+        customerEmail {char const *}
+        customerName {char const *}
+        customerPhone {char const *}
+        shippingAddress {char const *}} {
 }
 ----
 
 === Credit Card Charge Class [[creditcardchargeclass,Credit Card Charge]]
+
+[source,tcl]
+----
+<<type aliases>>=
+typealias AP_Code {enum {AP_approved, AP_overlimit, AP_noAccount,\
+        AP_connectionFailed, AP_accountDataMismatch, AP_expired, AP_pending}}
+----
 
 (((Ordering,Classes,Credit Card Charge)))
 [source,tcl]
@@ -1082,12 +1055,17 @@ class CreditCardCharge {
     attribute cardholderName char -dimension 128
     attribute billingAddress char -dimension 128
     attribute cardExpirationDate char -dimension 32
-    attribute dateChargeMade char -dimension 32
+    attribute dateChargeMade char -dimension 32 -default {""}
     attribute chargeAmount unsigned
     attribute approvalCode AP_Code -default AP_pending
 
     statemodel {
         <<Credit Card Charge State Model>>
+    }
+
+    classop unsigned genChargeID {} {
+        static unsigned idnum = 100 ;
+        return idnum++ ;
     }
 }
 ----
@@ -1119,21 +1097,6 @@ in the state activities for the `CreditCardCharge` class.
 transition @ - makeCharge -> RequestingChargeApproval
 
 state RequestingChargeApproval {order unsigned} {
-    R7 link $self $order ; # <1>
-    updateAttribute $self dateChargeMade [clock format [clock seconds]]
-
-    withAttribute $self accountNumber billingAddress cardholderName\
-            cardExpirationDate chargeAmount {
-        EE_CreditCardCompany::requestChargeApproval\
-            $accountNumber\
-            $billingAddress\
-            $cardholderName\
-            $cardExpirationDate\
-            [readAttribute $self chargeID]\
-            $chargeAmount
-    }
-
-    delaysignal 60000 $self chargeProcessingNotCompleted
 }
 transition RequestingChargeApproval - chargeProcessed -> ProcessingCompleted
 transition RequestingChargeApproval - chargeProcessingNotCompleted ->\
@@ -1147,16 +1110,6 @@ Clearly, `R7` is the one that is intended.
 ----
 <<Credit Card Charge State Model>>=
 state ProcessingCompleted {resultCode int} {
-    set order [findRelated $self R7] ; # <1>
-    canceldelayed $self $order chargeProcessingNotCompleted ; # <2>
-
-    updateAttribute $self approvalCode $resultCode
-    if {$resultCode eq "approved"} {
-        R8 link $self $order ; # <3>
-        signal $order paymentApproved
-    } else {
-        signal $order paymentDeclined
-    }
 }
 ----
 <1> Here again we need to use `R7`.
@@ -1170,9 +1123,6 @@ the charge that actually paid for the order.
 ----
 <<Credit Card Charge State Model>>=
 state DeclineForTimeout {} {
-    updateAttribute $self approvalCode connectionFailed
-    set order [findRelated $self R7] ; # <1>
-    signal $order paymentDeclined
 }
 ----
 <1> And the final substitution of `R7` for what was orginally `R8` in the
@@ -1220,7 +1170,8 @@ class Shipment {
     <<Shipment Operations>>
 }
 ----
-<1> The model shows the `shippingCompany` and `trackingNumber` attributes
+
+The model shows the `shippingCompany` and `trackingNumber` attributes
 form a secondary identifier.
 This is problematic because `shippingCompany` is a referential
 attribute that realizes `R21`.
@@ -1275,15 +1226,6 @@ translated Tcl code to the action language source.
 transition @ - requestShipment -> PreparingShipment
 
 state PreparingShipment {order unsigned} {
-    R6 link $self $order
-
-    set warehouse [Warehouse chooseWarehouse [readAttribute $order orderID]] ; # <1>
-    R24 link $self $warehouse
-
-    set items [findRelated $order R10 {R4 ProductSelection}] ; #<2>
-    R9 link $items $self
-
-    signal $warehouse shipmentReadyToPack ; #<3>
 }
 transition PreparingShipment - packed -> PackedandAwaitingTrackingNumber
 transition PreparingShipment - trackingNumberAssigned ->\
@@ -1322,24 +1264,23 @@ Not sure why this was important, but it's there.
 ----
 <<Shipment State Model>>=
 state PackedandAwaitingTrackingNumber {clerkID unsigned} {
-    instop $self updatePackingInfo $clerkID
 }
 transition PackedandAwaitingTrackingNumber - trackingNumberAssigned ->\
     NumberAssigned
 
-state NumberAssignedandWaitingtobePacked {shippingCompany {char const *}\
+state NumberAssignedandWaitingtobePacked {
+        shippingCompany {char const *}
         trackingNumber unsigned} {
-    instop $self updateTrackingInfo $shippingCompany $trackingNumber
 }
 transition NumberAssignedandWaitingtobePacked - packed -> Packed
 
-state NumberAssigned {shippingCompany {char const *} trackingNumber unsigned} {
-    instop $self updateTrackingInfo $shippingCompany $trackingNumber
+state NumberAssigned {
+        shippingCompany {char const *}
+        trackingNumber unsigned} {
 }
 transition NumberAssigned - pickedUp -> InTransittoCustomer
 
 state Packed {clerkID unsigned} {
-    instop $self updatePackingInfo $clerkID
 }
 transition Packed - pickedUp -> InTransittoCustomer
 ----
@@ -1351,21 +1292,12 @@ The only thing we have done here is to place duplicated code into one place.
 [source,tcl]
 ----
 <<Shipment Operations>>=
-instop void updateTrackingInfo {shippingCompany {char const *}\
+instop void updateTrackingInfo {
+        shippingCompany {char const *}\
         trackingNumber unsigned} {
-    updateAttribute $self trackingNumber $trackingNumber
-    set company [ShippingCompany findById companyName $shippingCompany]
-    R21 link $self $company
 }
 
 instop void updatePackingInfo {clerkID unsigned} {
-    updateAttribute $self timePrepared [clock format [clock seconds]]
-
-    set clerk [WarehouseClerk findById clerkID $clerkID]
-    R22 link $self $clerk
-
-    EE_ShippingCompany::shipmentReadyForPickup\
-        [readAttribute $self shipmentID]
 }
 ----
 
@@ -1376,14 +1308,10 @@ the last two states track the delivery of the shipment.
 ----
 <<Shipment State Model>>=
 state InTransittoCustomer {} {
-    updateAttribute $self timePickedUp [clock format [clock seconds]]
 }
 transition InTransittoCustomer - deliveryConfirmed -> Delivered
 
 state Delivered {timeDelivered {char const *}} {
-    updateAttribute $self timeDelivered $timeDelivered
-    set order [findRelated $self R6]
-    signal $order orderDelivered
 }
 ----
 
@@ -1434,7 +1362,6 @@ Here, we do the simplest thing we can and simply choose an arbitrary
 ----
 <<Warehouse Operations>>=
 classop void chooseWarehouse {orderID unsigned} {
-    return [limitRef [Warehouse findAll]]
 }
 ----
 
@@ -1462,37 +1389,14 @@ This is a common assigner idom.
 ----
 <<Warehouse State Model>>=
 state WaitingforaShipment {} {
-    set readyShipment [findRelatedWhere $self ~R24 {$waitingToBePacked}]
-    if {[isNotEmptyRef $readyShipment]} {
-        signal $self shipmentReadyToPack
-    }
 }
 transition WaitingforaShipment - shipmentReadyToPack -> WaitingforaFreeClerk
 
 state WaitingforaFreeClerk {} {
-    set freeClerk [findRelatedWhere $self {~R25 {~R27 ShippingClerk}}\
-        {$awaitingAssignment eq "true"}]
-    puts $freeClerk
-    if {[isNotEmptyRef $freeClerk]} {
-        signal $self clerkFree
-    }
 }
 transition WaitingforaFreeClerk - clerkFree -> AssigningClerktoShipment
 
 state AssigningClerktoShipment {} {
-    set readyShipment [findRelatedWhere $self ~R24 {$waitingToBePacked}]
-    set readyShipment [limitRef $readyShipment]
-
-    set freeClerk [findRelatedWhere $self {~R25 {~R27 ShippingClerk}}\
-        {$awaitingAssignment}]
-    set freeClerk [limitRef $freeClerk]
-
-    R23 link $readyShipment $freeClerk
-    updateAttribute $readyShipment waitingToBePacked false
-    updateAttribute $freeClerk awaitingAssignment false
-
-    signal $freeClerk clerkAssigned
-    signal $self clerkAssignedToShipment
 }
 transition AssigningClerktoShipment - clerkAssignedToShipment ->\
         WaitingforaShipment
@@ -1505,6 +1409,7 @@ transition AssigningClerktoShipment - clerkAssignedToShipment ->\
 ----
 <<Warehouse Clerk Class Definition>>=
 class WarehouseClerk {
+    attribute clerkID unsigned
     attribute clerkName char -dimension 64
     attribute goOffDutyAtEndOfJob bool -default false ; # <1>
 }
@@ -1579,23 +1484,15 @@ states that were not completely specified in the model graphic.
 transition @ - startShipping -> WaitingforaJob
 
 state WaitingforaJob {} {
-    updateAttribute $self awaitingAssignment true
-    set warehouse [findRelated R27 R25]
-    signal $warehouse clerkFree
 }
 transition WaitingforaJob - clerkAssigned -> SelectingBooks
 transition WaitingforaJob - offDuty -> OffDuty
 
 state SelectingBooks {} {
-    EE_ShippingClerk::shipmentReadyToPack\
-        [readAttribute $self shipmentID]
-
-    randomdelaysignal $self booksSelected
 }
 transition SelectingBooks - booksSelected -> PackingBox
 
 state PackingBox {} {
-    randomdelaysignal $self boxPacked
 }
 transition PackingBox - boxPacked -> SealingBox
 ----
@@ -1613,17 +1510,6 @@ always ship the requested quantity of each item.
 ----
 <<Shipping Clerk State Model>>=
 state SealingBox {} {
-    set allSelections [deRef [ProductSelection findAll] quantity] ; # <1>
-
-    ShipmentItem update [pipe {
-        findRelated $self R23 {R9 ShipmentItem} |
-        deRef ~ |
-        relation join ~ $allSelections |
-        relation project ~ shipmentID productID cartID quantity |
-        relation rename ~ quantity quantityShipped
-    }] ; # <2>
-
-    randomdelaysignal $self boxSealed
 }
 transition SealingBox - boxSealed -> AttachingShippingLabel
 ----
@@ -1710,34 +1596,20 @@ repeatedly to perform what is equivalent to a single relational join.
 ----
 <<Shipping Clerk State Model>>=
 state AttachingShippingLabel {} {
-    randomdelaysignal $self shippingLabelAttached
 }
 transition AttachingShippingLabel - shippingLabelAttached ->\
     DeliveringBoxtoLoadingDock
 
 state DeliveringBoxtoLoadingDock {} {
-    randomdelaysignal $self boxAtLoadingDoc
 }
 transition DeliveringBoxtoLoadingDock - boxAtLoadingDoc -> CompletingJob
 
 state CompletingJob {} {
-    set currentShipment [findRelated $self R23]
-    signal $currentShipment packed [readAttribute $self clerkID]
-    R23 unlink $currentShipment
-    set wc [findRelated $self R27]
-    if {[readAttribute $wc goOffDutyAtEndOfJob]} {
-        signal $self offDuty
-    } else {
-        updateAttribute $self awaitingAssignment true
-        set myWarehouse [findRelated $wc R25]
-        signal $myWarehouse clerkFree
-    }
 }
 transition CompletingJob - clerkAssigned -> SelectingBooks
 transition CompletingJob - offDuty -> OffDuty
 
 state OffDuty {} {
-    R27 migrate $self OffDutyClerk
 } ; # <1>
 ----
 <1> Note that we do *not* define the `OffDuty` state as `terminal`
@@ -1753,7 +1625,7 @@ time architecture to attempt to delete what no longer exists anyway.
 ----
 <<Stock Clerk Class Definition>>=
 class StockClerk {
-    attribute idle boolean -default true
+    attribute idle bool -default true
 }
 ----
 
@@ -1875,70 +1747,59 @@ We will see both used.
 
 === Product Population [[productpopulation,Product Population]]
 
-(((Product Specification,Population,Product)))
-[source,tcl]
-----
-<<Product Population>>=
-set eumlid 780201 ; # <1>
-set recid 7789930
-set wordid 938763
-----
-<1> We start with some basic ordinary Tcl variables that will be used
-to hold counters and attribute values that are used in several places.
-
 [source,tcl]
 ----
 <<Product Population>>=
 class Product {
-    productID
-    productName
-    copyright
-    unitPrice
-    description
-    website 
-    currentlyAvailable
-    categoryID
-    groupCode
-    publisherCode
-}\
-    $eumlid\
-    {Executable UML: A Foundation for Model-Driven Architecture}\
-    2002\
-    2995\
-    {Book on software development using models.}\
-    www.executableumlbook.com\
-    true\
-    [set bookid [incr categorytag]]\
-    0\
-    201\
-\
-    $recid\
-    {Carnival Music for Children}\
-    1955\
-    1000\
-    {Music as heard at old time carnivals}\
-    {}\
-    true\
-    [set musicid [incr categorytag]]\
-    1\
-    523\
-\
-    $wordid\
-    {Word 2020 for MacOSX}\
-    2020\
-    5995\
-    {Infamous word processing program}\
-    www.microsoft.com\
-    true\
-    [set swid [incr categorytag]]\
-    2\
-    666 ; # <1>
+    table {
+        productID
+        productName
+        copyright
+        unitPrice
+        description
+        website 
+        currentlyAvailable
+        R1
+        R15
+    } mbxuml {
+        {"14387"}
+        {"Executable UML: A Foundation for Model-Driven Architecture"}
+        {"2002"}
+        2995
+        {"Book on software development using models."}
+        {"www.executableumlbook.com"}
+        true
+        aw
+        book
+    } cmc {
+        {"14388"}
+        {"Carnival Music for Children"}
+        {"1955"}
+        1000
+        {"Music as heard at old time carnivals."}
+        {""}
+        true
+        otm
+        music
+    } macwd {
+        {"14389"}
+        {"Word 2020 for MacOSX"}
+        {"2020"}
+        5995
+        {"Infamous word processing program"}
+        {"www.microsoft.com"}
+        true
+        ms
+        software
+    } ; # <1>
+}
 ----
-<1> This is an example of populating using the form of the commands
-that is most convenient when variables are involved.
-The first argument is a list of the attributes which sets the order
-in which they appear in the subsequent arguments.
-There is a bit of Tcl syntax here that might be unfamiliar.
+<1> This is an example of populating using the table command.
+It saves some typing to specify repeatedly the attribute names.
+Note that ``C'' string literals in quotes must also be enclosed in
+braces. Turns out that double quotes are Tcl metacharacters and
+we need the braces to insure they are passed through as part of
+the attribute value.
 
 === Publisher Population [[publisherpopulation,Publisher Population]]
 
@@ -1947,35 +1808,33 @@ There is a bit of Tcl syntax here that might be unfamiliar.
 ----
 <<Publisher Population>>=
 class Publisher {
-    groupCode
-    publisherCode
-    name
-    address
-    website
-} {
-    0
-    201
-    Addison-Wesley
-    {New York, NY}
-    www.aw.com
-
-    1
-    523
-    {Old-Time Music}
-    {St. Louis, MO}
-    www.otm.com
-
-    2
-    666
-    {Microsoft, Inc.}
-    {Seattle, WA}
-    www.microsoft.com
-} ; # <1>
+    table {
+        groupCode
+        publisherCode
+        name
+        address
+        website
+    } aw {
+        {"0"}
+        {"201"}
+        {"Addison-Wesley"}
+        {"New York, NY"}
+        {"www.aw.com"}
+    } otm {
+        {"1"}
+        {"523"}
+        {"Old-Time Music"}
+        {"St. Louis, MO"}
+        {"www.otm.com"}
+    } ms {
+        {"2"}
+        {"666"}
+        {"Microsoft, Inc."}
+        {"Seattle, WA"}
+        {"www.microsoft.com"}
+    }
+}
 ----
-<1> Here we see the form of population that is most convenient for constant
-values.
-Fewer backslashes are required and whitespace is less significant.
-Again, Tcl syntax rules apply.
 
 === Author Population [[authorpopulation,Author Population]]
 
@@ -1984,17 +1843,19 @@ Again, Tcl syntax rules apply.
 ----
 <<Author Population>>=
 class Author {
-    name
-    website
-    email
-} {
-    {Stephen J. Mellor}
-    stephenmellor.com
-    stephen@stephenmellor.com
-
-    {Marc J. Balcer}
-    marcbalcer.com
-    marc@marcbalcer.com
+    table {
+        name
+        website
+        email
+    } sjm {
+        {"Stephen J. Mellor"}
+        {"stephenmellor.com"}
+        {"stephen@stephenmellor.com"}
+    } mjb {
+        {"Marc J. Balcer"}
+        {"marcbalcer.com"}
+        {"marc@marcbalcer.com"}
+    }
 }
 ----
 
@@ -2005,20 +1866,9 @@ class Author {
 ----
 <<Authorship Population>>=
 class Authorship {
-    name
-    productID
-    previousName
-    previousProductID
-}\
-    {Stephen J. Mellor}\
-    $eumlid\
-    {}\
-    {}\
-\
-    {Marc J. Balcer}\
-    $eumlid\
-    {Stephen J. Mellor}\
-    $eumlid
+    instance sjm R2 {Author sjm BookProduct mbxuml}
+    instance mjb R2 {Author mjb BookProduct mbxuml} R3 sjm
+}
 ----
 
 === Book Product Population [[bookproductpopulation,Book Product Population]]
@@ -2028,17 +1878,20 @@ class Authorship {
 ----
 <<Book Product Population>>=
 class BookProduct {
-    productID
-    bookNumber
-    titleCode
-    title
-    subtitle
-}\
-    $eumlid\
-    {ISBN 0-201-74804-5}\
-    74804-5\
-    {Executable UML}\
-    {A Foundation for Model-Driven Architecture}
+    table {
+        bookNumber
+        titleCode
+        title
+        subtitle
+        R11
+    } mbxuml {
+        {"ISBN 0-201-74804-5"}
+        {"74804-5"}
+        {"Executable UML"}
+        {"A Foundation for Model-Driven Architecture"}
+        mbxuml
+    }
+}
 ----
 
 === Recording Product Population [[recordingproductpopulation,Recording Product Population]]
@@ -2048,15 +1901,16 @@ class BookProduct {
 ----
 <<Recording Product Population>>=
 class RecordingProduct {
-    productID
-    runningTime
-    recordingID
-    formatID
-}\
-    $recid\
-    3:23\
-    [set cmusid [incr recordingtag]]\
-    [set cdid [incr formattag]]
+    table {
+        runningTime
+        R11
+        R16
+    } cmc {
+        203
+        cmc
+        {Recording cmc RecordingFormat cd}
+    }
+}
 ----
 
 === Software Product Population [[softwareproductpopulation,Software Product Population]]
@@ -2066,15 +1920,11 @@ class RecordingProduct {
 ----
 <<Software Product Population>>=
 class SoftwareProduct {
-    productID
-    productVersion
-    softwareID
-    platformID
-}\
-    $wordid\
-    20.17.3\
-    [set softid [incr softwaretag]]\
-    [set platformid [incr platformtag]]
+    instance macwd\
+        productVersion {"20.17.3"}\
+        R11 macwd\
+        R19 macosx
+}
 ----
 
 === Special Order Product Population [[specialorderproductpopulation,Special Order Product Population]]
@@ -2084,13 +1934,11 @@ class SoftwareProduct {
 ----
 <<Special Order Product Population>>=
 class SpecialOrderProduct {
-    productID
-    specialOrderInstructions
-    daysToDeliver
-}\
-    $recid\
-    {Their part number: 30557}\
-    10
+    instance cmc\
+        specialOrderInstructions {"Their part number: 30557"}\
+        daysToDeliver 10\
+        R12 cmc
+}
 ----
 
 === Stocked Product Population [[stockedproductpopulation,Stocked Product Population]]
@@ -2100,23 +1948,26 @@ class SpecialOrderProduct {
 ----
 <<Stocked Product Population>>=
 class StockedProduct {
-    productID
-    quantityOnHand
-    reorderThreshold
-    reorderIncrement
-    reorderInstructions
-}\
-    $eumlid\
-    100\
-    200\
-    100\
-    {Ship as quickly as possible}\
-\
-    $wordid\
-    55\
-    25\
-    55\
-    {Get a discount}
+    table {
+        quantityOnHand
+        reorderThreshold
+        reorderIncrement
+        reorderInstructions
+        R12
+    } mbxuml {
+        100
+        200
+        100
+        {"Ship as quickly as possible"}
+        mbxuml
+    } macwd {
+        55
+        25
+        55
+        {"Get a discount"}
+        macwd
+    }
+}
 ----
 
 === Product Category Population [[productcategorypopulation,Product Category Population]]
@@ -2126,21 +1977,10 @@ class StockedProduct {
 ----
 <<Product Category Population>>=
 class ProductCategory {
-    categoryID
-    categoryName
-    parentCategoryID
-}\
-    $bookid\
-    book\
-    {}\
-\
-    $musicid\
-    music\
-    {}\
-\
-    $swid\
-    software\
-    {}
+    instance book categoryName {"book"}
+    instance music categoryName {"music"}
+    instance software categoryName {"software"}
+}
 ----
 
 === Recording Population [[recordingpopulation,Recording Population]]
@@ -2150,11 +1990,8 @@ class ProductCategory {
 ----
 <<Recording Population>>=
 class Recording {
-    recordingID
-    title
-}\
-    $cmusid\
-    {Carnival Music for Children}
+    instance cmc title {"Carnival Music for Children"}
+}
 ----
 
 === Artist Population [[artistpopulation,Artist Population]]
@@ -2164,14 +2001,9 @@ class Recording {
 ----
 <<Artist Population>>=
 class Artist {
-    artistID
-    artistName
-}\
-    [set artist1id [incr artisttag]]\
-    {Mary Jane}\
-\
-    [set artist2id [incr artisttag]]\
-    {Fred Smith}
+    instance mj artistName {"Mary Jane"}
+    instance fs artistName {"Fred Smith"}
+}
 ----
 
 === Performance Credit Population [[performancecreditpopulation,Performance Credit Population]]
@@ -2181,20 +2013,9 @@ class Artist {
 ----
 <<Performance Credit Population>>=
 class PerformanceCredit {
-    recordingID
-    artistID
-    prevRecordingID
-    prevArtistID
-}\
-    $cmusid\
-    $artist1id\
-    {}\
-    {}\
-\
-    $cmusid\
-    $artist2id\
-    $cmusid\
-    $artist1id
+    instance mj R17 {Recording cmc Artist mj}
+    instance fs R17 {Recording cmc Artist fs} R18 mj
+}
 ----
 
 === Recording Format Population [[recordingformatpopulation,Recording Format Population]]
@@ -2204,11 +2025,8 @@ class PerformanceCredit {
 ----
 <<Recording Format Population>>=
 class RecordingFormat {
-    formatID
-    formatName
-}\
-    $cdid\
-    CD
+    instance cd formatName {"CD"}
+}
 ----
 
 === Platform Population [[xxpopulation,Platform Population]]
@@ -2218,11 +2036,8 @@ class RecordingFormat {
 ----
 <<Platform Population>>=
 class Platform {
-    platformID
-    platformName
-}\
-    $platformid\
-    MacOSX
+    instance macosx platformName {"MacOSX"}
+}
 ----
 
 === Computer Software Population [[computersoftwarepopulation,Computer Software Population]]
@@ -2232,11 +2047,8 @@ class Platform {
 ----
 <<Computer Software Population>>=
 class ComputerSoftware {
-    softwareID
-    title
-}\
-    $softid\
-    {Word 2020 for MacOSX}
+    instance macwd title {"Word 2020 for MacOSX"} R20 macwd
+}
 ----
 
 == Ordering Subsystem Population [[orderingsubsystempopulation,Ordering Subystem Population]]
@@ -2246,18 +2058,53 @@ All instances are created at run time.
 Most instances are created asynchronously by events.
 The requirement that *Customers* must have placed an order means that
 those instances are created when an *Order* is created.
+So here we only need to allocate the amount of space we require
+for the ordering subsystem classes.
+
+[source,tcl]
+----
+<<Ordering Population>>=
+class Customer {
+    allocate 20
+}
+class Order {
+    allocate 20
+}
+class ProductSelection {
+    allocate 40
+}
+class ShoppingCart {
+    allocate 20
+}
+class CreditCardCharge {
+    allocate 40
+}
+----
 
 == Shipping Subsystem Population [[shippingsubsystempopulation,Shipping Subystem Population]]
 
 [source,tcl]
 ----
 <<Shipping Population>>=
+<<Shipment Population>>
 <<Shipping Company Population>>
 <<Warehouse Population>>
 <<Warehouse Clerk Population>>
 <<Shipping Clerk Population>>
 <<Stock Clerk Population>>
 <<Off Duty Clerk Population>>
+<<Shipment Item Population>>
+----
+
+=== Shipment Population [[shipmentpopulation,Shipment Population]]
+
+(((Shipment,Population,Shipment)))
+[source,tcl]
+----
+<<Shipment Population>>=
+class Shipment {
+    allocate 20
+}
 ----
 
 === Shipping Company Population [[shippingcompanypopulation,Shipping Company Population]]
@@ -2267,26 +2114,28 @@ those instances are created when an *Order* is created.
 ----
 <<Shipping Company Population>>=
 class ShippingCompany {
-    companyName
-    trackingWebsite
-    customerServicePhone
-    localDispatchPhone
-    localOffice
-    localContact
-} {
-    FedEx
-    www.fedex.com
-    222-555-1212
-    223-555-1212
-    {200 Elm St., Anywhere, CA 94000}
-    {George Shipper}
-
-    UPS
-    www.ups.com
-    224-555-1212
-    225-555-1212
-    {220 Elm St., Anywhere, CA 94000}
-    {John Parcel}
+    table {
+        companyName
+        trackingWebsite
+        customerServicePhone
+        localDispatchPhone
+        localOffice
+        localContact
+    } fedex {
+        {"FedEx"}
+        {"www.fedex.com"}
+        {"222-555-1212"}
+        {"223-555-1212"}
+        {"200 Elm St., Anywhere, CA 94000"}
+        {"George Shipper"}
+    } ups {
+        {"UPS"}
+        {"www.ups.com"}
+        {"224-555-1212"}
+        {"225-555-1212"}
+        {"220 Elm St., Anywhere, CA 94000"}
+        {"John Parcel"}
+    }
 }
 ----
 
@@ -2297,14 +2146,17 @@ class ShippingCompany {
 ----
 <<Warehouse Population>>=
 class Warehouse {
-    warehouseName
-    warehouseLocation
-} {
-    {Acme Bookstore Warehouse}
-    {100 Broad St., Somewhere, CA 94000}
+    table {
+        warehouseName
+        warehouseLocation
+    } acme {
+        {"Acme Bookstore Warehouse"}
+        {"100 Broad St., Somewhere, CA 94000"}
 
-    {My Fulfillment}
-    {100 Fremont St., Somewhere, CA 94000}
+    } mf {
+        {"My Fulfillment"}
+        {"100 Fremont St., Somewhere, CA 94000"}
+    }
 }
 ----
 
@@ -2315,21 +2167,24 @@ class Warehouse {
 ----
 <<Warehouse Clerk Population>>=
 class WarehouseClerk {
-    clerkID
-    clerkName
-    warehouseName
-}\
-    [set clerk1id [incr clerktag]]\
-    {Fred Smith}\
-    {Acme Bookstore Warehouse}\
-\
-    [set clerk2id [incr clerktag]]\
-    {John Industrious}\
-    {Acme Bookstore Warehouse}\
-\
-    [set clerk3id [incr clerktag]]\
-    {George Slacker}\
-    {My Fulfillment}
+    table {
+        clerkID
+        clerkName
+        R25
+    } fs {
+        41
+        {"Fred Smith"}
+        acme
+    } ji {
+        42
+        {"John Industrious"}
+        acme
+    } gs {
+        43
+        {"George Slacker"}
+        mf
+    }
+}
 ----
 
 === Shipping Clerk Population [[shippingclerkpopulation,Shipping Clerk Population]]
@@ -2339,9 +2194,8 @@ class WarehouseClerk {
 ----
 <<Shipping Clerk Population>>=
 class ShippingClerk {
-    clerkID
-}\
-    $clerk1id
+    instance fs R27 fs
+}
 ----
 
 === Stock Clerk Population [[stockclerkpopulation,Stock Clerk Population]]
@@ -2351,9 +2205,8 @@ class ShippingClerk {
 ----
 <<Stock Clerk Population>>=
 class StockClerk {
-    clerkID
-}\
-    $clerk2id
+    instance ji R27 ji
+}
 ----
 
 === Off Duty Clerk Population [[offdutyclerkpopulation,Off Duty Clerk Population]]
@@ -2363,9 +2216,19 @@ class StockClerk {
 ----
 <<Off Duty Clerk Population>>=
 class OffDutyClerk {
-    clerkID
-}\
-    $clerk3id
+    instance gs R27 gs
+}
+----
+
+=== Shipment Item Population [[shipmentitempopulation,Shipment Item Population]]
+
+(((Shipment,Population,Shipment Item)))
+[source,tcl]
+----
+<<Shipment Item Population>>=
+class ShipmentItem {
+    allocate 50
+}
 ----
 
 == External Entities [[externalentities,External Entities]]
@@ -2428,17 +2291,12 @@ to all their possible states.
 
 [source,tcl]
 ----
-<<External Entity Stubs>>=
-namespace eval ::bookstore::EE_OnLineCustomer {
-    proc chargeDeclined {email} {
-        puts [info level 0]
-    }
-    proc chargeApproved {email} {
-        puts [info level 0]
-    }
-    proc orderReportedDelivered {email} {
-        puts [info level 0]
-    }
+<<external operations>>=
+externalop void OnlineCustomer_chargeDeclined {email {char const *}} {
+}
+externalop void OnlineCustomer_chargeApproved {email {char const *}} {
+}
+externalop void OnlineCustomer_orderReportedDelivered {email {char const *}} {
 }
 ----
 
@@ -2930,6 +2788,24 @@ domain bookstore {
     <<Product Specification Subsystem>>
     <<Ordering Subsystem>>
     <<Shipping Subsystem>>
+    <<type aliases>>
+    <<external operations>>
+    prologue {
+        #include <time.h>
+    }
+    epilogue {
+        int
+        main(
+            int argc,
+            char *argv[])
+        {
+            mrt_Initialize() ;
+            // bookstore_init() ;
+            mrt_EventLoop() ;
+
+            return EXIT_SUCCESS ;
+        }
+    }
 }
 ----
 
@@ -2942,6 +2818,7 @@ domain bookstore {
 
 population bookstore {
     <<Product Specification Population>>
+    <<Ordering Population>>
     <<Shipping Population>>
 }
 ----
