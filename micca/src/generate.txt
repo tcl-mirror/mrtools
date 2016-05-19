@@ -6282,7 +6282,7 @@ proc TraverseRelChain {startref relspecs} {
     set startClass [dict get $startsym Class]
 
     foreach relspec $relspecs {
-        set relinfo [LookUpRelationship $relspec]
+        set relinfo [LookUpRelationship $startClass $relspec]
         while {[llength $relinfo] != 0} {
             # puts "relinfo = \"$relinfo\""
             set relinfo [lassign $relinfo sourceclass targetclass reftype cond\
@@ -6326,11 +6326,6 @@ is suitable as an instance reference to the target of the navigation.
 [source,tcl]
 ----
 <<TraverseRelChain: single reference>>=
-if {$startClass ne $sourceclass} {
-    error "relationship, [lindex $relspec 0], is from\
-        $sourceclass to $targetclass, got, $startClass,\
-        as the traversal start"
-}
 lassign [CreateTempRefSymbol $targetclass] targettype targetref
 set refcode "$targettype$targetref = $startref->$comp ; // $relspec \n"
 if {$cond} { # <1>
@@ -6503,6 +6498,62 @@ test codegen-44.0 {
 ----
 endif::showtests[]
 
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-51.0 {
+    Navigate class based association -- singular, start at associator
+} -setup {
+    validateutils genMiccaFile codegen51 {
+        domain codegen51 {
+            class A {
+                attribute value int -default 40
+            }
+            class X {}
+            class Y {}
+            association R1 -associator A X 1--1 Y
+
+            domainop void findys {} {
+                %<A findByName a1 aref>%
+                %<instance yref findOneRelated aref R1>%
+                printf("y name = %s\n", yref->base__INST.name) ;
+                %<instance xref findOneRelated aref ~R1>%
+                printf("x name = %s\n", xref->base__INST.name) ;
+            }
+        }
+        population codegen51 {
+            class A {
+                instance a1 R1 {X x1 Y y1}
+            }
+            class X {
+                instance x1
+            }
+            class Y {
+                instance y1
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen51.c
+    testConditions\
+        {[validateutils matchLines codegen51.c {
+            struct Y *yref ;
+            struct Y *t__T1 = aref->R1.forward ; // R1
+            yref = t__T1 ;
+        }]}\
+        {[validateutils matchLines codegen51.c {
+            struct X *xref ;
+            struct X *t__T2 = aref->R1.backward ; // ~R1
+            xref = t__T2 ;
+        }]}
+} -result {1}
+----
+endif::showtests[]
+
 When we encounter a set of instance references stored in an array,
 the generated code must set up a loop construct to visit all the
 members of the set.
@@ -6510,11 +6561,6 @@ members of the set.
 [source,tcl]
 ----
 <<TraverseRelChain: array reference>>=
-if {$startClass ne $sourceclass} {
-    error "relationship, [lindex $relspec 0], is from\
-        $sourceclass to $targetclass, got, $startClass,\
-        as the traversal start"
-}
 set itervar [CreateTempSymbol\
     Ctype "struct $targetclass *const *"\
     Type "ReferenceArray" Class $targetclass]
@@ -6657,11 +6703,6 @@ we again have generate code to iterate across the links.
 [source,tcl]
 ----
 <<TraverseRelChain: linked reference>>=
-if {$startClass ne $sourceclass} {
-    error "relationship, [lindex $relspec 0], is from\
-        $sourceclass to $targetclass, got, $startClass,\
-        as the traversal start"
-}
 set itervar [CreateTempSymbol Ctype "MRT_LinkRef *"\
     Type "ReferenceLink" Class $targetclass]
 lassign $comp termcomp linkcomp
@@ -6819,15 +6860,10 @@ value that is unconditional.
 [source,tcl]
 ----
 <<TraverseRelChain: reference to superclass>>=
-if {$startClass ni $sourceclass} {
-    error "relationship, [lindex $relspec 0], is from\
-        \"[join $sourceclass {, }]\", to $targetclass,\
-        got, $startClass, as the traversal start"
-}
-lassign [CreateTempRefSymbol $targetclass] targettype\
-        targetref
+lassign [CreateTempRefSymbol $targetclass] targettype targetref
 append result [IndentToBlock\
-    "$targettype$targetref = $startref->$comp ; // $relspec \n"]
+    "$targettype$targetref = $startref->$comp ; // $relspec \n"\
+]
 ----
 
 ifdef::showtests[]
@@ -6890,11 +6926,6 @@ related to an instance of the designated subclass.
 [source,tcl]
 ----
 <<TraverseRelChain: reference to subclass>>=
-if {$startClass ne $sourceclass} {
-    error "relationship, [lindex $relspec 0], is from\
-        $sourceclass to \"[join $targetclass {, }]\", got, $startClass,\
-        as the traversal start"
-}
 lassign [CreateTempRefSymbol $targetclass] targettype targetref
 set classDesc [GetClassDescriptor $domain $targetclass]
 set refcode "$targettype$targetref = $startref->$comp ; // $relspec\n"
@@ -6963,11 +6994,6 @@ supeclass instance.
 [source,tcl]
 ----
 <<TraverseRelChain: union subclass to superclass reference>>=
-if {$startClass ni $sourceclass} {
-    error "relationship, [lindex $relspec 0], is from\
-        \"[join $sourceclass {, }]\", to $targetclass,\
-        got, $startClass, as the traversal start"
-}
 lassign [CreateTempRefSymbol $targetclass] targettype targetref
 append result [IndentToBlock\
     "$targettype$targetref = ($targettype)((uintptr_t)$startref -\
@@ -7111,7 +7137,7 @@ generalizations and the various types of each.
 [source,tcl]
 ----
 <<generation support commands>>=
-proc LookUpRelationship {relspec} {
+proc LookUpRelationship {startclass relspec} {
     variable domain
 
     lassign $relspec relname destclass
@@ -7160,8 +7186,18 @@ assignAttribute [findRelated $sassocRef ~R32]\
 assignAttribute [findRelated $sassocRef ~R33]\
     {Class trgclass} {Conditionality trgcond}
 if {$dir eq "forw"} {
-   return [list $srcclass $trgclass reference $trgcond $relname]
+    if {$startclass ne $srcclass} {
+        error "relationship, $relname, is from\
+            $srcclass to $trgclass: got, $startclass,\
+            as the traversal start"
+    }
+    return [list $srcclass $trgclass reference $trgcond $relname]
 } else {
+    if {$startclass ne $trgclass} {
+        error "relationship, ~$relname, is from\
+            $trgclass to $srcclass: got, $startclass,\
+            as the traversal start"
+    }
     if {!$srcmult} {
         set type reference
         set comp ${relname}__BACK
@@ -7214,39 +7250,53 @@ if {!$srcmult} {
 }
 if {$destclass eq {}} {
     if {$dir eq "forw"} {
-        return [list\
-            $srcclass $assocclass $srctype $trgcond $srccomp\
-            $assocclass $trgclass reference false\
-            ${relname}.forward\
-        ]
+        if {$startclass eq $srcclass} {
+            return [list\
+                $srcclass $assocclass $srctype $trgcond $srccomp\
+                $assocclass $trgclass reference false ${relname}.forward\
+            ]
+        } elseif {$startclass eq $assocclass} {
+            return [list\
+                $assocclass $trgclass reference false ${relname}.forward\
+            ]
+        } else {
+            error "relationship, $relname, is from class based from\
+                $srcclass to $trgclass via $assocclass: got, $startclass,\
+                as the traversal start"
+        }
     } else {
-        return [list\
-            $trgclass $assocclass $trgtype $srccond $trgcomp\
-            $assocclass $srcclass reference false\
-            ${relname}.backward\
-        ]
+        if {$startclass eq $trgclass} {
+            return [list\
+                $trgclass $assocclass $trgtype $srccond $trgcomp\
+                $assocclass $srcclass reference false ${relname}.backward\
+            ]
+        } elseif {$startclass eq $assocclass} {
+            return [list\
+                $assocclass $srcclass reference false ${relname}.backward\
+            ]
+        } else {
+            error "relationship, ~$relname, is from class based from\
+                $trgclass to $srcclass via $assocclass: got, $startclass,\
+                as the traversal start"
+        }
     }
 } else {
     if {$destclass eq $assocclass} {
         if {$dir eq "forw"} {
-            return [list $srcclass $assocclass $srctype $trgcond\
-                $srccomp]
+            return [list $srcclass $assocclass $srctype $trgcond $srccomp]
         } else {
-            return [list $trgclass $assocclass $trgtype $srccond\
-                $trgcomp]
+            return [list $trgclass $assocclass $trgtype $srccond $trgcomp]
         }
     } elseif {$destclass eq $trgclass} {
         if {$dir eq "forw"} {
-            return [list $assocclass $trgclass reference false\
-                ${relname}.forward]
+            return [list $assocclass $trgclass reference false ${relname}.forward]
         } else {
             error "navigating forward from $assocclass arrives at\
                 $trgclass: got $destclass"
         }
     } elseif {$destclass eq $srcclass} {
         if {$dir eq "back"} {
-            return [list $assocclass $srcclass reference false\
-                ${relname}.backward]
+            return [list $assocclass $srcclass reference false ${relname}.backward]
         } else {
             error "navigating backward from $assocclass arrives at\
                 $srcclass: got $destclass"
@@ -7266,60 +7316,48 @@ and those using a union.
 set genRef [findRelated $relRef {~R30 Generalization}]
 set refGenRef [findRelated $genRef {~R43 ReferenceGeneralization}]
 if {[isNotEmptyRef $refGenRef]} {
-    <<LookUpRelationship: reference generalizations>>
+    set super [readAttribute [findRelated $refGenRef ~R36] Class]
+    set subs [findRelated $refGenRef ~R37]
+    set subnames [relation list [deRef $subs] Class]
+    set isRefGen true
 } else {
-    <<LookUpRelationship: union generalizations>>
+    set uGenRef [findRelated $genRef {~R43 UnionGeneralization}]
+    set super [readAttribute [findRelated $uGenRef ~R44] Class]
+    set subs [findRelated $uGenRef ~R45]
+    set subnames [relation list [deRef $subs] Class]
+    set isRefGen false
 }
 ----
 
 [source,tcl]
 ----
-<<LookUpRelationship: reference generalizations>>=
-set super [readAttribute [findRelated $refGenRef ~R36] Class]
-set subs [findRelated $refGenRef ~R37]
-set subnames [relation list [deRef $subs] Class]
+<<LookUpRelationship: generalizations>>=
 if {$dir eq "forw"} {
     if {$destclass ne {}} {
         error "generalization, $relname, cannot have a\
             destination specifier when traversing to the superclass"
+    } elseif {$startclass ni $subnames} {
+        error "relationship, $relname, is from\
+            \"[join $subnames {, }]\", to $targetclass,\
+            got, $startclass, as the traversal start"
     }
-    return [list $subnames $super reftosuper false $relname]
+    set reftype [expr {$isRefGen ? "reftosuper" : "uniontosuper"}]
+    return [list $startclass $super $reftype false $relname]
 } else {
     if {$destclass eq {}} {
-        error "generalization, $relname, must specify a\
+        error "generalization, ~$relname, must specify a\
             destination when traversing to a subclass"
+    } elseif {$startclass ne $super} {
+        error "relationship, ~$relname, is from\
+            $super to \"[join $subnames {, }]\", got, $startclass,\
+            as the traversal start"
     } elseif {$destclass ni $subnames} {
-        error "generalization, $relname, cannot traverse to\
+        error "generalization, ~$relname, cannot traverse to\
             class, $destclass: should be one of:\
             \"[join $subnames {, }]\""
     }
-    return [list $super $destclass reftosub false $relname]
-}
-----
-
-[source,tcl]
-----
-<<LookUpRelationship: union generalizations>>=
-set uGenRef [findRelated $genRef {~R43 UnionGeneralization}]
-set super [readAttribute [findRelated $uGenRef ~R44] Class]
-set subs [findRelated $uGenRef ~R45]
-set subnames [relation list [deRef $subs] Class]
-if {$dir eq "forw"} {
-    if {$destclass ne {}} {
-        error "generalization, $relname, cannot have a\
-            destination specifier when traversing to the superclass"
-    }
-    return [list $subnames $super uniontosuper false $relname]
-} else {
-    if {$destclass eq {}} {
-        error "generalization, $relname, must specify a\
-            destination when traversing to a subclass"
-    } elseif {$destclass ni $subnames} {
-        error "generalization, $relname, cannot traverse to\
-            class, $destclass: should be one of:\
-            \"[join $subnames {, }]\""
-    }
-    return [list $super $destclass uniontosub false $relname]
+    set reftype [expr {$isRefGen ? "reftosub" : "uniontosub"}]
+    return [list $super $destclass $reftype false $relname]
 }
 ----
 
@@ -7364,7 +7402,7 @@ proc InstanceFindOneRelated {instref startref args} {
     set isCond false
 
     foreach relspec $args {
-        set relinfo [LookUpRelationship $relspec]
+        set relinfo [LookUpRelationship $startClass $relspec]
         while {[llength $relinfo] != 0} {
             # puts "relinfo = \"$relinfo\""
             set relinfo [lassign $relinfo sourceclass targetclass reftype cond\

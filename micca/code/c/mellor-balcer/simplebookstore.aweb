@@ -333,6 +333,16 @@ class Product {
     attribute description char -dimension 256
     attribute website char -dimension 256
     attribute currentlyAvailable bool
+
+    classop {struct Product *} findByProductID {productID {char const *}} {
+        %<Product foreachInstance product>%
+            if (strcmp(productID, %<instance product attribute productID>%) == 0) {
+                return product ;
+            }
+        %<end>%
+
+        return NULL ;
+    }
 }
 ----
 
@@ -653,7 +663,7 @@ associated with it.
 ----
 <<Order Class Definition>>=
 class Order {
-    attribute orderID unsigned
+    attribute orderID MRT_InstId
     attribute dateOrderPlaced char -dimension 64
     attribute totalValue unsigned
     attribute recipient char -dimension 128
@@ -662,6 +672,12 @@ class Order {
 
     statemodel {
         <<Order State Model>>
+    }
+
+    classop unsigned genOrderID {} {
+        static unsigned orderID = 100 ;
+
+        return orderID ++ ;
     }
 }
 ----
@@ -754,16 +770,16 @@ state SubmittingCharge {
         billingAddress {char const *}
         cardExpirationDate {char const *}
         cardholderName {char const *}} {
-    unsigned totalValue = %<my attribute totalValue>% ;
+    unsigned orderID = %<my attribute orderID>% ;
     unsigned chargeID = %<CreditCardCharge operation genChargeID>% ;
-    MRT_ClassId orderid = %<my instid>% ;
-    %<CreditCardCharge createasync makeCharge {order orderid}\
+    unsigned totalValue = %<my attribute totalValue>% ;
+    %<CreditCardCharge createasync makeCharge {order orderID}\
         chargeID chargeID\
         accountNumber accountNumber\
         billingAddress billingAddress\
         cardholderName cardholderName\
         cardExpirationDate cardExpirationDate\
-        chargeAmount totalValue>%
+        chargeAmount totalValue>% // <1>
 }
 
 transition SubmittingCharge - paymentApproved -> BeingPackedandShipped
@@ -794,18 +810,16 @@ to be translated into a different set of idoms in Tcl.
 state PaymentNotApproved {} {
     %<instance customer findOneRelated self R5>%
     char const *email = %<instance customer attribute email>% ;
-    %<external OnlineCustomer_chargeDeclined email email>% ;
+    %<external OnlineCustomer_chargeDeclined email email>% ; // <1>
 }
 
 transition PaymentNotApproved - subCharge -> SubmittingCharge
 ----
-<1> The action language text from the model is shown on the line immediately
-above.
-`Micca` does not have any direct support for generating events to external
+<1> `Micca` does not have any direct support for generating events to external
 entities.
 Instead,
 we create explict bridge operations, in this case 
-`EE_OnlineCustomer::chargeDeclined`, passing the required parameters.
+`OnlineCustomer_chargeDeclined`, passing the required parameters.
 That bridge operation can then map the semantics of a _declined charge_
 onto the appropriate operation of the domain that represents the
 Online Customer external entity.
@@ -820,10 +834,27 @@ We will see examples of this in the <<externalentities>> section below.
 ----
 <<Order State Model>>=
 state BeingPackedandShipped {} {
+    %<instance customer findOneRelated self R5>%
+    char const *email = %<instance customer attribute email>% ;
+    %<external OnlineCustomer_chargeApproved email email>% ;
+
+    MRT_ClassId orderid = %<my instid>% ;
+    unsigned shipmentID = %<Shipment operation genShipmentID>% ;
+    char const *recipient = %<my attribute recipient>% ;
+    char const *deliveryAddress = %<my attribute deliveryAddress>% ;
+    char const *contactPhone = %<my attribute contactPhone>% ;
+    %<Shipment createasync requestShipment {order orderid}\
+        shipmentID shipmentID\
+        recipient recipient\
+        deliveryAddress deliveryAddress\
+        contactPhone contactPhone>%
 }
 transition BeingPackedandShipped - orderDelivered -> DeliveredtoCustomer
 
 state DeliveredtoCustomer {} {
+    %<instance customer findOneRelated self R5>%
+    char const *email = %<instance customer attribute email>% ;
+    %<external OnlineCustomer_orderReportedDelivered email email>% ; // <1>
 }
 ----
 <1> So the question arises as to whether we should test the `customer`
@@ -893,28 +924,25 @@ so we want to be explicit about the initial state.
 transition @ - addSelection -> NewSelection
 
 state NewSelection {
-    cartID unsigned
-    productID unsigned
-    quantity unsigned} {
+        cartID unsigned
+        productID {char const *}
+        quantity unsigned} {
+    %<my attribute quantity>% = quantity ;
+
+    %<ShoppingCart instref cart>%
+    cart = %<ShoppingCart operation findByCartID cartID cartID>% ;
+    %<Product instref product>%
+    product = %<Product operation findByProductID productID productID>% ;
+    %<R4 relate cart product self>%
+
+    %<my attribute unitPriceOfSelection>% =
+            %<instance product attribute unitPrice>% ;
+
+    %<my signal changeQuantity quantity quantity>%
+// <1>
 }
 transition NewSelection - changeQuantity -> ChangingQuantity
 ----
-<1> So this is a bit tricky here.
-If an instance of `ProductSelection` is created asynchronously,
-then this state actvity is executed.
-We need to link up the references to the participating instances of
-`Product` and `ShoppingCart`.
-We do that by updating the `productId` and `cartID` referential attributes.
-However, synchronous creation happens as a side effect of linking
-instances of `Product` and `ShoppingCart` across R4.
-In that case, the referential attributes are set by the `link` operation,
-the instance is placed in the `NewSelection` state and the
-above state activity is *not* executed.
-This also implies that the synchonous creation must supply values for
-the `quantity`, `unitPriceOfSelection` and `selectionValue` attributes.
-In this case the attributes have been given default values so we don't
-really have to supply them unless they are to be different from the default.
-Okay, I said it was a bit tricky.
 
 Here we run into a quandary in the model.
 The two states below signal the `cartUpdated` event to a `ShoppingCart`.
@@ -930,11 +958,28 @@ See the <<shoppingcartclass>> for the definition of the operation.
 [source,tcl]
 ----
 <<Product Selection State Model>>=
-state ChangingQuantity {quantityOfSelection unsigned} {
+state ChangingQuantity {quantity unsigned} {
+    %<my attribute quantity>% = quantity ;
+    if (%<my attribute quantity>% == 0) {
+        %<my signal removeSelection>%
+    } else {
+        %<instance cart findOneRelated self ~R4>%
+        %<instance cart operation cartUpdated>% ;
+    }
 }
 transition ChangingQuantity - removeSelection -> RemovingSelection
 
 state RemovingSelection {} {
+    %<instance product findOneRelated self R4>%
+    %<instance cart findOneRelated self ~R4>%
+    %<R4 unrelate cart product self>%
+
+    %<instset prodset selectRelated cart R4>%
+    if (%<instset prodset empty>%) {
+        %<instance cart signal cancel>%
+    } else {
+        %<instance cart operation cartUpdated>% ;
+    }
 }
 terminal RemovingSelection
 ----
@@ -946,6 +991,7 @@ terminal RemovingSelection
 ----
 <<Shopping Cart Class Definition>>=
 class ShoppingCart {
+    attribute cartID unsigned
     attribute totalValue unsigned -default 0
 
     statemodel {
@@ -953,7 +999,28 @@ class ShoppingCart {
     }
 
     instop void cartUpdated {} {
+        %<my attribute totalValue>% = 0 ;
+        %<instance psel foreachRelated self {R4 ProductSelection}>%
+            %<my attribute totalValue>% +=
+                    %<instance psel attribute selectionValue>% ;
+        %<end>%
     } ; # <1>
+
+    classop unsigned genCartID {} {
+        static unsigned cartID = 1 ;
+
+        return cartID++ ;
+    }
+
+    classop {struct ShoppingCart *} findByCartID {cartID unsigned} {
+        %<ShoppingCart foreachInstance cart>%
+            if (cartID == %<instance cart attribute cartID>%) {
+                return cart ;
+            }
+        %<end>%
+
+        return NULL ;
+    }
 }
 ----
 <1> The intent here is much simpler than the code looks.
@@ -988,15 +1055,22 @@ how those commands work.
 <<Shopping Cart State Model>>=
 transition @ - startCart -> NewOrder
 
-state NewOrder {
-    productID unsigned
-    quantity unsigned} {
+state NewOrder {productID {char const *} quantity unsigned} {
+    %<my signal addSelection productID productID quantity quantity>%
 }
 transition NewOrder - addSelection -> AddingSelectiontoOrder
 
-state AddingSelectiontoOrder {
-    productID unsigned
-    quantity unsigned} {
+state AddingSelectiontoOrder {productID {char const *} quantity unsigned} {
+    %<Product instref product>%
+    product = %<Product operation findByProductID productID productID>% ;
+    unsigned unitPrice = %<instance product attribute unitPrice>% ;
+    unsigned selectionValue = unitPrice * quantity ;
+    %<ProductSelection create newSelection\
+            quantity quantity\
+            unitPriceOfSelection unitPrice\
+            selectionValue selectionValue>%
+    %<R4 relate self product newSelection>%
+// <1>
 }
 transition AddingSelectiontoOrder - addSelection -> AddingSelectiontoOrder
 transition AddingSelectiontoOrder - cancel -> CancelingEntireOrder
@@ -1015,10 +1089,16 @@ by the `R4 link` command.
 ----
 <<Shopping Cart State Model>>=
 state CancelingEntireOrder {} {
+    %<instance selection foreachRelated self {R4 ProductSelection}>%
+        %<instance product findOneRelated selection R4>%
+        %<R4 unrelate self product selection>%
+        %<instance selection delete>% // <1>
+    %<end>%
 }
-terminal CancelingEntireOrder ; # <1>
+terminal CancelingEntireOrder ; # <2>
 ----
-<1> The `CancelingEntireOrder` is a terminal state and the instance
+<1> The model seem to be missing the deletion of the associative class.
+<2> The `CancelingEntireOrder` is a terminal state and the instance
 will be automatically deleted when the state activity finishes.
 
 [source,tcl]
@@ -1097,6 +1177,7 @@ in the state activities for the `CreditCardCharge` class.
 transition @ - makeCharge -> RequestingChargeApproval
 
 state RequestingChargeApproval {order unsigned} {
+// <1>
 }
 transition RequestingChargeApproval - chargeProcessed -> ProcessingCompleted
 transition RequestingChargeApproval - chargeProcessingNotCompleted ->\
@@ -1110,6 +1191,9 @@ Clearly, `R7` is the one that is intended.
 ----
 <<Credit Card Charge State Model>>=
 state ProcessingCompleted {resultCode int} {
+// <1>
+// <2>
+// <3>
 }
 ----
 <1> Here again we need to use `R7`.
@@ -1123,6 +1207,7 @@ the charge that actually paid for the order.
 ----
 <<Credit Card Charge State Model>>=
 state DeclineForTimeout {} {
+// <1>
 }
 ----
 <1> And the final substitution of `R7` for what was orginally `R8` in the
@@ -1153,14 +1238,14 @@ The Shipping subsystem consists of the following classes.
 <<Shipment Class Definition>>=
 class Shipment {
     attribute shipmentID unsigned
-    attribute trackingNumber char -dimension 32
+    attribute trackingNumber char -dimension 32 -default {""}
 
     attribute recipient char -dimension 128
     attribute deliveryAddress char -dimension 128
     attribute contactPhone char -dimension 32
-    attribute timePrepared char -dimension 32
-    attribute timePickedUp char -dimension 32
-    attribute timeDelivered char -dimension 32
+    attribute timePrepared char -dimension 32 -default {""}
+    attribute timePickedUp char -dimension 32 -default {""}
+    attribute timeDelivered char -dimension 32 -default {""}
     attribute waitingToBePacked bool -default true
 
     statemodel {
@@ -1226,6 +1311,9 @@ translated Tcl code to the action language source.
 transition @ - requestShipment -> PreparingShipment
 
 state PreparingShipment {order unsigned} {
+// <1>
+// <2>
+// <3>
 }
 transition PreparingShipment - packed -> PackedandAwaitingTrackingNumber
 transition PreparingShipment - trackingNumberAssigned ->\
@@ -1298,6 +1386,12 @@ instop void updateTrackingInfo {
 }
 
 instop void updatePackingInfo {clerkID unsigned} {
+}
+
+classop unsigned genShipmentID {} {
+    static unsigned shipmentID = 200 ;
+
+    return shipmentID++ ;
 }
 ----
 
@@ -1510,6 +1604,8 @@ always ship the requested quantity of each item.
 ----
 <<Shipping Clerk State Model>>=
 state SealingBox {} {
+// <1>
+// <2>
 }
 transition SealingBox - boxSealed -> AttachingShippingLabel
 ----
@@ -1677,7 +1773,7 @@ we will supply values for those classes that are not created at run time.
 
 Note that populating a domain before running it is, in general, a necessary
 task and one that is frequently overlooked.
-Depending on the quanity of data,
+Depending on the quantity of data,
 population can be a large undertaking.
 It is easy to forget about the population step as we are involved
 in working out the domain and obtaining its translation.

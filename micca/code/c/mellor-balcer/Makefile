@@ -10,7 +10,11 @@
 #*--
 #
 
-CFLAGS	= -std=c11 -g -Og -Wall
+LDFLAGS = -g
+CFLAGS	= -std=c11 -g -Og -Wall\
+	-Wno-unused-variable\
+	-Wno-unused-function\
+	$(NULL)
 CPPFLAGS =\
 	 -D_POSIX_C_SOURCE=200112L\
 	 -D_ISOC11_SOURCE\
@@ -55,6 +59,7 @@ CLEANFILES =\
 	$(TESTS)\
 	$(LOGS)\
 	$(DIAGS)\
+	*.o\
 	$(NULL)
 
 A2XOPTS =\
@@ -102,7 +107,7 @@ doc : $(PDF)
 
 code : bookstore
 
-bookstore : bookstore.c micca_rt.c
+bookstore : bookstore.o micca_rt.o
 
 bookstore.c : bookstore.h micca_rt.h
 
