@@ -663,8 +663,8 @@ associated with it.
 ----
 <<Order Class Definition>>=
 class Order {
-    attribute orderID MRT_InstId
-    attribute dateOrderPlaced char -dimension 64
+    attribute orderID unsigned
+    attribute dateOrderPlaced char -dimension 64 -default {""}
     attribute totalValue unsigned
     attribute recipient char -dimension 128
     attribute deliveryAddress char -dimension 128
@@ -770,10 +770,9 @@ state SubmittingCharge {
         billingAddress {char const *}
         cardExpirationDate {char const *}
         cardholderName {char const *}} {
-    unsigned orderID = %<my attribute orderID>% ;
     unsigned chargeID = %<CreditCardCharge operation genChargeID>% ;
     unsigned totalValue = %<my attribute totalValue>% ;
-    %<CreditCardCharge createasync makeCharge {order orderID}\
+    %<CreditCardCharge createasync makeCharge {order self}\
         chargeID chargeID\
         accountNumber accountNumber\
         billingAddress billingAddress\
@@ -790,9 +789,11 @@ creation event, is accomplished as the `createasync` subcommand on the
 target class.
 Again, all the values of the attributes must be supplied since
 the instance must be created before the creation event is dispatched.
-The `[list $self]` argument is the parameter of the creation event itself,
-_i.e._ the instance reference of an order is a parameter to the `makeCharge`
-event.
+The model is a bit inconsistent here in the event parameters.
+The receiving creation state treats `order` as an instance reference,
+but the action language send `orderID` as the parameter.
+We use the instance reference here to agree with the receiving
+state activity.
 
 Note that we have factored the `makeCharge` event parameters.
 In the model graphic on page 342,
@@ -809,8 +810,10 @@ to be translated into a different set of idoms in Tcl.
 <<Order State Model>>=
 state PaymentNotApproved {} {
     %<instance customer findOneRelated self R5>%
+    MRT_InstId customerID = %<instance customer instid>% ;
     char const *email = %<instance customer attribute email>% ;
-    %<external OnlineCustomer_chargeDeclined email email>% ; // <1>
+    %<external OnlineCustomer_chargeDeclined customerID customerID\
+            email email>% ; // <1>
 }
 
 transition PaymentNotApproved - subCharge -> SubmittingCharge
@@ -835,15 +838,16 @@ We will see examples of this in the <<externalentities>> section below.
 <<Order State Model>>=
 state BeingPackedandShipped {} {
     %<instance customer findOneRelated self R5>%
+    MRT_InstId customerID = %<instance customer instid>% ;
     char const *email = %<instance customer attribute email>% ;
-    %<external OnlineCustomer_chargeApproved email email>% ;
+    %<external OnlineCustomer_chargeApproved customerID customerID\
+            email email>% ;
 
-    MRT_ClassId orderid = %<my instid>% ;
     unsigned shipmentID = %<Shipment operation genShipmentID>% ;
     char const *recipient = %<my attribute recipient>% ;
     char const *deliveryAddress = %<my attribute deliveryAddress>% ;
     char const *contactPhone = %<my attribute contactPhone>% ;
-    %<Shipment createasync requestShipment {order orderid}\
+    %<Shipment createasync requestShipment {order self}\
         shipmentID shipmentID\
         recipient recipient\
         deliveryAddress deliveryAddress\
@@ -853,8 +857,10 @@ transition BeingPackedandShipped - orderDelivered -> DeliveredtoCustomer
 
 state DeliveredtoCustomer {} {
     %<instance customer findOneRelated self R5>%
+    MRT_InstId customerID = %<instance customer instid>% ;
     char const *email = %<instance customer attribute email>% ;
-    %<external OnlineCustomer_orderReportedDelivered email email>% ; // <1>
+    %<external OnlineCustomer_orderReportedDelivered customerID customerID\
+            email email>% ; // <1>
 }
 ----
 <1> So the question arises as to whether we should test the `customer`
@@ -1113,6 +1119,20 @@ state EstablishingCustomerandVerifyingPayment {
         customerName {char const *}
         customerPhone {char const *}
         shippingAddress {char const *}} {
+    unsigned totalValue = %<my attribute totalValue>% ;
+    unsigned orderID = %<Order operation genOrderID>% ;
+    %<Order createasync checkOut {
+                cart self
+                accountNumber accountNumber
+                billingAddress billingAddress
+                cardExpirationDate cardExpirationDate
+                cardholderName cardholderName
+                customerEmail customerEmail}\
+            orderID orderID\
+            totalValue totalValue\
+            recipient customerName\
+            deliveryAddress shippingAddress\
+            contactPhone customerPhone>%
 }
 ----
 
@@ -1176,8 +1196,27 @@ in the state activities for the `CreditCardCharge` class.
 <<Credit Card Charge State Model>>=
 transition @ - makeCharge -> RequestingChargeApproval
 
-state RequestingChargeApproval {order unsigned} {
-// <1>
+state RequestingChargeApproval {order {struct Order *}} {
+    %<Order instref myorder>%
+    myorder = order ;
+    %<R7 relate self myorder>% // <1>
+    MRT_InstId cccID = %<my instid>% ;
+    char const *accountNumber = %<my attribute accountNumber>% ;
+    char const *billingAddress = %<my attribute billingAddress>% ;
+    char const *cardholderName = %<my attribute cardholderName>% ;
+    char const *cardExpirationDate = %<my attribute cardExpirationDate>% ;
+    unsigned transactionID = %<my attribute chargeID>% ;
+    unsigned chargeAmount = %<my attribute chargeAmount>% ;
+    %<external CreditCardCompany_requestChargeApproval\
+        cccID cccID\
+        accountNumber accountNumber\
+        billingAddress billingAddress\
+        cardholderName cardholderName\
+        cardExpirationDate cardExpirationDate\
+        transactionID transactionID\
+        chargeAmount chargeAmount>% ;
+
+    %<my delaysignal 60000 chargeProcessingNotCompleted>%
 }
 transition RequestingChargeApproval - chargeProcessed -> ProcessingCompleted
 transition RequestingChargeApproval - chargeProcessingNotCompleted ->\
@@ -1190,10 +1229,16 @@ Clearly, `R7` is the one that is intended.
 [source,tcl]
 ----
 <<Credit Card Charge State Model>>=
-state ProcessingCompleted {resultCode int} {
-// <1>
-// <2>
-// <3>
+state ProcessingCompleted {resultCode AP_Code} {
+    %<my attribute approvalCode>% = resultCode ;
+    %<instance order findOneRelated self R7>% // <1>
+    %<my canceldelayed chargeProcessingNotCompleted>% // <2>
+    if (resultCode == AP_approved) {
+        %<R8 relate self order>% // <3>
+        %<instance order signal paymentApproved>%
+    } else {
+        %<instance order signal paymentDeclined>%
+    }
 }
 ----
 <1> Here again we need to use `R7`.
@@ -1207,7 +1252,9 @@ the charge that actually paid for the order.
 ----
 <<Credit Card Charge State Model>>=
 state DeclineForTimeout {} {
-// <1>
+    %<my attribute approvalCode>% = AP_connectionFailed ;
+    %<instance order findOneRelated self R7>% // <1>
+    %<instance order signal paymentDeclined>%
 }
 ----
 <1> And the final substitution of `R7` for what was orginally `R8` in the
@@ -1310,10 +1357,21 @@ translated Tcl code to the action language source.
 <<Shipment State Model>>=
 transition @ - requestShipment -> PreparingShipment
 
-state PreparingShipment {order unsigned} {
-// <1>
-// <2>
-// <3>
+state PreparingShipment {order {struct Order *}} {
+    %<Order instref myorder>%
+    myorder = order ;
+    %<R6 relate self myorder>%
+
+    unsigned orderID = %<instance myorder attribute orderID>% ;
+    %<Warehouse instref warehouse>% // <1>
+    warehouse = %<Warehouse operation chooseWarehouse orderID orderID>% ;
+    %<R24 relate self warehouse>%
+
+    %<instance selection foreachRelated myorder R10 {R4 ProductSelection}>%
+        %<ShipmentItem create item>%
+        %<R9 relate self selection item>%
+    %<end>% // <2>
+    %<instance warehouse signal shipmentReadyToPack>% // <3>
 }
 transition PreparingShipment - packed -> PackedandAwaitingTrackingNumber
 transition PreparingShipment - trackingNumberAssigned ->\
@@ -1352,23 +1410,31 @@ Not sure why this was important, but it's there.
 ----
 <<Shipment State Model>>=
 state PackedandAwaitingTrackingNumber {clerkID unsigned} {
+    %<my operation updatePackingInfo clerkID clerkID>% ;
 }
 transition PackedandAwaitingTrackingNumber - trackingNumberAssigned ->\
     NumberAssigned
 
 state NumberAssignedandWaitingtobePacked {
         shippingCompany {char const *}
-        trackingNumber unsigned} {
+        trackingNumber {char const *}} {
+    %<my operation updateTrackingInfo\
+            shippingCompany shippingCompany\
+            trackingNumber trackingNumber>% ;
 }
 transition NumberAssignedandWaitingtobePacked - packed -> Packed
 
 state NumberAssigned {
         shippingCompany {char const *}
-        trackingNumber unsigned} {
+        trackingNumber {char const *}} {
+    %<my operation updateTrackingInfo\
+            shippingCompany shippingCompany\
+            trackingNumber trackingNumber>% ;
 }
 transition NumberAssigned - pickedUp -> InTransittoCustomer
 
 state Packed {clerkID unsigned} {
+    %<my operation updatePackingInfo clerkID clerkID>% ;
 }
 transition Packed - pickedUp -> InTransittoCustomer
 ----
@@ -1382,10 +1448,24 @@ The only thing we have done here is to place duplicated code into one place.
 <<Shipment Operations>>=
 instop void updateTrackingInfo {
         shippingCompany {char const *}\
-        trackingNumber unsigned} {
+        trackingNumber {char const *}} {
+    strcpy(%<my attribute trackingNumber>%,trackingNumber) ;
+    %<ShippingCompany instref company>%
+    company = %<ShippingCompany operation findByCompanyName\
+            companyName shippingCompany>% ;
+    %<R21 relate self company>%
 }
 
 instop void updatePackingInfo {clerkID unsigned} {
+    time_t now ;
+    time(&now) ;
+    strcpy(%<my attribute timePrepared>%, ctime(&now)) ;
+    %<WarehouseClerk instref clerk>%
+    clerk = %<WarehouseClerk operation findByClerkID clerkID clerkID>% ;
+    %<R22 relate self clerk>%
+    
+    MRT_InstId shipmentID = %<my instid>% ;
+    %<external ShippingCompany_shipmentReadyForPickup shipmentID shipmentID>% ;
 }
 
 classop unsigned genShipmentID {} {
@@ -1402,10 +1482,18 @@ the last two states track the delivery of the shipment.
 ----
 <<Shipment State Model>>=
 state InTransittoCustomer {} {
+    time_t now ;
+    time(&now) ;
+    strcpy(%<my attribute timePickedUp>%, ctime(&now)) ;
 }
 transition InTransittoCustomer - deliveryConfirmed -> Delivered
 
 state Delivered {timeDelivered {char const *}} {
+    time_t now ;
+    time(&now) ;
+    strcpy(%<my attribute timeDelivered>%, ctime(&now)) ;
+    %<instance order findOneRelated self R6>%
+    %<instance order signal orderDelivered>%
 }
 ----
 
@@ -1422,6 +1510,18 @@ class ShippingCompany {
     attribute localDispatchPhone char -dimension 32
     attribute localOffice char -dimension 128
     attribute localContact char -dimension 64
+
+    classop {struct ShippingCompany *} findByCompanyName {
+            companyName {char const *}} {
+        %<ShippingCompany foreachInstance company>%
+            if (strcmp(%<instance company attribute companyName>%,
+                    companyName) == 0) {
+                return company ;
+            }
+        %<end>%
+
+        return NULL ;
+    }
 }
 ----
 
@@ -1455,7 +1555,29 @@ Here, we do the simplest thing we can and simply choose an arbitrary
 [source,tcl]
 ----
 <<Warehouse Operations>>=
-classop void chooseWarehouse {orderID unsigned} {
+classop {struct Warehouse *} chooseWarehouse {orderID unsigned} {
+    %<Warehouse idtoref 0 warehouse>%
+    return warehouse ;
+}
+
+instop {struct Shipment *} findReadyShipment {} {
+    %<instance readyShipment foreachRelated self ~R24>%
+        if (%<instance readyShipment attribute waitingToBePacked>%) {
+            return readyShipment ;
+        }
+    %<end>%
+
+    return NULL ;
+}
+
+instop {struct ShippingClerk *} findFreeShippingClerk {} {
+    %<instance freeClerk foreachRelated self ~R25 {~R27 ShippingClerk}>%
+        if (%<instance freeClerk attribute awaitingAssignment>%) {
+            return freeClerk ;
+        }
+    %<end>%
+
+    return NULL ;
 }
 ----
 
@@ -1483,14 +1605,36 @@ This is a common assigner idom.
 ----
 <<Warehouse State Model>>=
 state WaitingforaShipment {} {
+    %<Shipment instref readyShipment>%
+    readyShipment = %<my operation findReadyShipment>% ;
+    if (readyShipment != NULL) {
+        %<my signal shipmentReadyToPack>%
+    }
 }
 transition WaitingforaShipment - shipmentReadyToPack -> WaitingforaFreeClerk
 
 state WaitingforaFreeClerk {} {
+    %<ShippingClerk instref freeClerk>%
+    freeClerk = %<my operation findFreeShippingClerk>% ;
+    if (freeClerk != NULL) {
+        %<my signal clerkFree>%
+    }
 }
 transition WaitingforaFreeClerk - clerkFree -> AssigningClerktoShipment
 
 state AssigningClerktoShipment {} {
+    %<Shipment instref readyShipment>%
+    readyShipment = %<my operation findReadyShipment>% ;
+
+    %<ShippingClerk instref freeClerk>%
+    freeClerk = %<my operation findFreeShippingClerk>% ;
+
+    %<R23 relate freeClerk readyShipment>%
+    %<instance readyShipment attribute waitingToBePacked>% = false ;
+    %<instance freeClerk attribute awaitingAssignment>% = false ;
+
+    %<instance freeClerk signal clerkAssigned>%
+    %<my signal clerkAssignedToShipment>%
 }
 transition AssigningClerktoShipment - clerkAssignedToShipment ->\
         WaitingforaShipment
@@ -1506,6 +1650,16 @@ class WarehouseClerk {
     attribute clerkID unsigned
     attribute clerkName char -dimension 64
     attribute goOffDutyAtEndOfJob bool -default false ; # <1>
+
+    classop {struct WarehouseClerk *} findByClerkID {clerkID unsigned} {
+        %<WarehouseClerk foreachInstance clerk>%
+            if (%<instance clerk attribute clerkID>% == clerkID) {
+                return clerk ;
+            }
+        %<end>%
+
+        return NULL ;
+    }
 }
 ----
 <1> This attribute is not in the model graphic, but it is mentioned
@@ -1530,6 +1684,11 @@ class ShippingClerk {
 
     statemodel {
         <<Shipping Clerk State Model>>
+    }
+
+    classop int randomdelay {} {
+        // random number 1 - 10 in tenths of a second
+        return (rand() % 10 + 1) * 100 ;
     }
 }
 ----
@@ -1557,14 +1716,6 @@ We will put some time delay in the events to try to simulate the time
 take to accomplish the tasks in the physical world.
 It is easy enough to capture this strategy in a procedure.
 
-[source,tcl]
-----
-<<Translation Helpers>>=
-proc ::bookstore::ShippingClerk::randomdelaysignal {instref event {max 10}} {
-    delaysignal [expr {int(rand() * $max) * 100}] $instref $event
-}
-----
-
 This procedure will generate a delayed event at a pseudo-random time
 between 0 and `max` tenths of a second.
 We use it below to drive the `ShippingClerk` state model through the
@@ -1578,15 +1729,28 @@ states that were not completely specified in the model graphic.
 transition @ - startShipping -> WaitingforaJob
 
 state WaitingforaJob {} {
+    %<my attribute awaitingAssignment>% = true ;
+    %<instance warehouse findOneRelated self R27 R25>%
+    %<instance warehouse signal clerkFree>%
 }
 transition WaitingforaJob - clerkAssigned -> SelectingBooks
 transition WaitingforaJob - offDuty -> OffDuty
 
 state SelectingBooks {} {
+    %<instance shipment findOneRelated self R23>%
+    MRT_InstId clerkID = %<my instid>% ;
+    unsigned shipmentID = %<instance shipment attribute shipmentID>% ;
+    %<external ShippingClerk_shipmentReadyToPack clerkID clerkID\
+            shipmentID shipmentID>% ;
+
+    int time = %<ShippingClerk operation randomdelay>% ;
+    %<my delaysignal time booksSelected>%
 }
 transition SelectingBooks - booksSelected -> PackingBox
 
 state PackingBox {} {
+    int time = %<ShippingClerk operation randomdelay>% ;
+    %<my delaysignal time boxPacked>%
 }
 transition PackingBox - boxPacked -> SealingBox
 ----
@@ -1604,108 +1768,62 @@ always ship the requested quantity of each item.
 ----
 <<Shipping Clerk State Model>>=
 state SealingBox {} {
-// <1>
-// <2>
+    // <1>
+    %<instset items selectRelated self R23 {R9 ShipmentItem}>%
+    %<instset items foreachSelected item>%
+        %<instance selection findOneRelated item R9>%
+        %<instance item attribute quantityShipped>% =
+                %<instance selection attribute quantity>% ;
+    %<end>%
+    int time = %<ShippingClerk operation randomdelay>% ;
+    %<my delaysignal time boxSealed>%
 }
 transition SealingBox - boxSealed -> AttachingShippingLabel
 ----
-<1> We will need a relation value that contains the `quantity` attributes
-for the `ProductSelection` instances.
-It is used below.
-<2> There are several way in which we could accomplish updating
-`quantityShipped` attribute of the `ShippmentItems` instances.
-One way would be to traverse `R23` and `R9` to obtain a set of `ShipmentItem`
+<1> We accomplish updating
+`quantityShipped` attribute of the `ShippmentItems` instances
+by traversing `R23` and `R9` to obtain a set of `ShipmentItem`
 instance references and then iterate across them, continuing along `R9`
 to obtain the corresponding `ProductSelection` instance.
-Then we could read the `quantity` attribute and use its value to update
+We then read the `quantity` attribute and use its value to update
 the `quantityShipped` value.
-Alternatively, we can avoid all the iterative stuff and do this in a
-much more relational fashion.
-Relational algebra eliminates virtually all the explicit iteration in
-state activities since relation values are sets and the algebra operates on
-the entire value at one time.
-In this case we want to use the `update` command to change non-identifying
-attributes to new values.
-This command is supplied by `micca` specifically for these kinds of
-situations.
-To use `ShipmentItem update` we need a relation value that has
-a heading consisting of the identifier of `ShipmentItem` and with any
-additional attributes we wish to modify, in this case `quantityShipped`.
-The five commands in the `pipe` compute the needed relation value.
-. `findRelated` traverse `R23` and `R9` ending at `ShipmentItem`, the
-associative class.
-. `deRef` dereferences the instance reference into a relation value so
-that we can now operate on it with the next three commands.
-. `relation join` performs a join on the `ProductSelection` projection
-that contains the `quantity` attributes
-and yields a new relation value that contains tuples
-where the `productID` and `cartID`
-attribute values match those in the `ShipmentItem` value.
-This will give a relation value with a `quantity` attribute which properly
-corresponds to the instances of `ShippmentItem`.
-. We can now begin to shape the heading of the joined value to match what
-we need.
-We need the `shipmentID`, `productID` and `cartID` attributes to identify
-an instance of `ShipmentItem` and the `quantity` attribute is what we want
-to magically turn into the `quantityShipped` attribute.
-. The magic is provided by using `relation rename` to rename the
-`quantity` attribute to be `quantityShipped`.
-The heading of the resulting relation value is now just what we need to
-update into the `ShipmentItem` instances.
-
-The relational approach to performing the update of the `quantityShipped`
-attributes will certainly seem strained and confusing if you are not
-familiar with the algebraic operators.
-If you have had some experience programming in SQL,
-it might not seem that different, although the approach to computing
-results in SQL and TclRAL are quite different.
-In the end,
-the update is a single statement that clearly shows we are
-updating the `ShipmentItem` instances with something, even if that something
-takes several steps to compute.
-Sadly,
-most action languages take an imperative and iterative approach to these
-types of computations.
-It is relatively easy to deduce how to obtain any required iteration when
-the computation is formulated relationally.
-The opposite is not true.
-For comparison we state the iterative approach below.
-
-[source,tcl]
-----
-set items [findRelated $self R23 {R9 ShipmentItem}]
-forAllRefs item $items {
-    set selection [findRelated $item R9]
-    updateAttribute $item quantityShipped [readAttribute $selection quantity]
-} ; # <1>
-----
-<1> `Micca` does provide a means to iterate across a set of instance references.
-It is not that iteration is bad or unnecessary.
-It is simply that it is often overused when _set at a time_ operations
-are readily available.
-
-Although shorter to write,
-it performs a lot more computation as the relationships must be navigated
-repeatedly to perform what is equivalent to a single relational join.
 
 [source,tcl]
 ----
 <<Shipping Clerk State Model>>=
 state AttachingShippingLabel {} {
+    int time = %<ShippingClerk operation randomdelay>% ;
+    %<my delaysignal time shippingLabelAttached>%
 }
 transition AttachingShippingLabel - shippingLabelAttached ->\
     DeliveringBoxtoLoadingDock
 
 state DeliveringBoxtoLoadingDock {} {
+    int time = %<ShippingClerk operation randomdelay>% ;
+    %<my delaysignal time boxAtLoadingDoc>%
 }
 transition DeliveringBoxtoLoadingDock - boxAtLoadingDoc -> CompletingJob
 
 state CompletingJob {} {
+    %<instance currentShipment findOneRelated self R23>%
+    %<instance clerk findOneRelated self R27>%
+    unsigned clerkID = %<instance clerk attribute clerkID>% ;
+    %<instance currentShipment signal packed clerkID clerkID>%
+    %<R23 unrelate self currentShipment>%
+    if (%<instance clerk attribute goOffDutyAtEndOfJob>%) {
+        %<my signal offDuty>%
+    } else {
+        %<my attribute awaitingAssignment>% = true ;
+        %<instance myWarehouse findOneRelated self R27 R25>%
+        %<instance myWarehouse signal clerkFree>%
+    }
 }
 transition CompletingJob - clerkAssigned -> SelectingBooks
 transition CompletingJob - offDuty -> OffDuty
 
 state OffDuty {} {
+    %<instance clerk findOneRelated self R27>%
+    %<R27 reclassify clerk OffDutyClerk offduty>%
 } ; # <1>
 ----
 <1> Note that we do *not* define the `OffDuty` state as `terminal`
@@ -2109,8 +2227,8 @@ class Artist {
 ----
 <<Performance Credit Population>>=
 class PerformanceCredit {
-    instance mj R17 {Recording cmc Artist mj}
-    instance fs R17 {Recording cmc Artist fs} R18 mj
+    instance mj R17 {Recording cmc Artist mj} R18 fs
+    instance fs R17 {Recording cmc Artist fs}
 }
 ----
 
@@ -2368,15 +2486,39 @@ For most of the external entity procedures that is all we strive to do.
 
 [source,tcl]
 ----
-<<External Entity Stubs>>=
-namespace eval ::bookstore::EE_CreditCardCompany {
-    proc requestChargeApproval {accountNumber billingAddress cardholderName
-                cardExpirationDate chargeID chargeAmount} {
-        puts [info level 0]
+<<external operations>>=
+externalop void CreditCardCompany_requestChargeApproval {
+        cccID MRT_InstId
+        accountNumber {char const *}
+        billingAddress {char const *}
+        cardholderName {char const *}
+        cardExpirationDate {char const *}
+        transactionID unsigned
+        chargeAmount unsigned} {
+    printf("%s:\n", __func__) ;
+    printf("    cccID = %u\n", cccID) ;
+    printf("    accountNumber = %s\n", accountNumber) ;
+    printf("    billingAddress = %s\n", billingAddress) ;
+    printf("    cardholderName = %s\n", cardholderName) ;
+    printf("    cardExpirationDate = %s\n", cardExpirationDate) ;
+    printf("    transactionID = %u\n", transactionID) ;
+    printf("    chargeAmount = %u\n", chargeAmount) ;
 
-        set chargeRef [::bookstore::CreditCardCharge findById chargeID $chargeID]
-        after 100 [list micca tunnel $chargeRef signal chargeProcessed approved] ; # <1>
-    }
+    union {
+        MRT_EventParams params ;
+        struct bookstore_CreditCardCharge_chargeProcessed__EPARAMS cccparams ;
+    } eparams = {
+        .cccparams = {
+            .resultCode = AP_approved
+        }
+    } ;
+    int result = mrt_PortalSignalDelayedEvent(&bookstore__PORTAL,
+        BOOKSTORE_CREDITCARDCHARGE_CLASSID,
+        cccID,
+        BOOKSTORE_CREDITCARDCHARGE_CHARGEPROCESSED_EVENT,
+        eparams.params,
+        100) ; // <1>
+    assert(result == 0) ;
 }
 ----
 <1> Here we must simulate some behavior.
@@ -2388,11 +2530,26 @@ to all their possible states.
 [source,tcl]
 ----
 <<external operations>>=
-externalop void OnlineCustomer_chargeDeclined {email {char const *}} {
+externalop void OnlineCustomer_chargeDeclined {
+        customerID MRT_InstId
+        email {char const *}} {
+    printf("%s:\n", __func__) ;
+    printf("    customerID = %u\n", customerID) ;
+    printf("    email = %s\n", email) ;
 }
-externalop void OnlineCustomer_chargeApproved {email {char const *}} {
+externalop void OnlineCustomer_chargeApproved {
+        customerID MRT_InstId
+        email {char const *}} {
+    printf("%s:\n", __func__) ;
+    printf("    customerID = %u\n", customerID) ;
+    printf("    email = %s\n", email) ;
 }
-externalop void OnlineCustomer_orderReportedDelivered {email {char const *}} {
+externalop void OnlineCustomer_orderReportedDelivered {
+        customerID MRT_InstId
+        email {char const *}} {
+    printf("%s:\n", __func__) ;
+    printf("    customerID = %u\n", customerID) ;
+    printf("    email = %s\n", email) ;
 }
 ----
 
@@ -2404,39 +2561,67 @@ Finally, we need to report the package delivery.
 
 [source,tcl]
 ----
-<<External Entity Stubs>>=
-namespace eval ::bookstore::EE_ShippingCompany {
-    proc shipmentReadyForPickup {shipmentID} {
-        puts [info level 0]
+<<external operations>>=
+externalop void ShippingCompany_shipmentReadyForPickup {shipmentID MRT_InstId} {
+    printf("%s:\n", __func__) ;
+    printf("    shipmentID = %u\n", shipmentID) ;
 
-        set shipmentRef [::bookstore::Shipment findById shipmentID $shipmentID]
-        micca tunnel $shipmentRef signal trackingNumberAssigned\
-            FedEx 130047332
+    union {
+        MRT_EventParams params ;
+        struct bookstore_Shipment_trackingNumberAssigned__EPARAMS tnaparams ;
+    } tnaevent = {
+        .tnaparams = {
+            .shippingCompany = "FedEx",
+            .trackingNumber = "130047332",
+        }
+    } ;
 
-        after 200 [list micca tunnel $shipmentRef signal pickedUp]
-        after 400 [list ::bookstore::EE_ShippingCompany::reportDelivery\
-                $shipmentID]
-    }
+    int result = mrt_PortalSignalEvent(&bookstore__PORTAL,
+        BOOKSTORE_SHIPMENT_CLASSID,
+        shipmentID,
+        BOOKSTORE_SHIPMENT_TRACKINGNUMBERASSIGNED_EVENT,
+        tnaevent.params) ;
+    assert(result == 0) ;
 
-    # We use a separate procedure, rather than directly tunneling the event, so
-    # we can get a better value for the deliveryConfirmed event parameter.
-    proc reportDelivery {shipmentID} {
-        puts [info level 0]
+    result = mrt_PortalSignalDelayedEvent(&bookstore__PORTAL,
+        BOOKSTORE_SHIPMENT_CLASSID,
+        shipmentID,
+        BOOKSTORE_SHIPMENT_PICKEDUP_EVENT,
+        NULL,
+        200) ;
+    assert(result == 0) ;
 
-        set shipmentRef [::bookstore::Shipment findById shipmentID $shipmentID]
-        micca tunnel $shipmentRef signal deliveryConfirmed\
-                [clock format [clock seconds]]
-    }
+    time_t now ;
+    time(&now) ;
+    now += 1 ;
+    union {
+        MRT_EventParams params ;
+        struct bookstore_Shipment_deliveryConfirmed__EPARAMS dcparams ;
+    } dcevent = {
+        .dcparams = {
+            .timeDelivered = ctime(&now),
+        }
+    } ;
+
+    result = mrt_PortalSignalDelayedEvent(&bookstore__PORTAL,
+        BOOKSTORE_SHIPMENT_CLASSID,
+        shipmentID,
+        BOOKSTORE_SHIPMENT_DELIVERYCONFIRMED_EVENT,
+        dcevent.params,
+        400) ;
+    assert(result == 0) ;
 }
 ----
 
 [source,tcl]
 ----
-<<External Entity Stubs>>=
-namespace eval ::bookstore::EE_ShippingClerk {
-    proc shipmentReadyToPack {shipmentID} {
-        puts [info level 0]
-    }
+<<external operations>>=
+externalop void ShippingClerk_shipmentReadyToPack {
+        clerkID MRT_InstId
+        shipmentID unsigned} {
+    printf("%s:\n", __func__) ;
+    printf("    clerkID = %u\n", clerkID) ;
+    printf("    shipmentID = %u\n", shipmentID) ;
 }
 ----
 
@@ -2451,113 +2636,13 @@ This will prevent us from having the start afresh and drive the domain
 to some state just to get into position to start a run.
 Real world testing would probably take another approach.
 
-For each execution scenario,
-we will record the state machine event dispatch traces.
-Those traces will then be presented as text and as a UML sequence diagram.
-It is important to remember that the sequence diagrams are programmatically
-generated and show the flow of events that happened during actual execution.
-
-Tcl has direct support in its core for event driven programming.
-It has the concept of an event loop
-and to have state machine events dispatched we must _enter the event loop_.
-Normally,
-a domain would enter the event loop immediately after initialization and
-would probably run forever or until it explicitly exited based on some
-condition.
-What we want to do is enter the event loop and run until some state
-activity is completed.
-Then we wish to take event dispatch traces and manage other aspects of the
-flow of our execution scenario.
-This is definitely a contrived situation because we want to stop things
-and look at what has just happened.
-We will create some convenience procedures to make the effort a bit less
-tedious.
-
-Our stategy for being able to synchronize to the execution of state
-activities depends upon two factors.
-
-. `Micca` converts state activity code into ordinary Tcl procedures.
-. Tcl provides the means to trace the execution of a procedure.
-
-Using this along with a timer to insure that we don't wait forever
-if something goes wrong,
-we can generate a procedure that will allow us to block until
-either a given state activity is executed or we time out.
-
-[source,tcl]
-----
-<<Common Execution Utilities>>=
-proc ::syncToStateActivity {class state {timeout 3000}} {
-    set activityproc\
-        [micca info statemodel activityproc bookstore $class $state] ; # <1>
-
-    trace add execution $activityproc leave syncToStop ; # <2>
-
-    set totimer [after $timeout set ::done TIMEOUT]
-    vwait ::done ; # <3>
-    after cancel $totimer
-    trace remove execution $activityproc leave syncToStop
-
-    if {$::done eq "TIMEOUT"} {
-        error "Sync to $class / $state timed out"
-    }
-    return $::done
-}
-----
-<1> Here we obtain the name of the Tcl procedure that contains the
-state activity.
-<2> This command tells Tcl to invoke the `syncToStop` command when
-execution leaves the activity procedure.
-<3> Enter the event loop waiting for the `::done` variable to be written.
-That will happen either when `syncToStop` is executed or when the
-timeout script is executed.
-
-Tcl arranges the execution trace callback to have a number of interesting
-arguments about the context of the trace.
-We don't use any of them and directly write to the global `::done` variable.
-
-[source,tcl]
-----
-<<Common Execution Utilities>>=
-proc ::syncToStop {cmd code result op} {
-    set ::done 1
-}
-----
-
 Finally,
 we can show the code for running the execution scenarios.
 
 [source,tcl]
 ----
-<<testscenario.tcl>>=
-<<copyright info>>
-
-package require micca 1.5
-
-<<Common Execution Utilities>>
-
-micca configureFromFile simplebookstore.tcl ; # <1>
-micca generate ; # <2>
-micca populateFromFile sbs_population.tcl
-
-<<External Entity Stubs>>
-<<Translation Helpers>>
-
-micca trace control on
-
-<<scenario1>>
-<<scenario2>>
-<<scenario3>>
-<<scenario4>>
-
-micca trace control off
+<<test scenarios>>=
 ----
-<1> These three commands build the domain from our description,
-generate the run time data and install the population.
-After they run, the domain is ready to receive events.
-<2> Because our domain was named `bookstore` and we did not specify
-a namespace where it was to be located,
-the domain will be placed in the `::bookstore` namespace.
 
 === Scenario 1 [[scenario1,Scenario 1]]
 
@@ -2641,26 +2726,6 @@ we want to record the event dispatch traces.
 logTraces scenario1
 ----
 
-The procedure to record the event dispatch traces obtains both
-the text representation as well as the graphical representation.
-
-[source,tcl]
-----
-<<Common Execution Utilities>>=
-proc ::logTraces {filenamebase} {
-    set logchan [::open $filenamebase.log w]
-    try {
-        puts $logchan [micca trace format [micca trace decode all]]
-    } finally {
-        ::chan close $logchan
-    }
-    micca trace diagram all $filenamebase.diag ; # <1>
-    micca trace control clear ; # <2>
-}
-----
-<1> This command outputs a file suitable for use with the `seqdiag` program
-that does the actual sequence diagram graphical drawing.
-<2> Clear out the traces in preparation for the next scenario.
 
 Below are the event dispatch traces in text log form.
 The traces are timestamped and the time difference from the previous
@@ -2896,8 +2961,7 @@ domain bookstore {
             char *argv[])
         {
             mrt_Initialize() ;
-            // bookstore_init() ;
-            mrt_EventLoop() ;
+            <<test scenarios>>
 
             return EXIT_SUCCESS ;
         }

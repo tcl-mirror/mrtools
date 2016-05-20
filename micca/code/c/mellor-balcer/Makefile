@@ -14,6 +14,7 @@ LDFLAGS = -g
 CFLAGS	= -std=c11 -g -Og -Wall\
 	-Wno-unused-variable\
 	-Wno-unused-function\
+	-Wno-unused-but-set-variable\
 	$(NULL)
 CPPFLAGS =\
 	 -D_POSIX_C_SOURCE=200112L\
@@ -145,6 +146,9 @@ $(LOGS) $(DIAGS) : testscenario.tcl $(ROOTS)
 
 %.pdf : %.diag
 	seqdiag --antialias -T pdf -o $@ $<
+
+other : simplebookstore.micca sbs_population.micca
+	tclsh ../../starpack/x86_64-linux-tcl8.6/micca_main.tcl -stubexternalops simplebookstore.micca sbs_population.micca
 
 #
 # vim :set sw=8 ts=8 sts=8 noexpandtab:
