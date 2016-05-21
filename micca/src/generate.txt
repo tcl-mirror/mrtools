@@ -4822,11 +4822,11 @@ proc operationDefinitions {} {
                 relation project $Parameters Name DataType |
                 relation rename ~ DataType Ctype |
                 relation extend ~ stup\
-                    Type string {"Parameter"}\
-                    Class string {$Class} |
+                    Type string {{}}\
+                    Class string {{}} |
                 relation update ~ utup {
                     [tuple extract $utup Name] eq "self"} {
-                    tuple update $utup Type Reference
+                    tuple update $utup Type Reference Class $Class
                 }
             }]
         }
@@ -4998,8 +4998,8 @@ proc activityDefinitions {} {
                         relation project $params Name Declaration |
                         relation rename ~ Declaration Ctype |
                         relation extend ~ stup\
-                            Type string {"Parameter"}\
-                            Class string {$Model}
+                            Type string {{}}\
+                            Class string {{}}
                     }]
                 } else {
                     set syms [relation create {
@@ -5128,7 +5128,7 @@ proc domainOpDefinitions {} {
                     relation project $Parameters Name DataType |
                     relation rename ~ DataType Ctype |
                     relation extend ~ stup\
-                        Type string {"Parameter"}\
+                        Type string {{}}\
                         Class string {{}}
                 }]
             }
@@ -5232,7 +5232,7 @@ proc externalOpDefinitions {} {
                 relation project $Parameters Name DataType |
                 relation rename ~ DataType Ctype |
                 relation extend ~ stup\
-                    Type string {"Parameter"}\
+                    Type string {{}}\
                     Class string {{}}
             }]
         }
@@ -5619,6 +5619,7 @@ foreach ugname [relation list [deRef $uniongens] Name] {
 <<CreateActivityCommands: instances>>=
 set cmdmap [dict create\
     attribute ${suppns}::InstanceAttribute\
+    assign ${suppns}::InstanceAssign\
     signal ${suppns}::InstanceSignal\
     delaysignal ${suppns}::InstanceDelaySignal\
     canceldelayed ${suppns}::InstanceCancelSignal\
@@ -5640,6 +5641,7 @@ namespace ensemble create\
 <<CreateActivityCommands: instances>>=
 set cmdmap [dict create\
     attribute [list ${suppns}::InstanceAttribute self]\
+    assign [list ${suppns}::InstanceAssign self]\
     signal [list ${suppns}::InstanceSignal self]\
     delaysignal [list ${suppns}::InstanceDelaySignal self]\
     canceldelayed [list ${suppns}::InstanceCancelSignal self]\
@@ -5762,6 +5764,18 @@ proc CheckSymbol {name args} {
 
 proc CheckSymProperties {sym args} {
     foreach {prop value} $args {
+        # if the property is empty, then we will assume the value that
+        # is checked first. This lets us pass parameters where we
+        # don't quite know the data type needs.
+        if {[dict get $sym $prop] eq {}} {
+            dict set sym $prop $value
+            relvar update Symbol stup {
+                    [tuple extract $stup Name] eq [dict get $sym Name] &&\
+                    [tuple extract $stup $prop] eq {}
+                } {
+                    tuple update $stup $prop $value
+                }
+        }
         if {[dict get $sym $prop] ne $value} {
             error "for variable, [dict get $sym Name], expected $prop to be,\
                     $value: got [dict get $sym $prop] instead"
@@ -6018,6 +6032,72 @@ proc InstanceAttribute {instref attr} {
             named, $attr"
     }
     return "$instref->$attr"
+}
+----
+
+==== Assigning Instance Attributes to Variables
+
+*****
+`%<instance` _instvar_ `assign` _?assignspec1 assignspec2  ...?_ `>%`
+
+instvar::
+    The name of a ``C'' variable that holds a reference to a class instance.
+assignspecN::
+    A set of attribute name / variable name pairs. Each _assignspec_
+    argument consists of a list of one or two elements.
+    The first element is the name of the attribute of _instvar_ to assign.
+    The second element is the name of a local variable into which the
+    assignment is made.
+    If the second element is absent, then the assignment is made to
+    a local variable with the same name as the attribute.
+
+The `assign` subccommand generates ``C'' statements to assign
+a set of attributes of _instvar_ according the the _assignspec_ arguments.
+The class whose instance is held in _instvar_ must contain an attribute whose
+name matches the attribute name in the _assignspec_ or an error is generated.
+*****
+
+[source,tcl]
+.Implementation
+----
+<<generation support commands>>=
+proc InstanceAssign {instref args} {
+    variable domain
+
+    set sym [CheckInstRefSymbol $instref]
+
+    set result {}
+    foreach attrspec $args {
+        if {[llength $attrspec] == 1} {
+            set attrname [lindex $attrspec 0]
+            set varname $attrname
+        } elseif {[llength $attrspec] == 2} {
+            lassign $attrspec attrname varname
+        } else {
+            error "bad attribute specification, \"$attrspec\":\
+                expected 1 or 2 element list"
+        }
+        set attrRef [Attribute findById Domain $domain\
+                Class [dict get $sym Class] Name $attrname]
+        if {[isEmptyRef $attrRef]} {
+            error "instance reference, $instref, refers to an instance of\
+                class, [dict get $sym Class], which does not have an attribute\
+                named, $attrname"
+        }
+        # HERE, need to be able to reuse local symbol names
+        # if the C type matches
+        assignAttribute $attrRef {DataType attrtype} Dimension
+        set vardecl [typeCheck composeDeclaration $attrtype $varname]
+        if {$Dimension > 0} { # <2>
+            append result\
+                "$vardecl\[$Dimension\] ;\n"\
+                "memcpy($varname, $instref->$attrname, sizeof($varname)) ;\n"
+        } else {
+            append result "$vardecl = $instref->$attrname ;\n"
+        }
+    }
+
+    return [IndentToBlock $result]
 }
 ----
 
@@ -8723,8 +8803,9 @@ endif::showtests[]
 <<generation support commands>>=
 proc ClassInstanceReference {className varName} {
     return [IndentToBlock [string cat\
-        [linecomment "$className instRef $varName"]\
+        [linecomment "$className instref $varName"]\
         "[CreateInstRefSymbol $className $varName]"\
+        "$varName = NULL ;\n"\
     ]]
 }
 ----
