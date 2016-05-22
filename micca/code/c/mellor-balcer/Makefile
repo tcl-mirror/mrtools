@@ -19,12 +19,19 @@ CFLAGS	= -std=c11 -g -Og -Wall\
 CPPFLAGS =\
 	 -D_POSIX_C_SOURCE=200112L\
 	 -D_ISOC11_SOURCE\
+	 -D_XOPEN_SOURCE\
 	 -DMRT_ECB_PARAM_SIZE=64\
-	 -DMRT_INSTRUMENT\
+	 -DNDEBUG\
 	 $(NULL)
 
 DOCSRC 	=\
 	simplebookstore.aweb\
+	$(NULL)
+
+MICCADIR = ../../../src
+
+RTSRC	=\
+	$(MICCADIR)/runtime.txt\
 	$(NULL)
 
 PDF 	=\
@@ -36,10 +43,6 @@ ROOTS	=\
 	sbs_population.micca\
 	$(NULL)
 
-TESTS	=\
-	testscenario.tcl\
-	$(NULL)
-
 SCENARIOS =\
 	scenario1\
 	scenario2\
@@ -47,20 +50,11 @@ SCENARIOS =\
 	scenario4\
 	$(NULL)
 
-LOGS	=\
-     	$(patsubst %,%.log,$(SCENARIOS))\
-	$(NULL)
-
-DIAGS	=\
-     	$(patsubst %,%.diag,$(SCENARIOS))\
-	$(NULL)
-
 CLEANFILES =\
 	$(PDF)\
 	$(ROOTS)\
-	$(TESTS)\
-	$(LOGS)\
-	$(DIAGS)\
+	micca_rt.c\
+	micca_rt.h\
 	*.o\
 	$(NULL)
 
@@ -101,7 +95,7 @@ ASCIIDOC_OPTS =\
 	$(patsubst %,--attribute=%,$(ASCIIDOC_ATTRS))\
 	$(NULL)
 
-.PHONY : all doc code runtests clean
+.PHONY : all doc code clean
 
 all : doc code
 
@@ -113,18 +107,27 @@ bookstore : bookstore.o micca_rt.o
 
 bookstore.c : bookstore.h micca_rt.h
 
-micca_rt.c : micca_rt.h
+micca_rt.o : micca_rt.c micca_rt.h
+
+micca_rt.h : $(RTSRC)
+	cd $(MICCADIR) ; atangle $(ATANGLEOPTS) -root micca_rt_posix.h\
+	    	-output $@ micca.aweb
+	mv $(MICCADIR)/micca_rt.h .
+
+micca_rt.c : $(RTSRC)
+	cd $(MICCADIR) ; atangle $(ATANGLEOPTS) -root micca_rt_posix.c -output $@ micca.aweb
+	mv $(MICCADIR)/micca_rt.c .
 
 bookstore.c : simplebookstore.micca sbs_population.micca
 	micca -stubexternalops simplebookstore.micca sbs_population.micca
 
-runtests : $(ROOTS) $(TESTS)
-	for test in $(TESTS) ; do tclsh $$test ; done
-
 clean :
 	$(RM) $(CLEANFILES)
 
-$(PDF) : $(DOCSRC) $(INFO)
+$(PDF) : $(DOCSRC) $(INFO) bookstore.log
+
+bookstore.log : bookstore
+	bookstore > bookstore.log
 
 simplebookstore.micca : $(DOCSRC)
 	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
@@ -134,9 +137,6 @@ sbs_population.micca : $(DOCSRC)
 
 testscenario.tcl : $(DOCSRC)
 	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
-
-$(LOGS) $(DIAGS) : testscenario.tcl $(ROOTS)
-	tclsh $<
 
 %.pdf : %.aweb
 	a2x $(A2XOPTS) --doctype=article  --format=pdf\
