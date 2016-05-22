@@ -27,9 +27,10 @@ The remaining component is to generate ``C'' code for a domain.
 Code generation consist of two major pieces:
 
 * Generating initialized ``C'' variables that supply the data values
-that are required by the run time.
-* Generating ``C'' code for state activities and domain operations to
-facilitate interfacing to the run time code.
+required by the run time.
+* Generating the ``C'' code for model level operations in
+state activities and domain operations.
+This facilitates interfacing to the run time code.
 
 `Micca` does not compile an action language into the target ``C'' for
 state activities.
@@ -93,7 +94,7 @@ namespace eval @Gen@ {
 }
 ----
 
-== Generating Run Time Data
+=== Generating Run Time Data
 
 `Micca` creates two ``C'' files for each domain.
 The first is a header file that contains interfacing information
@@ -312,16 +313,23 @@ an ordinary namespace variables
 proc GatherDomainProperties {domain} {
     variable ClassProperties
 
-    set sassigners [pipe {
-        SingleAssigner findWhere {$Domain eq $domain} |
+    set assigners [pipe {
+        AssignerStateModel findWhere {$Domain eq $domain} |
         deRef ~ |
-        relation project ~ Association |
-        relation rename ~ Association Name |
-        relation tag ~ Number -ascending Name |
+        ralutil::rvajoin ~ $::micca::SingleAssigner Single |
+        ralutil::rvajoin ~ $::micca::MultipleAssigner Multiple |
+        relation tag ~ Number -ascending Association |
         relation extend ~ stup\
-            Declaration string {"struct [tuple extract $stup Name]"}\
-            Reference string {"struct [tuple extract $stup Name] *"}\
-            StorageVariable string {"[tuple extract $stup Name]__POOL"}\
+            Declaration string {"struct [tuple extract $stup Association]"}\
+            Reference string {"struct [tuple extract $stup Association] *"}\
+            StorageVariable string {"[tuple extract $stup Association]__POOL"}
+    }]
+
+    set sassigners [pipe {
+        relation restrictwith $assigners {[relation isnotempty $Single]} |
+        relation eliminate ~ Domain Single Multiple |
+        relation rename ~ Association Name |
+        relation extend ~ stup\
             Allocation int {0}\
             InitialInstance int {1}\
             TotalInstance int {1}
@@ -329,24 +337,17 @@ proc GatherDomainProperties {domain} {
     # puts [relformat $sassigners sassigners]
 
     set massigners [pipe {
-        MultipleAssigner findWhere {$Domain eq $domain} |
-        deRef ~ |
-        relation tag ~ AssignerNumber -ascending Association |
+        relation restrictwith $assigners {[relation isnotempty $Multiple]} |
+        relation rename ~ Number AssignerNumber |
         ralutil::rvajoin ~ $::micca::MultipleAssignerInstance Instances |
-        ralutil::rvajoin ~ $::micca::ClassInstance Allocations |
+        relation ungroup ~ Multiple |
+        relation join ~ $::micca::ClassPopulation |
         relation extend ~ stup\
-            Declaration string {"struct [tuple extract $stup Association]"}\
-            Reference string {"struct [tuple extract $stup Association] *"}\
-            StorageVariable string {"[tuple extract $stup Association]__POOL"}\
-            Allocation int\
-                {[relation cardinality [tuple extract $stup Allocations]]}\
             InitialInstance int\
                 {[relation cardinality [tuple extract $stup Instances]]}\
-            TotalInstance int\
-                {[relation cardinality [tuple extract $stup Allocations]] +\
-                [relation cardinality [tuple extract $stup Instances]]} |
-            relation eliminate ~ Domain Class Allocations Instances |
-            relation rename ~ Association Name AssignerNumber Number
+            TotalInstance int {[tuple extract $stup Allocation]} |
+        relation eliminate ~ Domain Single Class Instances |
+        relation rename ~ Association Name AssignerNumber Number
     }]
     # puts [relformat $massigners massigners]
 
@@ -470,10 +471,8 @@ set headerTemplate [textutil::adjust::undent {
     [banner]
     #ifndef [headerFileGuard]
     #define [headerFileGuard]
+    #include "micca_rt.h"
     [interface]
-    #include <stddef.h>
-    #include <stdint.h>
-    #include <stdbool.h>
     [interfaceTypeAliases]
     [domainOpDeclarations]
     [externalOpDeclarations]
@@ -529,6 +528,7 @@ proc interface {} {
 }
 ----
 
+ifdef::showtests[]
 [source,tcl]
 .Tests
 ----
@@ -559,6 +559,7 @@ test headergen-1.0 {
     }
 } -result {1}
 ----
+endif::showtests[]
 
 === Type Aliases
 
@@ -690,6 +691,7 @@ proc interfaceTypeAliases {} {
 }
 ----
 
+ifdef::showtests[]
 [source,tcl]
 .Tests
 ----
@@ -732,6 +734,7 @@ test headergen-2.0 {
         }]}
 } -result {1}
 ----
+endif::showtests[]
 
 === Domain Operation Declarations
 
@@ -809,6 +812,7 @@ proc domainOpDeclarations {} {
 }
 ----
 
+ifdef::showtests[]
 [source,tcl]
 .Tests
 ----
@@ -858,6 +862,7 @@ test headergen-3.0 {
         }]}
 } -result {1}
 ----
+endif::showtests[]
 
 === External Operation Declarations
 
@@ -879,6 +884,7 @@ proc externalOpDeclarations {} {
 }
 ----
 
+ifdef::showtests[]
 [source,tcl]
 .Tests
 ----
@@ -898,6 +904,7 @@ test headergen-3.1 {
         }]}
 } -result {1}
 ----
+endif::showtests[]
 
 === Portal Function Constants
 
@@ -923,6 +930,7 @@ proc portalIds {} {
     variable domain
 
     <<portalIds:: generate class information>>
+    <<portalIds:: generate assigner information>>
     <<portalIds:: generate event information>>
     <<portalIds:: generate polymorphic event information>>
 
@@ -997,6 +1005,27 @@ forAllRefs inst $instRefs {
 }
 ----
 
+Assigners are treated much like classes.
+
+[source,tcl]
+----
+<<portalIds:: generate assigner information>>=
+set assigners [pipe {
+    AssignerStateModel findWhere {$Domain eq $domain} |
+    deRef ~ |
+    relation tag ~ Number -ascending Association
+}]
+relation foreach assigner $assigners {
+    relation assign $assigner
+    append result [comment "Assigner: $Association"]
+    set prefix [string toupper ${Domain}_${Association}]
+    append result\
+        "#define ${prefix}_ASSIGNERID $Number\n"\
+        "#define ${prefix}_INSTCOUNT\
+            [GetClassProperty $Association TotalInstance]\n"
+}
+----
+
 The encoding for event numbers is obtained straight from the platform
 model as they are numbered there.
 In this case we query the *TransitioningEvent* class.
@@ -1006,14 +1035,14 @@ In this case we query the *TransitioningEvent* class.
 <<portalIds:: generate event information>>=
 append result [comment "Numeric encoding of event numbers\
         used by the portal functions"]
-set tevents [pipe {
-    TransitioningEvent findWhere {$Domain eq $domain} |
+set mevents [pipe {
+    Event findWhere {$Domain eq $domain} |
     deRef ~ |
-    relation eliminate ~ Domain |
+    relation eliminate ~ Domain PSigID |
     relation group ~ Events Event Number
 }]
-relation foreach tevent $tevents -ascending Model {
-    relation assign $tevent
+relation foreach mevent $mevents -ascending Model {
+    relation assign $mevent
     append result [comment "Class: $Model"]
     append result "#define [string toupper ${domain}_${Model}_EVENTCOUNT]\
         [relation cardinality $Events]\n"
@@ -1025,33 +1054,7 @@ relation foreach tevent $tevents -ascending Model {
 }
 ----
 
-Similarly,
-for polymorphic events we query the *DeferredEvent* class.
-
-[source,tcl]
-----
-<<portalIds:: generate polymorphic event information>>=
-append result [comment "Numeric encoding of polymorphic event numbers\
-        used by the portal functions"]
-set pevents [pipe {
-    DeferredEvent findWhere {$Domain eq $domain} |
-    deRef ~ |
-    relation eliminate ~ Domain |
-    relation group ~ Events Event Number
-}]
-relation foreach pevent $pevents -ascending Model {
-    relation assign $pevent
-    append result [comment "Class: $Model"]
-    append result "#define [string toupper ${domain}_${Model}_POLYEVENTCOUNT]\
-        [relation cardinality $Events]\n"
-    relation foreach event $Events -ascending Number {
-        relation assign $event
-        append result "#define\
-            [string toupper ${domain}_${Model}_${Event}_POLYEVENT] $Number\n"
-    }
-}
-----
-
+ifdef::showtests[]
 [source,tcl]
 .Tests
 ----
@@ -1097,6 +1100,7 @@ test headergen-4.0 {
         }]}
 } -result {1}
 ----
+endif::showtests[]
 
 === Portal Data Structure Declaration
 
@@ -1153,14 +1157,13 @@ In the code file we will find it necessary to emit many forward
 declaration in addition to the required definitions.
 For example,
 it is necessary to emit forward declarations for all instance operations
-since we do not know in which activity it might be invoked.
+since we do not know in which activity one of them might be invoked.
 
 [source,tcl]
 ----
 <<generation data>>=
 set codeTemplate [textutil::adjust::undent {
     [banner]
-    #include "micca_rt.h"
     #ifdef MRT_INSTRUMENT
         #ifndef MRT_INSTRUMENT_ENTRY
             #define MRT_INSTRUMENT_ENTRY\
@@ -1242,6 +1245,7 @@ proc prologueDeclarations {} {
 }
 ----
 
+ifdef::showtests[]
 [source,tcl]
 ----
 <<generate command tests>>=
@@ -1250,8 +1254,8 @@ test codegen-1.0 {
 } -setup {
     validateutils genMiccaFile codegen1 {
         domain codegen1 {
-            prologue {#include mySpecial.h}
-            prologue {#include theSpecial.h}
+            prologue {#include "string.h"}
+            prologue {#include "stdlib.h"}
             epilogue {
                 static int count(
                     int a)
@@ -1274,12 +1278,13 @@ test codegen-1.0 {
     cleanupDomain
     validateutils forgetFiles
 } -body {
+    validateutils compileFiles codegen1.c
     testConditions\
         {[validateutils matchLines codegen1.c {
-            #include mySpecial.h
+            #include "string.h"
         }]}\
         {[validateutils matchLines codegen1.c {
-            #include theSpecial.h
+            #include "stdlib.h"
         }]}\
         {[validateutils matchLines codegen1.c {
             static int count(
@@ -1287,9 +1292,10 @@ test codegen-1.0 {
             {
                 return a + 1 ;
             }
-        }]}\
+        }]}
 } -result {1}
 ----
+endif::showtests[]
 
 === Implementation Type Aliases
 
@@ -1516,13 +1522,19 @@ proc DeclareClassStructure {classRef} {
 ----
 <1> Find all the class components for the given class.
 
+Declaring the structure members for attributes is a matter of finding
+the attributes and emiting ``C'' declarations, knowing the data type
+and attribute name.
+The only minor complication is for attributes that are specified to be
+arrays.
+
 [source,tcl]
 ----
 <<DeclareClassStructure: attribute declarations>>=
 set attrRefs [findRelated $compRefs {~R25 PopulatedComponent} {~R21 Attribute}] ; # <1>
 forAllRefs attrRef $attrRefs {
     assignAttribute $attrRef {Name attrName} DataType Dimension
-    append result "    $DataType $attrName"
+    append result "    [typeCheck composeDeclaration $DataType $attrName]"
     if {$Dimension > 0} { # <2>
         append result "\[$Dimension\]"
     }
@@ -1570,8 +1582,9 @@ forAllRefs superRef $superRefs {
 }
 ----
 
-Associative classes make two references which are composed together in
-an unnamed structure.
+Associative classes make two references,
+one to each class participating in the association,
+which are grouped together in an unnamed structure.
 
 [source,tcl]
 ----
@@ -1598,6 +1611,116 @@ forAllRefs atorRef $atorRefs {
         "    \} $attrName ;\n"
 }
 ----
+
+ifdef::showtests[]
+[source,tcl]
+.Tests
+----
+<<generate command tests>>=
+test codegen-3.0 {
+    Generated code file associator class references
+} -setup {
+    validateutils genMiccaFile codegen3 {
+        domain codegen3 {
+            class A {}
+            class X {}
+            class Y {}
+            association R1 -static -associator A X 0..*--0..* Y
+        }
+        population codegen3 {
+            class A {
+                instance fred1 R1 {X x1 Y y1}
+                instance fred2 R1 {X x2 Y y2}
+            }
+            class X {
+                instance x1
+                instance x2
+            }
+            class Y {
+                instance y1
+                instance y2
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen3.c
+    testConditions\
+        {[validateutils matchLines codegen3.c {
+            struct A {
+                MRT_Instance base__INST ;
+                struct {
+                    struct Y *forward ;
+                    struct X *backward ;
+                } R1 ;
+            } ;
+        }]}\
+        {[validateutils matchLines codegen3.c {
+            struct X {
+                MRT_Instance base__INST ;
+                struct {
+                    struct A *const *links ;
+                    unsigned count ;
+                } R1__FORW ;
+            } ;
+        }]}
+} -result {1}
+----
+
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-20.0 {
+    Generated code file associative class references
+} -setup {
+    validateutils genMiccaFile codegen20 {
+        domain codegen20 {
+            class A {}
+            class X {}
+            class Y {}
+            association R1 -associator A X 0..1--0..1 Y
+        }
+        population codegen20 {
+            class A {
+                instance fred1 R1 {X x1 Y y1}
+                instance fred2 R1 {X x2 Y y2}
+            }
+            class X {
+                instance x1
+                instance x2
+            }
+            class Y {
+                instance y1
+                instance y2
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen20.c
+    testConditions\
+        {[validateutils matchLines codegen20.c {
+            struct A {
+                MRT_Instance base__INST ;
+                struct {
+                    struct Y *forward ;
+                    struct X *backward ;
+                } R1 ;
+            } ;
+        }]}\
+        {[validateutils matchLines codegen20.c {
+            struct X {
+                MRT_Instance base__INST ;
+                struct A *R1__FORW ;
+            } ;
+        }]}
+} -result {1}
+----
+endif::showtests[]
 
 Simple association references also resolve to a single pointer declaration
 to the referenced class.
@@ -1628,6 +1751,56 @@ forAllRefs subRef $subRefs {
 }
 ----
 
+ifdef::showtests[]
+[source,tcl]
+.Tests
+----
+<<generate command tests>>=
+test codegen-2.0 {
+    Generated code file supertype and subtype references
+} -setup {
+    validateutils genMiccaFile codegen2 {
+        domain codegen2 {
+            class super {}
+            class sub1 {}
+            class sub2 {}
+            generalization R1 super sub1 sub2
+        }
+        population codegen2 {
+            class super {
+                instance fred1
+                instance fred2
+            }
+            class sub1 {
+                instance s1 R1 fred1
+            }
+            class sub2 {
+                instance s2 R1 fred2
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen2.c
+    testConditions\
+        {[validateutils matchLines codegen2.c {
+            struct super {
+                MRT_Instance base__INST ;
+                void *R1 ;
+            } ;
+        }]}\
+        {[validateutils matchLines codegen2.c {
+            struct sub1 {
+                MRT_Instance base__INST ;
+                struct super *R1 ;
+            } ;
+        }]}
+} -result {1}
+----
+endif::showtests[]
+
 Union superclasses use a union to serve as the container for
 subclass instances.
 
@@ -1647,6 +1820,101 @@ forAllRefs contRef $contRefs {
     append result "    \} $attrName ;\n"
 }
 ----
+
+ifdef::showtests[]
+[source,tcl]
+.Tests
+----
+<<generate command tests>>=
+test codegen-6.0 {
+    Generated code file union generalization
+} -setup {
+    validateutils genMiccaFile codegen6 {
+        domain codegen6 {
+            class super {}
+            class sub1 {
+                attribute color int -default 10
+            }
+            class sub2 {
+                attribute temp int -default 20
+            }
+            generalization R1 -union super sub1 sub2
+
+            class sub3 {
+                attribute degree int -default 30
+            }
+            class sub4 {
+                attribute yaw int -default 40
+            }
+
+            generalization R2 -union sub1 sub3 sub4
+
+            class sub5 {
+                attribute degree int -default 30
+            }
+            class sub6 {
+                attribute degree int -default 30
+            }
+
+            generalization R3 -union sub1 sub5 sub6
+
+            class X {}
+            association R4 X 1--1 sub5
+        }
+        population codegen6 {
+            class super {
+                instance fred1
+                instance fred2
+            }
+            class sub1 {
+                instance s1 R1 fred1
+            }
+            class sub2 {
+                instance s2 R1 fred2
+            }
+            class sub3 {
+                instance s3 R2 s1
+            }
+            class sub5 {
+                instance s5 R3 s1
+            }
+            class X {
+                instance x1 R4 s5
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen6.c
+    testConditions\
+        {[validateutils matchLines codegen6.c {
+            struct super {
+                MRT_Instance base__INST ;
+                union {
+                    struct sub1 sub1 ;
+                    struct sub2 sub2 ;
+                } R1 ;
+            } ;
+        }]}\
+        {[validateutils matchLines codegen6.c {
+            struct sub1 {
+                MRT_Instance base__INST ;
+                int color ;
+                union {
+                    struct sub3 sub3 ;
+                    struct sub4 sub4 ;
+                } R2 ;
+                union {
+                    struct sub5 sub5 ;
+                    struct sub6 sub6 ;
+                } R3 ;
+            } ;
+        }]}
+} -result {1}
+----
+endif::showtests[]
 
 For class instances that are part of a linked list,
 we have to provide storage in the class structure for the list links.
@@ -1733,16 +2001,304 @@ proc FindReferencedClass {compRef} {
 }
 ----
 
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-4.0 {
+    Generated code file reflexive class references
+} -setup {
+    validateutils genMiccaFile codegen4 {
+        domain codegen4 {
+            class X {}
+            association R1 X 0..1--0..1 X
+        }
+        population codegen4 {
+            class X {
+                instance x1 R1 x2
+                instance x2
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen4.c
+    testConditions\
+        {[validateutils matchLines codegen4.c {
+            struct X {
+                MRT_Instance base__INST ;
+                struct X *R1 ;
+                struct X *R1__BACK ;
+            } ;
+        }]}
+} -result {1}
+----
+
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-5.0 {
+    Generated code file reflexive associative class references
+} -setup {
+    validateutils genMiccaFile codegen5 {
+        domain codegen5 {
+            class A {}
+            class X {}
+            association R1 -associator A X 0..*--0..* X
+        }
+        population codegen5 {
+            class A {
+                instance a1 R1 {forward x2 backward x1}
+            }
+            class X {
+                instance x1
+                instance x2
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen5.c
+    testConditions\
+        {[validateutils matchLines codegen5.c {
+            struct A {
+                MRT_Instance base__INST ;
+                struct {
+                    struct X *forward ;
+                    struct X *backward ;
+                } R1 ;
+                MRT_LinkRef R1__FLINKS ;
+                MRT_LinkRef R1__BLINKS ;
+            } ;
+        }]}\
+        {[validateutils matchLines codegen5.c {
+            struct X {
+                MRT_Instance base__INST ;
+                MRT_LinkRef R1__FORW ;
+                MRT_LinkRef R1__BACK ;
+            } ;
+        }]}
+} -result {1}
+----
+
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-21.0 {
+    Generated code file reflexive associative class references -- static
+} -setup {
+    validateutils genMiccaFile codegen21 {
+        domain codegen21 {
+            class A {}
+            class X {}
+            association R1 -static -associator A X 0..*--0..* X
+        }
+        population codegen21 {
+            class A {
+                instance a1 R1 {forward x2 backward x1}
+            }
+            class X {
+                instance x1
+                instance x2
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen21.c
+    testConditions\
+        {[validateutils matchLines codegen21.c {
+            struct A {
+                MRT_Instance base__INST ;
+                struct {
+                    struct X *forward ;
+                    struct X *backward ;
+                } R1 ;
+            } ;
+        }]}\
+        {[validateutils matchLines codegen21.c {
+            struct X {
+                MRT_Instance base__INST ;
+                struct {
+                    struct A *const *links ;
+                    unsigned count ;
+                } R1__FORW ;
+                struct {
+                    struct A *const *links ;
+                    unsigned count ;
+                } R1__BACK ;
+            } ;
+        }]}
+} -result {1}
+----
+
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-7.0 {
+    Generated code file associative class references -- non static
+} -setup {
+    validateutils genMiccaFile codegen7 {
+        domain codegen7 {
+            class A {}
+            class X {}
+            class Y {}
+            association R1 -associator A X 0..*--0..* Y
+        }
+        population codegen7 {
+            class A {
+                instance a1 R1 {X x1 Y y1}
+                instance a2 R1 {X x2 Y y2}
+                instance a3 R1 {X x1 Y y2}
+                instance a4 R1 {X x2 Y y1}
+            }
+            class X {
+                instance x1
+                instance x2
+            }
+            class Y {
+                instance y1
+                instance y2
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen7.c
+    testConditions\
+        {[validateutils matchLines codegen7.c {
+            struct A {
+                MRT_Instance base__INST ;
+                struct {
+                    struct Y *forward ;
+                    struct X *backward ;
+                } R1 ;
+                MRT_LinkRef R1__FLINKS ;
+                MRT_LinkRef R1__BLINKS ;
+            } ;
+        }]}\
+        {[validateutils matchLines codegen7.c {
+            struct X {
+                MRT_Instance base__INST ;
+                MRT_LinkRef R1__FORW ;
+            } ;
+        }]}
+} -result {1}
+----
+
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-8.0 {
+    Generated code file reflexive associative class references -- non static
+} -setup {
+    validateutils genMiccaFile codegen8 {
+        domain codegen8 {
+            class A {}
+            class X {}
+            association R1 -associator A X 0..*--0..* X
+        }
+        population codegen8 {
+            class A {
+                instance a12 R1 {forward x2 backward x1}
+                instance a13 R1 {forward x3 backward x1}
+                instance a23 R1 {forward x3 backward x2}
+                instance a24 R1 {forward x4 backward x2}
+                instance a34 R1 {forward x4 backward x3}
+                instance a41 R1 {forward x1 backward x4}
+            }
+            class X {
+                instance x1
+                instance x2
+                instance x3
+                instance x4
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen8.c
+    testConditions\
+        {[validateutils matchLines codegen8.c {
+            struct A {
+                MRT_Instance base__INST ;
+                struct {
+                    struct X *forward ;
+                    struct X *backward ;
+                } R1 ;
+                MRT_LinkRef R1__FLINKS ;
+                MRT_LinkRef R1__BLINKS ;
+            } ;
+        }]}\
+        {[validateutils matchLines codegen8.c {
+            struct X {
+                MRT_Instance base__INST ;
+                MRT_LinkRef R1__FORW ;
+                MRT_LinkRef R1__BACK ;
+            } ;
+        }]}
+} -result {1}
+----
+
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-9.0 {
+    Generated code file simple reflexive class references
+} -setup {
+    validateutils genMiccaFile codegen9 {
+        domain codegen9 {
+            class X {}
+            association R1 X 0..*--0..1 X
+        }
+        population codegen9 {
+            class X {
+                instance x1 R1 x2
+                instance x2 R1 x3
+                instance x3 R1 x1
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen9.c
+    testConditions\
+        {[validateutils matchLines codegen9.c {
+            struct X {
+                MRT_Instance base__INST ;
+                struct X *R1 ;
+                MRT_LinkRef R1__BLINKS ;
+                MRT_LinkRef R1__BACK ;
+            } ;
+        }]}
+} -result {1}
+----
+endif::showtests[]
+
 === Assigner Declarations
 
-An assigner are declared in much the same manner as a class.
+An assigner is declared in much the same manner as a class.
 This gives us the ability to deal with the state model of an assigner
 using the same code as for classes.
 There are a few different rules for assigners:
 
 * Single assigners have no attributes and are never created dynamically.
+Their single instance is created as part of the initial instance population.
 * Multiple assigners have a single attribute and may be created dynamically.
 
+(((micca,Code Generation,assignerDeclarations)))
 [source,tcl]
 ----
 <<generation code commands>>=
@@ -1776,444 +2332,14 @@ proc assignerDeclarations {} {
 }
 ----
 
-[source,tcl]
-----
-<<generate command tests>>=
-test codegen-2.0 {
-    Generated code file supertype and subtype references
-} -setup {
-    validateutils genMiccaFile codegen2 {
-        domain codegen2 {
-            class super {}
-            class sub1 {}
-            class sub2 {}
-            generalization R1 super sub1 sub2
-        }
-        population codegen2 {
-            class super {
-                instance fred1
-                instance fred2
-            }
-            class sub1 {
-                instance s1 R1 fred1
-            }
-            class sub2 {
-                instance s2 R1 fred2
-            }
-        }
-    }
-} -cleanup {
-    cleanupDomain
-    validateutils forgetFiles
-} -body {
-    testConditions\
-        {[validateutils matchLines codegen2.c {
-            struct super {
-                MRT_Instance base__INST ;
-                void *R1 ;
-            } ;
-        }]}\
-        {[validateutils matchLines codegen2.c {
-            struct sub1 {
-                MRT_Instance base__INST ;
-                struct super *R1 ;
-            } ;
-        }]}
-} -result {1}
-----
-
-[source,tcl]
-----
-<<generate command tests>>=
-test codegen-3.0 {
-    Generated code file associative class references
-} -setup {
-    validateutils genMiccaFile codegen3 {
-        domain codegen3 {
-            class A {}
-            class X {}
-            class Y {}
-            association R1 -static -associator A X 0..*--0..* Y
-        }
-        population codegen3 {
-            class A {
-                instance fred1 R1 {X x1 Y y1}
-                instance fred2 R1 {X x2 Y y2}
-            }
-            class X {
-                instance x1
-                instance x2
-            }
-            class Y {
-                instance y1
-                instance y2
-            }
-        }
-    }
-} -cleanup {
-    cleanupDomain
-    validateutils forgetFiles
-} -body {
-    testConditions\
-        {[validateutils matchLines codegen3.c {
-            struct A {
-                MRT_Instance base__INST ;
-                struct {
-                    struct Y *forward ;
-                    struct X *backward ;
-                } R1 ;
-            } ;
-        }]}\
-        {[validateutils matchLines codegen3.c {
-            struct X {
-                MRT_Instance base__INST ;
-                struct {
-                    struct A *const *links ;
-                    unsigned count ;
-                } R1__FORW ;
-            } ;
-        }]}
-} -result {1}
-----
-
-[source,tcl]
-----
-<<generate command tests>>=
-test codegen-20.0 {
-    Generated code file associative class references
-} -setup {
-    validateutils genMiccaFile codegen20 {
-        domain codegen20 {
-            class A {}
-            class X {}
-            class Y {}
-            association R1 -associator A X 0..1--0..1 Y
-        }
-        population codegen20 {
-            class A {
-                instance fred1 R1 {X x1 Y y1}
-                instance fred2 R1 {X x2 Y y2}
-            }
-            class X {
-                instance x1
-                instance x2
-            }
-            class Y {
-                instance y1
-                instance y2
-            }
-        }
-    }
-} -cleanup {
-    cleanupDomain
-    validateutils forgetFiles
-} -body {
-    testConditions\
-        {[validateutils matchLines codegen20.c {
-            struct A {
-                MRT_Instance base__INST ;
-                struct {
-                    struct Y *forward ;
-                    struct X *backward ;
-                } R1 ;
-            } ;
-        }]}\
-        {[validateutils matchLines codegen20.c {
-            struct X {
-                MRT_Instance base__INST ;
-                struct A *R1__FORW ;
-            } ;
-        }]}
-} -result {1}
-----
-
-[source,tcl]
-----
-<<generate command tests>>=
-test codegen-4.0 {
-    Generated code file reflexive class references
-} -setup {
-    # makeFile {} codegen4.h
-    # makeFile {} codegen4.c
-    micca configure {
-        domain codegen4 {
-            class X {}
-            association R1 X 0..1--0..1 X
-        }
-        population codegen4 {
-            class X {
-                instance x1 R1 x2
-                instance x2
-            }
-        }
-    }
-} -cleanup {
-    cleanupDomain
-} -body {
-    micca generate
-    testConditions\
-        {[llength [fileutil::grep {R1} codegen4.c]] == 12}
-} -result {1}
-----
-
-[source,tcl]
-----
-<<generate command tests>>=
-test codegen-5.0 {
-    Generated code file reflexive associative class references
-} -setup {
-    # makeFile {} codegen5.h
-    # makeFile {} codegen5.c
-    micca configure {
-        domain codegen5 {
-            class A {}
-            class X {}
-            association R1 -associator A X 0..*--0..* X
-        }
-        population codegen5 {
-            class A {
-                instance a1 R1 {forward x2 backward x1}
-            }
-            class X {
-                instance x1
-                instance x2
-            }
-        }
-    }
-} -cleanup {
-    cleanupDomain
-} -body {
-    micca generate
-    testConditions\
-        {[llength [fileutil::grep {R1} codegen5.c]] == 37}
-} -result {1}
-----
-
-[source,tcl]
-----
-<<generate command tests>>=
-test codegen-21.0 {
-    Generated code file reflexive associative class references -- static
-} -setup {
-    # makeFile {} codegen21.h
-    # makeFile {} codegen21.c
-    micca configure {
-        domain codegen21 {
-            class A {}
-            class X {}
-            association R1 -static -associator A X 0..*--0..* X
-        }
-        population codegen21 {
-            class A {
-                instance a1 R1 {forward x2 backward x1}
-            }
-            class X {
-                instance x1
-                instance x2
-            }
-        }
-    }
-} -cleanup {
-    cleanupDomain
-} -body {
-    micca generate
-    testConditions\
-        {[llength [fileutil::grep {R1} codegen21.c]] == 21}
-} -result {1}
-----
-
-[source,tcl]
-----
-<<generate command tests>>=
-test codegen-6.0 {
-    Generated code file union generalization
-} -setup {
-    # makeFile {} codegen6.h
-    # makeFile {} codegen6.c
-    micca configure {
-        domain codegen6 {
-            class super {}
-            class sub1 {
-                attribute color int -default 10
-            }
-            class sub2 {
-                attribute temp int -default 20
-            }
-            generalization R1 -union super sub1 sub2
-
-            class sub3 {
-                attribute degree int -default 30
-            }
-            class sub4 {
-                attribute yaw int -default 40
-            }
-
-            generalization R2 -union sub1 sub3 sub4
-
-            class sub5 {
-                attribute degree int -default 30
-            }
-            class sub6 {
-                attribute degree int -default 30
-            }
-
-            generalization R3 -union sub1 sub5 sub6
-
-            class X {}
-            association R4 X 1--1 sub5
-        }
-        population codegen6 {
-            class super {
-                instance fred1
-                instance fred2
-            }
-            class sub1 {
-                instance s1 R1 fred1
-            }
-            class sub2 {
-                instance s2 R1 fred2
-            }
-            class sub3 {
-                instance s3 R2 s1
-            }
-            class sub5 {
-                instance s5 R3 s1
-            }
-            class X {
-                instance x1 R4 s5
-            }
-        }
-    }
-} -cleanup {
-    cleanupDomain
-} -body {
-    micca generate
-    testConditions\
-        {[llength [fileutil::grep {R1} codegen6.c]] == 13}\
-        {[llength [fileutil::grep {R2} codegen6.c]] == 11}
-} -result {1}
-----
-
-[source,tcl]
-----
-<<generate command tests>>=
-test codegen-7.0 {
-    Generated code file associative class references -- non static
-} -setup {
-    # makeFile {} codegen7.h
-    # makeFile {} codegen7.c
-    micca configure {
-        domain codegen7 {
-            class A {}
-            class X {}
-            class Y {}
-            association R1 -associator A X 0..*--0..* Y
-        }
-        population codegen7 {
-            class A {
-                instance a1 R1 {X x1 Y y1}
-                instance a2 R1 {X x2 Y y2}
-                instance a3 R1 {X x1 Y y2}
-                instance a4 R1 {X x2 Y y1}
-            }
-            class X {
-                instance x1
-                instance x2
-            }
-            class Y {
-                instance y1
-                instance y2
-            }
-        }
-    }
-} -cleanup {
-    cleanupDomain
-} -body {
-    micca generate
-    testConditions\
-        {[llength [fileutil::grep {R1_} codegen7.c]] == 48}
-} -result {1}
-----
-
-[source,tcl]
-----
-<<generate command tests>>=
-test codegen-8.0 {
-    Generated code file reflexive associative class references -- non static
-} -setup {
-    # makeFile {} codegen8.h
-    # makeFile {} codegen8.c
-    micca configure {
-        domain codegen8 {
-            class A {}
-            class X {}
-            association R1 -associator A X 0..*--0..* X
-        }
-        population codegen8 {
-            class A {
-                instance a12 R1 {forward x2 backward x1}
-                instance a13 R1 {forward x3 backward x1}
-                instance a23 R1 {forward x3 backward x2}
-                instance a24 R1 {forward x4 backward x2}
-                instance a34 R1 {forward x4 backward x3}
-                instance a41 R1 {forward x1 backward x4}
-            }
-            class X {
-                instance x1
-                instance x2
-                instance x3
-                instance x4
-            }
-        }
-    }
-} -cleanup {
-    cleanupDomain
-} -body {
-    micca generate
-    testConditions\
-        {[llength [fileutil::grep {R1_} codegen8.c]] == 72}
-} -result {1}
-----
-
-[source,tcl]
-----
-<<generate command tests>>=
-test codegen-9.0 {
-    Generated code file reflexive class references
-} -setup {
-    # makeFile {} codegen9.h
-    # makeFile {} codegen9.c
-    micca configure {
-        domain codegen9 {
-            class X {}
-            association R1 X 0..*--0..1 X
-        }
-        population codegen9 {
-            class X {
-                instance x1 R1 x2
-                instance x2 R1 x3
-                instance x3 R1 x1
-            }
-        }
-    }
-} -cleanup {
-    cleanupDomain
-} -body {
-    micca generate
-    testConditions\
-        {[llength [fileutil::grep {LINKS} codegen9.c]] == 13}
-} -result {1}
-----
-
+ifdef::showtests[]
 [source,tcl]
 ----
 <<generate command tests>>=
 test codegen-22.0 {
-    Generate a single assigner
+    Generate a single assigner declaration
 } -setup {
-    # makeFile {} codegen22.h
-    # makeFile {} codegen22.c
-    micca configure {
+    validateutils genMiccaFile codegen22 {
         domain codegen22 {
             class clerk {}
             class client {}
@@ -2246,10 +2372,15 @@ test codegen-22.0 {
     }
 } -cleanup {
     cleanupDomain
+    validateutils forgetFiles
 } -body {
-    micca generate
+    validateutils compileFiles codegen22.c
     testConditions\
-        {[llength [fileutil::grep {R1__POOL} codegen22.c]] == 1}
+        {[validateutils matchLines codegen22.c {
+            struct R1 {
+                MRT_Instance base__INST ;
+            } ;
+        }]}\
 } -result {1}
 ----
 
@@ -2257,11 +2388,9 @@ test codegen-22.0 {
 ----
 <<generate command tests>>=
 test codegen-23.0 {
-    Generate a multi assigner
+    Generate a multi assigner declaration
 } -setup {
-    # makeFile {} codegen23.h
-    # makeFile {} codegen23.c
-    micca configure {
+    validateutils genMiccaFile codegen23 {
         domain codegen23 {
             class clerk {}
             class client {}
@@ -2310,12 +2439,19 @@ test codegen-23.0 {
     }
 } -cleanup {
     cleanupDomain
+    validateutils forgetFiles
 } -body {
-    micca generate
+    validateutils compileFiles codegen23.c
     testConditions\
-        {[llength [fileutil::grep {R1__POOL} codegen23.c]] == 5}
+        {[validateutils matchLines codegen23.c {
+            struct R1 {
+                MRT_Instance base__INST ;
+                struct department * idinstance ;
+            } ;
+        }]}
 } -result {1}
 ----
+endif::showtests[]
 
 === Event Parameter Declarations
 
@@ -2326,8 +2462,9 @@ test codegen-23.0 {
 <<generation header commands>>=
 proc eventParamDeclarations {} {
     variable domain
-    set result {}
 
+    append result [comment "Transition Event Parameter Structure\
+            Declarations"]
     set tevents [pipe {
         TransitioningEvent findWhere {$Domain eq $domain} |
         findRelated ~ R80 |
@@ -2339,20 +2476,22 @@ proc eventParamDeclarations {} {
         relation group ~ Params Name Position DataType |
         relation group ~ Events Event Params
     }]
-    append result [comment "Transition Event Parameter Structure\
-            Declarations"]
     relation foreach tevent $tevents -ascending Model {
         relation assign $tevent
         relation foreach event $Events {
             relation assign $event
-            append result\
-                "struct ${domain}_${Model}_${Event}__EPARAMS \{\n"
+            set pstructname "struct ${domain}_${Model}_${Event}__EPARAMS"
+            append result "$pstructname \{\n"
             relation foreach param $Params -ascending Position {
                 relation assign $param DataType Name
                 append result\
                     "    [typeCheck composeDeclaration $DataType $Name] ;\n"
             }
             append result "\} ;\n"
+            append result\
+                "static_assert(sizeof($pstructname) <= sizeof(MRT_EventParams), "\
+                "\"Parameters for class or assigner, $Model, event,\
+                    $Event, are too large\") ;\n"
         }
     }
 
@@ -2373,14 +2512,18 @@ proc eventParamDeclarations {} {
         relation assign $tevent
         relation foreach event $Events {
             relation assign $event
-            append result\
-                "struct ${domain}_${Model}_${Event}__PEPARAMS \{\n"
+            set pstructname "struct ${domain}_${Model}_${Event}__PEPARAMS"
+            append result "$pstructname \{\n"
             relation foreach param $Params -ascending Position {
                 relation assign $param DataType Name
                 append result\
                     "    [typeCheck composeDeclaration $DataType $Name] ;\n"
             }
             append result "\} ;\n"
+            append result\
+                "static_assert(sizeof($pstructname) <= sizeof(MRT_EventParams), "\
+                "\"Parameters for class or assigner, $Model, event,\
+                    $Event, are too large\") ;\n"
         }
     }
 
@@ -2412,13 +2555,18 @@ proc stateParamDeclarations {} {
         append result [comment "State Parameter Structure Declarations"]
         relation foreach statearg $stateargs -ascending {Model State} {
             relation assign $statearg
-            append result "struct ${Model}_${State}__SPARAMS \{\n"
+            set pstructname "struct ${Model}_${State}__SPARAMS"
+            append result "$pstructname \{\n"
             relation foreach param $Params -ascending Position {
                 relation assign $param DataType Name
                 append result\
                     "    [typeCheck composeDeclaration $DataType $Name] ;\n"
             }
             append result "\} ;\n"
+            append result\
+                "static_assert(sizeof($pstructname) <= sizeof(MRT_EventParams), "\
+                "\"Parameters for class or assigner, $Model, state,\
+                    $State, are too large\") ;\n"
         }
     }
 
@@ -2426,6 +2574,7 @@ proc stateParamDeclarations {} {
 }
 ----
 
+ifdef::showtests[]
 [source,tcl]
 ----
 <<generate command tests>>=
@@ -2504,10 +2653,11 @@ test codegen-10.0 {
 } -body {
     micca generate
     testConditions\
-        {[llength [fileutil::grep {__EPARAMS} codegen10.h]] == 3}\
-        {[llength [fileutil::grep {__PEPARAMS} codegen10.h]] == 1}
+        {[llength [fileutil::grep {__EPARAMS} codegen10.h]] == 6}\
+        {[llength [fileutil::grep {__PEPARAMS} codegen10.h]] == 2}
 } -result {1}
 ----
+endif::showtests[]
 
 === Operation Declarations
 
@@ -2548,6 +2698,7 @@ proc operationDeclarations {} {
 }
 ----
 
+ifdef::showtests[]
 [source,tcl]
 ----
 <<generate command tests>>=
@@ -2585,6 +2736,7 @@ test codegen-11.0 {
         {[llength [fileutil::grep {X_addColor} codegen11.c]] == 2}
 } -result {1}
 ----
+endif::showtests[]
 
 === Constructor Declarations
 
@@ -2696,6 +2848,12 @@ proc storageDeclarations {} {
         }
     }
 
+    set singles [SingleAssigner findWhere {$Domain eq $domain}]
+    forAllRefs single $singles {
+        assignAttribute $single Association
+        append result "static struct ${Association} ${Association}__POOL\[1\] ;\n"
+    }
+
     # Total number of multiple assigner instances is the same as the
     # total number of instances of the id class
     set multis [MultipleAssigner findWhere {$Domain eq $domain}]
@@ -2751,6 +2909,12 @@ proc nameDefinitions {} {
                 \"$eventName\" ;\n"
     }
 
+    set saRefs [SingleAssigner findWhere {$Domain eq $domain}]
+    if {[isNotEmptyRef $saRefs]} {
+        append result "$storageType single_assigner_instance__NAME\[\] =\
+                \"assigner\" ;\n"
+    }
+
     set maRefs [MultipleAssigner findWhere {$Domain eq $domain}]
     if {[isNotEmptyRef $maRefs]} {
         append result "$storageType multi_assigner_attribute__NAME\[\] =\
@@ -2762,6 +2926,8 @@ proc nameDefinitions {} {
     return $result
 }
 ----
+
+=== Instance Allocation Block Definitions
 
 [source,tcl]
 ----
@@ -2782,13 +2948,29 @@ proc iabDefinitions {} {
         append result [DefineIABMembers $classRef true]
     }
 
+    set singles [SingleAssigner findWhere {$Domain eq $domain}]
+    forAllRefs single $singles {
+        assignAttribute $single Association
+        append result\
+            "static MRT_iab ${Association}__IAB = \{\n"\
+            "    .storageStart = &${Association}__POOL\[0\],\n"\
+            "    .storageFinish = &${Association}__POOL\[1\],\n"\
+            "    .storageLast = &${Association}__POOL\[0\],\n"\
+            "    .alloc = 2,\n"\
+            "    .instanceSize = sizeof\(struct ${Association}\),\n"\
+            "    .construct = NULL,\n"\
+            "    .destruct = NULL,\n"\
+            "    .linkCount = 0,\n"\
+            "    .linkOffsets = NULL\n"\
+            "\} ;\n"
+    }
+
     set multis [MultipleAssigner findWhere {$Domain eq $domain}]
     forAllRefs multi $multis {
         set initial [refMultiplicity [findRelated $multi ~R106]]
-        assignAttribute $multi {Class idclass}
-        set total [GetClassProperty [readAttribute $multi Class] TotalInstance]
+        assignAttribute $multi Association {Class idclass}
+        set total [GetClassProperty $idclass TotalInstance]
 
-        assignAttribute $multi
         append result\
             "static MRT_iab ${Association}__IAB = \{\n"\
             "    .storageStart = &${Association}__POOL\[0\],\n"\
@@ -2868,6 +3050,8 @@ proc DefineIABMembers {classRef isUnionSubclass} {
 }
 ----
 
+=== Event Dispatch Block Definitions
+
 [source,tcl]
 ----
 <<generation code commands>>=
@@ -2884,7 +3068,7 @@ proc edbDefinitions {} {
         append result [GenerateActivityTable $smodel]
         set termstates [GenerateTerminalStates $smodel result]
 
-        append result [GenerateModelNames $smodel]
+        append result [GenerateStateNames $smodel]
 
         append result "static MRT_edb const ${className}__EDB = \{\n"
 
@@ -2911,7 +3095,6 @@ proc edbDefinitions {} {
         append result\
             "        #ifndef MRT_NO_NAMES\n"\
             "    .stateNames = ${className}__SNAMES,\n"\
-            "    .eventNames = ${className}__ENAMES,\n"\
             "        #endif /* MRT_NO_NAMES */\n"
 
         append result\
@@ -2944,8 +3127,9 @@ proc GenerateTransitionTable {smodel} {
     # puts [relformat $states states]
 
     set events [pipe {
-        findRelated $smodel ~R87 |
-        deRef %
+        findRelated $smodel ~R87 R80 |
+        deRef % |
+        relation eliminate % PSigID
     } {} |%]
     # puts [relformat $events events]
 
@@ -3019,6 +3203,7 @@ proc GenerateTransitionTable {smodel} {
 }
 ----
 
+ifdef::showtests[]
 [source,tcl]
 ----
 <<generate command tests>>=
@@ -3066,6 +3251,7 @@ test codegen-12.0 {
         {[llength [fileutil::grep {X__ATAB} codegen12.c]] == 2}
 } -result {1}
 ----
+endif::showtests[]
 
 [source,tcl]
 ----
@@ -3141,7 +3327,7 @@ proc GenerateTerminalStates {smodel resultVar} {
 [source,tcl]
 ----
 <<generation code commands>>=
-proc GenerateModelNames {smodel} {
+proc GenerateStateNames {smodel} {
     variable domain
     assignAttribute $smodel {Model className}
 
@@ -3159,19 +3345,7 @@ proc GenerateModelNames {smodel} {
         set Name [string map {@ AT} $Name]
         append result "    ${className}_${Name}__SNAME,\n"
     }
-    append result "\} ;\n"
 
-    set events [pipe {
-        TransitioningEvent findWhere\
-                {$Domain eq $domain && $Model eq $className} |
-        deRef ~
-    }]
-
-    append result "static char const * const ${className}__ENAMES\[\] = \{\n"
-    relation foreach event $events -ascending Number {
-        relation assign $event Event
-        append result "    ${className}_${Event}__ENAME,\n"
-    }
     append result\
         "\} ;\n"\
         "#endif /* MRT_NO_NAMES */\n"
@@ -3180,13 +3354,14 @@ proc GenerateModelNames {smodel} {
 }
 ----
 
+=== Polymorphic Dispatch Block Definitions
+
 [source,tcl]
 ----
 <<generation code commands>>=
 proc pdbDefinitions {} {
     variable domain
 
-    set enames {}
     set rnames {}
     set pmaps {}
     set gdbs {}
@@ -3201,8 +3376,8 @@ proc pdbDefinitions {} {
     set deferred [pipe {
         findRelated $superRefs {R86 DeferralPath} |
         deRef ~ |
-        relation join ~ $::micca::DeferredEvent |
-        relation eliminate ~ Domain Role |
+        relation join ~ $::micca::DeferredEvent $::micca::Event |
+        relation eliminate ~ Domain Role PSigID |
         relation rename ~ Model Superclass Number SuperNumber
     }]
     # puts [relformat $deferred deferred]
@@ -3216,23 +3391,19 @@ proc pdbDefinitions {} {
     } {} |%]
     # puts [relformat $nonlocals nonlocals]
 
-    set polys [pipe {
-        relation join $nonlocals $::micca::DeferredEvent |
-        relation extend ~ ptup Type string {"mrtPolymorphicEvent"}
-    }]
+    set polys [relation join $nonlocals\
+            $::micca::DeferredEvent $::micca::Event]
     # puts [relformat $polys polys]
 
-    set trans [pipe {
-        relation join $nonlocals $::micca::TransitioningEvent |
-        relation extend ~ ptup Type string {"mrtTransitionEvent"}
-    }]
+    set trans [relation join $nonlocals\
+            $::micca::TransitioningEvent $::micca::Event]
     # puts [relformat $trans trans]
 
     set supers [pipe {
         relation union $polys $trans |
-        relation eliminate ~ Domain Role |
+        relation eliminate ~ Domain Role PSigID |
         relation join ~ $deferred |
-        relation group ~ EventMap Event SuperNumber Number Type |
+        relation group ~ EventMap Event SuperNumber Number |
         relation group ~ SubMap Model EventMap |
         relation group ~ Generalizations Relationship RelNumber SubMap
     }]
@@ -3253,16 +3424,13 @@ proc pdbDefinitions {} {
             append rnames "    ${Relationship}__NAME,\n"
 
             set pmapvar ${Superclass}_${Relationship}__PMAP
-            append pmaps "static MRT_PolyEventMap const $pmapvar\[\] = \{\n"
+            append pmaps "static MRT_EventCode const $pmapvar\[\] = \{\n"
 
             relation foreach submap $SubMap -ascending Model {
                 relation assign $submap
-                relation foreach eventmap $EventMap {
+                relation foreach eventmap $EventMap -ascending Number {
                     relation assign $eventmap
-                    append pmaps\
-                        "    "\
-                        "\{.event = $Number, .eventType = $Type\},"\
-                        "// $Event for $Model\n"
+                    append pmaps "    $Number, // $Event for $Model\n"
                 }
             }
             append pmaps "\} ;\n"
@@ -3276,21 +3444,12 @@ proc pdbDefinitions {} {
         append rnames "\} ;\n"
         append gdbs "\} ;\n"
 
-        set enamesvar ${Superclass}__PENAMES
-        append enames "static char const *const $enamesvar\[\] = \{\n"
-        relation foreach eventmap $EventMap {
-            relation assign $eventmap Event
-            append enames "    ${Superclass}_${Event}__ENAME,\n"
-        }
-        append enames "\} ;\n"
-
         append pdbs\
             "static MRT_pdb const ${Superclass}__PDB = \{\n"\
-            "    .eventCount = [relation cardinality $SubMap],\n"\
+            "    .eventCount = [relation cardinality $EventMap],\n"\
             "    .genCount = [relation cardinality $Generalizations],\n"\
             "    .genDispatch = $gdbvar,\n"\
             "        #ifndef MRT_NO_NAMES\n"\
-            "    .eventNames = $enamesvar,\n"\
             "    .genNames = $rnamesvar,\n"\
             "        #endif /* MRT_NO_NAMES */\n"\
             "\} ;\n"
@@ -3300,7 +3459,7 @@ proc pdbDefinitions {} {
     append result\
         [comment "Polymorphic Event Dispatch Block Definitions"]\
         "#ifndef MRT_NO_NAMES\n"\
-        $enames $rnames\
+        $rnames\
         "#endif /* MRT_NO_NAMES */\n"\
         $pmaps $gdbs $pdbs
 
@@ -3308,6 +3467,7 @@ proc pdbDefinitions {} {
 }
 ----
 
+ifdef::showtests[]
 [source,tcl]
 ----
 <<generate command tests>>=
@@ -3564,6 +3724,9 @@ test codegen-16.0 {
     return
 } -result {}
 ----
+endif::showtests[]
+
+=== Class Description Definitions
 
 [source,tcl]
 ----
@@ -3613,21 +3776,33 @@ proc classDefinitions {} {
     } {} |%]
     # puts [relformat $usubs usubs]
 
+    set allevents [pipe {
+        Event findWhere {$Domain eq $domain} |
+        deRef ~ |
+        relation rename ~ Model Name Number EvtNumber |
+        relation eliminate ~ PSigID
+    }]
+    # puts [relformat $allevents allevents]
+
     set classes [pipe {
         deRef $classRefs |
         relation extend ~ ctup IAB string {"&[tuple extract $ctup Name]__IAB"} |
+        ralutil::rvajoin ~ $allevents AEvents |
         ralutil::rvajoin ~\
-            [relation rename $::micca::StateModel Model Name] SModel |
-        relation extend ~ etup EDB string {
-            [relation cardinality [tuple extract $etup SModel]] == 0 ?\
-            "NULL" : "&[tuple extract $etup Name]__EDB"} |
+            [relation rename $::micca::TransitioningEvent Model Name] TEvents |
         ralutil::rvajoin ~\
-            [relation rename $::micca::DeferredEvent Model Name Number EvtNum]\
-                PEvents |
-        relation extend ~ ptup PDB string {
-            [relation cardinality [tuple extract $ptup PEvents]] == 0 ?\
-            "NULL" : "&[tuple extract $ptup Name]__PDB"} |
-        relation eliminate ~ SModel PEvents |
+            [relation rename $::micca::DeferredEvent Model Name] PEvents |
+        relation extend ~ etup\
+            EDB string {
+                [relation isempty [tuple extract $etup TEvents]] ?\
+                "NULL" : "&[tuple extract $etup Name]__EDB"}\
+            PDB string {
+                [relation isempty [tuple extract $etup PEvents]] ?\
+                "NULL" : "&[tuple extract $etup Name]__PDB"}\
+            eventNames string {
+                [relation isempty [tuple extract $etup AEvents]] ? "NULL" :\
+                "[tuple extract $etup Name]__ENAMES"} |
+        relation eliminate ~ TEvents PEvents |
         ralutil::rvajoin ~ $rels Relationships |
         relation extend ~ rtup\
             relCount int {
@@ -3640,12 +3815,12 @@ proc classDefinitions {} {
             attrCount int {
                 [relation cardinality [tuple extract $atup Attributes]]}\
             classAttrs string {
-                [relation cardinality [tuple extract $atup Attributes]] == 0 ?\
+                [relation isempty [tuple extract $atup Attributes]] ?\
                 "NULL" : "[tuple extract $atup Name]__CATTRS"} |
         ralutil::rvajoin ~ $usubs UnionSubs |
         relation extend ~ utup\
             containment string {
-                [relation cardinality [tuple extract $utup UnionSubs]] == 0 ?\
+                [relation isempty [tuple extract $utup UnionSubs]] ?\
                 "NULL" :\
                 "&${domain}__RSHIPS\[[relation extract\
                     [tuple extract $utup UnionSubs]\
@@ -3660,6 +3835,7 @@ proc classDefinitions {} {
 
     set relrefs {}
     set attrrefs {}
+    set namerefs {}
     relation foreach class $classes {
         relation assign $class
 
@@ -3705,9 +3881,24 @@ proc classDefinitions {} {
             append attrrefs "\} ;\n"
         }
 
+        if {[relation isnotempty $AEvents]} {
+            append namerefs\
+                "static char const *const ${Name}__ENAMES\["\
+                [relation cardinality $AEvents]\
+                "\] = \{\n"
+
+            relation foreach event $AEvents -ascending EvtNumber {
+                relation assign $event {Event eventName}
+                append namerefs "    ${Name}_${eventName}__ENAME,\n"
+            }
+
+            append namerefs "\} ;\n"
+        }
+
         append result\
-            "    \[$Number\] = \{\n"\
+            "    \[$Number\] = \{ // $Name\n"\
             "        .iab = $IAB,\n"\
+            "        .eventCount = [relation cardinality $AEvents],\n"\
             "        .edb = $EDB,\n"\
             "        .pdb = $PDB,\n"\
             "        .relCount = $relCount,\n"\
@@ -3717,16 +3908,19 @@ proc classDefinitions {} {
             "        .instCount = [GetClassProperty $Name TotalInstance],\n"\
             "        .containment = $containment,\n"\
             "            #ifndef MRT_NO_NAMES\n"\
-            "        .name = ${Name}__NAME\n"\
+            "        .name = ${Name}__NAME,\n"\
+            "        .eventNames = $eventNames,\n"\
             "            #endif /* MRT_NO_NAMES */\n"\
             "    \},\n"
     }
 
     append result "\} ;\n"
 
-    return [string cat $front $relrefs $attrrefs $result]
+    return [string cat $front $namerefs $relrefs $attrrefs $result]
 }
 ----
+
+=== Assigner Definitions
 
 [source,tcl]
 ----
@@ -3734,63 +3928,93 @@ proc classDefinitions {} {
 proc assignerDefinitions {} {
     variable domain
 
-    append result [comment "Single Assigner Class Description Definitions"]
-    set assignerRefs [SingleAssigner findWhere {$Domain eq $domain}]
-    forAllRefs assigner $assignerRefs {
-        assignAttribute $assigner
+    append result [comment "Assigner Class Description Definitions"]
+
+    set events [pipe {
+        TransitioningEvent findWhere {$Domain eq $domain} |
+        deRef ~ |
+        relation join ~ $::micca::Event |
+        relation eliminate ~ PSigID |
+        relation rename ~ Model Association
+    }]
+    set assigners [pipe {
+        AssignerStateModel findWhere {$Domain eq $domain} |
+        deRef ~ |
+        ralutil::rvajoin ~ $::micca::SingleAssigner Single |
+        ralutil::rvajoin ~ $::micca::MultipleAssigner Multiple |
+        relation join ~ $events |
+        relation group ~ Events Event Number
+    }]
+
+    set result {}
+    set attrResult {}
+    set enameResult {}
+    if {[relation isnotempty $assigners]} {
+        set nassign [relation cardinality $assigners]
         append result\
-            "static MRT_Class const ${Association}__CLASS = \{\n"\
-            "    .iab = NULL,\n"\
-            "    .edb = &${Association}__EDB,\n"\
-            "    .pdb = NULL,\n"\
-            "    .relCount = 0,\n"\
-            "    .classRels = NULL,\n"\
-            "    .attrCount = 0,\n"\
-            "    .classAttrs = NULL,\n"\
-            "    .instCount = 1,\n"\
-            "    .containment = NULL,\n"\
-            "        #ifndef MRT_NO_NAMES\n"\
-            "    .name = ${Association}__NAME,\n"\
-            "        #endif /* MRT_NO_NAMES */\n"\
-            "\} ;\n"
+            "static MRT_Class const ${domain}__ASSIGNERS\[$nassign\]= \{\n"\
+
+        relation foreach assigner $assigners -ascending Association {
+            relation assign $assigner
+
+            append enameResult\
+                "static char const *const ${Association}__ENAMES\["\
+                [relation cardinality $Events]\
+                "\] = \{\n"
+
+            relation foreach event $Events -ascending Number {
+                relation assign $event {Event eventName}
+                append enameResult "    ${Association}_${eventName}__ENAME,\n"
+            }
+
+            append enameResult "\} ;\n"
+
+            append result\
+                "    \{ // $Association\n"\
+                "        .iab = &${Association}__IAB,\n"\
+                "        .eventCount = [relation cardinality $Events],\n"\
+                "        .edb = &${Association}__EDB,\n"\
+                "        .pdb = NULL,\n"
+            if {[relation isnotempty $Single]} {
+                append result\
+                    "        .attrCount = 0,\n"\
+                    "        .classAttrs = NULL,\n"\
+            } else {
+                relation assign $Multiple
+                append attrResult\
+                    "static MRT_Attribute const ${Association}__CATTRS\[1\] = \{\n"\
+                    "    \{\n"\
+                    "        .offset = offsetof(struct $Association, idinstance),\n"\
+                    "        .size = sizeof([GetClassProperty $Class Reference]),\n"\
+                    "            #ifndef MRT_NO_NAMES\n"\
+                    "        .name = multi_assigner_attribute__NAME\n"\
+                    "            #endif /* MRT_NO_NAMES */\n"\
+                    "    \}\n"\
+                    "\} ;\n"
+                append result\
+                    "        .attrCount = 1,\n"\
+                    "        .classAttrs = ${Association}__CATTRS,\n"\
+            }
+            set ninst [GetClassProperty $Association TotalInstance]
+            append result\
+                "        .instCount = $ninst,\n"\
+                "        .relCount = 0,\n"\
+                "        .classRels = NULL,\n"\
+                "        .containment = NULL,\n"\
+                "            #ifndef MRT_NO_NAMES\n"\
+                "        .name = ${Association}__NAME,\n"\
+                "        .eventNames = ${Association}__ENAMES,\n"\
+                "            #endif /* MRT_NO_NAMES */\n"\
+                "    \},\n"
+        }
+        append result "\} ;\n"
     }
 
-    append result [comment "Multiple Assigner Class Description Definitions"]
-    set assignerRefs [MultipleAssigner findWhere {$Domain eq $domain}]
-    forAllRefs assigner $assignerRefs {
-        assignAttribute $assigner
-        append result\
-            "static MRT_Attribute const ${Association}__CATTRS\[1\] = \{\n"\
-            "    \{\n"\
-            "        .offset = offsetof(struct $Association, idinstance),\n"\
-            "        .size = sizeof([GetClassProperty $Class Reference]),\n"\
-            "            #ifndef MRT_NO_NAMES\n"\
-            "        .name = multi_assigner_attribute__NAME\n"\
-            "            #endif /* MRT_NO_NAMES */\n"\
-            "    \}\n"\
-            "\} ;\n"
-
-        set instRefs [findRelated $assigner ~R106]
-        append result\
-            "static MRT_Class const ${Association}__CLASS = \{\n"\
-            "    .iab = &${Association}__IAB,\n"\
-            "    .edb = &${Association}__EDB,\n"\
-            "    .pdb = NULL,\n"\
-            "    .relCount = 0,\n"\
-            "    .classRels = NULL,\n"\
-            "    .attrCount = 1,\n"\
-            "    .classAttrs = ${Association}__CATTRS,\n"\
-            "    .instCount = [refMultiplicity $instRefs],\n"\
-            "    .containment = NULL,\n"\
-            "        #ifndef MRT_NO_NAMES\n"\
-            "    .name = ${Association}__NAME,\n"\
-            "        #endif /* MRT_NO_NAMES */\n"\
-            "\} ;\n"
-    }
-
-    return $result
+    return [string cat $enameResult $attrResult $result]
 }
 ----
+
+=== Relationship Description Definitions
 
 ----
 <<generation code commands>>=
@@ -4104,6 +4328,8 @@ proc MapToCardinality {cond mult} {
 }
 ----
 
+=== Class Instance Definitions
+
 [source,tcl]
 ----
 <<generation code commands>>=
@@ -4319,7 +4545,7 @@ proc GenInstanceInitializers {className classNumber inst} {
         [readAttribute $sp Number] : "MRT_StateCode_IG"}]
 
     append result\
-        "$indent\{\n"\
+        "$indent\{ // $Instance\n"\
         "$indent2.base__INST = \{\n"\
         "$indent3.classDesc = &${domain}__CLASSES\[$classNumber\],\n"\
         "$indent3.alloc = [expr {$InstNumber + 1}],\n"\
@@ -4478,6 +4704,8 @@ proc GenInstanceInitializers {className classNumber inst} {
 }
 ----
 
+=== Assigner Instance Definitions
+
 [source,tcl]
 ----
 <<generation code commands>>=
@@ -4493,16 +4721,17 @@ proc assignerInstanceDefinitions {} {
             readAttribute ~ Number
         }]
         assignAttribute $assigner
+        set instnum [GetClassProperty $Association Number]
         append result\
             "static struct $Association ${Association}__POOL\[1\] = \{\n"\
             "    \{\n"\
             "        .base__INST = \{\n"\
-            "            .classDesc = &${Association}__CLASS,\n"\
+            "            .classDesc = &${domain}__ASSIGNERS\[$instnum\],\n"\
             "            .alloc = 1,\n"\
             "            .currentState = $initstate,\n"\
             "            .refCount = 0,\n"\
             "                #ifndef MRT_NO_NAMES\n"\
-            "            .name = ${Association}__NAME\n"\
+            "            .name = single_assigner_instance__NAME\n"\
             "                #endif /* MRT_NO_NAMES */\n"\
             "        \}\n"\
             "    \}\n"\
@@ -4512,7 +4741,7 @@ proc assignerInstanceDefinitions {} {
     append result [comment "Multiple Assigner Instance Definitions"]
     set multis [MultipleAssigner findWhere {$Domain eq $domain}]
     forAllRefs multi $multis {
-        assignAttribute $multi {Association assoc}
+        assignAttribute $multi
         set initstate [pipe {
             findRelated $multi R53 R50 R58 R57 |
             readAttribute ~ Number
@@ -4520,17 +4749,17 @@ proc assignerInstanceDefinitions {} {
 
         set multiinsts [findRelated $multi ~R106]
         if {[isNotEmptyRef $multiinsts]} {
-            set totalinsts [GetClassProperty [readAttribute $multi Class]\
-                    TotalInstance]
-            append result "static struct $assoc\
-                    ${assoc}__POOL\[$totalinsts\] = \{\n"
+            set totalinsts [GetClassProperty $Class TotalInstance]
+            set instnum [GetClassProperty $Association Number]
+            append result "static struct $Association\
+                    ${Association}__POOL\[$totalinsts\] = \{\n"
             forAllRefs assigner $multiinsts {
                 assignAttribute $assigner
                 set allocnum 0
                 append result\
                     "    \[$Number\] = \{\n"\
                     "        .base__INST = \{\n"\
-                    "            .classDesc = &${Association}__CLASS,\n"\
+                    "            .classDesc = &${domain}__ASSIGNERS\[$instnum\],\n"\
                     "            .alloc = [incr allocnum],\n"\
                     "            .currentState = $initstate,\n"\
                     "            .refCount = 0,\n"\
@@ -4549,6 +4778,8 @@ proc assignerInstanceDefinitions {} {
     return $result
 }
 ----
+
+=== Operation Definitions
 
 [source,tcl]
 ----
@@ -4591,11 +4822,11 @@ proc operationDefinitions {} {
                 relation project $Parameters Name DataType |
                 relation rename ~ DataType Ctype |
                 relation extend ~ stup\
-                    Type string {"Parameter"}\
-                    Class string {$Class} |
+                    Type string {{}}\
+                    Class string {{}} |
                 relation update ~ utup {
                     [tuple extract $utup Name] eq "self"} {
-                    tuple update $utup Type Reference
+                    tuple update $utup Type Reference Class $Class
                 }
             }]
         }
@@ -4604,7 +4835,7 @@ proc operationDefinitions {} {
             [blockcomment $Body]\
             "\{\n"\
             "    MRT_INSTRUMENT_ENTRY\n"\
-            [ExpandActivity $Body $syms]\
+            [ExpandActivity "$Operation operation" $Body $syms]\
             "\}\n"
     }
 
@@ -4612,19 +4843,13 @@ proc operationDefinitions {} {
 }
 ----
 
+=== Constructor Definitions
+
 [source,tcl]
 ----
 <<generation code commands>>=
 proc ctorDefinitions {} {
     return [TorDefinitions Constructor]
-}
-----
-
-[source,tcl]
-----
-<<generation code commands>>=
-proc dtorDefinitions {} {
-    return [TorDefinitions Destructor]
 }
 ----
 
@@ -4658,7 +4883,7 @@ proc TorDefinitions {which} {
                 [string cat\
                     "    MRT_INSTRUMENT_ENTRY\n"\
                     "    $selfdecl self = s__SELF ;\n"\
-                    [ExpandActivity $Body $syms]\
+                    [ExpandActivity "$Class $which" $Body $syms]\
                 ]\
                 "\}\n"
         }
@@ -4668,6 +4893,17 @@ proc TorDefinitions {which} {
 }
 ----
 
+=== Destructor Definitions
+
+[source,tcl]
+----
+<<generation code commands>>=
+proc dtorDefinitions {} {
+    return [TorDefinitions Destructor]
+}
+----
+
+ifdef::showtests[]
 [source,tcl]
 ----
 <<generate command tests>>=
@@ -4708,6 +4944,9 @@ test codegen-17.0 {
         {[llength [fileutil::grep {DTOR} codegen17.c]] == 3}
 } -result {1}
 ----
+endif::showtests[]
+
+=== Activity Definitions
 
 [source,tcl]
 ----
@@ -4759,8 +4998,8 @@ proc activityDefinitions {} {
                         relation project $params Name Declaration |
                         relation rename ~ Declaration Ctype |
                         relation extend ~ stup\
-                            Type string {"Parameter"}\
-                            Class string {$Model}
+                            Type string {{}}\
+                            Class string {{}}
                     }]
                 } else {
                     set syms [relation create {
@@ -4770,7 +5009,8 @@ proc activityDefinitions {} {
                 set syms [relation insert $syms [list Name self Ctype $selfdecl\
                         Type Reference Class $Model]]
 
-                append result [ExpandActivity $Activity $syms]
+                append result\
+                    [ExpandActivity "$Model $Name activity" $Activity $syms]
 
                 append result\
                     "        #undef MRT_STATENAME\n"\
@@ -4799,6 +5039,8 @@ proc FindParamsFromSig {psigRef} {
     } {} |%]
 }
 ----
+
+=== Domain Constructor Definition
 
 [source,tcl]
 ----
@@ -4838,6 +5080,8 @@ proc domainCtorDefinition {} {
     return $result
 }
 ----
+
+=== Domain Operation Definitions
 
 [source,tcl]
 ----
@@ -4884,7 +5128,7 @@ proc domainOpDefinitions {} {
                     relation project $Parameters Name DataType |
                     relation rename ~ DataType Ctype |
                     relation extend ~ stup\
-                        Type string {"Parameter"}\
+                        Type string {{}}\
                         Class string {{}}
                 }]
             }
@@ -4893,7 +5137,7 @@ proc domainOpDefinitions {} {
                 [blockcomment $Body]\
                 "\{\n"\
                 "    MRT_INSTRUMENT_ENTRY\n"\
-                [ExpandActivity $Body $syms]\
+                [ExpandActivity "$Operation domain operation" $Body $syms]\
                 "\}\n"
         }
     }
@@ -4902,6 +5146,7 @@ proc domainOpDefinitions {} {
 }
 ----
 
+ifdef::showtests[]
 [source,tcl]
 ----
 <<generate command tests>>=
@@ -4937,6 +5182,9 @@ test codegen-18.0 {
         {[llength [fileutil::grep {codegen18_color} codegen18.c]] == 1}
 } -result {1}
 ----
+endif::showtests[]
+
+=== External Operation Definitions
 
 [source,tcl]
 ----
@@ -4984,7 +5232,7 @@ proc externalOpDefinitions {} {
                 relation project $Parameters Name DataType |
                 relation rename ~ DataType Ctype |
                 relation extend ~ stup\
-                    Type string {"Parameter"}\
+                    Type string {{}}\
                     Class string {{}}
             }]
         }
@@ -4992,7 +5240,7 @@ proc externalOpDefinitions {} {
         append result\
             [blockcomment $Body]\
             "\{\n"\
-            [ExpandActivity $Body $syms]\
+            [ExpandActivity "$Operation external operation" $Body $syms]\
             "\}\n"
     }
 
@@ -5000,6 +5248,7 @@ proc externalOpDefinitions {} {
 }
 ----
 
+ifdef::showtests[]
 [source,tcl]
 ----
 <<generate command tests>>=
@@ -5035,6 +5284,9 @@ test codegen-19.0 {
         {[llength [fileutil::grep {codegen19_color__EOP} codegen19.c]] == 1}
 } -result {1}
 ----
+endif::showtests[]
+
+=== Portal Data Definitions
 
 [source,tcl]
 ----
@@ -5043,17 +5295,24 @@ proc portalDefinition {} {
     variable domain
 
     set classRefs [Class findWhere {$Domain eq $domain}]
+    set assignRefs [AssignerStateModel findWhere {$Domain eq $domain}]
+    set acount [refMultiplicity $assignRefs]
+    set aptr [expr {$acount == 0 ? "NULL" : "${domain}__ASSIGNERS"}]
     append result\
         [comment "Domain Portal Definition"]\
         "MRT_DomainPortal ${domain}__PORTAL = \{\n"\
         "    .classCount = [refMultiplicity $classRefs],\n"\
         "    .classes = ${domain}__CLASSES,\n"\
+        "    .assignerCount = $acount,\n"\
+        "    .assigners = $aptr,\n"\
         "        #ifndef MRT_NO_NAMES\n"\
         "    .name = \"$domain\"\n"\
         "        #endif /* MRT_NO_NAMES */\n"\
         "\} ;\n"
 }
 ----
+
+=== Epilogue Declarations
 
 [source,tcl]
 ----
@@ -5086,9 +5345,9 @@ as:
 ColorType c = %<my attribute Color>% ;
 *****
 
-The code generator would then expand the commands contained between the
-*%<* and *>%* delimiters and replace the embedded macro with the
-value of the *Color* attribute of the instance referenced by the
+The code generator would then expand the commands contained between the *%<*
+and *>%* delimiters and replace the embedded macro with ``C'' code required to
+access the value of the *Color* attribute of the instance referenced by the
 value of the *self* variable.
 This is a very simple case, but even here the code generator
 performs a number of significant checks in an attempt to discover
@@ -5120,12 +5379,14 @@ takes care of the semicolon punctuation.
 For value macros,
 the code generator just replaces the macro and does not add any punctuation.
 This enables a value macro to be used inside of another ``C'' expression.
-. A macro command may expand to a loop construct in ``C''.
-For looping macros,
-additional ``C'' code is included in the loop body and the end of the
-loop is given by invoking the `%<end>%` macro.
-Typically, the looping macros allow iteration over sets of instances
-and the loop body performs the per instance computation.
+. A macro command may expand to a construct in ``C'' requiring a
+compound statement.
+For macros generating compound statements,
+additional ``C'' code is included in the compound statement body and
+the end of the loop is given by invoking the `%<end>%` macro.
+Typically, the these macros allow iteration over sets of instances
+and the compound statement body is executed once for
+each instance.
 
 In the descriptions below we state the expansion type of each macro.
 
@@ -5235,7 +5496,7 @@ relation foreach info $classInfo {
     set cmdmap [dict create\
         foreachInstance [list ${suppns}::ClassForeachInstance $Name]\
         instref [list ${suppns}::ClassInstanceReference $Name]\
-        reference [list ${suppns}::ClassIdToRef $Name]\
+        idtoref [list ${suppns}::ClassIdToRef $Name]\
         instset [list ${suppns}::ClassInstanceSet $Name]\
         findByName [list ${suppns}::ClassFindByName $Name]\
         operation [list ${suppns}::ClassOperation $Name]\
@@ -5358,6 +5619,7 @@ foreach ugname [relation list [deRef $uniongens] Name] {
 <<CreateActivityCommands: instances>>=
 set cmdmap [dict create\
     attribute ${suppns}::InstanceAttribute\
+    assign ${suppns}::InstanceAssign\
     signal ${suppns}::InstanceSignal\
     delaysignal ${suppns}::InstanceDelaySignal\
     canceldelayed ${suppns}::InstanceCancelSignal\
@@ -5367,7 +5629,6 @@ set cmdmap [dict create\
     foreachRelated ${suppns}::InstanceForeachRelated\
     findOneRelated ${suppns}::InstanceFindOneRelated\
     instid ${suppns}::InstanceRefToId\
-    instref ${suppns}::InstanceIdToRef\
 ]
 namespace ensemble create\
     -command ${actns}::instance\
@@ -5380,6 +5641,7 @@ namespace ensemble create\
 <<CreateActivityCommands: instances>>=
 set cmdmap [dict create\
     attribute [list ${suppns}::InstanceAttribute self]\
+    assign [list ${suppns}::InstanceAssign self]\
     signal [list ${suppns}::InstanceSignal self]\
     delaysignal [list ${suppns}::InstanceDelaySignal self]\
     canceldelayed [list ${suppns}::InstanceCancelSignal self]\
@@ -5398,11 +5660,15 @@ namespace ensemble create\
 <<CreateActivityCommands: instance sets>>=
 set cmdmap [dict create\
     foreachSelected ${suppns}::InstanceSetForeachSelected\
+    selectRelated ${suppns}::InstanceSetSelectRelated\
     empty ${suppns}::InstanceSetEmpty\
+    cardinality ${suppns}::InstanceSetCardinality\
     notempty ${suppns}::InstanceSetNotEmpty\
     equal ${suppns}::InstanceSetEqual\
     notequal ${suppns}::InstanceSetNotEqual\
     add ${suppns}::InstanceSetAdd\
+    remove ${suppns}::InstanceSetRemove\
+    member ${suppns}::InstanceSetMember\
     union ${suppns}::InstanceSetUnion\
     intersect ${suppns}::InstanceSetIntersect\
     minus ${suppns}::InstanceSetMinus\
@@ -5425,6 +5691,8 @@ relvar create Symbol {
     Type string
     Class string
 } {Name Block}
+
+variable symcounter 0
 ----
 
 [source,tcl]
@@ -5496,6 +5764,18 @@ proc CheckSymbol {name args} {
 
 proc CheckSymProperties {sym args} {
     foreach {prop value} $args {
+        # if the property is empty, then we will assume the value that
+        # is checked first. This lets us pass parameters where we
+        # don't quite know the data type needs.
+        if {[dict get $sym $prop] eq {}} {
+            dict set sym $prop $value
+            relvar update Symbol stup {
+                    [tuple extract $stup Name] eq [dict get $sym Name] &&\
+                    [tuple extract $stup $prop] eq {}
+                } {
+                    tuple update $stup $prop $value
+                }
+        }
         if {[dict get $sym $prop] ne $value} {
             error "for variable, [dict get $sym Name], expected $prop to be,\
                     $value: got [dict get $sym $prop] instead"
@@ -5612,7 +5892,7 @@ proc GetBlock {} {
 [source,tcl]
 ----
 <<generation support commands>>=
-proc ExpandActivity {body parameters} {
+proc ExpandActivity {name body parameters} {
     # parameters is a relation value with heading:
     # Name string Ctype string Type string Class string
 
@@ -5624,7 +5904,7 @@ proc ExpandActivity {body parameters} {
         return [actexpand expand $body]
     } on error {result} {
         # puts $::errorInfo
-        log::error $result
+        log::error "$name: $result"
         variable errcount
         incr errcount
         set msg [pipe {
@@ -5636,6 +5916,7 @@ proc ExpandActivity {body parameters} {
         return "#error \"$msg\""
     } finally {
         relvar set Symbol [relation emptyof [relvar set Symbol]]
+        variable symcounter 0
     }
 }
 ----
@@ -5684,26 +5965,59 @@ proc InvokeExternalOp {opName args} {
         error "unknown external operation, $opName, for domain, $domain"
     }
 
-    append result "${domain}_${opName}__EOP\("
+    set provided [dict keys $args]
+    set params [deRef [findRelated $opRef ~R11]]
+    set required [relation list $params Name -ascending Number]
+    ValidateParams $opName $provided $required
+
     set pset {}
-    set paramRefs [findRelated $opRef ~R11]
-    relation foreach param [deRef $paramRefs] -ascending Number {
-        relation assign $param
-        if {![dict exists $args $Name]} {
-            error "no value given for the $Name parameter"
-        }
-        append pset "[dict get $args $Name], "
+    foreach pname $required {
+        append pset "[dict get $args $pname], "
     }
     set pset [string trimright $pset {, }]
 
-    append result $pset "\) ;"
-    return [IndentToBlock $result]
+    return "${domain}_${opName}__EOP\($pset\)"
 }
 ----
 
-=== Instance Commands
+=== Instance Macro Commands
+
+The macro command, `instance` has a number of subcommands used to
+access various aspects of a class instance.
+The instance commands follow a pattern:
+
+*****
+`%<instance` _instvar_ `subcommand` _other arguments_ `>%`
+*****
+
+The instance operation is performed on class instance whose reference
+is held in the _instvar_ variable.
+The `subcommand` argument names the specific instance operation to
+be performed.
+Each possible `subcommand` is given in a section below describing the
+operation.
+Difference `subcommand` operation may require additional arguments
+as described.
+
+==== Access to Instance Attributes
+
+*****
+`%<instance` _instvar_ `attribute` _attrname_ `>%`
+
+instvar::
+    The name of a ``C'' variable that holds a reference to a class instance.
+attrname::
+    The name of the attribute to be accessed.
+
+The `attribute` subccommand generates a ``C'' expression to access
+_attrname_ for the instance whose reference is contained in the
+variable named, _instvar_.
+The class whose instance is held in _instvar_ must contain an attribute whose
+name is _attrname_ or an error is generated.
+*****
 
 [source,tcl]
+.Implementation
 ----
 <<generation support commands>>=
 proc InstanceAttribute {instref attr} {
@@ -5721,7 +6035,86 @@ proc InstanceAttribute {instref attr} {
 }
 ----
 
+==== Assigning Instance Attributes to Variables
+
+*****
+`%<instance` _instvar_ `assign` _?assignspec1 assignspec2  ...?_ `>%`
+
+instvar::
+    The name of a ``C'' variable that holds a reference to a class instance.
+assignspecN::
+    A set of attribute name / variable name pairs. Each _assignspec_
+    argument consists of a list of one or two elements.
+    The first element is the name of the attribute of _instvar_ to assign.
+    The second element is the name of a local variable into which the
+    assignment is made.
+    If the second element is absent, then the assignment is made to
+    a local variable with the same name as the attribute.
+
+The `assign` subccommand generates ``C'' statements to assign
+a set of attributes of _instvar_ according the the _assignspec_ arguments.
+The class whose instance is held in _instvar_ must contain an attribute whose
+name matches the attribute name in the _assignspec_ or an error is generated.
+*****
+
 [source,tcl]
+.Implementation
+----
+<<generation support commands>>=
+proc InstanceAssign {instref args} {
+    variable domain
+
+    set sym [CheckInstRefSymbol $instref]
+
+    set result {}
+    foreach attrspec $args {
+        if {[llength $attrspec] == 1} {
+            set attrname [lindex $attrspec 0]
+            set varname $attrname
+        } elseif {[llength $attrspec] == 2} {
+            lassign $attrspec attrname varname
+        } else {
+            error "bad attribute specification, \"$attrspec\":\
+                expected 1 or 2 element list"
+        }
+        set attrRef [Attribute findById Domain $domain\
+                Class [dict get $sym Class] Name $attrname]
+        if {[isEmptyRef $attrRef]} {
+            error "instance reference, $instref, refers to an instance of\
+                class, [dict get $sym Class], which does not have an attribute\
+                named, $attrname"
+        }
+        # HERE, need to be able to reuse local symbol names
+        # if the C type matches
+        assignAttribute $attrRef {DataType attrtype} Dimension
+        set vardecl [typeCheck composeDeclaration $attrtype $varname]
+        if {$Dimension > 0} { # <2>
+            append result\
+                "$vardecl\[$Dimension\] ;\n"\
+                "memcpy($varname, $instref->$attrname, sizeof($varname)) ;\n"
+        } else {
+            append result "$vardecl = $instref->$attrname ;\n"
+        }
+    }
+
+    return [IndentToBlock $result]
+}
+----
+
+==== Deleting Instances
+
+*****
+`%<instance` _instvar_ `delete>%`
+
+instvar::
+    The name of a ``C'' variable that holds a reference to a class instance.
+
+The `delete` subccommand generates a ``C'' statement to delete the
+class instance whose reference is contained in _instvar_.
+*****
+
+[source,tcl]
+.Implementation
 ----
 <<generation support commands>>=
 proc InstanceDelete {instref} {
@@ -5734,7 +6127,35 @@ proc InstanceDelete {instref} {
 }
 ----
 
+==== Invoking Instance Based Operations
+
+*****
+`%<instance` _instvar_ `operation` _opname param1 value1 param2 value2 ..._ `>%`
+
+instvar::
+    The name of a ``C'' variable that holds a reference to a class instance.
+opname::
+    The name of the instance operation to be invoked.
+paramN valueN::
+    A set of named parameter values to the operation.
+
+The `operation` subccommand generates a ``C'' expression to invoke the instance
+based operation on the class instance whose reference is contained in
+_instvar_.
+The _opname_ argument must be a valid instance based operation defined
+on the class of the _instvar_ instance.
+Parameter arguments are parameter name / parameter value pairs,
+where the parameter name must match that provided in the definition of
+the operation.
+Parameter values may be any valid ``C'' value expression such as a
+variable name or a constant.
+Parameters may be given in any order since they are named.
+It is an error not to provide values for all the parameters of the
+operation.
+*****
+
 [source,tcl]
+.Implementation
 ----
 <<generation support commands>>=
 proc InstanceOperation {instref opName args} {
@@ -5751,360 +6172,261 @@ proc InstanceOperation {instref opName args} {
         error "unknown instance operation, $opName, for class, $className"
     }
 
-    append result\
-        [linecomment "instance $instref operation $opName [list $args]"]\
-        "${className}_$opName\("
-    dict set args self $instref
+    dict set args self $instref ; # <1>
+    set provided [dict keys $args]
+    set params [deRef [findRelated $opRef ~R4]]
+    set required [relation list $params Name -ascending Number] ; # <2>
+    ValidateParams $opName $provided $required
+
     set pset {}
-    set paramRefs [findRelated $opRef ~R4]
-    relation foreach param [deRef $paramRefs] -ascending Number {
-        relation assign $param
-        if {![dict exists $args $Name]} {
-            error "no value given for the $Name parameter"
-        }
-        append pset "[dict get $args $Name], "
+    foreach pname $required {
+        append pset "[dict get $args $pname], "
     }
     set pset [string trimright $pset {, }]
 
-    append result $pset "\)"
-    return $result
+    return "${className}_$opName\($pset\)"
 }
 ----
+<1> The value of the implicit `self` argument is just the instance reference
+upon which the macro command was invoked.
+<2> The order is important here since ``C'' passes parameters by order.
+We use the parameter numbering to translate from pass by name to pass by order.
 
 [source,tcl]
 ----
 <<generation support commands>>=
-proc InstanceForeachRelated {instref startref args} {
-    variable domain
+proc ValidateParams {name provided required} {
+    if {![struct::set equal $provided $required]} {
+        lassign [struct::set intersect3 $provided $required]\
+            p_inter_r p_minus_r r_minus_p
+        if {![struct::set empty $p_minus_r]} {
+            error "provided parameter(s), \"[join $p_minus_r ,]\", which are\
+                not parameters to, $name"
+        }
+        if {![struct::set empty $r_minus_p]} {
+            error "parameter(s), \"[join $r_minus_p ,]\", are required for,\
+                $name, but were not provided"
+        }
+    }
+}
+----
 
-    set startsym [CheckInstRefSymbol $startref]
-    set startClass [dict get $startsym Class]
-    set startlevel [GetBlock]
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-49.0 {
+    Navigate simple association -- singular
+} -setup {
+    validateutils genMiccaFile codegen49 {
+        domain codegen49 {
+            class X {
+                attribute temp int -default 10
+
+                instop void incrTemp {quantity int} {
+                    %<my attribute temp>% += quantity ;
+                }
+            }
+            domainop void findys {} {
+                %<X findByName x1 xref>%
+                int x = 3 ;
+                %<instance xref operation incrTemp quantity {x + 2}>% ;
+            }
+        }
+        population codegen49 {
+            class X {
+                instance x1
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen49.c
+    testConditions\
+        {[validateutils matchLines codegen49.c {
+            X_incrTemp(xref, x + 2) ;
+        }]}
+} -result {1}
+----
+endif::showtests[]
+
+==== Iterating Across Related Instances
+
+One of the more complicated model level actions is to navigate a
+chain of relationships.
+Navigation starts at a given class instance and then traverses
+relationships to obtain a related set of class instances.
+Often,
+it is not necessary to actually accumulate the set of related instance
+references.
+For simple operations on the related instances,
+it is sufficient to iterate across them and perform the operation as
+each related instance is found.
+
+What makes relationship navigation complicated is the different
+``C'' level storage strategies for the relationship pointers.
+Sometimes the pointer is just a single value, sometimes a linked list
+and sometimes a counted array.
+Some relationships are conditional and so traversal through a conditional
+relationship must insure that we have actually found an instance.
+All of these considerations make is essential to provide an embedded
+macro command to generate the required code.
+
+<<relationship-naming-conventions,Previously>>, we explained the conventions
+used to specify relationship traversal.
+Those same conventions will be used here to specify, as a set of arguments,
+the relationship chain to be navigated.
+
+*****
+`%<instance` _instvar_ `foreachRelated` _start rel1 ?rel2? ..._ `>%` +
+{nbsp}{nbsp} _Loop Body_ +
+`%<end>%`
+
+instvar::
+    The name of a ``C'' variable that holds a reference to a class instance.
+start::
+    The name of a ``C'' variable containing the instance reference where
+    the relationship navigation will begin.
+relN::
+    A set of relationship navigation specifications.
+
+The `foreachRelated` subccommand generates ``C'' statements
+to iterate across the set of instances obtained by navigating
+the relationship chain which starts at the _start_ instance
+and is given by the _relN_ arguments.
+A reference to each instance found in the navigation is assigned into
+the _instvar_ variable and then _Loop Body_ is executed.
+Statements in the _Loop Body_ terminate at the `%<end>%` macro command.
+The scope of the _instvar_ variable is confined to the statements in
+the _Loop Body_.
+
+The relationship traversal is given as a set of relationship navigation
+specifications of the form:
+
+* `Rdd` -- traversing relationship _Rdd_ in the forward direction.
+* `~Rdd` -- traversing relationship _Rdd_ in the backward direction.
+* `{Rdd class}` -- traversing relationship _Rdd_ in the forward direction and
+stopping at `class`.
+* `{~Rdd class}` -- traversing relationship _Rdd_ in the backward direction and
+stopping at `class`.
+*****
+{nbsp}
+[source,tcl]
+.Implementation
+----
+<<generation support commands>>=
+proc InstanceForeachRelated {instref startref args} {
+    set startblock [GetBlock]
     set result [IndentToBlock\
         [linecomment "instance $instref foreachRelated $startref [list $args]"]\
     ]
 
-    foreach relspec $args {
-        set relinfo [LookUpRelationship $relspec]
+    lassign [TraverseRelChain $startref $args] chaincode targetclass targetref
+    append result $chaincode
+    append result [IndentToBlock [string cat\
+        [CreateInstRefSymbol $targetclass $instref]\
+        "$instref = $targetref ;\n"]]
+
+    PushContext InstanceForeachRelated depth [expr {[GetBlock] - $startblock}]
+
+    return $result
+}
+----
+
+The difficult part of the code generation for traversing a relationship
+chain is factored in the to procedure below.
+The `TraversRelChain` procedure generates the code to access the pointer
+in the instance structures associated with a given set of relationships.
+Since there are many different pointer arrangements,
+the traversal code will be specific to each type of relationships
+being traversed.
+The return value of the function is a three element list giving the
+generated code to traverse the relationship chain, the target class
+of the end of the chain and a variable name containing the target instance
+reference of the end.
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc TraverseRelChain {startref relspecs} {
+    variable domain
+
+    if {[llength $relspecs] == 0} {
+        error "empty relationship chain specification"
+    }
+
+    set result {}
+    set startsym [CheckInstRefSymbol $startref]
+    set startClass [dict get $startsym Class]
+
+    foreach relspec $relspecs {
+        set relinfo [LookUpRelationship $startClass $relspec]
         while {[llength $relinfo] != 0} {
             # puts "relinfo = \"$relinfo\""
             set relinfo [lassign $relinfo sourceclass targetclass reftype cond\
                 comp]
             switch -exact -- $reftype {
                 reference {
-                    if {$startClass ne $sourceclass} {
-                        error "relationship, [lindex $relspec 0], is from\
-                            $sourceclass to $targetclass, got, $startClass,\
-                            as the traversal start"
-                    }
-                    lassign [CreateTempRefSymbol $targetclass]\
-                        targettype targetref
-                    set refcode "$targettype$targetref = $startref->$comp ;\
-                    // $relspec \n"
-                    if {$cond} {
-                        append refcode "if ($targetref != NULL) \{\n"
-                        append result [IndentToBlock $refcode]
-                        PushBlock
-                    } else {
-                        append result [IndentToBlock $refcode]
-                    }
+                    <<TraverseRelChain: single reference>>
                 }
                 array {
-                    if {$startClass ne $sourceclass} {
-                        error "relationship, [lindex $relspec 0], is from\
-                            $sourceclass to $targetclass, got, $startClass,\
-                            as the traversal start"
-                    }
-                    set itervar [CreateTempSymbol\
-                        Ctype "struct $targetclass *const *"\
-                        Type "ReferenceArray" Class $targetclass]
-                    set cntvar [CreateTempSymbol Ctype size_t Type ArrayCounter\
-                        Class $targetclass]
-                    set refcode\
-                        "struct $targetclass *const *$itervar =\
-                            $startref->$comp.links ; // $relspec\n"
-                    append refcode\
-                        "for (size_t $cntvar = $startref->$comp.count ;\
-                            $cntvar != 0 ; $cntvar--, $itervar++) \{"
-                    append result [IndentToBlock $refcode]
-                    PushBlock
-                    lassign [CreateTempRefSymbol $targetclass] targettype\
-                            targetref
-                    append result [IndentToBlock\
-                        "$targettype$targetref = *$itervar ;"]
+                    <<TraverseRelChain: array reference>>
                 }
                 linked {
-                    if {$startClass ne $sourceclass} {
-                        error "relationship, [lindex $relspec 0], is from\
-                            $sourceclass to $targetclass, got, $startClass,\
-                            as the traversal start"
-                    }
-                    set itervar [CreateTempSymbol Ctype "MRT_LinkRef *"\
-                        Type "ReferenceLink" Class $targetclass]
-                    lassign $comp termcomp linkcomp
-                    append result [IndentToBlock\
-                        "for (MRT_LinkRef *$itervar =\
-                            mrtLinkRefBegin(&$startref->$termcomp) ;\
-                            $itervar != mrtLinkRefEnd(&$startref->$termcomp) ;)\
-                            \{\n"]
-                    PushBlock
-                    lassign [CreateTempRefSymbol $targetclass] targettype\
-                            targetref
-                    append result [IndentToBlock [string cat\
-                        "$targettype$targetref =\
-                            ($targettype)((uintptr_t)$itervar -\
-                            offsetof(struct $targetclass, $linkcomp)) ;\n"\
-                        "$itervar = $itervar->next ;\n"\
-                    ]]
+                    <<TraverseRelChain: linked reference>>
                 }
                 reftosuper {
-                    if {$startClass ni $sourceclass} {
-                        error "relationship, [lindex $relspec 0], is from\
-                            \"[join $sourceclass {, }]\", to $targetclass,\
-                            got, $startClass, as the traversal start"
-                    }
-                    lassign [CreateTempRefSymbol $targetclass] targettype\
-                            targetref
-                    append result [IndentToBlock\
-                        "$targettype$targetref = $startref->$comp ;\
-                        // $relspec \n"]
+                    <<TraverseRelChain: reference to superclass>>
                 }
                 reftosub {
-                    lassign [CreateTempRefSymbol $targetclass] targettype\
-                            targetref
-                    set subnum [GetClassProperty $targetclass Number]
-                    set refcode\
-                        "$targettype$targetref = $startref->$comp ;\
-                            // $relspec\n"
-                    append refcode\
-                        "if ($targetref->base__INST.classDesc ==\
-                        &${domain}__CLASSES\[$subnum\]) \{\n"
-                    append result [IndentToBlock $refcode]
-                    PushBlock
+                    <<TraverseRelChain: reference to subclass>>
                 }
                 uniontosuper {
-                    if {$startClass ni $sourceclass} {
-                        error "relationship, [lindex $relspec 0], is from\
-                            \"[join $sourceclass {, }]\", to $targetclass,\
-                            got, $startClass, as the traversal start"
-                    }
-                    lassign [CreateTempRefSymbol $targetclass] targettype\
-                            targetref
-                    append result [IndentToBlock\
-                        "$targettype$targetref =\
-                        ($targettype)((uintptr_t)$startref -\
-                        offsetof(struct $targetclass, $comp.$startClass)) ;\
-                        // $relspec \n"]
+                    <<TraverseRelChain: union subclass to superclass reference>>
                 }
                 uniontosub {
-                    lassign [CreateTempRefSymbol $targetclass] targettype\
-                            targetref
-                    set subnum [GetClassProperty $targetclass Number]
-                    set refcode\
-                        "$targettype$targetref = &$startref->$comp.$targetclass ;\
-                            // $relspec\n"
-                    append refcode\
-                        "if ($targetref->base__INST.classDesc ==\
-                        &${domain}__CLASSES\[$subnum\]) \{\n"
-                    append result [IndentToBlock $refcode]
-                    PushBlock
+                    <<TraverseRelChain: union superclass to subclass reference>>
                 }
             }
             set startClass $targetclass
             set startref $targetref
         }
     }
-    append result [IndentToBlock [string cat\
-        [CreateInstRefSymbol $targetclass $instref]\
-        "$instref = $targetref ;\n"]]
 
-    PushContext InstanceForeachRelated depth [expr {[GetBlock] - $startlevel}]
-
-    return $result
+    return [list $result $targetclass $targetref]
 }
 ----
+
+Instance references stored as a single pointer value generate
+code to assign the pointer value into a temporary variable that
+is suitable as an instance reference to the target of the navigation.
 
 [source,tcl]
 ----
-<<generation support commands>>=
-proc LookUpRelationship {relspec} {
-    variable domain
-
-    lassign $relspec relname destclass
-    if {[string index $relname 0] eq "~"} {
-        set dir back
-        set relname [string range $relname 1 end]
-    } else {
-        set dir forw
-    }
-
-    set relRef [Relationship findById Domain $domain Name $relname]
-    set assocRef [findRelated $relRef {~R30 Association}]
-    if {[isNotEmptyRef $assocRef]} {
-        set isstatic [readAttribute $assocRef IsStatic]
-        set sassocRef [findRelated $assocRef {~R31 SimpleAssociation}]
-        if {[isNotEmptyRef $sassocRef]} {
-            if {$destclass ne {}} {
-                error "simple association, $relname, cannot have a\
-                    destination specifier"
-            }
-            assignAttribute [findRelated $sassocRef ~R32]\
-                {Class srcclass} {Conditionality srccond} {Multiplicity srcmult}
-            assignAttribute [findRelated $sassocRef ~R33]\
-                {Class trgclass} {Conditionality trgcond}
-            if {$dir eq "forw"} {
-               return [list $srcclass $trgclass reference $trgcond $relname]
-            } else {
-                if {!$srcmult} {
-                    set type reference
-                    set comp ${relname}__BACK
-                } else {
-                    if {$isstatic} {
-                        set type array
-                        set comp ${relname}__BACK
-                    } else {
-                        set type linked
-                        set comp [list ${relname}__BACK ${relname}__BLINKS]
-                    }
-                }
-                return [list $trgclass $srcclass $type $srccond $comp]
-            }
-        } else {
-            set cassocRef [findRelated $assocRef {~R31 ClassBasedAssociation}]
-            assignAttribute [findRelated $cassocRef ~R34]\
-                {Class srcclass} {Conditionality srccond} {Multiplicity srcmult}
-            assignAttribute [findRelated $cassocRef ~R35]\
-                {Class trgclass} {Conditionality trgcond} {Multiplicity trgmult}
-            assignAttribute [findRelated $cassocRef ~R42]\
-                {Class assocclass}
-            if {!$trgmult} {
-                set srctype reference
-                set srccomp ${relname}__FORW
-            } else {
-                if {$isstatic} {
-                    set srctype array
-                    set srccomp ${relname}__FORW
-                } else {
-                    set srctype linked
-                    set srccomp [list ${relname}__FORW ${relname}__FLINKS]
-                }
-            }
-            if {!$srcmult} {
-                set trgtype reference
-                set trgcomp ${relname}__BACK
-            } else {
-                if {$isstatic} {
-                    set trgtype array
-                    set trgcomp ${relname}__BACK
-                } else {
-                    set trgtype linked
-                    set trgcomp [list ${relname}__BACK ${relname}__BLINKS]
-                }
-            }
-            if {$destclass eq {}} {
-                if {$dir eq "forw"} {
-                    return [list\
-                        $srcclass $assocclass $srctype $trgcond $srccomp\
-                        $assocclass $trgclass reference false\
-                        ${relname}.forward\
-                    ]
-                } else {
-                    return [list\
-                        $trgclass $assocclass $trgtype $srccond $trgcomp\
-                        $assocclass $srcclass reference false\
-                        ${relname}.backward\
-                    ]
-                }
-            } else {
-                if {$destclass eq $assocclass} {
-                    if {$dir eq "forw"} {
-                        return [list $srcclass $assocclass $srctype $trgcond\
-                            $srccomp]
-                    } else {
-                        return [list $trgclass $assocclass $trgtype $srccond\
-                            $trgcomp]
-                    }
-                } elseif {$destclass eq $trgclass} {
-                    if {$dir eq "forw"} {
-                        return [list $assocclass $trgclass reference false\
-                            ${relname}.forward]
-                    } else {
-                        error "navigating forward from $assocclass arrives at\
-                            $trgclass: got $destclass"
-                    }
-                } elseif {$destclass eq $srcclass} {
-                    if {$dir eq "back"} {
-                        return [list $assocclass $srcclass reference false\
-                            ${relname}.backward]
-                    } else {
-                        error "navigating backward from $assocclass arrives at\
-                            $srcclass: got $destclass"
-                    }
-                } else {
-                    error "$destclass does not participate in $relname"
-                }
-            }
-        }
-    } else {
-        set genRef [findRelated $relRef {~R30 Generalization}]
-        set refGenRef [findRelated $genRef {~R43 ReferenceGeneralization}]
-        if {[isNotEmptyRef $refGenRef]} {
-            set super [readAttribute [findRelated $refGenRef ~R36] Class]
-            set subs [findRelated $refGenRef ~R37]
-            set subnames [relation list [deRef $subs] Class]
-            if {$dir eq "forw"} {
-                if {$destclass ne {}} {
-                    error "generalization, $relname, cannot have a\
-                        destination specifier when traversing to the superclass"
-                }
-                return [list $subnames $super reftosuper false $relname]
-            } else {
-                if {$destclass eq {}} {
-                    error "generalization, $relname, must specify a\
-                        destination when traversing to a subclass"
-                } elseif {$destclass ni $subnames} {
-                    error "generalization, $relname, cannot traverse to\
-                        class, $destclass: should be one of:\
-                        \"[join $subnames {, }]\""
-                }
-                return [list $super $destclass reftosub false $relname]
-            }
-        } else {
-            set uGenRef [findRelated $genRef {~R43 UnionGeneralization}]
-            set super [readAttribute [findRelated $uGenRef ~R44] Class]
-            set subs [findRelated $uGenRef ~R45]
-            set subnames [relation list [deRef $subs] Class]
-            if {$dir eq "forw"} {
-                if {$destclass ne {}} {
-                    error "generalization, $relname, cannot have a\
-                        destination specifier when traversing to the superclass"
-                }
-                return [list $subnames $super uniontosuper false $relname]
-            } else {
-                if {$destclass eq {}} {
-                    error "generalization, $relname, must specify a\
-                        destination when traversing to a subclass"
-                } elseif {$destclass ni $subnames} {
-                    error "generalization, $relname, cannot traverse to\
-                        class, $destclass: should be one of:\
-                        \"[join $subnames {, }]\""
-                }
-                return [list $super $destclass uniontosub false $relname]
-            }
-        }
-    }
+<<TraverseRelChain: single reference>>=
+lassign [CreateTempRefSymbol $targetclass] targettype targetref
+set refcode "$targettype$targetref = $startref->$comp ; // $relspec \n"
+if {$cond} { # <1>
+    append refcode "if ($targetref != NULL) \{\n"
+    append result [IndentToBlock $refcode]
+    PushBlock
+} else {
+    append result [IndentToBlock $refcode]
 }
 ----
+<1> If the relationship is conditional, then we must generate code
+to test if we obtained an instance pointer.
 
+ifdef::showtests[]
 [source,tcl]
 ----
 <<generate command tests>>=
 test codegen-36.0 {
     Navigate simple association -- singular
 } -setup {
-    # makeFile {} codegen36.h
-    # makeFile {} codegen36.c
-    micca configure {
+    validateutils genMiccaFile codegen36 {
         domain codegen36 {
             class X {}
             class Y {}
@@ -6116,11 +6438,10 @@ test codegen-36.0 {
             association R2 Z 0..1--1 Y
 
             domainop void findys {} {
-                %<X foreachInstance xs>%
-                    %<instance z foreachRelated xs R1 ~R2>%
-                        printf("z.value = %d\n",
-                            %<instance z attribute value>%) ;
-                    %<end>%
+                %<X findByName x1 xs>%
+                %<instance z foreachRelated xs R1 ~R2>%
+                    printf("z.value = %d\n",
+                        %<instance z attribute value>%) ;
                 %<end>%
             }
         }
@@ -6138,123 +6459,32 @@ test codegen-36.0 {
     }
 } -cleanup {
     cleanupDomain
+    validateutils forgetFiles
 } -body {
-    micca generate
+    validateutils compileFiles codegen36.c
     testConditions\
-        {[llength [fileutil::grep {->R1} codegen36.c]] == 1}\
-        {[llength [fileutil::grep {->R2__BACK} codegen36.c]] == 1}
-} -result {1}
-----
-
-[source,tcl]
-----
-<<generate command tests>>=
-test codegen-37.0 {
-    Navigate simple association -- multiple static
-} -setup {
-    # makeFile {} codegen37.h
-    # makeFile {} codegen37.c
-    micca configure {
-        domain codegen37 {
-            class X {}
-            class Y {}
-            association R1 X 1--1 Y
-
-            class Z {
-                attribute value int -default 20
-            }
-            association R2 -static Z 0..*--1 Y
-
-            domainop void findys {} {
-                %<X foreachInstance xs>%
-                    %<instance z foreachRelated xs R1 ~R2>%
-                        printf("z.value = %d\n",
-                            %<instance z attribute value>%) ;
-                    %<end>%
-                %<end>%
-            }
-        }
-        population codegen37 {
-            class X {
-                instance x1 R1 y1
-            }
-            class Y {
-                instance y1
-            }
-            class Z {
-                instance z1 R2 y1
-            }
-        }
+        {[validateutils matchLines codegen36.c {
+    struct Y *t__T1 = xs->R1 ; // R1
+    struct Z *t__T2 = t__T1->R2__BACK ; // ~R2
+    if (t__T2 != NULL) {
+        struct Z *z ;
+        z = t__T2 ;
+        printf("z.value = %d\n",
+z->value) ;
     }
-} -cleanup {
-    cleanupDomain
-} -body {
-    micca generate
-    testConditions\
-        {[llength [fileutil::grep {->R1} codegen37.c]] == 1}\
-        {[llength [fileutil::grep {->R2__BACK} codegen37.c]] == 2}
+        }]}
 } -result {1}
 ----
+endif::showtests[]
 
-[source,tcl]
-----
-<<generate command tests>>=
-test codegen-38.0 {
-    Navigate simple association -- multiple dynamic
-} -setup {
-    # makeFile {} codegen38.h
-    # makeFile {} codegen38.c
-    micca configure {
-        domain codegen38 {
-            class X {}
-            class Y {}
-            association R1 X 1--1 Y
-
-            class Z {
-                attribute value int -default 20
-            }
-            association R2 -dynamic Z 0..*--1 Y
-
-            domainop void findys {} {
-                %<X foreachInstance xs>%
-                    %<instance z foreachRelated xs R1 ~R2>%
-                        printf("z.value = %d\n",
-                            %<instance z attribute value>%) ;
-                    %<end>%
-                %<end>%
-            }
-        }
-        population codegen38 {
-            class X {
-                instance x1 R1 y1
-            }
-            class Y {
-                instance y1
-            }
-            class Z {
-                instance z1 R2 y1
-            }
-        }
-    }
-} -cleanup {
-    cleanupDomain
-} -body {
-    micca generate
-    testConditions\
-        {[llength [fileutil::grep {->R1} codegen38.c]] == 1}\
-        {[llength [fileutil::grep {->R2__BACK} codegen38.c]] == 1}
-} -result {1}
-----
-
+ifdef::showtests[]
 [source,tcl]
 ----
 <<generate command tests>>=
 test codegen-43.0 {
     Navigate class based association -- singular
 } -setup {
-    # makeFile {} codegen43.h
-    # makeFile {} codegen43.c
-    micca configure {
+    validateutils genMiccaFile codegen43 {
         domain codegen43 {
             class A {}
             class X {}
@@ -6264,10 +6494,9 @@ test codegen-43.0 {
             association R1 -associator A X 1--1 Y
 
             domainop void findys {} {
-                %<X foreachInstance xs>%
-                    %<instance y foreachRelated xs R1>%
-                        printf("y.value = %d\n", %<instance y attribute value>%) ;
-                    %<end>%
+                %<X findByName x1 xs>%
+                %<instance y foreachRelated xs R1>%
+                    printf("y.value = %d\n", %<instance y attribute value>%) ;
                 %<end>%
             }
         }
@@ -6285,23 +6514,28 @@ test codegen-43.0 {
     }
 } -cleanup {
     cleanupDomain
+    validateutils forgetFiles
 } -body {
-    micca generate
+    validateutils compileFiles codegen43.c
     testConditions\
-        {[llength [fileutil::grep {->R1.forward} codegen43.c]] == 1}\
-        {[llength [fileutil::grep {->R1__FORW} codegen43.c]] == 1}
+        {[validateutils matchLines codegen43.c {
+    struct A *t__T1 = xs->R1__FORW ; // R1
+    struct Y *t__T2 = t__T1->R1.forward ; // R1
+    struct Y *y ;
+    y = t__T2 ;
+        }]}
 } -result {1}
 ----
+endif::showtests[]
 
+ifdef::showtests[]
 [source,tcl]
 ----
 <<generate command tests>>=
 test codegen-44.0 {
     Navigate class based association -- singular, stop at associator
 } -setup {
-    # makeFile {} codegen44.h
-    # makeFile {} codegen44.c
-    micca configure {
+    validateutils genMiccaFile codegen44 {
         domain codegen44 {
             class A {
                 attribute value int -default 40
@@ -6311,10 +6545,9 @@ test codegen-44.0 {
             association R1 -associator A X 1--1 Y
 
             domainop void findys {} {
-                %<X foreachInstance xs>%
-                    %<instance a foreachRelated xs {R1 A}>%
-                        printf("a.value = %d\n", %<instance a attribute value>%) ;
-                    %<end>%
+                %<X findByName x1 xs>%
+                %<instance a foreachRelated xs {R1 A}>%
+                    printf("a.value = %d\n", %<instance a attribute value>%) ;
                 %<end>%
             }
         }
@@ -6332,22 +6565,173 @@ test codegen-44.0 {
     }
 } -cleanup {
     cleanupDomain
+    validateutils forgetFiles
 } -body {
-    micca generate
+    validateutils compileFiles codegen44.c
     testConditions\
-        {[llength [fileutil::grep {->R1__FORW} codegen44.c]] == 1}
+        {[validateutils matchLines codegen44.c {
+            struct A *t__T1 = xs->R1__FORW ; // R1 A
+            struct A *a ;
+            a = t__T1 ;
+        }]}
 } -result {1}
 ----
+endif::showtests[]
 
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-51.0 {
+    Navigate class based association -- singular, start at associator
+} -setup {
+    validateutils genMiccaFile codegen51 {
+        domain codegen51 {
+            class A {
+                attribute value int -default 40
+            }
+            class X {}
+            class Y {}
+            association R1 -associator A X 1--1 Y
+
+            domainop void findys {} {
+                %<A findByName a1 aref>%
+                %<instance yref findOneRelated aref R1>%
+                printf("y name = %s\n", yref->base__INST.name) ;
+                %<instance xref findOneRelated aref ~R1>%
+                printf("x name = %s\n", xref->base__INST.name) ;
+            }
+        }
+        population codegen51 {
+            class A {
+                instance a1 R1 {X x1 Y y1}
+            }
+            class X {
+                instance x1
+            }
+            class Y {
+                instance y1
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen51.c
+    testConditions\
+        {[validateutils matchLines codegen51.c {
+            struct Y *yref ;
+            struct Y *t__T1 = aref->R1.forward ; // R1
+            yref = t__T1 ;
+        }]}\
+        {[validateutils matchLines codegen51.c {
+            struct X *xref ;
+            struct X *t__T2 = aref->R1.backward ; // ~R1
+            xref = t__T2 ;
+        }]}
+} -result {1}
+----
+endif::showtests[]
+
+When we encounter a set of instance references stored in an array,
+the generated code must set up a loop construct to visit all the
+members of the set.
+
+[source,tcl]
+----
+<<TraverseRelChain: array reference>>=
+set itervar [CreateTempSymbol\
+    Ctype "struct $targetclass *const *"\
+    Type "ReferenceArray" Class $targetclass]
+set cntvar [CreateTempSymbol Ctype size_t\
+    Type ArrayCounter Class $targetclass]
+set refcode\
+    "struct $targetclass *const *$itervar =\
+        $startref->$comp.links ; // $relspec\n"
+append refcode\
+    "for (size_t $cntvar = $startref->$comp.count ;\
+        $cntvar != 0 ; $cntvar--, $itervar++) \{" ; # <1>
+append result [IndentToBlock $refcode]
+PushBlock
+lassign [CreateTempRefSymbol $targetclass] targettype\
+        targetref
+append result [IndentToBlock\
+    "$targettype$targetref = *$itervar ;"]
+----
+<1> For the array case there is no special handling in case the
+set of related instance is empty.
+In the empty case, the code generator will have set the count
+value to 0 and the loop will not be executed.
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-37.0 {
+    Navigate simple association -- multiple static
+} -setup {
+    validateutils genMiccaFile codegen37 {
+        domain codegen37 {
+            class X {}
+            class Y {}
+            association R1 X 1--1 Y
+
+            class Z {
+                attribute value int -default 10
+            }
+            association R2 -static Z 0..*--1 Y
+
+            domainop void findys {} {
+                %<X findByName x1 xs>%
+                %<instance z foreachRelated xs R1 ~R2>%
+                    printf("z.value = %d\n",
+                        %<instance z attribute value>%) ;
+                %<end>%
+            }
+        }
+        population codegen37 {
+            class X {
+                instance x1 R1 y1
+            }
+            class Y {
+                instance y1
+            }
+            class Z {
+                instance z1 R2 y1
+                instance z2 R2 y1
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen37.c
+    testConditions\
+        {[validateutils matchLines codegen37.c {
+    struct Y *t__T1 = xs->R1 ; // R1
+    struct Z *const *t__T2 = t__T1->R2__BACK.links ; // ~R2
+    for (size_t t__T3 = t__T1->R2__BACK.count ; t__T3 != 0 ; t__T3--, t__T2++) {
+        struct Z *t__T4 = *t__T2 ;
+        struct Z *z ;
+        z = t__T4 ;
+        printf("z.value = %d\n",
+z->value) ;
+    }
+        }]}
+} -result {1}
+----
+endif::showtests[]
+
+ifdef::showtests[]
 [source,tcl]
 ----
 <<generate command tests>>=
 test codegen-45.0 {
     Navigate class based association -- multiple, static
 } -setup {
-    # makeFile {} codegen45.h
-    # makeFile {} codegen45.c
-    micca configure {
+    validateutils genMiccaFile codegen45 {
         domain codegen45 {
             class A {}
             class X {}
@@ -6357,10 +6741,9 @@ test codegen-45.0 {
             association R1 -static -associator A X 1..*--1 Y
 
             domainop void findys {} {
-                %<X foreachInstance xs>%
-                    %<instance y foreachRelated xs R1>%
-                        printf("y.value = %d\n", %<instance y attribute value>%) ;
-                    %<end>%
+                %<X findByName x1 xs>%
+                %<instance y foreachRelated xs R1>%
+                    printf("y.value = %d\n", %<instance y attribute value>%) ;
                 %<end>%
             }
         }
@@ -6380,23 +6763,128 @@ test codegen-45.0 {
     }
 } -cleanup {
     cleanupDomain
+    validateutils forgetFiles
 } -body {
-    micca generate
+    validateutils compileFiles codegen45.c
     testConditions\
-        {[llength [fileutil::grep {->R1.forward} codegen45.c]] == 1}\
-        {[llength [fileutil::grep {->R1__FORW} codegen45.c]] == 1}
+        {[validateutils matchLines codegen45.c {
+            struct A *t__T1 = xs->R1__FORW ; // R1
+            struct Y *t__T2 = t__T1->R1.forward ; // R1
+            struct Y *y ;
+            y = t__T2 ;
+        }]}
 } -result {1}
 ----
+endif::showtests[]
 
+For references stored in linked lists,
+we again have generate code to iterate across the links.
+
+[source,tcl]
+----
+<<TraverseRelChain: linked reference>>=
+set itervar [CreateTempSymbol Ctype "MRT_LinkRef *"\
+    Type "ReferenceLink" Class $targetclass]
+lassign $comp termcomp linkcomp
+append result [IndentToBlock\
+    "for (MRT_LinkRef *$itervar =\
+        mrtLinkRefBegin(&$startref->$termcomp) ;\
+        $itervar != mrtLinkRefEnd(&$startref->$termcomp) ;)\
+        \{\n"] ; # <1>
+PushBlock
+lassign [CreateTempRefSymbol $targetclass] targettype\
+        targetref
+append result [IndentToBlock [string cat\
+    "$targettype$targetref =\
+        ($targettype)((uintptr_t)$itervar -\
+        offsetof(struct $targetclass, $linkcomp)) ;\n"\
+    "$itervar = $itervar->next ;\n"\
+]] ; # <2>
+----
+<1> Again, there is no special empty case for linked lists.
+If there are no related instances linked together,
+the linked list iterator will be at the end and the loop will not
+be entered.
+<2> Two complications arise using linked list.
+Since a class instance may be threaded onto several linked lists,
+we must do some pointer arithmetic to transform the link value
+stored in the linked list into a pointer to the beginning of the
+instance. So, we must subtract off the offset to the link pointers
+in the instance.
+Secondly, we advance the linked list iterator at the beginning of the
+loop rather than at the end.
+This is to make sure that any user supplied code that might unlink
+the instance from the linked list does not invalidate our iterator.
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-38.0 {
+    Navigate simple association -- multiple dynamic
+} -setup {
+    validateutils genMiccaFile codegen38 {
+        domain codegen38 {
+            class X {}
+            class Y {}
+            association R1 X 1--1 Y
+
+            class Z {
+                attribute value int -default 20
+            }
+            association R2 -dynamic Z 0..*--1 Y
+
+            domainop void findys {} {
+                %<X findByName x1 xs>%
+                %<instance z foreachRelated xs R1 ~R2>%
+                    printf("z.value = %d\n",
+                        %<instance z attribute value>%) ;
+                %<end>%
+            }
+        }
+        population codegen38 {
+            class X {
+                instance x1 R1 y1
+            }
+            class Y {
+                instance y1
+            }
+            class Z {
+                instance z1 R2 y1
+                instance z2 R2 y1
+                instance z3 R2 y1
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen38.c
+    testConditions\
+        {[validateutils matchLines codegen38.c {
+    struct Y *t__T1 = xs->R1 ; // R1
+    for (MRT_LinkRef *t__T2 = mrtLinkRefBegin(&t__T1->R2__BACK) ; t__T2 != mrtLinkRefEnd(&t__T1->R2__BACK) ;) {
+        struct Z *t__T3 = (struct Z *)((uintptr_t)t__T2 - offsetof(struct Z, R2__BLINKS)) ;
+        t__T2 = t__T2->next ;
+        struct Z *z ;
+        z = t__T3 ;
+        printf("z.value = %d\n",
+z->value) ;
+    }
+        }]}
+} -result {1}
+----
+endif::showtests[]
+
+ifdef::showtests[]
 [source,tcl]
 ----
 <<generate command tests>>=
 test codegen-46.0 {
-    Navigate class based association -- multiple, static
+    Navigate class based association -- multiple, dynamic
 } -setup {
-    # makeFile {} codegen46.h
-    # makeFile {} codegen46.c
-    micca configure {
+    validateutils genMiccaFile codegen46 {
         domain codegen46 {
             class A {}
             class X {}
@@ -6406,10 +6894,9 @@ test codegen-46.0 {
             association R1 -associator A X 1..*--1..* Y
 
             domainop void findys {} {
-                %<X foreachInstance xs>%
-                    %<instance y foreachRelated xs R1>%
-                        printf("y.value = %d\n", %<instance y attribute value>%) ;
-                    %<end>%
+                %<X findByName x1 xs>%
+                %<instance y foreachRelated xs R1>%
+                    printf("y.value = %d\n", %<instance y attribute value>%) ;
                 %<end>%
             }
         }
@@ -6429,23 +6916,44 @@ test codegen-46.0 {
     }
 } -cleanup {
     cleanupDomain
+    validateutils forgetFiles
 } -body {
-    micca generate
+    validateutils compileFiles codegen46.c
     testConditions\
-        {[llength [fileutil::grep {->R1.forward} codegen46.c]] == 1}\
-        {[llength [fileutil::grep {->R1__FORW} codegen46.c]] == 1}
+        {[validateutils matchLines codegen46.c {
+    for (MRT_LinkRef *t__T1 = mrtLinkRefBegin(&xs->R1__FORW) ; t__T1 != mrtLinkRefEnd(&xs->R1__FORW) ;) {
+        struct A *t__T2 = (struct A *)((uintptr_t)t__T1 - offsetof(struct A, R1__FLINKS)) ;
+        t__T1 = t__T1->next ;
+        struct Y *t__T3 = t__T2->R1.forward ; // R1
+        struct Y *y ;
+        y = t__T3 ;
+        printf("y.value = %d\n", y->value) ;
+    }
+        }]}
 } -result {1}
 ----
+endif::showtests[]
 
+References from subclasses to superclasses are just a single pointer
+value that is unconditional.
+
+[source,tcl]
+----
+<<TraverseRelChain: reference to superclass>>=
+lassign [CreateTempRefSymbol $targetclass] targettype targetref
+append result [IndentToBlock\
+    "$targettype$targetref = $startref->$comp ; // $relspec \n"\
+]
+----
+
+ifdef::showtests[]
 [source,tcl]
 ----
 <<generate command tests>>=
 test codegen-39.0 {
     Navigate reference generalization from subclass to superclass
 } -setup {
-    # makeFile {} codegen39.h
-    # makeFile {} codegen39.c
-    micca configure {
+    validateutils genMiccaFile codegen39 {
         domain codegen39 {
             class S {
                 attribute value int -default 20
@@ -6455,11 +6963,9 @@ test codegen-39.0 {
             generalization R1 -reference S Y Z
 
             domainop void findss {} {
-                %<Y foreachInstance ys>%
-                    %<instance s foreachRelated ys R1>%
-                        printf("s.value = %d\n",
-                            %<instance s attribute value>%) ;
-                    %<end>%
+                %<Y findByName y1 ys>%
+                %<instance s foreachRelated ys R1>%
+                    printf("s.value = %d\n", %<instance s attribute value>%) ;
                 %<end>%
             }
         }
@@ -6477,69 +6983,45 @@ test codegen-39.0 {
     }
 } -cleanup {
     cleanupDomain
+    validateutils forgetFiles
 } -body {
-    micca generate
+    validateutils compileFiles codegen39.c
     testConditions\
-        {[llength [fileutil::grep {->R1} codegen39.c]] == 1}
+        {[validateutils matchLines codegen39.c {
+            struct S *t__T1 = ys->R1 ; // R1
+            struct S *s ;
+            s = t__T1 ;
+        }]}
 } -result {1}
 ----
+endif::showtests[]
+
+References from a superclass to a subclass are also just a single
+pointer value.
+However, the traversal is conditional.
+When specifying a traversal to a subclass, the subclass class name
+must be given and the generated code has to insure that we are currently
+related to an instance of the designated subclass.
 
 [source,tcl]
 ----
-<<generate command tests>>=
-test codegen-40.0 {
-    Navigate union generalization from subclass to superclass
-} -setup {
-    # makeFile {} codegen40.h
-    # makeFile {} codegen40.c
-    micca configure {
-        domain codegen40 {
-            class S {
-                attribute value int -default 20
-            }
-            class Y {}
-            class Z {}
-            generalization R1 -union S Y Z
-
-            domainop void findss {} {
-                %<Y foreachInstance ys>%
-                    %<instance s foreachRelated ys R1>%
-                        printf("s.value = %d\n",
-                            %<instance s attribute value>%) ;
-                    %<end>%
-                %<end>%
-            }
-        }
-        population codegen40 {
-            class S {
-                instance s1
-            }
-            class Y {
-                instance y1 R1 s1
-            }
-            class Z {
-                allocate 1
-            }
-        }
-    }
-} -cleanup {
-    cleanupDomain
-} -body {
-    micca generate
-    testConditions\
-        {[llength [fileutil::grep {offsetof} codegen40.c]] == 3}
-} -result {1}
+<<TraverseRelChain: reference to subclass>>=
+lassign [CreateTempRefSymbol $targetclass] targettype targetref
+set classDesc [GetClassDescriptor $domain $targetclass]
+set refcode "$targettype$targetref = $startref->$comp ; // $relspec\n"
+append refcode "if ($targetref->base__INST.classDesc == &$classDesc) \{\n"
+append result [IndentToBlock $refcode]
+PushBlock
 ----
 
+ifdef::showtests[]
 [source,tcl]
 ----
 <<generate command tests>>=
 test codegen-41.0 {
     Navigate reference generalization from superclass to subclass
 } -setup {
-    # makeFile {} codegen41.h
-    # makeFile {} codegen41.c
-    micca configure {
+    validateutils genMiccaFile codegen41 {
         domain codegen41 {
             class S {}
             class Y {
@@ -6549,11 +7031,9 @@ test codegen-41.0 {
             generalization R1 -reference S Y Z
 
             domainop void findss {} {
-                %<S foreachInstance ss>%
-                    %<instance y foreachRelated ss {~R1 Y}>%
-                        printf("y.value = %d\n",
-                            %<instance y attribute value>%) ;
-                    %<end>%
+                %<S findByName s1 ss>%
+                %<instance y foreachRelated ss {~R1 Y}>%
+                    printf("y.value = %d\n", %<instance y attribute value>%) ;
                 %<end>%
             }
         }
@@ -6571,40 +7051,60 @@ test codegen-41.0 {
     }
 } -cleanup {
     cleanupDomain
+    validateutils forgetFiles
 } -body {
-    micca generate
+    validateutils compileFiles codegen41.c
     testConditions\
-        {[llength [fileutil::grep {->R1} codegen41.c]] == 1}
+        {[validateutils matchLines codegen41.c {
+            struct Y *t__T1 = ss->R1 ; // ~R1 Y
+            if (t__T1->base__INST.classDesc == &codegen41__CLASSES[1]) {
+                struct Y *y ;
+                y = t__T1 ;
+                printf("y.value = %d\n", y->value) ;
+            }
+        }]}
 } -result {1}
 ----
+endif::showtests[]
+
+When a generalization is stored in a union,
+then pointer arithmetic alone is sufficient to _up cast_ to the
+supeclass instance.
 
 [source,tcl]
 ----
+<<TraverseRelChain: union subclass to superclass reference>>=
+lassign [CreateTempRefSymbol $targetclass] targettype targetref
+append result [IndentToBlock\
+    "$targettype$targetref = ($targettype)((uintptr_t)$startref -\
+    offsetof(struct $targetclass, $comp.$startClass)) ;\
+    // $relspec \n"]
+----
+
+ifdef::showtests[]
+[source,tcl]
+----
 <<generate command tests>>=
-test codegen-42.0 {
-    Navigate reference generalization from superclass to subclass
+test codegen-40.0 {
+    Navigate union generalization from subclass to superclass
 } -setup {
-    # makeFile {} codegen42.h
-    # makeFile {} codegen42.c
-    micca configure {
-        domain codegen42 {
-            class S {}
-            class Y {
+    validateutils genMiccaFile codegen40 {
+        domain codegen40 {
+            class S {
                 attribute value int -default 20
             }
+            class Y {}
             class Z {}
             generalization R1 -union S Y Z
 
             domainop void findss {} {
-                %<S foreachInstance ss>%
-                    %<instance y foreachRelated ss {~R1 Y}>%
-                        printf("y.value = %d\n",
-                            %<instance y attribute value>%) ;
-                    %<end>%
+                %<Y findByName y1 ys>%
+                %<instance s foreachRelated ys R1>%
+                    printf("s.value = %d\n", %<instance s attribute value>%) ;
                 %<end>%
             }
         }
-        population codegen42 {
+        population codegen40 {
             class S {
                 instance s1
             }
@@ -6618,12 +7118,354 @@ test codegen-42.0 {
     }
 } -cleanup {
     cleanupDomain
+    validateutils forgetFiles
 } -body {
-    micca generate
+    validateutils compileFiles codegen40.c
     testConditions\
-        {[llength [fileutil::grep {->R1} codegen42.c]] == 1}
+        {[validateutils matchLines codegen40.c {
+    struct S *t__T1 = (struct S *)((uintptr_t)ys - offsetof(struct S, R1.Y)) ; // R1
+    struct S *s ;
+    s = t__T1 ;
+        }]}
 } -result {1}
 ----
+endif::showtests[]
+
+Going from the superclass to the subclass with a union storage arrangement
+has the same complication as when pointers are used, namely we must
+make sure that the instance is currently related to an instance of the
+given target subclass.
+The addressing expression is much easier as the compiler will
+do the address arithmetic for us.
+
+[source,tcl]
+----
+<<TraverseRelChain: union superclass to subclass reference>>=
+lassign [CreateTempRefSymbol $targetclass] targettype targetref
+set classDesc [GetClassDescriptor $domain $targetclass]
+set refcode "$targettype$targetref = &$startref->$comp.$targetclass ;\
+        // $relspec\n"
+append refcode\
+    "if ($targetref->base__INST.classDesc == &$classDesc) \{\n"
+append result [IndentToBlock $refcode]
+PushBlock
+----
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-42.0 {
+    Navigate union generalization from superclass to subclass
+} -setup {
+    validateutils genMiccaFile codegen42 {
+        domain codegen42 {
+            class S {}
+            class Y {
+                attribute value int -default 20
+            }
+            class Z {}
+            generalization R1 -union S Y Z
+
+            domainop void findss {} {
+                %<S findByName s1 ss>%
+                %<instance y foreachRelated ss {~R1 Y}>%
+                    printf("y.value = %d\n", %<instance y attribute value>%) ;
+                %<end>%
+            }
+        }
+        population codegen42 {
+            class S {
+                instance s1
+            }
+            class Y {
+                instance y1 R1 s1
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen42.c
+    testConditions\
+        {[validateutils matchLines codegen42.c {
+            struct Y *t__T1 = &ss->R1.Y ; // ~R1 Y
+            if (t__T1->base__INST.classDesc == &codegen42__CLASSES[1]) {
+                struct Y *y ;
+                y = t__T1 ;
+                printf("y.value = %d\n", y->value) ;
+            }
+        }]}
+} -result {1}
+----
+endif::showtests[]
+
+To simplify the code of `TraverseRelChain`,
+we use the `LookUpRelationship` procedure to summarize the
+relationship characteristics that are needed to navigate the relationship.
+
+The 
+<<relationship-subsystem,Relationship Subsystem>>
+of the platform model discusses the various arrangements for
+reference pointer storage and how for class based associations
+traversal is decomposed into two steps.
+The structure of `LookUpRelationship` follows directly from the
+platform model for relationships, searching for associations and
+generalizations and the various types of each.
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc LookUpRelationship {startclass relspec} {
+    variable domain
+
+    lassign $relspec relname destclass
+    if {[string index $relname 0] eq "~"} {
+        set dir back
+        set relname [string range $relname 1 end]
+    } else {
+        set dir forw
+    }
+
+    set relRef [Relationship findById Domain $domain Name $relname]
+    set assocRef [findRelated $relRef {~R30 Association}]
+    if {[isNotEmptyRef $assocRef]} {
+        <<LookUpRelationship: associations>>
+    } else {
+        <<LookUpRelationship: generalizations>>
+    }
+}
+----
+
+Association type relationships are partitioned into either simple
+associations or class based associations.
+We follow that division in the code below.
+
+[source,tcl]
+----
+<<LookUpRelationship: associations>>=
+set isstatic [readAttribute $assocRef IsStatic]
+set sassocRef [findRelated $assocRef {~R31 SimpleAssociation}]
+if {[isNotEmptyRef $sassocRef]} {
+    <<LookUpRelationship: simple associations>>
+} else {
+    <<LookUpRelationship: class based associations>>
+}
+----
+
+[source,tcl]
+----
+<<LookUpRelationship: simple associations>>=
+if {$destclass ne {}} {
+    error "simple association, $relname, cannot have a\
+        destination specifier"
+}
+assignAttribute [findRelated $sassocRef ~R32]\
+    {Class srcclass} {Conditionality srccond} {Multiplicity srcmult}
+assignAttribute [findRelated $sassocRef ~R33]\
+    {Class trgclass} {Conditionality trgcond}
+if {$dir eq "forw"} {
+    if {$startclass ne $srcclass} {
+        error "relationship, $relname, is from\
+            $srcclass to $trgclass: got, $startclass,\
+            as the traversal start"
+    }
+    return [list $srcclass $trgclass reference $trgcond $relname]
+} else {
+    if {$startclass ne $trgclass} {
+        error "relationship, ~$relname, is from\
+            $trgclass to $srcclass: got, $startclass,\
+            as the traversal start"
+    }
+    if {!$srcmult} {
+        set type reference
+        set comp ${relname}__BACK
+    } else {
+        if {$isstatic} {
+            set type array
+            set comp ${relname}__BACK
+        } else {
+            set type linked
+            set comp [list ${relname}__BACK ${relname}__BLINKS]
+        }
+    }
+    return [list $trgclass $srcclass $type $srccond $comp]
+}
+----
+
+[source,tcl]
+----
+<<LookUpRelationship: class based associations>>=
+set cassocRef [findRelated $assocRef {~R31 ClassBasedAssociation}]
+assignAttribute [findRelated $cassocRef ~R34]\
+    {Class srcclass} {Conditionality srccond} {Multiplicity srcmult}
+assignAttribute [findRelated $cassocRef ~R35]\
+    {Class trgclass} {Conditionality trgcond} {Multiplicity trgmult}
+assignAttribute [findRelated $cassocRef ~R42]\
+    {Class assocclass}
+if {!$trgmult} {
+    set srctype reference
+    set srccomp ${relname}__FORW
+} else {
+    if {$isstatic} {
+        set srctype array
+        set srccomp ${relname}__FORW
+    } else {
+        set srctype linked
+        set srccomp [list ${relname}__FORW ${relname}__FLINKS]
+    }
+}
+if {!$srcmult} {
+    set trgtype reference
+    set trgcomp ${relname}__BACK
+} else {
+    if {$isstatic} {
+        set trgtype array
+        set trgcomp ${relname}__BACK
+    } else {
+        set trgtype linked
+        set trgcomp [list ${relname}__BACK ${relname}__BLINKS]
+    }
+}
+if {$destclass eq {}} {
+    if {$dir eq "forw"} {
+        if {$startclass eq $srcclass} {
+            return [list\
+                $srcclass $assocclass $srctype $trgcond $srccomp\
+                $assocclass $trgclass reference false ${relname}.forward\
+            ]
+        } elseif {$startclass eq $assocclass} {
+            return [list\
+                $assocclass $trgclass reference false ${relname}.forward\
+            ]
+        } else {
+            error "relationship, $relname, is from class based from\
+                $srcclass to $trgclass via $assocclass: got, $startclass,\
+                as the traversal start"
+        }
+    } else {
+        if {$startclass eq $trgclass} {
+            return [list\
+                $trgclass $assocclass $trgtype $srccond $trgcomp\
+                $assocclass $srcclass reference false ${relname}.backward\
+            ]
+        } elseif {$startclass eq $assocclass} {
+            return [list\
+                $assocclass $srcclass reference false ${relname}.backward\
+            ]
+        } else {
+            error "relationship, ~$relname, is from class based from\
+                $trgclass to $srcclass via $assocclass: got, $startclass,\
+                as the traversal start"
+        }
+    }
+} else {
+    if {$destclass eq $assocclass} {
+        if {$dir eq "forw"} {
+            return [list $srcclass $assocclass $srctype $trgcond $srccomp]
+        } else {
+            return [list $trgclass $assocclass $trgtype $srccond $trgcomp]
+        }
+    } elseif {$destclass eq $trgclass} {
+        if {$dir eq "forw"} {
+            return [list $assocclass $trgclass reference false ${relname}.forward]
+        } else {
+            error "navigating forward from $assocclass arrives at\
+                $trgclass: got $destclass"
+        }
+    } elseif {$destclass eq $srcclass} {
+        if {$dir eq "back"} {
+            return [list $assocclass $srcclass reference false ${relname}.backward]
+        } else {
+            error "navigating backward from $assocclass arrives at\
+                $srcclass: got $destclass"
+        }
+    } else {
+        error "$destclass does not participate in $relname"
+    }
+}
+----
+
+Generalizations are divided into those implemented using references
+and those using a union.
+
+[source,tcl]
+----
+<<LookUpRelationship: generalizations>>=
+set genRef [findRelated $relRef {~R30 Generalization}]
+set refGenRef [findRelated $genRef {~R43 ReferenceGeneralization}]
+if {[isNotEmptyRef $refGenRef]} {
+    set super [readAttribute [findRelated $refGenRef ~R36] Class]
+    set subs [findRelated $refGenRef ~R37]
+    set subnames [relation list [deRef $subs] Class]
+    set isRefGen true
+} else {
+    set uGenRef [findRelated $genRef {~R43 UnionGeneralization}]
+    set super [readAttribute [findRelated $uGenRef ~R44] Class]
+    set subs [findRelated $uGenRef ~R45]
+    set subnames [relation list [deRef $subs] Class]
+    set isRefGen false
+}
+----
+
+[source,tcl]
+----
+<<LookUpRelationship: generalizations>>=
+if {$dir eq "forw"} {
+    if {$destclass ne {}} {
+        error "generalization, $relname, cannot have a\
+            destination specifier when traversing to the superclass"
+    } elseif {$startclass ni $subnames} {
+        error "relationship, $relname, is from\
+            \"[join $subnames {, }]\", to $targetclass,\
+            got, $startclass, as the traversal start"
+    }
+    set reftype [expr {$isRefGen ? "reftosuper" : "uniontosuper"}]
+    return [list $startclass $super $reftype false $relname]
+} else {
+    if {$destclass eq {}} {
+        error "generalization, ~$relname, must specify a\
+            destination when traversing to a subclass"
+    } elseif {$startclass ne $super} {
+        error "relationship, ~$relname, is from\
+            $super to \"[join $subnames {, }]\", got, $startclass,\
+            as the traversal start"
+    } elseif {$destclass ni $subnames} {
+        error "generalization, ~$relname, cannot traverse to\
+            class, $destclass: should be one of:\
+            \"[join $subnames {, }]\""
+    }
+    set reftype [expr {$isRefGen ? "reftosub" : "uniontosub"}]
+    return [list $super $destclass $reftype false $relname]
+}
+----
+
+==== Finding a Single Related Instance
+
+*****
+`%<instance` _instvar_ `findOneRelated` _start rel1 ?rel2? ..._ `>%`
+
+instvar::
+    The name of a ``C'' variable that will hold the related instance.
+start::
+    The name of a ``C'' variable containing the instance reference where
+    the relationship navigation will begin.
+relN::
+    A set of relationship navigation specifications.
+
+The `findOneRelated` subccommand generates ``C'' statements
+obtain a single instance reference by navigating
+the relationship chain which starts at the _start_ instance
+and is given by the _relN_ arguments.
+A reference to the related instance is assigned into
+the _instvar_ variable.
+The _instvar_ variable is declared if necessary.
+If the traversal of the relationship chain would yield more than a
+single instance,
+then an error is thrown.
+*****
+{nbsp}
 
 [source,tcl]
 ----
@@ -6640,7 +7482,7 @@ proc InstanceFindOneRelated {instref startref args} {
     set isCond false
 
     foreach relspec $args {
-        set relinfo [LookUpRelationship $relspec]
+        set relinfo [LookUpRelationship $startClass $relspec]
         while {[llength $relinfo] != 0} {
             # puts "relinfo = \"$relinfo\""
             set relinfo [lassign $relinfo sourceclass targetclass reftype cond\
@@ -6686,13 +7528,11 @@ proc InstanceFindOneRelated {instref startref args} {
                     set isCond true
                     lassign [CreateTempRefSymbol $targetclass] targettype\
                             targetref
-                    set subnum [GetClassProperty $targetclass Number]
-                    set refcode\
-                        "$targettype$targetref = $startref->$comp ;\
+                    set classDesc [GetClassDescriptor $domain $targetclass]
+                    set refcode "$targettype$targetref = $startref->$comp ;\
                             // $relspec\n"
                     append refcode\
-                        "if ($targetref->base__INST.classDesc ==\
-                        &${domain}__CLASSES\[$subnum\]) \{\n"
+                        "if ($targetref->base__INST.classDesc == &$classDesc) \{\n"
                     append result [IndentToBlock $refcode]
                     PushBlock
                 }
@@ -6714,13 +7554,12 @@ proc InstanceFindOneRelated {instref startref args} {
                     set isCond true
                     lassign [CreateTempRefSymbol $targetclass] targettype\
                             targetref
-                    set subnum [GetClassProperty $targetclass Number]
+                    set classDesc [GetClassDescriptor $domain $targetclass]
                     set refcode\
                         "$targettype$targetref = &$startref->$comp.$targetclass ;\
                             // $relspec\n"
                     append refcode\
-                        "if ($targetref->base__INST.classDesc ==\
-                        &${domain}__CLASSES\[$subnum\]) \{\n"
+                        "if ($targetref->base__INST.classDesc == &$classDesc) \{\n"
                     append result [IndentToBlock $refcode]
                     PushBlock
                 }
@@ -6744,28 +7583,216 @@ proc InstanceFindOneRelated {instref startref args} {
 }
 ----
 
+==== Signaling an Instance
+
+*****
+`%<instance` _instvar_ `signal` _event_ _?name1 value1 name2 value2 ...?_ `>%`
+
+instvar::
+    The name of a ``C'' variable containing an instance reference
+    which is to be signaled.
+event::
+    The name of an event in the state model for the class to which
+    the instance belongs.
+nameN / valueN::
+    A set of event parameter name / event parameter value pairs for the
+    parameters that match the parameter signature of _event_.
+
+The `signal` subccommand generates ``C'' statements
+to arrange for _event_ to be signaled to the instance referenced by the
+_instvar_ variable.
+Any given name / value pairs are passed as the parameters of the event.
+All event parameters must be supplied and parameter names must match
+the event signature of the _event_ being signaled.
+If _event_ is not an event for the state model of _instvar_ then
+an error is thrown.
+*****
+{nbsp}
+
 [source,tcl]
 ----
 <<generation support commands>>=
 proc InstanceSignal {instref event args} {
-    append result [linecomment "instance $instref signal $event [list $args]"]
     lassign [InstanceNewECB $instref $event $args] ecbvar ecbcode
-    append result $ecbcode "mrt_PostEvent($ecbvar) ;\n"
-    return [IndentToBlock $result]
+    return [IndentToBlock [string cat\
+        [linecomment "instance $instref signal $event [list $args]"]\
+        $ecbcode\
+        "mrt_PostEvent($ecbvar) ;\n"\
+    ]]
 }
 ----
 
 [source,tcl]
 ----
 <<generation support commands>>=
-proc InstanceDelaySignal {instref time event args} {
-    append result [linecomment "instance $instref delaysignal $time\
-            $event [list $args]"]
-    lassign [InstanceNewECB $instref $event $args] ecbvar ecbcode
-    append result $ecbcode "mrt_PostDelayedEvent($ecbvar, $time) ;\n"
-    return [IndentToBlock $result]
+proc InstanceNewECB {instref event arglist} {
+    variable domain
+
+    if {[llength $arglist] % 2 != 0} {
+        error "event parameters must be given as name / value pairs, got:\
+            \"$arglist\""
+    }
+    set target [CheckInstRefSymbol $instref]
+
+    dict with target {
+        set eventRef [Event findById Domain $domain Model $Class Event $event]
+        if {[isEmptyRef $eventRef]} {
+            error "event, $event, is not a known event for class, $Class"
+        }
+        set eventNum [readAttribute $eventRef Number]
+
+        set psig [findRelated $eventRef R69]
+        set params [FindParamsFromSig $psig]
+        set required [relation list $params Name -ascending Position]
+        set supplied [dict keys $arglist]
+        ValidateParams $event $supplied $required
+
+        set result {}
+        set sourceinst [expr {[LookUpSymbol self] eq {} ? "NULL" : "self"}]
+        set ecbvar [CreateTempSymbol Ctype {MRT_ecb *} Type ECB Class $Class]
+        append result "MRT_ecb *$ecbvar =\
+                mrt_NewEvent($eventNum, $instref, $sourceinst) ;\n"
+        if {[llength $required] != 0} {
+            set eparamsname ${domain}_${Class}_${event}__EPARAMS
+            set ptrparams [CreateTempSymbol Ctype "struct *$eparamsname"\
+                Type EventParams Class $Class]
+            append result\
+                "struct $eparamsname *const $ptrparams =\n"\
+                "    (struct $eparamsname *)$ecbvar->eventParameters ;\n"
+            foreach param $required {
+                append result "$ptrparams->$param = [dict get $arglist $param] ;\n"
+            }
+        }
+    }
+    return [list $ecbvar $result]
 }
 ----
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-50.0 {
+    Signal an event with parameters
+} -setup {
+    validateutils genMiccaFile codegen50 {
+        domain codegen50 {
+            class X {
+                attribute temp int -default 20
+
+                statemodel {
+                    state Idle {} {
+                    }
+                    transition Idle - E1 -> Running
+
+                    state Running {incr int} {
+                        %<my attribute temp>% += incr ;
+                    }
+                    transition Running - E1 -> Running ;
+                }
+            }
+
+            domainop void startx1 {} {
+                %<X findByName x1 xref>%
+                %<instance xref signal E1 incr 30>%
+            }
+        }
+        population codegen50 {
+            class X {
+                instance x1
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen50.c
+    testConditions\
+        {[validateutils matchLines codegen50.c {
+            MRT_ecb *t__T1 = mrt_NewEvent(0, xref, NULL) ;
+            struct codegen50_X_E1__EPARAMS *const t__T2 =
+                (struct codegen50_X_E1__EPARAMS *)t__T1->eventParameters ;
+            t__T2->incr = 30 ;
+            mrt_PostEvent(t__T1) ;
+        }]}
+} -result {1}
+----
+endif::showtests[]
+
+==== Delayed Signaling of an Instance
+
+*****
+`%<instance` _instvar_ `delaysignal` _time_ _event_
+_?name1 value1 name2 value2 ...?_ `>%`
+
+instvar::
+    The name of a ``C'' variable containing an instance reference
+    which is to be signaled.
+time::
+    The minimum number of milliseconds that are to elapse before
+    the event is signaled.
+event::
+    The name of an event in the state model for the class to which
+    the instance belongs.
+nameN / valueN::
+    A set of event parameter name / event parameter value pairs for the
+    parameters that match the parameter signature of _event_.
+
+The `delaysignal` subccommand generates ``C'' statements
+to arrange for _event_ to be signaled to the instance referenced by the
+_instvar_ variable after _time_ number of milliseconds has elapsed.
+The value of _time_ may be zero, in which case the event is signaled
+immediately.
+Any given name / value pairs are passed as the parameters of the event.
+All event parameters must be supplied and parameter names must match
+the event signature of the _event_ being signaled.
+If _event_ is not an event for the state model of _instvar_ then
+an error is thrown.
+*****
+{nbsp}
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc InstanceDelaySignal {instref time event args} {
+    lassign [InstanceNewECB $instref $event $args] ecbvar ecbcode
+    return [IndentToBlock [string cat\
+        [linecomment "instance $instref delaysignal $time $event [list $args]"]\
+        $ecbcode\
+        "mrt_PostDelayedEvent($ecbvar, $time) ;\n"\
+    ]]
+}
+----
+
+==== Cancel a Delayed Signal
+
+*****
+`%<instance` _instvar_ `canceldelayed` _event_ _?sourceinst?_ `>%`
+
+instvar::
+    The name of a ``C'' variable containing an instance reference
+    which is to be signaled.
+event::
+    The name of an event in the state model for the class to which
+    the instance belongs.
+sourceinst::
+    The name of a variable whose value is a reference to the
+    instance which originally signaled the delayed event.
+
+The `canceldelay` subccommand generates ``C'' statements
+to arrange the delayed evetn, _event_, not be delivered to the
+instance referenced by _instvar_.
+If the delayed event was signaled from outside of a state activity,
+then the _sourceinst_ argument is omitted.
+Otherwise, _sourceinst_ is the name of a variable containing a reference
+to the instance that signaled the event.
+After it is canceled, _event_ will not be dispatched.
+It is not an error to cancel an event that does not exist or has
+already been dispatched.
+Only events that were signaled as delayed events may be canceled.
+*****
+{nbsp}
 
 [source,tcl]
 ----
@@ -6792,6 +7819,46 @@ proc InstanceCancelSignal {instref event {sourceref {}}} {
 [source,tcl]
 ----
 <<generation support commands>>=
+proc FindEventNumber {class event} {
+    variable domain
+    set eventRef [Event findById Domain $domain Model $class Event $event]
+    if {[isEmptyRef $eventRef]} {
+        error "event, $event, is not a known event for class, $Class"
+    }
+    return [readAttribute $eventRef Number]
+}
+----
+
+==== Time Remaining for a Delayed Event
+
+*****
+`%<instance` _instvar_ `delayremaining` _event_ _?sourceinst?_ `>%`
+
+instvar::
+    The name of a ``C'' variable containing an instance reference
+    which is to be signaled.
+event::
+    The name of an event in the state model for the class to which
+    the instance belongs.
+sourceinst::
+    The name of a variable whose value is a reference to the
+    instance which originally signaled the delayed event.
+
+The `delayremaining` subccommand generates a ``C'' expression
+containing the number of milliseconds that remain before _event_ is
+signaled to the instance referenced by _instvar_.
+If the delayed event was signaled from outside of a state activity,
+then the _sourceinst_ argument is omitted.
+Otherwise, _sourceinst_ is the name of a variable containing a reference
+to the instance that signaled the event.
+A return value of zero implies that the event has already been dispatched
+or does not exist.
+*****
+{nbsp}
+
+[source,tcl]
+----
+<<generation support commands>>=
 proc InstanceRemainingTime {instref event {sourceref {}}} {
     variable domain
 
@@ -6807,106 +7874,35 @@ proc InstanceRemainingTime {instref event {sourceref {}}} {
 }
 ----
 
+==== Obtaining an Instance Identifier
+
+It is often useful for external operation to be given a token
+that can be used to identify an instance of a class.
+Directly passing instance reference pointers outside of a domain
+is *strongly discouraged*.
+Since class instances are stored in an array,
+the index into the array provides a convenient identifier.
+
+*****
+`%<instance` _instvar_ `instid` `>%`
+
+instvar::
+    The name of a ``C'' variable containing an instance reference
+    which is to be signaled.
+
+The `instvar` subccommand generates a ``C'' expression
+for an identifier which corresponds to the instance reference of _instvar_.
+The identifier values range from 0 to the number of instance of
+the class of _instvar_ minus one.
+*****
+{nbsp}
+
 [source,tcl]
 ----
 <<generation support commands>>=
 proc InstanceRefToId {instref} {
     CheckInstRefSymbol $instref
     return "mrt_InstanceIndex($instref)"
-}
-----
-
-[source,tcl]
-----
-<<generation support commands>>=
-proc InstanceIdToRef {instref className instid} {
-    variable domain
-
-    set classDesc [GetClassDescriptor $domain $className]
-    append result\
-        [CreateInstRefSymbol $className $instref]\
-        "$instref = mrt_InstanceReference($classDesc, $instid) ;\n"
-    return [IndentToBlock $result] ;
-}
-----
-
-[source,tcl]
-----
-<<generation support commands>>=
-proc InstanceNewECB {instref event arglist} {
-    variable domain
-
-    if {[llength $arglist] % 2 != 0} {
-        error "event parameters must be given as name / value pairs, got:\
-            \"$arglist\""
-    }
-    set target [CheckInstRefSymbol $instref]
-
-    dict with target {
-        set eventRef [Event findById Domain $domain Model $Class Event $event]
-        if {[isEmptyRef $eventRef]} {
-            error "event, $event, is not a known event for class, $Class"
-        }
-
-        set transRef [findRelated $eventRef {~R80 TransitioningEvent}]
-        if {[isNotEmptyRef $transRef]} {
-            assignAttribute $transRef {Number eventNum}
-            set eventType mrtTransitionEvent
-        } else {
-            set deferredRef [findRelated $eventRef {~R80 DeferredEvent}]
-            assignAttribute $deferredRef {Number eventNum}
-            set eventType mrtPolymorphicEvent
-        }
-
-        set psig [findRelated $eventRef R69]
-        set params [FindParamsFromSig $psig]
-        set required [relation list $params Name]
-        set supplied [dict keys $arglist]
-        if {![::struct::set equal $required $supplied]} {
-            error "event, $event, requires parameters,\
-                \"[join $required {, }]\", got:\
-                \"[join $supplied {, }]\""
-        }
-
-        set result {}
-        set sourceinst [expr {[LookUpSymbol self] eq {} ? "NULL" : "self"}]
-        set ecbvar [CreateTempSymbol Ctype {MRT_ecb *} Type ECB Class $Class]
-        append result "MRT_ecb *$ecbvar = mrt_NewEvent($eventNum,\
-            $eventType, $instref, $sourceinst) ;\n"
-        if {[relation isnotempty $params]} {
-            set eparamsname ${domain}_${Class}_${event}__EPARAMS
-            set ptrparams [CreateTempSymbol Ctype "struct *$eparamsname"\
-                Type EventParams Class $Class]
-            append result\
-                "struct $eparamsname *const $ptrparams =\n"\
-                "    (struct $eparamsname *)$ecbvar->eventParameters ;\n"
-            relation foreach param $params -ascending Position {
-                relation assign $param Name
-                append result "$ptrparams->$Name = [dict get $arglist $Name] ;\n"
-            }
-        }
-    }
-    return [list $ecbvar $result]
-}
-----
-
-[source,tcl]
-----
-<<generation support commands>>=
-proc FindEventNumber {class event} {
-    variable domain
-    set eventRef [Event findById Domain $domain Model $class Event $event]
-    if {[isEmptyRef $eventRef]} {
-        error "event, $event, is not a known event for class, $Class"
-    }
-
-    set transRef [findRelated $eventRef {~R80 TransitioningEvent}]
-    if {[isNotEmptyRef $transRef]} {
-        return [readAttribute $transRef Number]
-    } else {
-        set deferredRef [findRelated $eventRef {~R80 DeferredEvent}]
-        return [readAttribute $deferredRef Number]
-    }
 }
 ----
 
@@ -6953,7 +7949,16 @@ proc InstanceSetEmpty {set} {
 ----
 <<generation support commands>>=
 proc InstanceSetNotEmpty {set} {
-    return ![InstanceSetEmpty $set]
+    return !([InstanceSetEmpty $set])
+}
+----
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc InstanceSetCardinality {set} {
+    CheckInstSetSymbol $set
+    return "mrt_InstSetCardinality(&$set) ;\n"
 }
 ----
 
@@ -6980,13 +7985,127 @@ proc InstanceSetNotEqual {set1 set2} {
 <<generation support commands>>=
 proc InstanceSetAdd {set inst} {
     set setsym [CheckInstSetSymbol $set]
-    set instsym [CheckInstRefSymbol $inst Class [dict get $setsym Class]]
+    CheckInstRefSymbol $inst Class [dict get $setsym Class]
     return [IndentToBlock [string cat\
         [linecomment "instset $set add $inst"]\
         "mrt_InstSetAddInstance(&$set, $inst) ;\n"\
     ]]
 }
 ----
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc InstanceSetRemove {set inst} {
+    set setsym [CheckInstSetSymbol $set]
+    CheckInstRefSymbol $inst Class [dict get $setsym Class]
+    return [IndentToBlock [string cat\
+        [linecomment "instset $set remove $inst"]\
+        "mrt_InstSetRemoveInstance(&$set, $inst) ;\n"\
+    ]]
+}
+----
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc InstanceSetMember {set inst} {
+    set setsym [CheckInstSetSymbol $set]
+    CheckInstRefSymbol $inst Class [dict get $setsym Class]
+    return "mrt_InstSetMember(&$set, $inst)"
+}
+----
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc InstanceSetSelectRelated {set startref args} {
+    variable domain
+
+    set startlevel [GetBlock]
+    set result [IndentToBlock\
+        [linecomment "instset $set selectedRelated $startref [list $args]"]\
+    ]
+
+    lassign [TraverseRelChain $startref $args] chaincode targetclass targetref
+    set targetclassDesc [GetClassDescriptor $domain $targetclass]
+    append chaincode\
+        [IndentToBlock "mrt_InstSetAddInstance(&$set, $targetref) ;\n"]
+
+    set depth [expr {[GetBlock] - $startlevel}]
+    for {set i 0} {$i < $depth} {incr i} {
+        PopBlock
+        append chaincode [IndentToBlock "\}\n"]
+    }
+
+    append result [IndentToBlock [string cat\
+        [CreateInstSetSymbol $targetclass $set]\
+        "mrt_InstSetInitialize(&$set, &$targetclassDesc) ;\n"]]
+    append result $chaincode
+
+    return $result
+}
+----
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-48.0 {
+    Generated code file to select related instances
+} -setup {
+    validateutils genMiccaFile codegen48 {
+        domain codegen48 {
+            class X {
+                attribute color int -default 20
+            }
+            class Y {
+                attribute temp int -default 30
+            }
+            association R1 Y 1..*--1 X
+            class Z {
+                attribute pressure int -default 40
+            }
+            association R2 Z 0..1--1 Y
+            domainop void find {} {
+                %<X findByName x1 xref>%
+                %<instset zset selectRelated xref ~R1 ~R2>%
+            }
+        }
+        population codegen48 {
+            class X {
+                instance x1
+            }
+            class Y {
+                instance y1 R1 x1 temp 31
+                instance y2 R1 x1 temp 32
+                instance y3 R1 x1 temp 33
+                instance y4 R1 x1 temp 34
+            }
+            class Z {
+                instance z1 R2 y1 pressure 41
+                instance z2 R2 y2 pressure 42
+                instance z3 R2 y3 pressure 43
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen48.c
+    testConditions\
+        {[validateutils matchLines codegen48.c {
+        struct Y *t__T2 = (struct Y *)((uintptr_t)t__T1 - offsetof(struct Y, R1__BLINKS)) ;
+        t__T1 = t__T1->next ;
+        struct Z *t__T3 = t__T2->R2__BACK ; // ~R2
+        if (t__T3 != NULL) {
+            mrt_InstSetAddInstance(&zset, t__T3) ;
+        }
+        }]}
+} -result {1}
+----
+endif::showtests[]
 
 [source,tcl]
 ----
@@ -7051,6 +8170,57 @@ proc InstanceSetMinus {diffset set1 set2} {
 ----
 
 === Class Commands
+
+For each class in a domain,
+the code generator creates a macro command that has the same name
+as the class.
+For example,
+if a domain contains a class named, *WashingMachine*,
+the there will be an embedded macro command named, WashingMachine,
+which can be invoked as:
+
+*****
+`%<WashingMachine` `subcommand` ?_arg1 arg2 ..._? `>%`
+*****
+
+where `subcommand` is a class model level operation command.
+
+In this section we describe the model level subcommands that
+are available for each class.
+
+==== Synchronous Instance Creation
+
+*****
+`%<` _class_ `create` _instref_ _?attr1 value1 att2 value2 ...?_ `>%`
+
+_class_::
+    The name of a domain class for which an instance is synchronously created.
+instref::
+    The name of a variable into which a reference to the newly created
+    class instance is placed.
+attrN / valueN::
+    A set of attribute name / attribute values which are used to set the
+    attribute values of the newly created instance.
+
+The `create` subcommand for a class creates ``C'' statements to
+synchronously create a new instance of the class.
+A reference to the instance is placed in the variable called, _instref_.
+If _instref_ has not been previously declared, it is declared
+automatically.
+The attributes of the newly created instance are set to the values given
+by the _attrN / valueN_ pairs.
+All attributes of the instance must either be supplied a value 
+as part of the invocation of the `create` subcommand or
+have default values declared for them as part of the class definition.
+Any value given as an argument overrides any default value that might
+have been defined for an attribute.
+If _class_ has an associated state model,
+then the newly created instance is placed in the default initial state
+that was defined for the state model.
+No state activity is executed since the instance creation is done
+synchronously.
+*****
+{nbsp}
 
 [source,tcl]
 ----
@@ -7152,15 +8322,14 @@ proc FindDefaultedAttributes {className} {
 }
 ----
 
+ifdef::showtests[]
 [source,tcl]
 ----
 <<generate command tests>>=
 test codegen-26.0 {
     Generated code file instance creation
 } -setup {
-    # makeFile {} codegen26.h
-    # makeFile {} codegen26.c
-    micca configure {
+    validateutils genMiccaFile codegen26 {
         domain codegen26 {
             class X {
                 attribute color int -default 20
@@ -7179,10 +8348,16 @@ test codegen-26.0 {
     }
 } -cleanup {
     cleanupDomain
+    validateutils forgetFiles
 } -body {
-    micca generate
+    validateutils compileFiles codegen26.c
     testConditions\
-        {[llength [fileutil::grep {mrt_CreateInstance} codegen26.c]] == 1}
+        {[validateutils matchLines codegen26.c {
+        struct X *newx ;
+        newx = mrt_CreateInstance(&codegen26__CLASSES[0], MRT_StateCode_IG) ;
+        newx->color = 30 ;
+        newx->temp = 22 ;
+        }]}
 } -result {1}
 ----
 
@@ -7314,6 +8489,7 @@ test codegen-26.4 {
         {[llength [fileutil::grep {strncpy} codegen26_4.c]] == 2}
 } -result {1}
 ----
+endif::showtests[]
 
 [source,tcl]
 ----
@@ -7347,6 +8523,7 @@ proc GetStateNumber {domain className state} {
 }
 ----
 
+ifdef::showtests[]
 [source,tcl]
 ----
 <<generate command tests>>=
@@ -7436,6 +8613,7 @@ test codegen-27.1 {
     micca generate
 } -result {encountered 1 code generation error(s)} -returnCodes error
 ----
+endif::showtests[]
 
 [source,tcl]
 ----
@@ -7447,8 +8625,7 @@ proc ClassCreateAsync {className event eventparams args} {
         error "event parameters must be given as name / value pairs, got:\
             \"$eventparams\""
     }
-    set eventRef [TransitioningEvent findById Domain $domain Model $className\
-            Event $event]
+    set eventRef [Event findById Domain $domain Model $className Event $event]
     if {[isEmptyRef $eventRef]} {
         error "class, $className, has no event named, $event"
     }
@@ -7458,7 +8635,7 @@ proc ClassCreateAsync {className event eventparams args} {
         [linecomment "$className createasync $event [list $eventparams]\
             [list $args]"]
 
-    set psig [findRelated $eventRef R80 R69]
+    set psig [findRelated $eventRef R69]
     set params [FindParamsFromSig $psig]
     if {[relation isnotempty $params]} {
         set required [relation list $params Name]
@@ -7503,6 +8680,7 @@ proc ClassCreateAsync {className event eventparams args} {
 }
 ----
 
+ifdef::showtests[]
 [source,tcl]
 ----
 <<generate command tests>>=
@@ -7549,6 +8727,7 @@ test codegen-28.0 {
         {[llength [fileutil::grep {mrt_CreateAsync} codegen28.c]] == 1}
 } -result {1}
 ----
+endif::showtests[]
 
 [source,tcl]
 ----
@@ -7582,6 +8761,7 @@ proc ClassForeachInstance {className instref} {
 }
 ----
 
+ifdef::showtests[]
 [source,tcl]
 ----
 <<generate command tests>>=
@@ -7616,14 +8796,16 @@ test codegen-29.0 {
         {[llength [fileutil::grep {xref->color} codegen29.c]] == 1}
 } -result {1}
 ----
+endif::showtests[]
 
 [source,tcl]
 ----
 <<generation support commands>>=
 proc ClassInstanceReference {className varName} {
     return [IndentToBlock [string cat\
-        [linecomment "$className instRef $varName"]\
+        [linecomment "$className instref $varName"]\
         "[CreateInstRefSymbol $className $varName]"\
+        "$varName = NULL ;\n"\
     ]]
 }
 ----
@@ -7631,11 +8813,14 @@ proc ClassInstanceReference {className varName} {
 [source,tcl]
 ----
 <<generation support commands>>=
-proc ClassIdToRef {className instid} {
-    CheckSymbol $instid Ctype MRT_InstId
+proc ClassIdToRef {className instid instref} {
     variable domain
+
     set classDesc [GetClassDescriptor $domain $className]
-    return "mrt_InstanceIndex($classDesc, $instid)"
+    append result\
+        [CreateInstRefSymbol $className $instref]\
+        "$instref = mrt_InstanceReference(&$classDesc, $instid) ;\n"
+    return [IndentToBlock $result] ;
 }
 ----
 
@@ -7647,18 +8832,19 @@ proc ClassFindByName {className instName instref} {
     set instRef [ClassInstance findById Domain $domain Class $className\
         Instance $instName]
     if {[isEmptyRef $instRef]} {
-        error "class, $className, has not instance named, $instName"
+        error "class, $className, has no instance named, $instName"
     }
+    set classDesc [GetClassDescriptor $domain $className]
     set instNum [readAttribute $instRef Number]
     append result\
         [linecomment "$className findByName $instName $instref"]\
         [CreateInstRefSymbol $className $instref]\
-        "$instref = &${className}__POOL\[$instNum\] ;\n"\
-        "assert($instref->base__INST.alloc > 0) ;\n"
+        "$instref = mrt_InstanceReference(&$classDesc, $instNum) ;\n"
     return [IndentToBlock $result]
 }
 ----
 
+ifdef::showtests[]
 [source,tcl]
 ----
 <<generate command tests>>=
@@ -7731,6 +8917,7 @@ test codegen-25.0 {
         {[llength [fileutil::grep {struct Z} codegen25.c]] == 7}
 } -result {1}
 ----
+endif::showtests[]
 
 [source,tcl]
 ----
@@ -7747,20 +8934,18 @@ proc ClassOperation {className opName args} {
         error "unknown class operation, $opName, for class, $className"
     }
 
-    append result "${className}_$opName\("
+    set provided [dict keys $args]
+    set params [deRef [findRelated $opRef ~R4]]
+    set required [relation list $params Name -ascending Number]
+    ValidateParams $opName $provided $required
+
     set pset {}
-    set paramRefs [findRelated $opRef ~R4]
-    relation foreach param [deRef $paramRefs] -ascending Number {
-        relation assign $param
-        if {![dict exists $args $Name]} {
-            error "no value given for the $Name parameter"
-        }
-        append pset "[dict get $args $Name], "
+    foreach pname $required {
+        append pset "[dict get $args $pname], "
     }
     set pset [string trimright $pset {, }]
 
-    append result $pset "\)"
-    return $result
+    return "${className}_$opName\($pset\)"
 }
 ----
 
@@ -7843,6 +9028,7 @@ proc SimpleAssocLinkage {relName sourceref targetref opname} {
 }
 ----
 
+ifdef::showtests[]
 [source,tcl]
 ----
 <<generate command tests>>=
@@ -7890,6 +9076,7 @@ test codegen-30.0 {
         {[llength [fileutil::grep {mrt_Unrelate} codegen30.c]] == 1}
 } -result {1}
 ----
+endif::showtests[]
 
 // HERE
 // Improve this interface to take advantage of automatically creating
@@ -7966,6 +9153,7 @@ proc ClassAssocLinkage {relName sourceref targetref assocref opname} {
 }
 ----
 
+ifdef::showtests[]
 [source,tcl]
 ----
 <<generate command tests>>=
@@ -8011,6 +9199,7 @@ test codegen-31.0 {
         {[llength [fileutil::grep {mrt_Unrelate} codegen31.c]] == 1}
 } -result {1}
 ----
+endif::showtests[]
 
 [source,tcl]
 ----
@@ -8080,6 +9269,7 @@ proc RefGenLinkage {relName source target opname} {
 }
 ----
 
+ifdef::showtests[]
 [source,tcl]
 ----
 <<generate command tests>>=
@@ -8124,6 +9314,7 @@ test codegen-32.0 {
         {[llength [fileutil::grep {mrt_Unrelate} codegen32.c]] == 1}
 } -result {1}
 ----
+endif::showtests[]
 
 [source,tcl]
 ----
@@ -8139,11 +9330,11 @@ proc RelRefGenReclassify {relName superref subclass subref args} {
     CheckSuperClassReference $supername $superref
     CheckSubClassName $subclass [findRelated $relRef ~R37]
 
-    set classDesc &${domain}__CLASSES\[[GetClassProperty $subclass Number]\]
+    set classDesc [GetClassDescriptor $domain $subclass]
     append result\
         [CreateInstRefSymbol $subclass $subref]\
         "$subref = mrt_Reclassify\(&${domain}__RSHIPS\[$relNum\], $superref, "\
-        "$classDesc\) ;\n"
+        "&$classDesc\) ;\n"
 
     set attrvalues [GetAttrInitialValues $subclass $args]
     foreach {attrName attrValue} $attrvalues {
@@ -8185,6 +9376,7 @@ proc CheckSubClassName {subclass subRefs} {
 }
 ----
 
+ifdef::showtests[]
 [source,tcl]
 ----
 <<generate command tests>>=
@@ -8230,6 +9422,7 @@ test codegen-33.0 {
         {[llength [fileutil::grep {mrt_Reclassify} codegen33.c]] == 1}
 } -result {1}
 ----
+endif::showtests[]
 
 [source,tcl]
 ----
@@ -8256,11 +9449,11 @@ proc RelUnionGenReclassify {relName superref subclass subref args} {
     CheckSuperClassReference $supername $superref
     CheckSubClassName $subclass [findRelated $relRef ~R45]
 
-    set classDesc &${domain}__CLASSES\[[GetClassProperty $subclass Number]\]
+    set classDesc [GetClassDescriptor $domain $subclass]
     append result\
         [CreateInstRefSymbol $subclass $subref]\
         "$subref = mrt_Reclassify\(&${domain}__RSHIPS\[$relNum\], $superref, "\
-        "$classDesc\) ;\n"
+        "&$classDesc\) ;\n"
 
     set attrvalues [GetAttrInitialValues $subclass $args]
     foreach {attrName attrValue} $attrvalues {
@@ -8271,6 +9464,7 @@ proc RelUnionGenReclassify {relName superref subclass subref args} {
 }
 ----
 
+ifdef::showtests[]
 [source,tcl]
 ----
 <<generate command tests>>=
@@ -8308,6 +9502,7 @@ test codegen-34.0 {
         {[llength [fileutil::grep {mrt_Reclassify} codegen34.c]] == 1}
 } -result {1}
 ----
+endif::showtests[]
 
 === Assigner Commands
 
@@ -8329,6 +9524,7 @@ proc SingleAssignerSignal {relName event args} {
 }
 ----
 
+ifdef::showtests[]
 [source,tcl]
 ----
 <<generate command tests>>=
@@ -8380,6 +9576,7 @@ test codegen-35.0 {
         {[llength [fileutil::grep {mrt_PostEvent} codegen35.c]] == 1}
 } -result {1}
 ----
+endif::showtests[]
 
 [source,tcl]
 ----
@@ -8392,7 +9589,7 @@ proc MultiAssignerCreate {relName instref idinst} {
     set idClass [readAttribute $maRef Class]
     CheckInstRefSymbol $idinst Class $idClass
 
-    set assignerClass ${relName}__CLASS
+    set assignerClass ${domain}__ASSIGNERS\[[GetClassProperty $relName Number]\]
     append result\
         [linecomment "$relName create $instref $idinst"]\
         [CreateInstRefSymbol $relName $instref]\
@@ -8403,6 +9600,7 @@ proc MultiAssignerCreate {relName instref idinst} {
 }
 ----
 
+ifdef::showtests[]
 [source,tcl]
 ----
 <<generate command tests>>=
@@ -8462,6 +9660,7 @@ test codegen-47.0 {
         {[llength [fileutil::grep {R1__POOL} codegen47.c]] == 4}
 } -result {1}
 ----
+endif::showtests[]
 
 == Helper Commands
 
@@ -8519,9 +9718,9 @@ proc comment {args} {
 [source,tcl]
 ----
 <<generation helper commands>>=
-proc linecomment {args} {
+proc linecomment {text} {
     set result {}
-    foreach line $args {
+    foreach line [split $text \n] {
         append result "// $line\n"
     }
     return $result

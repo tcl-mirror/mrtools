@@ -27,6 +27,10 @@ DOCSRC 	=\
 	micca.aweb\
 	$(NULL)
 
+CODEFILE =\
+	  $(CODEDIR)/tcl/micca.tcl\
+	  $(NULL)
+
 DOCPARTS=\
 	bibliography.txt\
 	codeorg.txt\
@@ -52,13 +56,31 @@ LSDIAGRAMS =\
 	platform-relation.uxf\
 	platform-statemodel.uxf\
 	platform-transition.uxf\
-	pointer-example.uxf\
-	pointer-set-example.uxf\
+	rel-simp-nr-1-1.uxf\
+	rel-simp-r-1-1.uxf\
+	rel-simp-nr-M-1-dyn.uxf\
+	rel-simp-r-M-1-dyn.uxf\
+	rel-simp-nr-M-1-static.uxf\
+	rel-simp-r-M-1-static.uxf\
+	rel-assoc-nr-1-1.uxf\
+	rel-assoc-r-1-1.uxf\
+	rel-assoc-nr-M-1-dyn.uxf\
+	rel-assoc-r-M-1-dyn.uxf\
+	rel-assoc-nr-M-1-static.uxf\
+	rel-assoc-r-M-1-static.uxf\
+	rel-assoc-nr-M-M-dyn.uxf\
+	rel-assoc-r-M-M-dyn.uxf\
+	rel-assoc-nr-M-M-static.uxf\
+	rel-assoc-r-M-M-static.uxf\
+	rel-gen-ref.uxf\
+	rel-gen-union.uxf\
 	assoc-decompose.uxf\
 	wmc-class-diagram.uxf\
 	wm-states.uxf\
 	ct-states.uxf\
 	main-loop.uxf\
+	auto-translation.uxf\
+	micca-translation.uxf\
 	$(NULL)
 
 IMAGES =\
@@ -102,7 +124,6 @@ A2XOPTS =\
 	$(NULL)
 
 ATANGLEOPTS =\
-	-report\
 	$(NULL)
 
 DBLATEX_PARAMS =\
@@ -144,16 +165,16 @@ all : doc code tests package
 
 doc : $(PDF)
 
-code : $(TCLSRC)
+code : $(CODEFILE)
 
 tests : code $(TESTS)
 
 runtests : tests
 	cd $(TESTDIR) ; tclsh $(TESTS) -verbose bet -level debug
 
-package : $(PKGDIR)/package-micca-$(VERSION)-tcl.tm
+package : $(PKGDIR)/package-micca-$(VERSION)-tcl.zip
 
-$(PKGDIR)/package-micca-$(VERSION)-tcl.tm : code $(CODEDIR)/tcl/pkgIndex.tcl
+$(PKGDIR)/package-micca-$(VERSION)-tcl.zip : $(CODEFILE) $(CODEDIR)/tcl/pkgIndex.tcl
 	teapot-pkg generate --output $(PKGDIR) $(CODEDIR)/tcl
 
 clean :
@@ -167,6 +188,9 @@ $(TCLSRC) : $(DOCSRC) $(DOCPARTS)
 
 $(TESTS) : $(DOCSRC) $(DOCPARTS)
 
+$(CODEFILE) : $(DOCSRC) $(DOCPARTS)
+	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $@ $<
+
 $(DOCDIR)/%.pdf : %.aweb
 	a2x $(A2XOPTS) --doctype=book  --format=pdf\
 	    --destination-dir=$(DOCDIR)\
@@ -179,8 +203,13 @@ $(DOCDIR)/%.pdf : %.aweb
 %.test : %.aweb
 	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $(TESTDIR)/$@ $<
 
-
 $(IMAGEDIR)/platform-%.pdf : platform-%.uxf
+	umlet -action=convert -format=pdf\
+		-filename=$< -output=$(basename $@)-cvt
+	pdftk $(basename $@)-cvt.pdf cat 1left output $@
+	$(RM) $(basename $@)-cvt.pdf
+
+$(IMAGEDIR)/%-translation.pdf : %-translation.uxf
 	umlet -action=convert -format=pdf\
 		-filename=$< -output=$(basename $@)-cvt
 	pdftk $(basename $@)-cvt.pdf cat 1left output $@

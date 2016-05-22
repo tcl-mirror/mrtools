@@ -10,8 +10,28 @@
 #*--
 #
 
+LDFLAGS = -g
+CFLAGS	= -std=c11 -g -Og -Wall\
+	-Wno-unused-variable\
+	-Wno-unused-function\
+	-Wno-unused-but-set-variable\
+	$(NULL)
+CPPFLAGS =\
+	 -D_POSIX_C_SOURCE=200112L\
+	 -D_ISOC11_SOURCE\
+	 -D_XOPEN_SOURCE\
+	 -DMRT_ECB_PARAM_SIZE=64\
+	 -DNDEBUG\
+	 $(NULL)
+
 DOCSRC 	=\
 	simplebookstore.aweb\
+	$(NULL)
+
+MICCADIR = ../../../src
+
+RTSRC	=\
+	$(MICCADIR)/runtime.txt\
 	$(NULL)
 
 PDF 	=\
@@ -23,10 +43,6 @@ ROOTS	=\
 	sbs_population.micca\
 	$(NULL)
 
-TESTS	=\
-	testscenario.tcl\
-	$(NULL)
-
 SCENARIOS =\
 	scenario1\
 	scenario2\
@@ -34,20 +50,12 @@ SCENARIOS =\
 	scenario4\
 	$(NULL)
 
-LOGS	=\
-     	$(patsubst %,%.log,$(SCENARIOS))\
-	$(NULL)
-
-DIAGS	=\
-     	$(patsubst %,%.diag,$(SCENARIOS))\
-	$(NULL)
-
 CLEANFILES =\
 	$(PDF)\
 	$(ROOTS)\
-	$(TESTS)\
-	$(LOGS)\
-	$(DIAGS)\
+	micca_rt.c\
+	micca_rt.h\
+	*.o\
 	$(NULL)
 
 A2XOPTS =\
@@ -55,7 +63,6 @@ A2XOPTS =\
 	$(NULL)
 
 ATANGLEOPTS =\
-	-report\
 	$(NULL)
 
 DBLATEX_PARAMS =\
@@ -88,21 +95,39 @@ ASCIIDOC_OPTS =\
 	$(patsubst %,--attribute=%,$(ASCIIDOC_ATTRS))\
 	$(NULL)
 
-.PHONY : all doc code runtests clean
+.PHONY : all doc code clean
 
 all : doc code
 
 doc : $(PDF)
 
-code : $(ROOTS)
+code : bookstore
 
-runtests : $(ROOTS) $(TESTS)
-	for test in $(TESTS) ; do tclsh $$test ; done
+bookstore : bookstore.o micca_rt.o
+
+bookstore.c : bookstore.h micca_rt.h
+
+micca_rt.o : micca_rt.c micca_rt.h
+
+micca_rt.h : $(RTSRC)
+	cd $(MICCADIR) ; atangle $(ATANGLEOPTS) -root micca_rt_posix.h\
+	    	-output $@ micca.aweb
+	mv $(MICCADIR)/micca_rt.h .
+
+micca_rt.c : $(RTSRC)
+	cd $(MICCADIR) ; atangle $(ATANGLEOPTS) -root micca_rt_posix.c -output $@ micca.aweb
+	mv $(MICCADIR)/micca_rt.c .
+
+bookstore.c : simplebookstore.micca sbs_population.micca
+	micca -stubexternalops simplebookstore.micca sbs_population.micca
 
 clean :
 	$(RM) $(CLEANFILES)
 
-$(PDF) : $(DOCSRC) $(INFO)
+$(PDF) : $(DOCSRC) $(INFO) bookstore.log
+
+bookstore.log : bookstore
+	bookstore > bookstore.log
 
 simplebookstore.micca : $(DOCSRC)
 	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
@@ -113,9 +138,6 @@ sbs_population.micca : $(DOCSRC)
 testscenario.tcl : $(DOCSRC)
 	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
 
-$(LOGS) $(DIAGS) : testscenario.tcl $(ROOTS)
-	tclsh $<
-
 %.pdf : %.aweb
 	a2x $(A2XOPTS) --doctype=article  --format=pdf\
 	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) $<
@@ -125,6 +147,9 @@ $(LOGS) $(DIAGS) : testscenario.tcl $(ROOTS)
 
 %.pdf : %.diag
 	seqdiag --antialias -T pdf -o $@ $<
+
+other : simplebookstore.micca sbs_population.micca
+	tclsh ../../starpack/x86_64-linux-tcl8.6/micca_main.tcl -stubexternalops simplebookstore.micca sbs_population.micca
 
 #
 # vim :set sw=8 ts=8 sts=8 noexpandtab:

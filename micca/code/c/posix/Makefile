@@ -11,8 +11,12 @@
 
 MICCADIR = ../../../src
 
-CFLAGS	= -std=c11 -g -L$(HOME)/local/lib -Wall -Og
-CPPFLAGS = -D_POSIX_C_SOURCE=200112L -D_ISOC11_SOURCE
+CFLAGS	= -std=c11 -g -L$(HOME)/local/lib -Wall
+CPPFLAGS =\
+	 -D_POSIX_C_SOURCE=200112L\
+	 -D_ISOC11_SOURCE\
+	 -D_XOPEN_SOURCE=600\
+	 $(NULL)
 
 DOCSRC 	=\
 	micca_rt_test.aweb\
@@ -20,6 +24,16 @@ DOCSRC 	=\
 
 RTSRC 	=\
 	$(MICCADIR)/micca.aweb\
+	$(MICCADIR)/bibliography.txt\
+	$(MICCADIR)/codeorg.txt\
+	$(MICCADIR)/configure.txt\
+	$(MICCADIR)/example.txt\
+	$(MICCADIR)/generate.txt\
+	$(MICCADIR)/litprog.txt\
+	$(MICCADIR)/platform.txt\
+	$(MICCADIR)/preface.txt\
+	$(MICCADIR)/runtime.txt\
+	$(MICCADIR)/translation.txt\
 	$(NULL)
 
 PDF 	=\
@@ -31,7 +45,6 @@ A2XOPTS =\
 	$(NULL)
 
 ATANGLEOPTS =\
-	-report\
 	$(NULL)
 
 DBLATEX_PARAMS =\
@@ -60,9 +73,9 @@ ASCIIDOC_OPTS =\
 	$(patsubst %,--attribute=%,$(ASCIIDOC_ATTRS))\
 	$(NULL)
 
-.PHONY : all tests runtests
+.PHONY : all doc runtests
 
-all : tests
+all : doc runtests
 
 doc : $(PDF)
 
@@ -86,12 +99,12 @@ micca_rt_test.c : micca_rt.c micca_rt.h testdomain.c
 micca_rt_test.c : $(DOCSRC)
 	atangle $(ATANGLEOPTS) -root micca_rt_test.c -output $@ $<
 
-micca_rt.h : $(RTSRC) $(MICCADIR)/*.txt
+micca_rt.h : $(RTSRC)
 	cd $(MICCADIR) ; atangle $(ATANGLEOPTS) -root micca_rt_posix.h\
 	    	-output $@ micca.aweb
 	mv $(MICCADIR)/micca_rt.h .
 
-micca_rt.c : $(RTSRC) $(MICCADIR)/*.txt
+micca_rt.c : $(RTSRC)
 	cd $(MICCADIR) ; atangle $(ATANGLEOPTS) -root micca_rt_posix.c -output $@ micca.aweb
 	mv $(MICCADIR)/micca_rt.c .
 
@@ -106,8 +119,15 @@ CLEANFILES =\
 	micca_rt_test.c\
 	micca_rt.c\
 	micca_rt.h\
+	micca_rt.o\
+	testdomain.micca\
 	testdomain.c\
 	testdomain.h\
+	testdomain.o\
+	$(PDF)\
+	*.gcov\
+	*.gcda\
+	*.gcno\
 	$(NULL)
 
 clean :

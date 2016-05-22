@@ -33,7 +33,6 @@ RTSRCS=\
 	$(NULL)
 
 ATANGLEOPTS =\
-	-report\
 	$(NULL)
 
 .PHONY : all

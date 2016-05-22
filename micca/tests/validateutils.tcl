@@ -49,6 +49,7 @@ namespace eval ::validateutils {
     namespace export forgetFiles
     namespace export matchLines
     namespace export genMiccaFile
+    namespace export compileFiles
     namespace ensemble create
 
     namespace import ::tcltest::*
@@ -159,6 +160,14 @@ proc ::validateutils::genMiccaFile {domain content args} {
     micca configure $content
     micca generate {*}$args
     indexFiles $domain.c $domain.h
+}
+
+proc ::validateutils::compileFiles {args} {
+    set osuffix [expr {$::tcl_platform(os) eq "Windows" ? "obj" : "o"}]
+    foreach fname $args {
+        puts -nonewline [exec -keepnewline -- cc -c -std=c11 -Wall $fname 2>@1]
+        file delete [file rootname $fname].$osuffix
+    }
 }
 
 package provide validateutils $::validateutils::version
