@@ -1659,7 +1659,7 @@ to avoid the complication of managing the lifetime of the set variables.
 Since our target environment is usually quite limited,
 large automatic variables are to be avoided.
 
-The chosen design is to use a bit vector.
+The chosen design uses a bit vector.
 Since class instances are contained in an array,
 the index of a class instance in the storage pool array can be used
 as an index into a bit vector.
@@ -1795,6 +1795,10 @@ of the bit vector.
 The correct word is given by the quotient of the index and the
 number of bits in a set vector word.
 The correct bit offset within a word is given by the modulus.
+We are using divide and modulus operations with the full expectation
+that the compiler will recognize, at some level of optimization,
+that `MRT_SETWORD_BITS` is a power of two and transform the divide and modulus
+into bitwise operations.
 
 We also need a means to remove an instance from the set.
 
@@ -1842,7 +1846,7 @@ mrt_InstSetRemoveInstance(
 }
 ----
 <1> More bit twiddling. The bitwise AND of the one's complement of a mask
-clears the corresponding bit.
+clears in the result any bit that was set in the mask.
 
 We also provide a test for membership in an instance set.
 
@@ -2517,7 +2521,8 @@ We will show how this is accomplished by:
 
 . Showing the data structures used to describe relationships.
 . Explaining how transactions work and how referential integrity is checked.
-. Giving code to relate and unrelate instances in a relationship.
+. Giving code to relate and unrelate instances in a relationship that
+operates with the integrity check.
 
 === Describing Relationships
 
@@ -4577,7 +4582,7 @@ Such organization may be helpful to the programmer,
 but since they are directly supported by the implementation language,
 the `micca` run-time does not get involved in mediating them.
 
-Where the run-time does get involved is for those computations that must leave
+The run-time does get involved with those computations that must leave
 off at some point,
 waiting for some other action in the system or the external environment,
 and then resume execution maintaining the past history.
@@ -4776,7 +4781,7 @@ static MRT_ecb mrtECBPool[MRT_EVENTPOOLSIZE] ;
 
 === Event Parameter Storage [[event-parameter-storage]]
 
-We need to discuss events that carry parametric data and how that will happen.
+We need to design how events that carry parameteric data will operate.
 In this formulation of state machines,
 events may carry additional parameters.
 Space has to be allocated for that data.
@@ -4894,7 +4899,8 @@ that are not currently begin used.
 From the data structures and the semantics of the queuing,
 a given ECB can be on at most one of the queues at any time.
 Most of the time each ECB is on exactly one of the queues,
-but there are short times when ECB's are held in local variables.
+but there are short times when an ECB is not in any queue and a pointer
+to the ECB is held in a local variable.
 
 The operations that are performed on event queue are associated with
 adding and removing elements.
@@ -5128,16 +5134,6 @@ mrt_NewEvent(
     assert(targetInst->alloc != 0) ;
     assert(event < targetInst->classDesc->eventCount) ;
 
-    if (targetInst == NULL ||
-            targetInst->alloc == 0 ||
-            event >= targetInst->classDesc->eventCount) {
-#           ifndef MRT_NO_NAMES
-        mrtFatalError(mrtNoEvent, event, targetInst->classDesc->name) ;
-#           else
-        mrtFatalError(mrtNoEvent, event, targetInst->classDesc) ;
-#           endif /* MRT_NO_NAMES */
-    }
-
     MRT_ecb *ecb = mrtAllocEvent() ;
 
     ecb->eventNumber = event ;
@@ -5284,6 +5280,7 @@ mrt_CreateAsync(
     assert(targetClass != NULL) ;
     assert(targetClass->edb != NULL) ;
     assert(targetClass->edb->creationState >= 0) ;
+    assert(event < targetClass->edb->eventCount) ;
 
     MRT_Instance *targetInst = mrt_CreateInstance(targetClass,
             targetClass->edb->creationState) ; // <1>
@@ -6276,17 +6273,17 @@ There are two distinct types of events: transitioning events and
 polymorphic events.
 The event types are distinct in that the numerical encoding of the
 events is used in different ways.
-In the platform model,
+In the <<platform-event-class,platform model>>,
 all the events for a given state model must have distinct names.
 The distinction in the platform model between Transitioning Event
 and Deferred Event is the difference we now see between an ordinary
 transition event and a polymorphic event.
 The code generator will assign a unique integer to each event.
 The set of transition events will be encoded sequentially
-starting at 0 up to N - 1,
-where N is the number of transitioning events in the state model.
-Polymorphic events for the class are then encoded starting at N
-up to N + M - 1, where M is the number of polymorphic events.
+starting at 0 up to E - 1,
+where E is the number of transitioning events in the state model.
+Polymorphic events for the class are then encoded starting at E
+up to E + P - 1, where P is the number of polymorphic events.
 Note that only superclass classes that have both polymorphic events
 (either defined or inherited) and
 a state model of its own will have both transition events and
@@ -6299,7 +6296,7 @@ identify an event for a class when, for example, it is in a delayed
 event queue.
 As we will see below,
 at dispatch time, any polymorphic event numbers will have the number
-of transition events for the class (N in the discussion above)
+of transition events for the class (E in the discussion above)
 subtracted from their encoded number so that they can be used as an
 array index into the data structures used for polymorphic event mapping.
 
@@ -6309,13 +6306,18 @@ A transition event that is dispatched when the current state of the
 instance is the pseudo-initial creation state is deemed a creation event.
 We wish to treat creation events separately because of the
 design strategy we have used to implement asynchronous instance creation.
-The strategy used is to create the instance in an inactive state
-and queue the creation event.
-Then when the creation event is dispatched, the instance is marked as
-active and an ordinary event dispatch may happen.
+The strategy creates the instance in the creation state, marks its
+memory slot as allocated but inactive,
+and queues a transition event.
+When the event is dispatched, the instance memory slot must be marked 
+active and a transition event dispatch happens.
 By marking the instance as inactive, but allocated, we can make sure
 the instance data is not accessed during the time between when it
 was created and when the creation event is actually dispatched.
+But, because there is additional processing to be done before a creation
+event is dispatched as a transition event,
+we have to be able to identify a transition event as being using
+in an asynchronous instance creation context.
 
 We provide separate functions to dispatch each event type.
 
@@ -6898,7 +6900,7 @@ mrtDispatchPolymorphicEvent(
         /*
          * Check that our subclass instance is indeed allocated and usable.  We
          * are trying to guard against the possiblity that the subclass
-         * instance was deleted before the polymorphic event was signaled.
+         * instance was deleted before the polymorphic event was delivered.
          */
         assert(targetInst->alloc > 0) ;
         if (targetInst->alloc <= 0) {
@@ -6954,13 +6956,13 @@ and the polymorphic event number.
 So we hold them in local variables as we overwrite the necessary fields
 in the ECB to hold the mapped event information.
 
-The core of the algorithm is to fetch the subclass code from the superclass
-instance and use that as the row index into the polymorphic event map for the
-generalization.
-The event number is then used as the column index to find the mapping
-entry.
-That mapping entry contains a new event number and event type.
-The new target of the event is then the currently related subclass instance.
+The core of the algorithm is to determine the subclass code of the related
+subclass instance and use that as the row index into the polymorphic event map
+for the generalization.
+The event number (appropriately offset by the number of transition events)
+is then used as the column index to find the mapping entry.
+That mapping entry contains a new event number.
+The new target of the event is the currently related subclass instance.
 As we have discussed,
 this may be a stored as a pointer or may be a union member of the superclass
 instance structure.
@@ -6975,14 +6977,17 @@ Finally the newly minted ECB is recursively dispatched and the
 next generalization is considered.
 Recursively dispatching the event preserves the order of delivery of
 the events.
+Note that when there are multiple generalization hierarchies for
+the event,
+the dispatch order is determined by the order the code generator
+decides for generalization dispatch blocks.
 
 === Creation Event Dispatch
 
 Fortunately, creation events are much simpler than polymorphic events.
-Creation event dispatch is the simple combination of instance allocation
-and normal event dispatch.
+Creation event dispatch fixes up the `alloc` field of the
+target and the ECB before normal event dispatch.
 No additional data structures are required.
-The code below shows how it is done.
 
 (((micca,Run Time Function,mrtDispatchCreationEvent)))
 [source,c]
@@ -7417,6 +7422,7 @@ Negative numbers indicate an error occurred.
 
 (((micca,Run Time Function,mrt_PortalReadAttr)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 int
@@ -7489,6 +7495,7 @@ Negative numbers indicate an error occurred.
 
 (((micca,Run Time Function,mrt_PortalUpdateAttr)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 int
@@ -7557,6 +7564,7 @@ Negative numbers indicate an error occurred.
 
 (((micca,Run Time Function,mrt_PortalSignalEvent)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 int
@@ -7673,10 +7681,16 @@ mrt_PortalSignalDelayedEvent(
     if there are not parameters for the event.
 `delay`::
     The number of milliseconds to delay before the event is dispatched.
+
+`mrt_PortalSignalDelayedEvent` signals an ordinary or polymorphic event
+to the deliverd to an instance after a delay time.
+The return value is 0 upon success.
+Negative numbers indicate an error occurred.
 *****
 
 (((micca,Run Time Function,mrt_PortalSignalDelayedEvent)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 int
@@ -7701,6 +7715,9 @@ mrt_PortalSignalDelayedEvent(
 }
 ----
 
+==== Canceling Delayed Events
+
+*****
 [source,c]
 ----
 <<mrt external interfaces>>=
@@ -7712,8 +7729,25 @@ mrt_PortalCancelDelayedEvent(
     MRT_EventCode eventNumber) ;
 ----
 
+`portal`::
+    A pointer to the portal structure for the domain.
+`classId`::
+    The number of the class. This number is generated by micca and placed in
+    the domain header file.
+`instId`::
+    The number of the instance. Instance numbers are consecutive non-negative
+    integers up to the maximum number of instances defined for the class.
+`eventNumber`::
+    The event number of the event to signal.
+
+`mrt_PortalCancelDelayedEvent` cancels a delayed event.
+The return value is 0 upon success.
+Negative numbers indicate an error occurred.
+*****
+
 (((micca,Run Time Function,mrt_PortalCancelDelayedEvent)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 int
@@ -7749,6 +7783,7 @@ mrt_PortalRemainingDelayTime(
 
 (((micca,Run Time Function,mrt_PortalRemainingDelayTime)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 int
@@ -7786,6 +7821,7 @@ mrt_PortalCreateInstance(
 
 (((micca,Run Time Function,mrt_PortalCreateInstance)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 int
@@ -7830,6 +7866,7 @@ mrt_PortalCreateAsync(
 
 (((micca,Run Time Function,mrt_PortalCreateAsync)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 int
@@ -7873,6 +7910,7 @@ mrt_PortalDeleteInstance(
 
 (((micca,Run Time Function,mrt_PortalDeleteInstance)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 int
@@ -7936,6 +7974,7 @@ Negative numbers indicate an error occurred.
 
 (((micca,Run Time Function,mrt_PortalSignalEventAssigner)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 int
@@ -8011,6 +8050,7 @@ defined, then the return value is `NULL`.
 
 (((micca,Run Time Function,mrt_PortalDomainName)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 char const *
@@ -8048,6 +8088,7 @@ minus 1.
 
 (((micca,Run Time Function,mrt_PortalDomainClassCount)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 unsigned
@@ -8071,6 +8112,7 @@ mrt_PortalClassName(
 
 (((micca,Run Time Function,mrt_PortalClassName)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 int
@@ -8111,6 +8153,7 @@ mrt_PortalClassAttributeCount(
 
 (((micca,Run Time Function,mrt_PortalClassAttributeCount)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 int
@@ -8143,6 +8186,7 @@ mrt_PortalClassInstanceCount(
 
 (((micca,Run Time Function,mrt_PortalClassInstanceCount)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 int
@@ -8175,6 +8219,7 @@ mrt_PortalClassEventCount(
 
 (((micca,Run Time Function,mrt_PortalClassEventCount)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 int
@@ -8207,6 +8252,7 @@ mrt_PortalClassStateCount(
 
 (((micca,Run Time Function,mrt_PortalStateCount)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 int
@@ -8242,6 +8288,7 @@ mrt_PortalClassAttributeName(
 
 (((micca,Run Time Function,mrt_PortalClassAttributeName)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 int
@@ -8288,6 +8335,7 @@ mrt_PortalClassAttributeSize(
 
 (((micca,Run Time Function,mrt_PortalClassAttributeSize)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 int
@@ -8327,6 +8375,7 @@ mrt_PortalClassEventName(
 
 (((micca,Run Time Function,mrt_PortalClassEventName)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 int
@@ -8379,6 +8428,7 @@ mrt_PortalClassStateName(
 
 (((micca,Run Time Function,mrt_PortalClassStateName)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 int
@@ -9157,7 +9207,6 @@ typedef enum {
     mrtTransOverflow,
     mrtStaticRelationship,
     mrtRelationshipLinkage,
-    mrtNoEvent,
 
 #       ifdef _POSIX_C_SOURCE
     mrtTimerOpFailed,
@@ -9186,13 +9235,11 @@ static char const * const errMsgs[] = {
     [mrtEventInFlight] = "event-in-flight error: %s.%s - %s -> %s.%s\n",
     [mrtNoInstSlot] = "no available instance slots: %s\n",
     [mrtRefIntegrity] = "referential integrity check failed: %s\n",
-    [mrtNoEvent] = "no such event, %u, for class %s\n",
 #       else
     [mrtCantHappen] = "can't happen transition: %p: %u - %u -> CH\n",
     [mrtEventInFlight] = "event-in-flight error: %p - %u -> %p\n",
     [mrtNoInstSlot] = "no available instance slots: %p\n",
     [mrtRefIntegrity] = "referential integrity check failed: %p\n",
-    [mrtNoEvent] = "no such event, %u, for class %p\n",
 #       endif /* MRT_NO_NAMES */
 
 #       ifdef _POSIX_C_SOURCE
@@ -9274,6 +9321,7 @@ mrt_SetFatalErrorHandler(
 ----
 
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 MRT_FatalErrorHandler
@@ -9434,6 +9482,7 @@ of `classDesc` may be created without exhausting the memory pool
 of instances for the class.
 
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 bool
@@ -9459,6 +9508,7 @@ mrt_EventAvailable(void) ;
 ----
 
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 bool
