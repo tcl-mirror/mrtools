@@ -3836,7 +3836,7 @@ proc classDefinitions {} {
 
     set relrefs {}
     set attrrefs {}
-    set namerefs {}
+    set namerefs "#ifndef MRT_NO_NAMES\n"
     relation foreach class $classes {
         relation assign $class
 
@@ -3914,6 +3914,7 @@ proc classDefinitions {} {
             "            #endif /* MRT_NO_NAMES */\n"\
             "    \},\n"
     }
+    append namerefs "#endif /* MRT_NO_NAMES */\n"
 
     append result "\} ;\n"
 
@@ -5840,6 +5841,33 @@ namespace ensemble create\
 
 === Symbol Table
 
+The embedded macro commands have need to keep track of ``C'' variables.
+So we provide some rudamentary symbol table support.
+We must also account for the scoping rules for identifiers in ``C''.
+In modern dialects of ``C'',
+automatic variables may be declared almost anywhere in a function.
+Each compound statement introduces a new variable scope and variables
+declared within that scope go out of scope at the end of the compound
+statement.
+Further,
+a variable declared in an interior scope may _hide_ a variable of the
+same name in an outer scope.
+Although this language feature may have some uses,
+we will avoid it here.
+Embedded commands that declare variables will not reuse a variable name
+and thus risk hiding a variable by the same name in some outer scope.
+In the case where a variable name is reused and there is a conflict
+in the type of the variable,
+an error is generated.
+
+The other complication in the symbol table is that we do have to track
+``C'' language scope in order to remove variables from the symbol table
+as they go out of scope.
+Otherwise, we would generate compiler errors by referring to variables
+that a no longer in scope.
+
+We hold the symbol table information in a relation variable.
+
 [source,tcl]
 ----
 <<generation support data>>=
@@ -5850,8 +5878,29 @@ relvar create Symbol {
     Class string
     Block int
 } Name
+----
 
+Name::
+    The name of a variable.
+Ctype::
+    The ``C'' language type name for the variable.
+Type::
+    The type of the variable as it is used in the code generation.
+    This may be the empty string if we do not know its usage from
+    the context.
+Class::
+    The name of the class to which the variable pertains, if any.
+Block::
+    The block number in which the variable was declared.
 
+We will also be creating temporary variables during the code generation
+and will use a simple counter to make the names unique.
+The counter is reset back to zero after each activity's code is generated
+in order to have consistent symbol names in the generated code.
+
+[source,tcl]
+----
+<<generation support data>>=
 variable symcounter 0
 ----
 
@@ -5859,7 +5908,6 @@ variable symcounter 0
 ----
 <<generation support commands>>=
 proc LookUpSymbol {name} {
-    variable block
     set sym [relvar restrictone Symbol Name $name]
     if {[relation isnotempty $sym]} {
         return [tuple get [relation tuple $sym]]
@@ -5867,7 +5915,13 @@ proc LookUpSymbol {name} {
 
     return
 }
+----
 
+Looking up a symbol returns a dictionary of the symbol attributes.
+
+[source,tcl]
+----
+<<generation support commands>>=
 proc InsertSymbol {args} {
     variable block
     dict set args Block $block
@@ -5875,32 +5929,51 @@ proc InsertSymbol {args} {
         set sym [relvar insert Symbol $args]
         return [tuple get [relation tuple $sym]]
     } trap {RAL relvar insert DUPLICATE_TUPLE*} {result} {
-        error "duplicate symbol, [dict get $args Name], $result"
+        error "duplicate symbol, [dict get $args Name], $result" ; # <1>
     } on error {result opts} {
         return -options $opts $result
     }
 }
+----
+<1> We trap duplicates to give a better error message.
 
+Inserting a symbol also returns the dictionary of its attributes.
+
+[source,tcl]
+----
+<<generation support commands>>=
 proc DeleteSymbol {name} {
     return [relvar deleteone Symbol Name $name]
 }
+----
 
+[source,tcl]
+----
+<<generation support commands>>=
 proc CreateTempSymbol {args} {
     variable symcounter
     set name t__T[incr symcounter]
     InsertSymbol Name $name {*}$args
     return $name
 }
+----
 
+[source,tcl]
+----
+<<generation support commands>>=
 proc CreateTempRefSymbol {className} {
     set reftype [GetClassProperty $className Reference]
     set symName [CreateTempSymbol Ctype $reftype Type Reference Class $className]
     return [list $reftype $symName]
 }
+----
 
+[source,tcl]
+----
+<<generation support commands>>=
 proc CheckSymbol {name args} {
     set sym [LookUpSymbol $name]
-    if {$sym eq {}} {
+    if {[dict size $sym] == 0} {
         error "unknown symbol, $name"
     }
     if {[llength $args] != 0} {
@@ -5908,7 +5981,11 @@ proc CheckSymbol {name args} {
     }
     return $sym
 }
+----
 
+[source,tcl]
+----
+<<generation support commands>>=
 proc CheckSymProperties {sym args} {
     foreach {prop value} $args {
         # if the property is empty, then we will assume the value that
@@ -5930,7 +6007,11 @@ proc CheckSymProperties {sym args} {
     }
     return
 }
+----
 
+[source,tcl]
+----
+<<generation support commands>>=
 proc CreateInstRefSymbol {className varName} {
     set sym [LookUpSymbol $varName]
     if {$sym ne {}} {
@@ -5941,11 +6022,19 @@ proc CreateInstRefSymbol {className varName} {
     InsertSymbol Name $varName Ctype $creftype Type Reference Class $className
     return "$creftype$varName ;\n"
 }
+----
 
+[source,tcl]
+----
+<<generation support commands>>=
 proc CheckInstRefSymbol {varName args} {
     tailcall CheckSymbol $varName Type Reference {*}$args
 }
+----
 
+[source,tcl]
+----
+<<generation support commands>>=
 proc CreateInstSetSymbol {className varName} {
     set sym [LookUpSymbol $varName]
     if {$sym ne {}} {
@@ -5956,11 +6045,32 @@ proc CreateInstSetSymbol {className varName} {
     InsertSymbol Name $varName Ctype $ctype Type InstanceSet Class $className
     return "$ctype $varName ;\n"
 }
+----
 
+[source,tcl]
+----
+<<generation support commands>>=
 proc CheckInstSetSymbol {varName args} {
     tailcall CheckSymbol $varName Type InstanceSet {*}$args
 }
+----
 
+==== Tracking Code Blocks
+
+In order to format the generated code neatly,
+and to keep track of variable scopes introduced by ``C'' statements
+in an activity,
+we examine all the text as it is processed to deduce blocks going
+in and out of scope and to format passed through code.
+In the end the format of the generated code is not perfect,
+but is much better than code generators usually produce.
+Although the ``C'' compiler does not care about whitespace and code format,
+the generated file from `micca` do show up when debugging the code
+and a consistent format is worthwhile.
+
+[source,tcl]
+----
+<<generation support commands>>=
 proc ProcessCodeLines {text} {
     variable block
 
@@ -5995,13 +6105,64 @@ proc ProcessCodeLines {text} {
 [source,tcl]
 ----
 <<generation support commands>>=
+proc IndentToBlock {code} {
+    variable block
+    # indent seems to swallow a trailing new line
+    return [::textutil::adjust::indent $code\
+        [string repeat { } [expr {$block * 4}]]]\n
+}
+----
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc PushBlock {{by 1}} {
+    variable block
+    incr block $by
+}
+----
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc PopBlock {{by -1}} {
+    variable block
+    relvar delete Symbol stup {[tuple extract $stup Block] == $block}
+    incr block $by
+}
+----
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc GetBlock {} {
+    variable block
+    return $block
+}
+----
+
+==== Expansion Context
+
+The template expansion library supports the notion of a _context_.
+A _context_ is a temporary diversion of processing that can have its own
+separate environment.
+The set of contexts form a stack and so we supply procedures to
+push and pop the implied stack of expansion contexts.
+
+[source,tcl]
+----
+<<generation support commands>>=
 proc PushContext {context args} {
     actexpand cpush $context
     foreach {var value} $args {
         actexpand cset $var $value
     }
 }
+----
 
+[source,tcl]
+----
+<<generation support commands>>=
 proc PopContext {context args} {
     foreach varname $args {
         upvar 1 $varname cvar
@@ -6009,64 +6170,14 @@ proc PopContext {context args} {
     }
     return [actexpand cpop $context]
 }
-
-proc IndentToBlock {code} {
-    variable block
-    # indent seems to swallow a trailing new line
-    return [::textutil::adjust::indent $code\
-        [string repeat { } [expr {$block * 4}]]]\n
-}
-
-proc PushBlock {{by 1}} {
-    variable block
-    incr block $by
-}
-
-proc PopBlock {{by -1}} {
-    variable block
-    relvar delete Symbol stup {[tuple extract $stup Block] == $block}
-    incr block $by
-}
-
-proc GetBlock {} {
-    variable block
-    return $block
-}
 ----
 
-=== Template Expansion of Activity Code
-
-[source,tcl]
-----
-<<generation support commands>>=
-proc ExpandActivity {name body parameters} {
-    # parameters is a relation value with heading:
-    # Name string Ctype string Type string Class string
-
-    variable block 1
-    try {
-        foreach param [relation body $parameters] {
-            InsertSymbol {*}$param
-        }
-        return [actexpand expand $body]
-    } on error {result} {
-        # puts $::errorInfo
-        log::error "$name: $result"
-        variable errcount
-        incr errcount
-        set msg [pipe {
-            split $result \n |
-            lrange ~ 1 2 |
-            string map [list \" {}] ~ |
-            join ~
-        }]
-        return "#error \"$msg\""
-    } finally {
-        relvar set Symbol [relation emptyof [relvar set Symbol]]
-        variable symcounter 0
-    }
-}
-----
+In our usage of expansion contexts,
+some commands allow other code to be given that is executed
+when certain conditions are met
+(_e.g._ a code body that is part of an iteration).
+At the end of the code block,
+we must close off the open contexts.
 
 [source,tcl]
 ----
@@ -6097,9 +6208,62 @@ proc End {} {
 }
 ----
 
-=== Invoking External Operations
+=== Template Expansion of Activity Code
 
 [source,tcl]
+----
+<<generation support commands>>=
+proc ExpandActivity {name body parameters} {
+    # parameters is a relation value with heading:
+    # Name string Ctype string Type string Class string
+
+    variable block 1
+    try {
+        foreach param [relation body $parameters] {
+            InsertSymbol {*}$param
+        }
+        return [actexpand expand $body]
+    } on error {result} {
+        # puts $::errorInfo
+        log::error "$name: $result"
+        variable errcount
+        incr errcount
+        set msg [pipe {
+            split $result \n |
+            lrange ~ 1 2 |
+            string map [list \" {}] ~ |
+            join ~
+        }] ; # <1>
+        return "#error \"$msg\"" ; <2>
+    } finally {
+        relvar set Symbol [relation emptyof [relvar set Symbol]]
+        variable symcounter 0
+    }
+}
+----
+<1> Preparing a message suitable for `#error` from the error result.
+<2> We place a `#error` statement in the code to make sure it
+will not compile.
+
+=== Invoking External Operations
+
+*****
+`%<external` _opname_ _?name1 value1 name2 value2 ...?_ `>%`
+
+opname::
+    The name of the external operation.
+nameN / valueN::
+    The arguments to the external operation are given as a set of
+    name / value pairs.
+
+The `external` command generates a ``C'' expression to invoke
+the external operation given by, _opname_.
+Arguments passed to the operation are given as name / value pairs.
+The ordering of the pairs is arbitrary.
+*****
+
+[source,tcl]
+.Implementation
 ----
 <<generation support commands>>=
 proc InvokeExternalOp {opName args} {
@@ -6149,6 +6313,17 @@ Difference `subcommand` operation may require additional arguments
 as described.
 
 ==== Access to Instance Attributes
+
+It is possible and often desirable to access attributes of an instance
+directly using ``C'' pointer indirection.
+For example, the `Color` attribute of the instance referenced by
+a `self` variable can be obtained using `self->Color`.
+
+However,
+`micca` also provides an embedded macro command to generate the pointer
+indirection expression.
+The command has the advantage of checking that the attribute name is
+valid for the class.
 
 *****
 `%<instance` _instvar_ `attribute` _attrname_ `>%`
@@ -6201,7 +6376,9 @@ assignspecN::
     a local variable with the same name as the attribute.
 
 The `assign` subccommand generates ``C'' statements to assign
-a set of attributes of _instvar_ according the the _assignspec_ arguments.
+a set of attributes of _instvar_ to local variables
+according the the _assignspec_ arguments.
+All local variables are declared as necessary.
 The class whose instance is held in _instvar_ must contain an attribute whose
 name matches the attribute name in the _assignspec_ or an error is generated.
 *****
@@ -6233,16 +6410,26 @@ proc InstanceAssign {instref args} {
                 class, [dict get $sym Class], which does not have an attribute\
                 named, $attrname"
         }
-        # HERE, need to be able to reuse local symbol names
-        # if the C type matches
         assignAttribute $attrRef {DataType attrtype} Dimension
-        set vardecl [typeCheck composeDeclaration $attrtype $varname]
-        if {$Dimension > 0} { # <2>
+
+        set sym [LookUpSym $varname]
+        if {[dict size $sym] != 0} {
+            CheckSymProperties $sym Ctype $attrtype
+        } else {
+            InsertSymbol Name $varname Ctype $attrtype Type {} Class {}
+            set vardecl [typeCheck composeDeclaration $attrtype $varname]
+            append result "$vardecl"
+            if {$Dimension > 0} {
+                append result "\[$Dimension\]"
+            }
+            append result " ;\n"
+        }
+
+        if {$Dimension > 0} {
             append result\
-                "$vardecl\[$Dimension\] ;\n"\
                 "memcpy($varname, $instref->$attrname, sizeof($varname)) ;\n"
         } else {
-            append result "$vardecl = $instref->$attrname ;\n"
+            append result "$varname = $instref->$attrname ;\n"
         }
     }
 
@@ -6365,7 +6552,7 @@ ifdef::showtests[]
 ----
 <<generate command tests>>=
 test codegen-49.0 {
-    Navigate simple association -- singular
+    Invoke instance based operation
 } -setup {
     validateutils genMiccaFile codegen49 {
         domain codegen49 {
@@ -6412,13 +6599,13 @@ it is not necessary to actually accumulate the set of related instance
 references.
 For simple operations on the related instances,
 it is sufficient to iterate across them and perform the operation as
-each related instance is found.
+each related instance is visited.
 
-What makes relationship navigation complicated is the different
-``C'' level storage strategies for the relationship pointers.
-Sometimes the pointer is just a single value, sometimes a linked list
-and sometimes a counted array.
-Some relationships are conditional and so traversal through a conditional
+The different ``C'' level storage strategies for relationship pointers
+makes navigation complicated.
+Sometimes the navigation is accomplished by a single pointer,
+sometimes a linked list and sometimes a counted array.
+Some relationships are conditional and traversal through a conditional
 relationship must insure that we have actually found an instance.
 All of these considerations make is essential to provide an embedded
 macro command to generate the required code.
@@ -6430,7 +6617,7 @@ the relationship chain to be navigated.
 
 *****
 `%<instance` _instvar_ `foreachRelated` _start rel1 ?rel2? ..._ `>%` +
-{nbsp}{nbsp} _Loop Body_ +
+_Loop Body_ +
 `%<end>%`
 
 instvar::
@@ -6445,11 +6632,11 @@ The `foreachRelated` subccommand generates ``C'' statements
 to iterate across the set of instances obtained by navigating
 the relationship chain which starts at the _start_ instance
 and is given by the _relN_ arguments.
-A reference to each instance found in the navigation is assigned into
+A reference to each instance found in the navigation is assigned to
 the _instvar_ variable and then _Loop Body_ is executed.
 Statements in the _Loop Body_ terminate at the `%<end>%` macro command.
 The scope of the _instvar_ variable is confined to the statements in
-the _Loop Body_.
+the _Loop Body_ unless it was declared previously.
 
 The relationship traversal is given as a set of relationship navigation
 specifications of the form:
@@ -6461,7 +6648,7 @@ stopping at `class`.
 * `{~Rdd class}` -- traversing relationship _Rdd_ in the backward direction and
 stopping at `class`.
 *****
-{nbsp}
+
 [source,tcl]
 .Implementation
 ----
@@ -6795,18 +6982,15 @@ set itervar [CreateTempSymbol\
     Type "ReferenceArray" Class $targetclass]
 set cntvar [CreateTempSymbol Ctype size_t\
     Type ArrayCounter Class $targetclass]
-set refcode\
-    "struct $targetclass *const *$itervar =\
+set refcode "struct $targetclass *const *$itervar =\
         $startref->$comp.links ; // $relspec\n"
 append refcode\
     "for (size_t $cntvar = $startref->$comp.count ;\
         $cntvar != 0 ; $cntvar--, $itervar++) \{" ; # <1>
 append result [IndentToBlock $refcode]
 PushBlock
-lassign [CreateTempRefSymbol $targetclass] targettype\
-        targetref
-append result [IndentToBlock\
-    "$targettype$targetref = *$itervar ;"]
+lassign [CreateTempRefSymbol $targetclass] targettype targetref
+append result [IndentToBlock "$targettype$targetref = *$itervar ;"]
 ----
 <1> For the array case there is no special handling in case the
 set of related instance is empty.
@@ -6941,8 +7125,7 @@ append result [IndentToBlock\
         $itervar != mrtLinkRefEnd(&$startref->$termcomp) ;)\
         \{\n"] ; # <1>
 PushBlock
-lassign [CreateTempRefSymbol $targetclass] targettype\
-        targetref
+lassign [CreateTempRefSymbol $targetclass] targettype targetref
 append result [IndentToBlock [string cat\
     "$targettype$targetref =\
         ($targettype)((uintptr_t)$itervar -\
@@ -6956,7 +7139,7 @@ the linked list iterator will be at the end and the loop will not
 be entered.
 <2> Two complications arise using linked list.
 Since a class instance may be threaded onto several linked lists,
-we must do some pointer arithmetic to transform the link value
+we must do some pointer arithmetic to transform the pointer value
 stored in the linked list into a pointer to the beginning of the
 instance. So, we must subtract off the offset to the link pointers
 in the instance.
@@ -7591,6 +7774,39 @@ if {$dir eq "forw"} {
 ----
 
 ==== Iterating Across Selected Related Instances
+
+*****
+`%<instance` _instvar_ `foreachRelatedWhere` _clause start rel1 ?rel2? ..._ `>%` +
+_Loop Body_ +
+`%<end>%`
+
+instvar::
+    The name of a ``C'' variable that holds a reference to a class instance.
+clause::
+    A ``C'' expression that evaluates to a value that can be interpreted
+    as a boolean.
+start::
+    The name of a ``C'' variable containing the instance reference where
+    the relationship navigation will begin.
+relN::
+    A set of relationship navigation specifications.
+
+The `foreachRelatedWhere` subccommand generates ``C'' statements
+to iterate across the set of instances obtained by navigating
+the relationship chain which starts at the _start_ instance
+and is given by the _relN_ arguments.
+A reference to each instance found in the navigation is assigned to
+the _instvar_ variable and then `clause` is executed.
+If the result of executing `clause` is non-zero,
+then _Loop Body_ is executed.
+Otherwise, _Loop Body_ is skipped.
+Statements in the _Loop Body_ terminate at the `%<end>%` macro command.
+The scope of the _instvar_ variable is confined to the statements in
+the _Loop Body_ unless it was declared previously.
+The relationship traversal is given as a set of relationship navigation
+specifications of the same form as for the `foreachRelated` subcommand.
+*****
+
 [source,tcl]
 .Implementation
 ----
@@ -7642,9 +7858,9 @@ If the traversal of the relationship chain would yield more than a
 single instance,
 then an error is thrown.
 *****
-{nbsp}
 
 [source,tcl]
+.Implementation
 ----
 <<generation support commands>>=
 proc InstanceFindOneRelated {instref startref args} {
@@ -7760,7 +7976,7 @@ proc InstanceFindOneRelated {instref startref args} {
 }
 ----
 
-==== Signaling an Instance
+==== Signaling an Event
 
 *****
 `%<instance` _instvar_ `signal` _event_ _?name1 value1 name2 value2 ...?_ `>%`
@@ -7784,9 +8000,9 @@ the event signature of the _event_ being signaled.
 If _event_ is not an event for the state model of _instvar_ then
 an error is thrown.
 *****
-{nbsp}
 
 [source,tcl]
+.Implementation
 ----
 <<generation support commands>>=
 proc InstanceSignal {instref event args} {
@@ -7897,7 +8113,7 @@ test codegen-50.0 {
 ----
 endif::showtests[]
 
-==== Delayed Signaling of an Instance
+==== Delayed Signaling of an Event
 
 *****
 `%<instance` _instvar_ `delaysignal` _time_ _event_
@@ -7927,9 +8143,9 @@ the event signature of the _event_ being signaled.
 If _event_ is not an event for the state model of _instvar_ then
 an error is thrown.
 *****
-{nbsp}
 
 [source,tcl]
+.Implementation
 ----
 <<generation support commands>>=
 proc InstanceDelaySignal {instref time event args} {
@@ -7969,9 +8185,9 @@ It is not an error to cancel an event that does not exist or has
 already been dispatched.
 Only events that were signaled as delayed events may be canceled.
 *****
-{nbsp}
 
 [source,tcl]
+.Implementation
 ----
 <<generation support commands>>=
 proc InstanceCancelSignal {instref event {sourceref {}}} {
@@ -8031,9 +8247,9 @@ to the instance that signaled the event.
 A return value of zero implies that the event has already been dispatched
 or does not exist.
 *****
-{nbsp}
 
 [source,tcl]
+.Implementation
 ----
 <<generation support commands>>=
 proc InstanceRemainingTime {instref event {sourceref {}}} {
@@ -8072,9 +8288,9 @@ for an identifier which corresponds to the instance reference of _instvar_.
 The identifier values range from 0 to the number of instance of
 the class of _instvar_ minus one.
 *****
-{nbsp}
 
 [source,tcl]
+.Implementation
 ----
 <<generation support commands>>=
 proc InstanceRefToId {instref} {
@@ -8391,7 +8607,7 @@ the code generator creates a macro command that has the same name
 as the class.
 For example,
 if a domain contains a class named, *WashingMachine*,
-the there will be an embedded macro command named, WashingMachine,
+the there will be an embedded macro command named, `WashingMachine`,
 which can be invoked as:
 
 *****
@@ -8400,7 +8616,7 @@ which can be invoked as:
 
 where `subcommand` is a class model level operation command.
 
-In this section we describe the model level subcommands that
+In this section we describe the embedded macro commands that
 are available for each class.
 
 ==== Synchronous Instance Creation
@@ -8435,9 +8651,9 @@ that was defined for the state model.
 No state activity is executed since the instance creation is done
 synchronously.
 *****
-{nbsp}
 
 [source,tcl]
+.Implementation
 ----
 <<generation support commands>>=
 proc ClassCreate {className instref args} {
@@ -8706,7 +8922,41 @@ test codegen-26.4 {
 ----
 endif::showtests[]
 
+==== Synchronous Instance Creation in a Given State
+
+*****
+`%<` _class_ `createin` _instref_ _state_ _?attr1 value1 att2 value2 ...?_ `>%`
+
+_class_::
+    The name of a domain class for which an instance is synchronously created.
+instref::
+    The name of a variable into which a reference to the newly created
+    class instance is placed.
+state::
+    The name of the state into which the newly created instance is placed.
+attrN / valueN::
+    A set of attribute name / attribute values which are used to set the
+    attribute values of the newly created instance.
+
+The `createin` subcommand for a class generates ``C'' statements to
+synchronously create a new instance of the class in a given state.
+This subcommand is defined only for classes that have a state model.
+A reference to the instance is placed in the variable called, _instref_.
+If _instref_ has not been previously declared, it is declared
+automatically.
+The attributes of the newly created instance are set to the values given
+by the _attrN / valueN_ pairs.
+All attributes of the instance must either be supplied a value 
+as part of the invocation of the `createin` subcommand or
+have default values declared for them as part of the class definition.
+Any value given as an argument overrides any default value that might
+have been defined for an attribute.
+The instance will start in the _state_ state and *no* activity is executed
+since the instance creation is done synchronously.
+*****
+
 [source,tcl]
+.Implementation
 ----
 <<generation support commands>>=
 proc ClassCreateIn {className instref state args} {
@@ -8830,7 +9080,45 @@ test codegen-27.1 {
 ----
 endif::showtests[]
 
+==== Asynchronous Instance Creation
+
+*****
+`%<` _class_ `createasync` _event_ \{ _?eparams?_ \} _?attr1 value1 att2 value2 ...?_ `>%`
+
+_class_::
+    The name of a domain class for which an instance is asynchronously created.
+event::
+    The name of the creation event that is to be signaled to the
+    newly created class instance.
+eparams::
+    A set of parameter name / value pairs that are the parameters of the
+    creation event.
+    If there are no parameters, is it sufficent to use the empty
+    list ( \{} ) as the command argument.
+attrN / valueN::
+    A set of attribute name / attribute values which are used to set the
+    attribute values of the newly created instance.
+
+The `createasync` subcommand for a class generates ``C'' statements to
+asynchronously create a new instance of the class by signaling _event_
+to it.
+Any parameters of the creation event are given by name / value pairs
+specified as the _eparams_ list.
+The attributes of the newly created instance are set to the values given
+by the _attrN / valueN_ pairs.
+All attributes of the instance must either be supplied a value 
+as part of the invocation of the `createasync` subcommand or
+have default values declared for them as part of the class definition.
+Any value given as an argument overrides any default value that might
+have been defined for an attribute.
+This command only defined for classes that have a state model for which
+creation events have been specified.
+The instance is created and placed in it creation state awaiting delivery
+of _event_, whereupon it will transition and execute a state activity.
+*****
+
 [source,tcl]
+.Implementation
 ----
 <<generation support commands>>=
 proc ClassCreateAsync {className event eventparams args} {
@@ -8902,9 +9190,7 @@ ifdef::showtests[]
 test codegen-28.0 {
     asynchronous instance creation
 } -setup {
-    # makeFile {} codegen28.h
-    # makeFile {} codegen28.c
-    micca configure {
+    validateutils genMiccaFile codegen28 {
         domain codegen28 {
             class X {
                 attribute color int -default 20
@@ -8936,15 +9222,41 @@ test codegen-28.0 {
     }
 } -cleanup {
     cleanupDomain
+    validateutils forgetFiles
 } -body {
-    micca generate
-    testConditions\
-        {[llength [fileutil::grep {mrt_CreateAsync} codegen28.c]] == 1}
+    validateutils compileFiles codegen28.c
+    validateutils matchLines codegen28.c {
+        struct codegen28_X_e3__EPARAMS t__T1 = {
+            .a = 20,
+        } ;
+        struct X *t__T2 = mrt_CreateAsync(&codegen28__CLASSES[0], 2, &t__T1, sizeof(t__T1), NULL) ;
+        t__T2->color = 30 ;
+    }
 } -result {1}
 ----
 endif::showtests[]
 
+==== Iterating Over Class Instances
+
+*****
+`%<` _class_ `foreachInstance` _instref_ `>%`
+_Loop Body_
+`%<end>%`
+
+_class_::
+    The name of a domain class.
+instref::
+    The name of a variable into which a reference to a class instance is placed.
+
+The `foreachInstance` subcommand for a class generates ``C'' statements
+to visit the instances of _class_.
+For each allocated instance of _class_,
+a reference to the instance is assigned to the _instref_ variable
+and _Loop Body_ is executed.
+*****
+
 [source,tcl]
+.Implementation
 ----
 <<generation support commands>>=
 proc ClassForeachInstance {className instref} {
@@ -8982,9 +9294,7 @@ ifdef::showtests[]
 test codegen-29.0 {
     Iterate over non-union subclass
 } -setup {
-    # makeFile {} codegen29.h
-    # makeFile {} codegen29.c
-    micca configure {
+    validateutils genMiccaFile codegen29 {
         domain codegen29 {
             class X {
                 attribute color int -default 20
@@ -9004,13 +9314,123 @@ test codegen-29.0 {
     }
 } -cleanup {
     cleanupDomain
+    validateutils forgetFiles
 } -body {
-    micca generate
-    testConditions\
-        {[llength [fileutil::grep {xref->color} codegen29.c]] == 1}
+    validateutils compileFiles codegen29.c
+    validateutils matchLines codegen29.c {
+        MRT_InstIterator t__T1 ;
+        for (mrt_InstIteratorStart(&t__T1, &codegen29__CLASSES[0]) ; mrt_InstIteratorMore(&t__T1) ; mrt_InstIteratorNext(&t__T1)) {
+            struct X *xref ;
+            xref = mrt_InstIteratorGet(&t__T1) ;
+            printf("%d\n", xref->color) ;
+        }
+    }
 } -result {1}
 ----
 endif::showtests[]
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-25.0 {
+    Iterate over union subclass
+} -setup {
+    validateutils genMiccaFile codegen25 {
+        domain codegen25 {
+            class A {}
+            class B {}
+            class X {
+                attribute color int -default 20
+                attribute temp int -default 40
+                attribute size int -default 50
+
+            }
+            generalization R1 -union A B X
+
+            class Y {
+                attribute sign bool -default true
+                attribute cost int -default 10
+
+                statemodel {
+                    state s1 {} {
+                        %<Z foreachInstance zref>%
+                            printf("%d\n", %<instance zref attribute plus>%) ;
+                        %<end>%
+                    }
+                    transition s1 - e1 -> s1
+                }
+            }
+            class Z {
+                attribute magnitude bool -default false
+                attribute plus int -default 42
+            }
+
+            generalization R2 -union X Y Z
+        }
+        population codegen25 {
+            class A {
+                instance a1
+                instance a2
+                instance a3
+                instance a4
+            }
+            class B {
+                instance b1 R1 a1
+            }
+            class X {
+                instance x1 R1 a2
+                instance x2 R1 a3
+                instance x3 R1 a4
+            }
+            class Y {
+                instance y1 R2 x1
+            }
+            class Z {
+                instance z1 R2 x2
+                instance z2 R2 x3
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen25.c
+    validateutils matchLines codegen25.c {
+        MRT_InstIterator t__T1 ;
+        for (mrt_InstIteratorStart(&t__T1, &codegen25__CLASSES[4]) ; mrt_InstIteratorMore(&t__T1) ; mrt_InstIteratorNext(&t__T1)) {
+            struct Z *zref ;
+            zref = mrt_InstIteratorGet(&t__T1) ;
+            printf("%d\n", zref->plus) ;
+        }
+    }
+} -result {1}
+----
+endif::showtests[]
+
+==== Conditional Iteration Over Class Instances
+
+*****
+`%<` _class_ `foreachWhere` _instref_ _clause_`>%`
+_Loop Body_
+`%<end>%`
+
+_class_::
+    The name of a domain class.
+instref::
+    The name of a variable into which a reference to a class instance is placed.
+where::
+    ``C'' code statements that can be evaluated to yield a boolean value.
+
+The `foreachWhere` subcommand for a class generates ``C'' statements
+to visit conditionally the instances of _class_.
+For each allocated instance of _class_,
+a reference to the instance is assigned to the _instref_ variable
+and _clause_ is evaluated.
+If _clause_ evaluates to non-zero, then _Loop Body_ is executed.
+Otherwise, _Loop Body_ is skipped.
+*****
 
 [source,tcl]
 ----
@@ -9049,7 +9469,7 @@ ifdef::showtests[]
 ----
 <<generate command tests>>=
 test codegen-53.0 {
-    Generate instance set from class instances.
+    Iterate over class instances based on where clause
 } -setup {
     validateutils genMiccaFile codegen53 {
         domain codegen53 {
@@ -9058,7 +9478,6 @@ test codegen-53.0 {
                 attribute color int -default 20
 
                 classop {struct X *} findById {id unsigned} {
-                    %<X instref xref>%
                     %<X foreachWhere xref {xref->id == id}>%
                         return xref ;
                     %<end>%
@@ -9082,6 +9501,7 @@ test codegen-53.0 {
     validateutils matchLines codegen53.c {
         MRT_InstIterator t__T1 ;
         for (mrt_InstIteratorStart(&t__T1, &codegen53__CLASSES[0]) ; mrt_InstIteratorMore(&t__T1) ; mrt_InstIteratorNext(&t__T1)) {
+            struct X *xref ;
             xref = mrt_InstIteratorGet(&t__T1) ;
             if (xref->id == id) {
                 return xref ;
@@ -9092,7 +9512,32 @@ test codegen-53.0 {
 ----
 endif::showtests[]
 
+==== Conditionally Selecting Class Instances
+
+*****
+`%<` _class_ `selectWhere` _instref_ _clause_ _instset_`>%`
+
+_class_::
+    The name of a domain class.
+instref::
+    The name of a variable into which a reference to a class instance is placed.
+where::
+    ``C'' code statements that can be evaluated to yield a boolean value.
+instset::
+    The name of a variable which will contain an instance set.
+
+The `selectWhere` subcommand for a class generates ``C'' statements
+to conditionally add instances of _class_ to an instance set.
+For each allocated instance of _class_,
+a reference to the instance is assigned to the _instref_ variable
+and _clause_ is evaluated.
+If _clause_ evaluates to non-zero,
+then the instance is added to the set being accumulated in
+the _instset_ variable.
+*****
+
 [source,tcl]
+.Implementation
 ----
 <<generation support commands>>=
 proc ClassSelectWhere {className instref where instset} {
@@ -9186,6 +9631,22 @@ test codegen-52.0 {
 ----
 endif::showtests[]
 
+==== Declaring Instance Reference Variables
+
+*****
+`%<` _class_ `instref` _varname_ `>%`
+
+_class_::
+    The name of a domain class.
+varname::
+    The name of a variable which will be declared as an instance reference
+    to an instance of _class_.
+
+The `instref` subcommand for a class generates ``C'' statements
+declare _varname_ to be a variable whose type is suitable to hold
+an instance reference to instances of _class_.
+*****
+
 [source,tcl]
 ----
 <<generation support commands>>=
@@ -9232,81 +9693,6 @@ proc ClassFindByName {className instName instref} {
 }
 ----
 
-ifdef::showtests[]
-[source,tcl]
-----
-<<generate command tests>>=
-test codegen-25.0 {
-    Iterate over union subclass
-} -setup {
-    # makeFile {} codegen25.h
-    # makeFile {} codegen25.c
-    micca configure {
-        domain codegen25 {
-            class A {}
-            class B {}
-            class X {
-                attribute color int -default 20
-                attribute temp int -default 40
-                attribute size int -default 50
-
-            }
-            generalization R1 -union A B X
-
-            class Y {
-                attribute sign bool -default true
-                attribute cost int -default 10
-
-                statemodel {
-                    state s1 {} {
-                        %<Z foreachInstance zref>%
-                            printf("%d\n", %<instance zref attribute plus>%) ;
-                        %<end>%
-                    }
-                    transition s1 - e1 -> s1
-                }
-            }
-            class Z {
-                attribute magnitude bool -default false
-                attribute plus int -default 42
-            }
-
-            generalization R2 -union X Y Z
-        }
-        population codegen25 {
-            class A {
-                instance a1
-                instance a2
-                instance a3
-                instance a4
-            }
-            class B {
-                instance b1 R1 a1
-            }
-            class X {
-                instance x1 R1 a2
-                instance x2 R1 a3
-                instance x3 R1 a4
-            }
-            class Y {
-                instance y1 R2 x1
-            }
-            class Z {
-                instance z1 R2 x2
-                instance z2 R2 x3
-            }
-        }
-    }
-} -cleanup {
-    cleanupDomain
-} -body {
-    micca generate
-    testConditions\
-        {[llength [fileutil::grep {struct Z} codegen25.c]] == 7}
-} -result {1}
-----
-endif::showtests[]
-
 [source,tcl]
 ----
 <<generation support commands>>=
@@ -9352,6 +9738,13 @@ proc ClassInstanceSet {className varName} {
 ----
 
 === Relationship Commands
+
+Similar to classes,
+each relationship in the domain model will have an embedded macro command
+of the same name as the relationship.
+Further, relationship have an embedded macro command for the
+reverse direction, _i.e._ a relationship `R42` will have two commands,
+`R42` and `~R42`.
 
 [source,tcl]
 ----
