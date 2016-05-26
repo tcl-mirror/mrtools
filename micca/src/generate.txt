@@ -5508,9 +5508,8 @@ First,
 we query some information about the classes in the domain we are
 generating.
 The class commands will vary depending upon:
-
-* the class having a defined state model or
-* the class having creation events.
+\(1) the class having a defined state model and
+\(2) if a class with a state model has creation events.
 
 [source,tcl]
 ----
@@ -5560,6 +5559,8 @@ relation foreach info $classInfo {
     relation assign $info
     set cmdmap [dict create\
         foreachInstance [list ${suppns}::ClassForeachInstance $Name]\
+        foreachWhere [list ${suppns}::ClassForeachWhere $Name]\
+        selectWhere [list ${suppns}::ClassSelectWhere $Name]\
         instref [list ${suppns}::ClassInstanceReference $Name]\
         idtoref [list ${suppns}::ClassIdToRef $Name]\
         instset [list ${suppns}::ClassInstanceSet $Name]\
@@ -5777,6 +5778,7 @@ set cmdmap [dict create\
     delete ${suppns}::InstanceDelete\
     operation ${suppns}::InstanceOperation\
     foreachRelated ${suppns}::InstanceForeachRelated\
+    foreachRelatedWhere ${suppns}::InstanceForeachRelatedWhere\
     findOneRelated ${suppns}::InstanceFindOneRelated\
     instid ${suppns}::InstanceRefToId\
 ]
@@ -5817,6 +5819,7 @@ Instance sets also have a fixed set of subcommand operations.
 set cmdmap [dict create\
     foreachSelected ${suppns}::InstanceSetForeachSelected\
     selectRelated ${suppns}::InstanceSetSelectRelated\
+    selectRelatedWhere ${suppns}::InstanceSetSelectRelatedWhere\
     empty ${suppns}::InstanceSetEmpty\
     cardinality ${suppns}::InstanceSetCardinality\
     notempty ${suppns}::InstanceSetNotEmpty\
@@ -5842,11 +5845,12 @@ namespace ensemble create\
 <<generation support data>>=
 relvar create Symbol {
     Name string
-    Block int
     Ctype string
     Type string
     Class string
-} {Name Block}
+    Block int
+} Name
+
 
 variable symcounter 0
 ----
@@ -5856,31 +5860,18 @@ variable symcounter 0
 <<generation support commands>>=
 proc LookUpSymbol {name} {
     variable block
-    set sym [pipe {
-        relvar set Symbol |
-        relation restrictwith ~ {$Name eq $name}
-    }]
-    if {[relation isempty $sym]} {
-        return
+    set sym [relvar restrictone Symbol Name $name]
+    if {[relation isnotempty $sym]} {
+        return [tuple get [relation tuple $sym]]
     }
-    if {[relation cardinality $sym] > 1} {
-        set sym [pipe {
-            relation tag $sym BlockOrder -descending Block |
-            relation restrictwith ~ {$BlockOrder == 0} |
-            relation elminate ~ BlockOrder
-        }]
-    }
-    return [pipe {
-        relation eliminate $sym Block |
-        relation tuple ~ |
-        tuple get ~
-    }]
+
+    return
 }
 
 proc InsertSymbol {args} {
+    variable block
+    dict set args Block $block
     try {
-        variable block
-        lappend args Block $block
         set sym [relvar insert Symbol $args]
         return [tuple get [relation tuple $sym]]
     } trap {RAL relvar insert DUPLICATE_TUPLE*} {result} {
@@ -5891,7 +5882,7 @@ proc InsertSymbol {args} {
 }
 
 proc DeleteSymbol {name} {
-    return [relvar delete Symbol symtup {[tuple extract $symtup Name] eq $name}]
+    return [relvar deleteone Symbol Name $name]
 }
 
 proc CreateTempSymbol {args} {
@@ -6087,7 +6078,9 @@ proc End {} {
     switch -exact -- $context {
         InstanceSetForeachSelected -
         InstanceForeachRelated -
-        ClassForeachInstance {
+        InstanceForeachRelatedWhere -
+        ClassForeachInstance -
+        ClassForeachWhere {
             set result [PopContext $context depth]
             for {set i 0} {$i < $depth} {incr i} {
                 PopBlock
@@ -7597,6 +7590,34 @@ if {$dir eq "forw"} {
 }
 ----
 
+==== Iterating Across Selected Related Instances
+[source,tcl]
+.Implementation
+----
+<<generation support commands>>=
+proc InstanceForeachRelatedWhere {instref where startref args} {
+    set startblock [GetBlock]
+    set result [IndentToBlock\
+        [linecomment "instance $instref foreachRelatedWhere [list $where]\
+                $startref [list $args]"]\
+    ]
+
+    lassign [TraverseRelChain $startref $args] chaincode targetclass targetref
+    append result $chaincode
+    append result [IndentToBlock [string cat\
+        [CreateInstRefSymbol $targetclass $instref]\
+        "$instref = $targetref ;\n"\
+        "if ($where) \{\n"\
+    ]]
+    PushBlock
+
+    PushContext InstanceForeachRelatedWhere\
+            depth [expr {[GetBlock] - $startblock}]
+
+    return $result
+}
+----
+
 ==== Finding a Single Related Instance
 
 *****
@@ -8266,6 +8287,44 @@ endif::showtests[]
 [source,tcl]
 ----
 <<generation support commands>>=
+proc InstanceSetSelectRelatedWhere {set instref where startref args} {
+    variable domain
+
+    set startlevel [GetBlock]
+    set result [IndentToBlock\
+        [linecomment "instset $set selectRelatedWhere [list $where] $startref\
+                [list $args]"]\
+    ]
+
+    lassign [TraverseRelChain $startref $args] chaincode targetclass targetref
+    append chaincode [IndentToBlock [string cat\
+        [CreateInstRefSymbol $targetclass $instref]\
+        "$instref = $targetref ;\n"\
+        "if ($where) \{\n"\
+    ]]
+    PushBlock
+    append chaincode [IndentToBlock\
+        "mrt_InstSetAddInstance(&$set, $instref) ;\n"]
+
+    set depth [expr {[GetBlock] - $startlevel}]
+    for {set i 0} {$i < $depth} {incr i} {
+        PopBlock
+        append chaincode [IndentToBlock "\}\n"]
+    }
+
+    set targetclassDesc [GetClassDescriptor $domain $targetclass]
+    append result [IndentToBlock [string cat\
+        [CreateInstSetSymbol $targetclass $set]\
+        "mrt_InstSetInitialize(&$set, &$targetclassDesc) ;\n"]]
+    append result $chaincode
+
+    return $result
+}
+----
+
+[source,tcl]
+----
+<<generation support commands>>=
 proc InstanceSetUnion {opset set1 set2 args} {
     tailcall InstanceSetOperation union mrt_InstSetUnion $opset $set1 $set2\
             {*}$args
@@ -8893,7 +8952,6 @@ proc ClassForeachInstance {className instref} {
 
     set iter [CreateTempSymbol Ctype {MRT_InstIterator}\
             Type InstanceIterator Class $className]
-    set iab [CreateTempSymbol Ctype {MRT_iab *} Type IAB Class $className]
 
     set startlevel [GetBlock]
 
@@ -8950,6 +9008,180 @@ test codegen-29.0 {
     micca generate
     testConditions\
         {[llength [fileutil::grep {xref->color} codegen29.c]] == 1}
+} -result {1}
+----
+endif::showtests[]
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc ClassForeachWhere {className instref where} {
+    variable domain
+
+    set startlevel [GetBlock]
+
+    set classDesc [GetClassDescriptor $domain $className]
+    set iter [CreateTempSymbol Ctype {MRT_InstIterator}\
+            Type InstanceIterator Class $className]
+    set result [IndentToBlock [string cat\
+        [linecomment "$className foreachWhere $instref [list $where]"]\
+        "MRT_InstIterator $iter ;\n"\
+        "for (mrt_InstIteratorStart(&$iter, &$classDesc) ;\
+            mrt_InstIteratorMore(&$iter) ;\
+            mrt_InstIteratorNext(&$iter)) \{\n"\
+    ]]
+    PushBlock
+    append result [IndentToBlock [string cat\
+        [CreateInstRefSymbol $className $instref]\
+        "$instref = mrt_InstIteratorGet(&$iter) ;\n"\
+        "if ($where) \{\n"\
+    ]]
+    PushBlock
+
+    PushContext ClassForeachWhere depth [expr {[GetBlock] - $startlevel}]
+
+    return $result
+}
+----
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-53.0 {
+    Generate instance set from class instances.
+} -setup {
+    validateutils genMiccaFile codegen53 {
+        domain codegen53 {
+            class X {
+                attribute id unsigned
+                attribute color int -default 20
+
+                classop {struct X *} findById {id unsigned} {
+                    %<X instref xref>%
+                    %<X foreachWhere xref {xref->id == id}>%
+                        return xref ;
+                    %<end>%
+                    return NULL ;
+                }
+            }
+        }
+        population codegen53 {
+            class X {
+                instance x1 id 100 color 30
+                instance x2 id 101
+                allocate 4
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen53.c
+    validateutils matchLines codegen53.c {
+        MRT_InstIterator t__T1 ;
+        for (mrt_InstIteratorStart(&t__T1, &codegen53__CLASSES[0]) ; mrt_InstIteratorMore(&t__T1) ; mrt_InstIteratorNext(&t__T1)) {
+            xref = mrt_InstIteratorGet(&t__T1) ;
+            if (xref->id == id) {
+                return xref ;
+            }
+        }
+    }
+} -result {1}
+----
+endif::showtests[]
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc ClassSelectWhere {className instref where instset} {
+    variable domain
+    set result [IndentToBlock\
+        [linecomment "$className selectWhere $instref [list $where] $instset"]\
+    ]
+
+    set startlevel [GetBlock]
+
+    set classDesc [GetClassDescriptor $domain $className]
+    append result [IndentToBlock [string cat\
+        [CreateInstSetSymbol $className $instset]\
+        "mrt_InstSetInitialize(&$instset, &$classDesc) ;\n"]\
+    ]
+
+    set iter [CreateTempSymbol Ctype {MRT_InstIterator}\
+            Type InstanceIterator Class $className]
+    append result [IndentToBlock [string cat\
+        "MRT_InstIterator $iter ;\n"\
+        "for (mrt_InstIteratorStart(&$iter, &$classDesc) ;\
+            mrt_InstIteratorMore(&$iter) ;\
+            mrt_InstIteratorNext(&$iter)) \{\n"\
+    ]]
+    PushBlock
+
+    append result [IndentToBlock [string cat\
+        [CreateInstRefSymbol $className $instref]\
+        "$instref = mrt_InstIteratorGet(&$iter) ;\n"\
+        "if ($where) \{\n"\
+    ]]
+    PushBlock
+
+    append result [IndentToBlock\
+        "mrt_InstSetAddInstance(&$instset, $instref) ;\n"\
+    ]
+
+    set depth [expr {[GetBlock] - $startlevel}]
+    for {set i 0} {$i < $depth} {incr i} {
+        PopBlock
+        append result [IndentToBlock "\}\n"]
+    }
+
+    return $result
+}
+----
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-52.0 {
+    Generate instance set from class instances.
+} -setup {
+    validateutils genMiccaFile codegen52 {
+        domain codegen52 {
+            class X {
+                attribute color int -default 20
+            }
+
+            domainop void printcolors {} {
+                %<X selectWhere xref {xref->color != 20} xset>%
+            }
+        }
+        population codegen52 {
+            class X {
+                instance x1 color 30
+                instance x2
+                allocate 4
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen52.c
+    validateutils matchLines codegen52.c {
+        MRT_InstSet xset ;
+        mrt_InstSetInitialize(&xset, &codegen52__CLASSES[0]) ;
+        MRT_InstIterator t__T1 ;
+        for (mrt_InstIteratorStart(&t__T1, &codegen52__CLASSES[0]) ; mrt_InstIteratorMore(&t__T1) ; mrt_InstIteratorNext(&t__T1)) {
+            struct X *xref ;
+            xref = mrt_InstIteratorGet(&t__T1) ;
+            if (xref->color != 20) {
+                mrt_InstSetAddInstance(&xset, xref) ;
+            }
+        }
+    }
 } -result {1}
 ----
 endif::showtests[]
