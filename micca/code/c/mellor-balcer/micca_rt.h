@@ -135,7 +135,6 @@ typedef enum {
     mrtTransOverflow,
     mrtStaticRelationship,
     mrtRelationshipLinkage,
-    mrtNoEvent,
 
 #       ifdef _POSIX_C_SOURCE
     mrtTimerOpFailed,

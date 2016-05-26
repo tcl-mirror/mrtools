@@ -136,7 +136,9 @@ Although the reports generated are intended to be consumed by a compiler
 rather than a human,
 the design of the generator is very similar to generating reports
 from a database.
-In this case the database is the platform model and the reports are ``C'' code.
+In this case the database is the platform model as populated by
+a configuration script and the reports are ``C'' code placed in files
+and intended to be processed later by a compiler.
 
 (((micca,Gen,miccaGenerate)))
 [source,tcl]
@@ -2956,7 +2958,7 @@ proc iabDefinitions {} {
             "    .storageStart = &${Association}__POOL\[0\],\n"\
             "    .storageFinish = &${Association}__POOL\[1\],\n"\
             "    .storageLast = &${Association}__POOL\[0\],\n"\
-            "    .alloc = 2,\n"\
+            "    .alloc = 1,\n"\
             "    .instanceSize = sizeof\(struct ${Association}\),\n"\
             "    .construct = NULL,\n"\
             "    .destruct = NULL,\n"\
@@ -2976,7 +2978,7 @@ proc iabDefinitions {} {
             "    .storageStart = &${Association}__POOL\[0\],\n"\
             "    .storageFinish = &${Association}__POOL\[$total\],\n"\
             "    .storageLast = &${Association}__POOL\[[expr {$total - 1}]\],\n"\
-            "    .alloc = [expr {$initial + 1}],\n"\
+            "    .alloc = $initial,\n"\
             "    .instanceSize = sizeof\(struct ${Association}\),\n"\
             "    .construct = NULL,\n"\
             "    .destruct = NULL,\n"\
@@ -3037,8 +3039,7 @@ proc DefineIABMembers {classRef isUnionSubclass} {
         expr {[isEmptyRef %] ? "NULL" : "[readAttribute % Class]__DTOR"}
     } {} |%]
     append result\
-        "    .alloc = [expr {[GetClassProperty $className InitialInstance]\
-                    + 1}],\n"\
+        "    .alloc = [GetClassProperty $className InitialInstance],\n"\
         "    .instanceSize = sizeof\([GetClassProperty $className Declaration]\),\n"\
         "    .construct = $ctor,\n"\
         "    .destruct = $dtor,\n"\
@@ -5332,7 +5333,11 @@ proc epilogueDeclarations {} {
 In this section we discuss the macro commands that are available
 to a translator for easing the burden of translating model level
 execution into the required ``C'' code.
-The ``C'' code supplied by the user for state activities and other
+When using `micca` to translate a model,
+state activities are coded in ``C'' and passed along to the generated
+code file.
+To make coding model level actions easier,
+the ``C'' code supplied by the translator for state activities and other
 operations can contain embedded macros which are further expanded
 by the code generator.
 The macros are simple commands with arguments that are enclosed
@@ -5345,29 +5350,32 @@ as:
 ColorType c = %<my attribute Color>% ;
 *****
 
-The code generator would then expand the commands contained between the *%<*
-and *>%* delimiters and replace the embedded macro with ``C'' code required to
+For this example,
+the code generator expands the commands contained between the *%<*
+and *>%* delimiters and replaces the embedded macro with ``C'' code required to
 access the value of the *Color* attribute of the instance referenced by the
 value of the *self* variable.
 This is a very simple case, but even here the code generator
 performs a number of significant checks in an attempt to discover
 errors before code is sent to the compiler.
 In this case, the code generator insures that the attribute named
-*Color* exists for the class in which the action is run.
+*Color* exists for the class to which the `self` instance refers.
 
 There are many of these macro commands to handle common model level
 processing.
-State activities are then a mix of ``C'' code and macros to accomplish
-the purpose of the activity.
+State activities are then a mix of ``C'' code and embedded macros commands
+to accomplish the purpose of the activity.
 The straight ``C'' contains the algorithmic processing and the
 expanded macros handle the model level actions such as navigating
 relationships, finding instances and dealing with attribute updates.
+These types of model level actions must account for the data structures
+and naming conventions that the run-time code uses.
 Since the code generator has access to the populated platform model,
 it performs many consistency checks that would otherwise result in
 compiler errors.
-Discovering error earlier makes them much easier to correct since
-the mapping of compiler errors back to the source becomes more difficult
-since there is a level of translation in between.
+Discovering errors earlier makes them much easier to correct since
+relating compiler error messages back to the `micca` source
+becomes more difficult in the face of another level of translation.
 
 The macro commands expand to one of three types of ``C'' constructs:
 
@@ -5375,10 +5383,10 @@ The macro commands expand to one of three types of ``C'' constructs:
 For statement macros,
 the expansion yields one or more lines of code and the code generator
 takes care of the semicolon punctuation.
-. A macro command may expand to a value in ``C''.
-For value macros,
+. A macro command may expand to an expression in ``C''.
+For expression macros,
 the code generator just replaces the macro and does not add any punctuation.
-This enables a value macro to be used inside of another ``C'' expression.
+This enables a expression macro to be used inside of another ``C'' expression.
 . A macro command may expand to a construct in ``C'' requiring a
 compound statement.
 For macros generating compound statements,
@@ -5440,6 +5448,37 @@ that create less interference.
 
 === Creating the Macro Commands
 
+The commands available for embedding into ``C'' activity code
+are organized into groups.
+
+* A command to invoke external operations.
+* Commands related to classes.
+* Commands related to relationships.
+* Commands related to instances.
+* Commands related to instance sets.
+
+Each of these different command groups are discussed in sections below.
+Since we are using a template expander to expand the commands,
+in this section we show how the expansion commands are created.
+
+For classes and relationships,
+embedded macro commands named after the classes and relationships themselves
+are created.
+For example, if the domain contains a class named `WashingMachine`,
+then there will be an embedded command named `WashingMachine`
+that can be used to access class level functions specific to the
+`WashingMachine` class.
+The same holds true for a relationship.
+If `R27` exists in the domain, then there will be an embedded command
+named `R27` that can be used to relate and unrelate instances
+across the relationship.
+To insure that there is no conflict in names,
+we will create the embedded commands in their own namespace,
+`GenActivity` as a child namespace of `GenSupport`.
+Since all classes (or relationships) have the same set of subcommands
+available to them, we will namespace ensembles to obtain the
+``object oriented'' Tcl style for the embedded commands.
+
 [source,tcl]
 ----
 <<generation commands>>=
@@ -5457,20 +5496,20 @@ proc CreateActivityCommands {domain} {
     <<CreateActivityCommands: instances>>
     <<CreateActivityCommands: instance sets>>
 
-    interp alias {} external {} ${suppns}::InvokeExternalOp
-    interp alias {} end {} ${suppns}::End
+    interp alias {} ${actns}::external {} ${suppns}::InvokeExternalOp
+    interp alias {} ${actns}::end {} ${suppns}::End
 }
 ----
 
-[source,tcl]
-----
-<<CreateActivityCommands: classes>>=
-set usubnames [pipe {
-    UnionSubclass findWhere {$Domain eq $domain} |
-    deRef ~ |
-    relation list ~ Class
-}]
-----
+We see that the code is sectioned into four chunks based on what
+the namespace ensemble command refers to.
+
+First,
+we query some information about the classes in the domain we are
+generating.
+The class commands will vary depending upon:
+\(1) the class having a defined state model and
+\(2) if a class with a state model has creation events.
 
 [source,tcl]
 ----
@@ -5489,12 +5528,39 @@ set classInfo [pipe {
         [relation isnotempty [tuple extract $ctup CreationStates]]} |
     relation project ~ Name HasStateModel HasCreationState
 }]
+----
 
+We first need to find out all the union subclass names.
+As usual, union subclasses have to be treated a bit differently.
+A union subclass cannot be created either synchronously or asynchronously.
+A union subclass can only be migrated as part of a generalization.
+
+[source,tcl]
+----
+<<CreateActivityCommands: classes>>=
+set usubnames [pipe {
+    UnionSubclass findWhere {$Domain eq $domain} |
+    deRef ~ |
+    relation list ~ Class
+}]
+----
+
+We now iterate over the classes for the domain and construct the
+namespace ensemble command map.
+Command maps are the key to ensemble commands and allow you to
+forward the command invocation with additional information
+(in this case the name of the class).
+
+[source,tcl]
+----
+<<CreateActivityCommands: classes>>=
 set cmdmap [dict create]
 relation foreach info $classInfo {
     relation assign $info
     set cmdmap [dict create\
         foreachInstance [list ${suppns}::ClassForeachInstance $Name]\
+        foreachWhere [list ${suppns}::ClassForeachWhere $Name]\
+        selectWhere [list ${suppns}::ClassSelectWhere $Name]\
         instref [list ${suppns}::ClassInstanceReference $Name]\
         idtoref [list ${suppns}::ClassIdToRef $Name]\
         instset [list ${suppns}::ClassInstanceSet $Name]\
@@ -5516,13 +5582,65 @@ relation foreach info $classInfo {
 }
 ----
 
+For relationships,
+we must consider each type of relationships separately.
+As shown in the platform model,
+the top level specialization of relationships is between
+associations and generalizations.
+
 [source,tcl]
 ----
 <<CreateActivityCommands: relationships>>=
 set relRefs [Relationship findWhere {$Domain eq $domain}]
 
+<<CreateActivityCommands: associations>>
+<<CreateActivityCommands: generalizations>>
+----
+
+The functions for association commands deal primarily with
+relating and unrelating instances across the association.
+Given the syntax for relationship traverals we have used,
+we will also create a _forward_ and _backward_ command
+to be used in relationship linkage.
+Both these commands require the instance argument be provided in
+a specific order, source then target for the forward command and
+target then source for the backward command.
+For example,
+the association
+
+.....
+association R22 A 1..*--1 B
+.....
+
+will result in both a `R22` command and a `~R22` command.
+Instances of `A` and `B` are related by using either command:
+
+.....
+%<R22 relate ainst binst>%
+%<~R22 relate binst ainst>%
+.....
+
+Associations can also have an assigner defined for them.
+In that case they need to be able to signal an event to the assigner.
+In the case of a multiple assigner,
+the relationship command also need to support creating an instance
+of the assigner.
+Associations are further specialized into simple associations and
+class based associations.
+All the permutations of these commands are considered below.
+
+[source,tcl]
+----
+<<CreateActivityCommands: associations>>=
 set assocs [findRelatedWhere $relRefs {{~R30 Association}} {!$IsStatic}]
 
+<<CreateActivityCommands: simple associations>>
+<<CreateActivityCommands: class based associations>>
+----
+
+[source,tcl]
+----
+<<CreateActivityCommands: simple associations>>=
 set simpassocs [findRelated $assocs {~R31 SimpleAssociation}]
 forAllRefs simpassoc $simpassocs {
     set simpname [readAttribute $simpassoc Name]
@@ -5552,14 +5670,19 @@ forAllRefs simpassoc $simpassocs {
         -command ${actns}::~$simpname\
         -map $cmdmap
 }
+----
 
+[source,tcl]
+----
+<<CreateActivityCommands: class based associations>>=
 set classassocs [findRelated $assocs {~R31 ClassBasedAssociation}]
-foreach cbname [relation list [deRef $classassocs] Name] {
+forAllRefs classassoc $classassocs {
+    set cbname [readAttribute $classassoc Name]
     set cmdmap [dict create\
         relate [list ${suppns}::RelClassRelateForw $cbname]\
         unrelate [list ${suppns}::RelClassUnrelateForw $cbname]\
     ]
-    set assigner [findRelated $classassocs R31 ~R52]
+    set assigner [findRelated $classassoc R31 ~R52]
     if {[isNotEmptyRef $assigner]} {
         if {[isNotEmptyRef [findRelated $assigner {~R53 SingleAssigner}]]} {
             dict set cmdmap signal\
@@ -5581,9 +5704,29 @@ foreach cbname [relation list [deRef $classassocs] Name] {
         -command ${actns}::~$cbname\
         -map $cmdmap
 }
+----
 
+Generalization relationships are specialized into those using
+references and those using unions.
+The command distinction is that union generalizations only support
+a single subcommand, namely `migrate`.
+Given the storage arrangement for union generalizations,
+relating and unrelating instances does not make sense
+since subclass instances are bound to the storage of their superclass
+instances..
+
+[source,tcl]
+----
+<<CreateActivityCommands: generalizations>>=
 set gens [findRelated $relRefs {~R30 Generalization}]
 
+<<CreateActivityCommands: reference generalizations>>
+<<CreateActivityCommands: union generalizations>>
+----
+
+[source,tcl]
+----
+<<CreateActivityCommands: reference generalizations>>=
 set refgens [findRelated $gens {~R43 ReferenceGeneralization}]
 foreach rgname [relation list [deRef $refgens] Name] {
     set cmdmap [dict create\
@@ -5603,7 +5746,11 @@ foreach rgname [relation list [deRef $refgens] Name] {
         -command ${actns}::~$rgname\
         -map $cmdmap
 }
+----
 
+[source,tcl]
+----
+<<CreateActivityCommands: union generalizations>>=
 set uniongens [findRelated $gens {~R43 UnionGeneralization}]
 foreach ugname [relation list [deRef $uniongens] Name] {
     namespace ensemble create\
@@ -5613,6 +5760,10 @@ foreach ugname [relation list [deRef $uniongens] Name] {
         ]
 }
 ----
+
+The ensemble command for class instances is much simpler.
+All instances have the same set of subcommands and they
+are simply enumerated in the command map of the ensemble.
 
 [source,tcl]
 ----
@@ -5627,6 +5778,7 @@ set cmdmap [dict create\
     delete ${suppns}::InstanceDelete\
     operation ${suppns}::InstanceOperation\
     foreachRelated ${suppns}::InstanceForeachRelated\
+    foreachRelatedWhere ${suppns}::InstanceForeachRelatedWhere\
     findOneRelated ${suppns}::InstanceFindOneRelated\
     instid ${suppns}::InstanceRefToId\
 ]
@@ -5635,6 +5787,10 @@ namespace ensemble create\
     -parameters instref\
     -map $cmdmap
 ----
+
+To save some typing,
+we create an ensemble command named `my` which is just a shorthand for
+`instance self`.
 
 [source,tcl]
 ----
@@ -5655,12 +5811,15 @@ namespace ensemble create\
     -map $cmdmap
 ----
 
+Instance sets also have a fixed set of subcommand operations.
+
 [source,tcl]
 ----
 <<CreateActivityCommands: instance sets>>=
 set cmdmap [dict create\
     foreachSelected ${suppns}::InstanceSetForeachSelected\
     selectRelated ${suppns}::InstanceSetSelectRelated\
+    selectRelatedWhere ${suppns}::InstanceSetSelectRelatedWhere\
     empty ${suppns}::InstanceSetEmpty\
     cardinality ${suppns}::InstanceSetCardinality\
     notempty ${suppns}::InstanceSetNotEmpty\
@@ -5686,11 +5845,12 @@ namespace ensemble create\
 <<generation support data>>=
 relvar create Symbol {
     Name string
-    Block int
     Ctype string
     Type string
     Class string
-} {Name Block}
+    Block int
+} Name
+
 
 variable symcounter 0
 ----
@@ -5700,31 +5860,18 @@ variable symcounter 0
 <<generation support commands>>=
 proc LookUpSymbol {name} {
     variable block
-    set sym [pipe {
-        relvar set Symbol |
-        relation restrictwith ~ {$Name eq $name}
-    }]
-    if {[relation isempty $sym]} {
-        return
+    set sym [relvar restrictone Symbol Name $name]
+    if {[relation isnotempty $sym]} {
+        return [tuple get [relation tuple $sym]]
     }
-    if {[relation cardinality $sym] > 1} {
-        set sym [pipe {
-            relation tag $sym BlockOrder -descending Block |
-            relation restrictwith ~ {$BlockOrder == 0} |
-            relation elminate ~ BlockOrder
-        }]
-    }
-    return [pipe {
-        relation eliminate $sym Block |
-        relation tuple ~ |
-        tuple get ~
-    }]
+
+    return
 }
 
 proc InsertSymbol {args} {
+    variable block
+    dict set args Block $block
     try {
-        variable block
-        lappend args Block $block
         set sym [relvar insert Symbol $args]
         return [tuple get [relation tuple $sym]]
     } trap {RAL relvar insert DUPLICATE_TUPLE*} {result} {
@@ -5735,7 +5882,7 @@ proc InsertSymbol {args} {
 }
 
 proc DeleteSymbol {name} {
-    return [relvar delete Symbol symtup {[tuple extract $symtup Name] eq $name}]
+    return [relvar deleteone Symbol Name $name]
 }
 
 proc CreateTempSymbol {args} {
@@ -5931,7 +6078,9 @@ proc End {} {
     switch -exact -- $context {
         InstanceSetForeachSelected -
         InstanceForeachRelated -
-        ClassForeachInstance {
+        InstanceForeachRelatedWhere -
+        ClassForeachInstance -
+        ClassForeachWhere {
             set result [PopContext $context depth]
             for {set i 0} {$i < $depth} {incr i} {
                 PopBlock
@@ -7441,6 +7590,34 @@ if {$dir eq "forw"} {
 }
 ----
 
+==== Iterating Across Selected Related Instances
+[source,tcl]
+.Implementation
+----
+<<generation support commands>>=
+proc InstanceForeachRelatedWhere {instref where startref args} {
+    set startblock [GetBlock]
+    set result [IndentToBlock\
+        [linecomment "instance $instref foreachRelatedWhere [list $where]\
+                $startref [list $args]"]\
+    ]
+
+    lassign [TraverseRelChain $startref $args] chaincode targetclass targetref
+    append result $chaincode
+    append result [IndentToBlock [string cat\
+        [CreateInstRefSymbol $targetclass $instref]\
+        "$instref = $targetref ;\n"\
+        "if ($where) \{\n"\
+    ]]
+    PushBlock
+
+    PushContext InstanceForeachRelatedWhere\
+            depth [expr {[GetBlock] - $startblock}]
+
+    return $result
+}
+----
+
 ==== Finding a Single Related Instance
 
 *****
@@ -8110,6 +8287,44 @@ endif::showtests[]
 [source,tcl]
 ----
 <<generation support commands>>=
+proc InstanceSetSelectRelatedWhere {set instref where startref args} {
+    variable domain
+
+    set startlevel [GetBlock]
+    set result [IndentToBlock\
+        [linecomment "instset $set selectRelatedWhere [list $where] $startref\
+                [list $args]"]\
+    ]
+
+    lassign [TraverseRelChain $startref $args] chaincode targetclass targetref
+    append chaincode [IndentToBlock [string cat\
+        [CreateInstRefSymbol $targetclass $instref]\
+        "$instref = $targetref ;\n"\
+        "if ($where) \{\n"\
+    ]]
+    PushBlock
+    append chaincode [IndentToBlock\
+        "mrt_InstSetAddInstance(&$set, $instref) ;\n"]
+
+    set depth [expr {[GetBlock] - $startlevel}]
+    for {set i 0} {$i < $depth} {incr i} {
+        PopBlock
+        append chaincode [IndentToBlock "\}\n"]
+    }
+
+    set targetclassDesc [GetClassDescriptor $domain $targetclass]
+    append result [IndentToBlock [string cat\
+        [CreateInstSetSymbol $targetclass $set]\
+        "mrt_InstSetInitialize(&$set, &$targetclassDesc) ;\n"]]
+    append result $chaincode
+
+    return $result
+}
+----
+
+[source,tcl]
+----
+<<generation support commands>>=
 proc InstanceSetUnion {opset set1 set2 args} {
     tailcall InstanceSetOperation union mrt_InstSetUnion $opset $set1 $set2\
             {*}$args
@@ -8737,7 +8952,6 @@ proc ClassForeachInstance {className instref} {
 
     set iter [CreateTempSymbol Ctype {MRT_InstIterator}\
             Type InstanceIterator Class $className]
-    set iab [CreateTempSymbol Ctype {MRT_iab *} Type IAB Class $className]
 
     set startlevel [GetBlock]
 
@@ -8794,6 +9008,180 @@ test codegen-29.0 {
     micca generate
     testConditions\
         {[llength [fileutil::grep {xref->color} codegen29.c]] == 1}
+} -result {1}
+----
+endif::showtests[]
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc ClassForeachWhere {className instref where} {
+    variable domain
+
+    set startlevel [GetBlock]
+
+    set classDesc [GetClassDescriptor $domain $className]
+    set iter [CreateTempSymbol Ctype {MRT_InstIterator}\
+            Type InstanceIterator Class $className]
+    set result [IndentToBlock [string cat\
+        [linecomment "$className foreachWhere $instref [list $where]"]\
+        "MRT_InstIterator $iter ;\n"\
+        "for (mrt_InstIteratorStart(&$iter, &$classDesc) ;\
+            mrt_InstIteratorMore(&$iter) ;\
+            mrt_InstIteratorNext(&$iter)) \{\n"\
+    ]]
+    PushBlock
+    append result [IndentToBlock [string cat\
+        [CreateInstRefSymbol $className $instref]\
+        "$instref = mrt_InstIteratorGet(&$iter) ;\n"\
+        "if ($where) \{\n"\
+    ]]
+    PushBlock
+
+    PushContext ClassForeachWhere depth [expr {[GetBlock] - $startlevel}]
+
+    return $result
+}
+----
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-53.0 {
+    Generate instance set from class instances.
+} -setup {
+    validateutils genMiccaFile codegen53 {
+        domain codegen53 {
+            class X {
+                attribute id unsigned
+                attribute color int -default 20
+
+                classop {struct X *} findById {id unsigned} {
+                    %<X instref xref>%
+                    %<X foreachWhere xref {xref->id == id}>%
+                        return xref ;
+                    %<end>%
+                    return NULL ;
+                }
+            }
+        }
+        population codegen53 {
+            class X {
+                instance x1 id 100 color 30
+                instance x2 id 101
+                allocate 4
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen53.c
+    validateutils matchLines codegen53.c {
+        MRT_InstIterator t__T1 ;
+        for (mrt_InstIteratorStart(&t__T1, &codegen53__CLASSES[0]) ; mrt_InstIteratorMore(&t__T1) ; mrt_InstIteratorNext(&t__T1)) {
+            xref = mrt_InstIteratorGet(&t__T1) ;
+            if (xref->id == id) {
+                return xref ;
+            }
+        }
+    }
+} -result {1}
+----
+endif::showtests[]
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc ClassSelectWhere {className instref where instset} {
+    variable domain
+    set result [IndentToBlock\
+        [linecomment "$className selectWhere $instref [list $where] $instset"]\
+    ]
+
+    set startlevel [GetBlock]
+
+    set classDesc [GetClassDescriptor $domain $className]
+    append result [IndentToBlock [string cat\
+        [CreateInstSetSymbol $className $instset]\
+        "mrt_InstSetInitialize(&$instset, &$classDesc) ;\n"]\
+    ]
+
+    set iter [CreateTempSymbol Ctype {MRT_InstIterator}\
+            Type InstanceIterator Class $className]
+    append result [IndentToBlock [string cat\
+        "MRT_InstIterator $iter ;\n"\
+        "for (mrt_InstIteratorStart(&$iter, &$classDesc) ;\
+            mrt_InstIteratorMore(&$iter) ;\
+            mrt_InstIteratorNext(&$iter)) \{\n"\
+    ]]
+    PushBlock
+
+    append result [IndentToBlock [string cat\
+        [CreateInstRefSymbol $className $instref]\
+        "$instref = mrt_InstIteratorGet(&$iter) ;\n"\
+        "if ($where) \{\n"\
+    ]]
+    PushBlock
+
+    append result [IndentToBlock\
+        "mrt_InstSetAddInstance(&$instset, $instref) ;\n"\
+    ]
+
+    set depth [expr {[GetBlock] - $startlevel}]
+    for {set i 0} {$i < $depth} {incr i} {
+        PopBlock
+        append result [IndentToBlock "\}\n"]
+    }
+
+    return $result
+}
+----
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-52.0 {
+    Generate instance set from class instances.
+} -setup {
+    validateutils genMiccaFile codegen52 {
+        domain codegen52 {
+            class X {
+                attribute color int -default 20
+            }
+
+            domainop void printcolors {} {
+                %<X selectWhere xref {xref->color != 20} xset>%
+            }
+        }
+        population codegen52 {
+            class X {
+                instance x1 color 30
+                instance x2
+                allocate 4
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen52.c
+    validateutils matchLines codegen52.c {
+        MRT_InstSet xset ;
+        mrt_InstSetInitialize(&xset, &codegen52__CLASSES[0]) ;
+        MRT_InstIterator t__T1 ;
+        for (mrt_InstIteratorStart(&t__T1, &codegen52__CLASSES[0]) ; mrt_InstIteratorMore(&t__T1) ; mrt_InstIteratorNext(&t__T1)) {
+            struct X *xref ;
+            xref = mrt_InstIteratorGet(&t__T1) ;
+            if (xref->color != 20) {
+                mrt_InstSetAddInstance(&xset, xref) ;
+            }
+        }
+    }
 } -result {1}
 ----
 endif::showtests[]

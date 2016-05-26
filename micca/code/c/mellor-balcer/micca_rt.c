@@ -189,13 +189,11 @@ static char const * const errMsgs[] = {
     [mrtEventInFlight] = "event-in-flight error: %s.%s - %s -> %s.%s\n",
     [mrtNoInstSlot] = "no available instance slots: %s\n",
     [mrtRefIntegrity] = "referential integrity check failed: %s\n",
-    [mrtNoEvent] = "no such event, %u, for class %s\n",
 #       else
     [mrtCantHappen] = "can't happen transition: %p: %u - %u -> CH\n",
     [mrtEventInFlight] = "event-in-flight error: %p - %u -> %p\n",
     [mrtNoInstSlot] = "no available instance slots: %p\n",
     [mrtRefIntegrity] = "referential integrity check failed: %p\n",
-    [mrtNoEvent] = "no such event, %u, for class %p\n",
 #       endif /* MRT_NO_NAMES */
 
 #       ifdef _POSIX_C_SOURCE
@@ -1780,7 +1778,7 @@ mrtDispatchPolymorphicEvent(
         /*
          * Check that our subclass instance is indeed allocated and usable.  We
          * are trying to guard against the possiblity that the subclass
-         * instance was deleted before the polymorphic event was signaled.
+         * instance was deleted before the polymorphic event was delivered.
          */
         assert(targetInst->alloc > 0) ;
         if (targetInst->alloc <= 0) {
@@ -2883,16 +2881,6 @@ mrt_NewEvent(
     assert(targetInst->alloc != 0) ;
     assert(event < targetInst->classDesc->eventCount) ;
 
-    if (targetInst == NULL ||
-            targetInst->alloc == 0 ||
-            event >= targetInst->classDesc->eventCount) {
-#           ifndef MRT_NO_NAMES
-        mrtFatalError(mrtNoEvent, event, targetInst->classDesc->name) ;
-#           else
-        mrtFatalError(mrtNoEvent, event, targetInst->classDesc) ;
-#           endif /* MRT_NO_NAMES */
-    }
-
     MRT_ecb *ecb = mrtAllocEvent() ;
 
     ecb->eventNumber = event ;
@@ -2940,6 +2928,7 @@ mrt_CreateAsync(
     assert(targetClass != NULL) ;
     assert(targetClass->edb != NULL) ;
     assert(targetClass->edb->creationState >= 0) ;
+    assert(event < targetClass->edb->eventCount) ;
 
     MRT_Instance *targetInst = mrt_CreateInstance(targetClass,
             targetClass->edb->creationState) ; // <1>
