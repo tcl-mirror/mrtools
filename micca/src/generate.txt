@@ -525,7 +525,7 @@ proc interface {} {
 
     return [string cat\
         [comment "Domain Interface Contents"]\
-        [textutil::adjust::undent [string trim $interface \n]]\
+        [textutil::adjust::undent [string trim $interface]]\
     ]
 }
 ----
@@ -683,10 +683,8 @@ proc interfaceTypeAliases {} {
     append result [comment "Type Aliases"]
     forAllRefs taRef [FindInterfaceTypeAliases $domain] {
         assignAttribute $taRef TypeName TypeDefinition
-        append result\
-            "typedef "\
-            [typeCheck composeDeclaration $TypeDefinition $TypeName]\
-            " \;\n"
+        append result "typedef "\
+            [typeCheck composeDeclaration $TypeDefinition $TypeName] " ;\n"
     }
 
     return $result
@@ -753,9 +751,11 @@ There are several different operations defined in the platform model.
 Since they use the same attribute names,
 it is possible to factor the generation of declaration code into
 a common procedure.
-What we need to know is are instance references to the operation
+We need to know the instance references to the operation
 and the name of the relationship used to find the parameters of
 the operation.
+Optionally, a suffix can be added to the ``C'' identifier for the
+operation.
 
 (((micca,Helpers,GenOperationDeclarations)))
 [source,tcl]
@@ -788,8 +788,7 @@ proc GenOperationDeclarations {opRefs paramRel {suffix {}}} {
 }
 ----
 <1> Passing in a relationship name as an argument may appear unconventional,
-but this is Tcl and queries need not be composed strictly of constant
-data.
+but this is Tcl and portions of a query can be variable.
 <2> Note that we prepend the domain name to the operation name
 in order to avoid naming conflicts in the global namespace.
 Naming conventions are necessary when dealing with a language like
@@ -908,6 +907,161 @@ test headergen-3.1 {
 ----
 endif::showtests[]
 
+=== Event Parameter Declarations
+
+Since events can be signaled via the portal functions,
+we need to make the parameter signature of an event available
+in the header file.
+Typically, bridge code will need to supply any parameter an event
+may need and will need a structure declaration to do that.
+
+(((micca,Header Generation,eventParamDeclarations)))
+[source,tcl]
+.Implementation
+----
+<<generation header commands>>=
+proc eventParamDeclarations {} {
+    variable domain
+
+    set result [comment "Event Parameter Structure Declarations"]
+    set evtparams [pipe {
+        Event findWhere {$Domain eq $domain} |
+        deRef ~ |
+        relation join $::micca::ParameterSignature |
+        relation eliminate ~ ASigID |
+        relation join ~ $::micca::Parameter $::micca::Argument |
+        relation project ~ Model Event Name Position DataType |
+        relation group ~ Params Name Position DataType |
+        relation group ~ Events Event Params
+    }]
+    relation foreach evtparam $evtparams -ascending Model {
+        relation assign $evtparam
+        relation foreach event $Events {
+            relation assign $event
+            set pstructname "struct ${domain}_${Model}_${Event}__EPARAMS"
+            append result "$pstructname \{\n"
+            relation foreach param $Params -ascending Position {
+                relation assign $param DataType Name
+                append result\
+                    "    [typeCheck composeDeclaration $DataType $Name] ;\n"
+            }
+            append result "\} ;\n"
+            append result\
+                "static_assert(sizeof($pstructname) <= sizeof(MRT_EventParams), "\
+                "\"Parameters for class or assigner, $Model, event,\
+                    $Event, are too large\") ;\n"
+        }
+    }
+
+    return $result
+}
+----
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-10.0 {
+    Generated event parameter structures
+} -setup {
+    validateutils genMiccaFile codegen10 {
+        domain codegen10 {
+            typealias MyCount int
+            class X {
+                attribute color int -default 20
+
+                statemodel {
+                    state s1 {a MyCount b {char *}} {
+                        printf("%d %s\n", a, b) ;
+                        (void)self ;
+                    }
+                    transition s1 -> e1 -> s1
+                }
+            }
+            class super {
+                polymorphic e1 f MyCount g {char *}
+                polymorphic e2
+            }
+            class sub1 {
+                statemodel {
+                    state s1 {a MyCount b {char *}} {
+                        printf("%d %s\n", a, b) ;
+                        (void)self ;
+                    }
+
+                    state s2 {} {
+                        printf("in s2\n") ;
+                        (void)self ;
+                    }
+
+                    transition s1 -> e1 -> s1
+                    transition s1 - e2 -> s2
+                    transition s2 - e1 -> s1
+                }
+            }
+            class sub2 {
+                statemodel {
+                    state s1 {a MyCount b {char *}} {
+                        printf("%d %s\n", a, b) ;
+                        (void)self ;
+                    }
+
+                    state s2 {} {
+                        printf("in s2\n") ;
+                        (void)self ;
+                    }
+
+                    transition s1 -> e1 -> s1
+                    transition s1 - e2 -> s2
+                    transition s2 - e1 -> s1
+                }
+            }
+            generalization R1 super sub1 sub2
+        }
+        population codegen10 {
+            class X {
+                instance x1 color 30
+            }
+            class super {
+                instance sup1
+                instance sup2
+            }
+            class sub1 {
+                instance s1 R1 sup1
+            }
+            class sub2 {
+                instance s2 R1 sup2
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen10.c
+    testConditions\
+        {[validateutils matchLines codegen10.h {
+            struct codegen10_sub1_e1__EPARAMS {
+                MyCount f ;
+                char * g ;
+            } ;
+        }]}\
+        {[validateutils matchLines codegen10.h {
+            struct codegen10_sub2_e1__EPARAMS {
+                MyCount f ;
+                char * g ;
+            } ;
+        }]}\
+        {[validateutils matchLines codegen10.h {
+            struct codegen10_super_e1__EPARAMS {
+                MyCount f ;
+                char * g ;
+            } ;
+        }]}
+} -result {1}
+----
+endif::showtests[]
+
 === Portal Function Constants
 
 The run time code provides a set of
@@ -918,11 +1072,12 @@ The functions require integer constants that encode identifiers
 for the various entities that can be accessed via the portal.
 Those constants are placed in the generated header file.
 
-We generate information on three aspects of the domain:
+We generate information on several aspects of the domain:
 
-. Classes
-. Transitioning events
-. Polymorphic events
+* Classes
+* Instances
+* Attributes
+* Events
 
 (((micca,Header Generation,portalIds)))
 [source,tcl]
@@ -1030,7 +1185,7 @@ relation foreach assigner $assigners {
 
 The encoding for event numbers is obtained straight from the platform
 model as they are numbered there.
-In this case we query the *TransitioningEvent* class.
+In this case we query the *Event* class.
 
 [source,tcl]
 ----
@@ -1336,9 +1491,9 @@ the generated code file.
 No definition of the structure is given here.
 That will come later, but since class structures have pointers to
 other class structures we need to tell the compiler about the names.
-Sometimes the pointer references between classes are so direct
+Sometimes the pointer references between classes are so intertwined
 that we have no choice but to forward declare the class.
-Rather than attempting to figure out some order does not reference
+Rather than attempting to figure out some order that does not reference
 a class structure name before it is defined,
 we just emit forward declarations for all the classes.
 There is no reason to do the compiler's job here.
@@ -1365,12 +1520,12 @@ proc forwardClassDeclarations {} {
 }
 ----
 
-=== Forward Relationshp Declaration
+=== Forward Relationship Declaration
 
 The same reasoning applies to the array that holds the
 relationship description information.
-Class definitions will make reference to and we need to have its name
-known to the compiler.
+Class definitions will make reference to relationship descriptions
+and we need to have its name known to the compiler.
 
 (((micca,Code Generation,forwardRelationshipDeclaration)))
 [source,tcl]
@@ -1397,7 +1552,7 @@ we must emit the union subclass declarations in the correct order
 for the compiler.
 Otherwise,
 the compiler will complain as it must know the size of every member of a
-structure as it is being defined.
+structure as the structure is being declared.
 
 The strategy here is start with the ultimate superclasses and find
 those ultimate superclasses that are part of a union based generalization.
@@ -1501,7 +1656,7 @@ as required and defined by the run time code.
 . References used to implement relationship navigation.
 
 Of the three, references are the most complicated in that they come
-in a larger number of types.
+in a larger number of variations.
 
 (((micca,Code Generation,DeclareClassStructure)))
 [source,tcl]
@@ -2455,85 +2610,11 @@ test codegen-23.0 {
 ----
 endif::showtests[]
 
-=== Event Parameter Declarations
-
-(((micca,Code Generation,eventParamDeclarations)))
-[source,tcl]
-.Implementation
-----
-<<generation header commands>>=
-proc eventParamDeclarations {} {
-    variable domain
-
-    append result [comment "Transition Event Parameter Structure\
-            Declarations"]
-    set tevents [pipe {
-        TransitioningEvent findWhere {$Domain eq $domain} |
-        findRelated ~ R80 |
-        deRef ~ |
-        relation join $::micca::ParameterSignature |
-        relation eliminate ~ ASigID |
-        relation join ~ $::micca::Parameter $::micca::Argument |
-        relation project ~ Model Event Name Position DataType |
-        relation group ~ Params Name Position DataType |
-        relation group ~ Events Event Params
-    }]
-    relation foreach tevent $tevents -ascending Model {
-        relation assign $tevent
-        relation foreach event $Events {
-            relation assign $event
-            set pstructname "struct ${domain}_${Model}_${Event}__EPARAMS"
-            append result "$pstructname \{\n"
-            relation foreach param $Params -ascending Position {
-                relation assign $param DataType Name
-                append result\
-                    "    [typeCheck composeDeclaration $DataType $Name] ;\n"
-            }
-            append result "\} ;\n"
-            append result\
-                "static_assert(sizeof($pstructname) <= sizeof(MRT_EventParams), "\
-                "\"Parameters for class or assigner, $Model, event,\
-                    $Event, are too large\") ;\n"
-        }
-    }
-
-    set pevents [pipe {
-        PolymorphicEvent findWhere {$Domain eq $domain} |
-        findRelated ~ R81 R80 |
-        deRef ~ |
-        relation join $::micca::ParameterSignature |
-        relation eliminate ~ ASigID |
-        relation join ~ $::micca::Parameter $::micca::Argument |
-        relation project ~ Model Event Name Position DataType |
-        relation group ~ Params Name Position DataType |
-        relation group ~ Events Event Params
-    }]
-    append result [comment "Polymorphic Event Parameter Structure\
-            Declarations"]
-    relation foreach tevent $pevents -ascending Model {
-        relation assign $tevent
-        relation foreach event $Events {
-            relation assign $event
-            set pstructname "struct ${domain}_${Model}_${Event}__PEPARAMS"
-            append result "$pstructname \{\n"
-            relation foreach param $Params -ascending Position {
-                relation assign $param DataType Name
-                append result\
-                    "    [typeCheck composeDeclaration $DataType $Name] ;\n"
-            }
-            append result "\} ;\n"
-            append result\
-                "static_assert(sizeof($pstructname) <= sizeof(MRT_EventParams), "\
-                "\"Parameters for class or assigner, $Model, event,\
-                    $Event, are too large\") ;\n"
-        }
-    }
-
-    return $result
-}
-----
-
 === State Parameter Declarations
+
+The parameter signatures for state activities are strictly
+private to the domain and so their structure declarations are
+placed in the generated code file.
 
 (((micca,Code Generation,stateParamDeclarations)))
 [source,tcl]
@@ -2541,7 +2622,7 @@ proc eventParamDeclarations {} {
 <<generation code commands>>=
 proc stateParamDeclarations {} {
     variable domain
-    set result {}
+    set result [comment "State Parameter Structure Declarations"]
 
     set stateargs [pipe {
         State findWhere {$Domain eq $domain} |
@@ -2553,135 +2634,32 @@ proc stateParamDeclarations {} {
         relation group ~ Params Name Position DataType
     }]
 
-    if {[relation isnotempty $stateargs]} {
-        append result [comment "State Parameter Structure Declarations"]
-        relation foreach statearg $stateargs -ascending {Model State} {
-            relation assign $statearg
-            set pstructname "struct ${Model}_${State}__SPARAMS"
-            append result "$pstructname \{\n"
-            relation foreach param $Params -ascending Position {
-                relation assign $param DataType Name
-                append result\
-                    "    [typeCheck composeDeclaration $DataType $Name] ;\n"
-            }
-            append result "\} ;\n"
+    relation foreach statearg $stateargs -ascending {Model State} {
+        relation assign $statearg
+        set pstructname "struct ${Model}_${State}__SPARAMS"
+        append result "$pstructname \{\n"
+        relation foreach param $Params -ascending Position {
+            relation assign $param DataType Name
             append result\
-                "static_assert(sizeof($pstructname) <= sizeof(MRT_EventParams), "\
-                "\"Parameters for class or assigner, $Model, state,\
-                    $State, are too large\") ;\n"
+                "    [typeCheck composeDeclaration $DataType $Name] ;\n"
         }
+        append result "\} ;\n"
+        append result\
+            "static_assert(sizeof($pstructname) <= sizeof(MRT_EventParams), "\
+            "\"Parameters for class or assigner, $Model, state,\
+                $State, are too large\") ;\n"
     }
 
     return $result
 }
 ----
 
-ifdef::showtests[]
-[source,tcl]
-----
-<<generate command tests>>=
-test codegen-10.0 {
-    Generated event parameter structures
-} -setup {
-    validateutils genMiccaFile codegen10 {
-        domain codegen10 {
-            typealias MyCount int
-            class X {
-                attribute color int -default 20
-
-                statemodel {
-                    state s1 {a MyCount b {char *}} {
-                        printf("%d %s\n", a, b) ;
-                        (void)self ;
-                    }
-                    transition s1 -> e1 -> s1
-                }
-            }
-            class super {
-                polymorphic e1 f MyCount g {char *}
-                polymorphic e2
-            }
-            class sub1 {
-                statemodel {
-                    state s1 {a MyCount b {char *}} {
-                        printf("%d %s\n", a, b) ;
-                        (void)self ;
-                    }
-
-                    state s2 {} {
-                        printf("in s2\n") ;
-                        (void)self ;
-                    }
-
-                    transition s1 -> e1 -> s1
-                    transition s1 - e2 -> s2
-                    transition s2 - e1 -> s1
-                }
-            }
-            class sub2 {
-                statemodel {
-                    state s1 {a MyCount b {char *}} {
-                        printf("%d %s\n", a, b) ;
-                        (void)self ;
-                    }
-
-                    state s2 {} {
-                        printf("in s2\n") ;
-                        (void)self ;
-                    }
-
-                    transition s1 -> e1 -> s1
-                    transition s1 - e2 -> s2
-                    transition s2 - e1 -> s1
-                }
-            }
-            generalization R1 super sub1 sub2
-        }
-        population codegen10 {
-            class X {
-                instance x1 color 30
-            }
-            class super {
-                instance sup1
-                instance sup2
-            }
-            class sub1 {
-                instance s1 R1 sup1
-            }
-            class sub2 {
-                instance s2 R1 sup2
-            }
-        }
-    }
-} -cleanup {
-    cleanupDomain
-    validateutils forgetFiles
-} -body {
-    validateutils compileFiles codegen10.c
-    testConditions\
-        {[validateutils matchLines codegen10.h {
-            struct codegen10_sub1_e1__EPARAMS {
-                MyCount f ;
-                char * g ;
-            } ;
-        }]}\
-        {[validateutils matchLines codegen10.h {
-            struct codegen10_sub2_e1__EPARAMS {
-                MyCount f ;
-                char * g ;
-            } ;
-        }]}\
-        {[validateutils matchLines codegen10.h {
-            struct codegen10_super_e1__PEPARAMS {
-                MyCount f ;
-                char * g ;
-            } ;
-        }]}
-} -result {1}
-----
-endif::showtests[]
-
 === Operation Declarations
+
+Both class based and instance based operations must have names
+that are unique within the class,
+so we can emit the forward declarations for both types of operations
+in a single query.
 
 (((micca,Code Generation,operationDeclarations)))
 [source,tcl]
@@ -2689,7 +2667,7 @@ endif::showtests[]
 <<generation code commands>>=
 proc operationDeclarations {} {
     variable domain
-    set result {}
+    set result [comment "Operation Forward Declarations"]
 
     set ops [pipe {
         Operation findWhere {$Domain eq $domain} |
@@ -2698,22 +2676,19 @@ proc operationDeclarations {} {
         ralutil::rvajoin ~ $::micca::OperationParameter Parameters
     }]
 
-    if {[relation isnotempty $ops]} {
-        append result [comment "Operation Forward Declarations"]
-        relation foreach op $ops {
-            relation assign $op
-            append result\
-                "static $ReturnDataType ${Class}_$Operation\("
+    relation foreach op $ops {
+        relation assign $op
+        append result\
+            "static $ReturnDataType ${Class}_$Operation\("
 
-            if {[relation isempty $Parameters]} {
-                append result void
-            } else {
-                append result [join\
-                    [relation list $Parameters DataType -ascending Number] {, }]
-            }
-
-            append result "\) ;\n"
+        if {[relation isempty $Parameters]} {
+            append result void
+        } else {
+            append result [join\
+                [relation list $Parameters DataType -ascending Number] {, }]
         }
+
+        append result "\) ;\n"
     }
 
     return $result
@@ -2776,22 +2751,22 @@ endif::showtests[]
 
 === Constructor Declarations
 
+Pointers to constructors are part of the IAB for a class
+and so we need to have forward declarations for them.
+
 (((micca,Code Generation,ctorDeclarations)))
 [source,tcl]
 ----
 <<generation code commands>>=
 proc ctorDeclarations {} {
     variable domain
-    set result {}
+    set result [comment "Class Constructor Forward Declarations"]
 
     set ctors [Constructor findWhere {$Domain eq $domain}]
-    if {[isNotEmptyRef $ctors]} {
-        append result [comment "Class Constructor Forward Declarations"]
-        forAllRefs ctor $ctors {
-            assignAttribute $ctor {Class className}
-            append result\
-                "static void ${className}__CTOR\(void *const) ;\n"
-        }
+    forAllRefs ctor $ctors {
+        assignAttribute $ctor {Class className}
+        append result\
+            "static void ${className}__CTOR\(void *const) ;\n"
     }
 
     return $result
@@ -2800,22 +2775,21 @@ proc ctorDeclarations {} {
 
 === Destructor Declarations
 
+Destructor declarations follow the same pattern as constructors.
+
 (((micca,Code Generation,dtorDeclarations)))
 [source,tcl]
 ----
 <<generation code commands>>=
 proc dtorDeclarations {} {
     variable domain
-    set result {}
+    set result [comment "Class Destructor Forward Declarations"]
 
     set dtors [Destructor findWhere {$Domain eq $domain}]
-    if {[isNotEmptyRef $dtors]} {
-        append result [comment "Class Destructor Forward Declarations"]
-        forAllRefs dtor $dtors {
-            assignAttribute $dtor {Class className}
-            append result\
-                "static void ${className}__DTOR\(void *const) ;\n"
-        }
+    forAllRefs dtor $dtors {
+        assignAttribute $dtor {Class className}
+        append result\
+            "static void ${className}__DTOR\(void *const) ;\n"
     }
 
     return $result
@@ -2824,13 +2798,16 @@ proc dtorDeclarations {} {
 
 === Activity Declarations
 
+State activities must also be declared so that pointers to them
+can be used as activity table initializer values.
+
 (((micca,Code Generation,activityDeclarations)))
 [source,tcl]
 ----
 <<generation code commands>>=
 proc activityDeclarations {} {
     variable domain
-    set result {}
+    set result [comment "State Activities Forward Declarations"]
 
     set classes [pipe {
         State findWhere {$Domain eq $domain && [string trim $Activity] ne {}} |
@@ -2839,17 +2816,13 @@ proc activityDeclarations {} {
         relation group ~ States Name
     }]
 
-    if {[relation isnotempty $classes]} {
-        append result [comment "State Activities Forward Declarations"]
-
-        relation foreach class $classes -ascending Model {
-            relation assign $class
-            relation foreach state $States {
-                relation assign $state
-                append result "static void ${Model}_${Name}__ACTIVITY\("\
-                    "void *const s__SELF, "\
-                    "void const *const p__PARAMS) ;\n"
-            }
+    relation foreach class $classes -ascending Model {
+        relation assign $class
+        relation foreach state $States {
+            relation assign $state
+            append result "static void ${Model}_${Name}__ACTIVITY\("\
+                "void *const s__SELF, "\
+                "void const *const p__PARAMS) ;\n"
         }
     }
 
@@ -2859,29 +2832,35 @@ proc activityDeclarations {} {
 
 === Storage Declarations
 
+Because the relationship pointers in the initial instance population
+initializers will involve address expressions into the storage pool
+of the instances of a class,
+we need to make the storage pool names known to the compiler.
+Later, we will put down the initializers, if any.
+If there is not an initial instance population for a class,
+then this declaration is sufficient to allocate the memory for the
+instance storage.
+
 (((micca,Code Generation,storageDeclarations)))
 [source,tcl]
 ----
 <<generation code commands>>=
 proc storageDeclarations {} {
     variable domain
-    set result {}
+    set result [comment "Class Instance Storage Forward Declarations"]
 
     set cpops [pipe {
         FindNonUnionSubclasses $domain |
         findRelated % R104 {~R101 ElementPopulation} {~R105 ClassPopulation}
     } {} |%]
 
-    if {[isNotEmptyRef $cpops]} {
-        append result [comment "Class Instance Storage Forward Declarations"]
-        forAllRefs cpop $cpops {
-            assignAttribute $cpop {Allocation allocation} {Class className}
-            set insts [refMultiplicity [findRelated $cpop ~R102]]
-            set total [expr {$allocation + $insts}]
-            append result "static struct $className "\
-                [GetClassProperty $className StorageVariable]\
-                "\[[GetClassProperty $className TotalInstance]\] ;\n"
-        }
+    forAllRefs cpop $cpops {
+        assignAttribute $cpop {Allocation allocation} {Class className}
+        set insts [refMultiplicity [findRelated $cpop ~R102]]
+        set total [expr {$allocation + $insts}]
+        append result "static struct $className "\
+            [GetClassProperty $className StorageVariable]\
+            "\[[GetClassProperty $className TotalInstance]\] ;\n"
     }
 
     set singles [SingleAssigner findWhere {$Domain eq $domain}]
@@ -2905,6 +2884,12 @@ proc storageDeclarations {} {
 ----
 
 === Name Definitions
+
+The naming information for classes, relationships, states, events, etc.
+is placed in the generated code file.
+Note that the names can be compiled out by defining the `MRT_NO_NAMES`
+preprocessor symbol.
+Naming consumes a lot of memory and is most useful only during debugging.
 
 (((micca,Code Generation,nameDefinitions)))
 [source,tcl]
@@ -2965,6 +2950,10 @@ proc nameDefinitions {} {
 
 === Instance Allocation Block Definitions
 
+An Instance Allocation Block defines the characteristics of the instance
+storage pool to the run-time code.
+
+(((micca,Code Generation,iabDefinitions)))
 [source,tcl]
 ----
 <<generation code commands>>=
@@ -3087,6 +3076,10 @@ proc DefineIABMembers {classRef isUnionSubclass} {
 
 === Event Dispatch Block Definitions
 
+The Event Dispatch Block is the critical data structure used to
+dispatch events to the state models.
+
+(((micca,Code Generation,edbDefinitions)))
 [source,tcl]
 ----
 <<generation code commands>>=
@@ -3140,6 +3133,22 @@ proc edbDefinitions {} {
 }
 ----
 
+The transition table is key to event dispatch.
+The data structure is a matrix of _state_ rows and _events_ columns.
+However, the matrix is held as a one-dimensional array
+since that is a consistent single type that can be declared
+for the EDB.
+The dispatch code deals with finding the correct state row and
+event column by performing the correct address arithmetic.
+
+The strategy for computing the transition matrix is to
+compute the Cartesian product of the states and events and then
+determine the proper value for each cell.
+The platform model does not store the entire matrix explicitly.
+Rather it just contains the transitions specified by `transition` statements
+and holds defaults for the other cells.
+Here, the code must explicitly set a value for each cell.
+
 [source,tcl]
 ----
 <<generation code commands>>=
@@ -3158,7 +3167,7 @@ proc GenerateTransitionTable {smodel} {
         deRef % |
         relation rename % Name State
     } {} |%]
-    set states [relation union $states $cstate]
+    set states [relation union $states $cstate] ; # <1>
     # puts [relformat $states states]
 
     set events [pipe {
@@ -3171,7 +3180,7 @@ proc GenerateTransitionTable {smodel} {
     set alltrans [pipe {
         relation eliminate $events Number |
         relation join $states ~
-    }]
+    }] ; # <2>
     # puts [relformat $alltrans alltrans]
 
     set statetrans [pipe {
@@ -3196,7 +3205,7 @@ proc GenerateTransitionTable {smodel} {
         relation rename ~ DefaultTrans NewState |
         relation update ~ dttup {[tuple extract $dttup State] eq "@"} {
                 tuple update $dttup NewState CH}
-    }]
+    }] ; # <3>
     # puts [relformat $deftrans deftrans]
 
     set ntstates [pipe {
@@ -3231,12 +3240,22 @@ proc GenerateTransitionTable {smodel} {
     relation foreach transition $transitions -ascending {StateNumber Number} {
         relation assign $transition
         append result "    $NewStateNumber, // $State - $Event -> $NewState\n"
-    }
+    } ; # <4>
     append result "\} ;\n"
 
     return $result
 }
 ----
+<1> The set of all states includes the creation state, if any.
+<2> The `join` here effectively computes the Cartesian product since
+the only attributes in common are `Domain` and `Model`.
+<3> We compute a default transition for all the transitions not
+specified as a TransitionPlace.
+Note that the default transition coming out of the creation state
+is always `CH` since we do not want an outgoing transition from the
+creation state to be ignored.
+<4> Order here is first by state number and then by event number.
+This is the order that the run-time code requires.
 
 ifdef::showtests[]
 [source,tcl]
@@ -3411,6 +3430,11 @@ proc GenerateStateNames {smodel} {
 
 === Polymorphic Dispatch Block Definitions
 
+Polymorphic event dispatch involves mapping events at run time
+across a generalization.
+Here the data structures required by the run-time are more complicated.
+
+(((micca,Code Generation,pdbDefinitions)))
 [source,tcl]
 ----
 <<generation code commands>>=
@@ -3827,7 +3851,7 @@ test codegen-16.0 {
     }]}\
     {[validateutils matchLines codegen16.c {
         static struct A A__POOL[3] = {
-            { // a1
+            [0] = { // a1
                 .base__INST = {
                     .classDesc = &codegen16__CLASSES[0],
                     .alloc = 1,
@@ -3846,7 +3870,7 @@ test codegen-16.0 {
                     .prev = &Y__POOL[0].R1__BACK
                 },
             },
-            { // a2
+            [1] = { // a2
                 .base__INST = {
                     .classDesc = &codegen16__CLASSES[0],
                     .alloc = 2,
@@ -3865,7 +3889,7 @@ test codegen-16.0 {
                     .prev = &Y__POOL[1].R1__BACK
                 },
             },
-            { // a3
+            [2] = { // a3
                 .base__INST = {
                     .classDesc = &codegen16__CLASSES[0],
                     .alloc = 3,
@@ -3892,6 +3916,17 @@ endif::showtests[]
 
 === Class Description Definitions
 
+The class descriptions are another run-time data structure that is
+used extensively.
+It is the key focus of how a particular instance is to be treated
+since all instances of a class exhibit the same behavior.
+
+The strategy here is to build a single, rather large relation value
+that contains attributes for the values of the `MRT_Class` structure
+elements and then iterate over the relation value to output
+the ``C'' structure member initializer values.
+
+(((micca,Code Generation,classDefinitions)))
 [source,tcl]
 ----
 <<generation code commands>>=
@@ -4087,6 +4122,7 @@ proc classDefinitions {} {
 
 === Assigner Definitions
 
+(((micca,Code Generation,assignerDefinitions)))
 [source,tcl]
 ----
 <<generation code commands>>=
@@ -4181,6 +4217,12 @@ proc assignerDefinitions {} {
 
 === Relationship Description Definitions
 
+The calculation of relationship descriptions breaks down along the
+lines of the four different types of relationships found in the
+platform model.
+
+(((micca,Code Generation,relationshipDefinitions)))
+[source,tcl]
 ----
 <<generation code commands>>=
 proc relationshipDefinitions {} {
@@ -4203,244 +4245,10 @@ proc relationshipDefinitions {} {
         assignAttribute $relRef {Name relName} Number
         append result "$indent\[$Number\] = \{ // $relName\n"
 
-        # Simple Association
-        set typeRef [findRelated $relRef\
-                {~R30 Association} {~R31 SimpleAssociation}]
-        if {[isNotEmptyRef $typeRef]} {
-            set sourceRef [findRelated $typeRef ~R32]
-            assignAttribute $sourceRef {Class sClass} {Conditionality sCond}\
-                {Multiplicity sMult}
-            set sNum [readAttribute [findRelated $sourceRef R40 R41] Number]
-
-            set targetRef [findRelated $typeRef ~R33]
-            assignAttribute $targetRef {Class tClass} {Conditionality tCond}
-            set tNum [readAttribute [findRelated $targetRef R38 R40 R41] Number]
-
-            set tMult false
-            set stype mrtSingular
-            set slink 0
-
-            set tcomp [findRelated $targetRef R38 R94 R28]
-            lassign [FindRelOffsets $tcomp] ttype tlink
-
-            set sstore "offsetof([GetClassProperty $sClass Declaration],\
-                    $relName)"
-            set tstore "offsetof([GetClassProperty $tClass Declaration],\
-                    [readAttribute $tcomp Name])"
-
-            append result\
-                "$indent2.relType = mrtSimpleAssoc,\n"\
-                "$indent2.relInfo.simpleAssociation = \{\n"
-
-            append result\
-                "$indent3.source = \{\n"\
-                "$indent4.classDesc = &${domain}__CLASSES\[$sNum\], // $sClass\n"\
-                "$indent4.cardinality = [MapToCardinality $tCond $tMult],\n"\
-                "$indent4.storageType = $stype,\n"\
-                "$indent4.storageOffset = $sstore,\n"\
-                "$indent4.linkOffset = $slink\n"\
-                "$indent3\},\n"
-
-            append result\
-                "$indent3.target = \{\n"\
-                "$indent4.classDesc = &${domain}__CLASSES\[$tNum\], // $tClass\n"\
-                "$indent4.cardinality = [MapToCardinality $sCond $sMult],\n"\
-                "$indent4.storageType = $ttype,\n"\
-                "$indent4.storageOffset = $tstore,\n"\
-                "$indent4.linkOffset = $tlink\n"\
-                "$indent3\}\n"
-
-            append result\
-                "$indent2\},\n"\
-                "${indent3}#ifndef MRT_NO_NAMES\n"\
-                "$indent2.name = ${relName}__NAME\n"\
-                "${indent3}#endif /* MRT_NO_NAMES */\n"\
-                "$indent\},\n"
-            continue
-        }
-
-        set typeRef [findRelated $relRef\
-                {~R30 Association} {~R31 ClassBasedAssociation}]
-        if {[isNotEmptyRef $typeRef]} {
-            set sourceRef [findRelated $typeRef ~R34]
-            assignAttribute $sourceRef {Class sClass} {Conditionality sCond}\
-                {Multiplicity sMult}
-            set sNum [readAttribute [findRelated $sourceRef R40 R41] Number]
-
-            set targetRef [findRelated $typeRef ~R35]
-            assignAttribute $targetRef {Class tClass} {Conditionality tCond}\
-                {Multiplicity tMult}
-            set tNum [readAttribute [findRelated $targetRef R38 R40 R41] Number]
-
-            set asstorRef [findRelated $typeRef ~R42]
-            assignAttribute $asstorRef {Class aClass}
-            set aNum [readAttribute [findRelated $asstorRef R40 R41] Number]
-
-            set scomp [findRelated $sourceRef R95 R28]
-            lassign [FindRelOffsets $scomp] stype slink
-
-            set tcomp [findRelated $targetRef R38 R94 R28]
-            lassign [FindRelOffsets $tcomp] ttype tlink
-
-            set sstore "offsetof([GetClassProperty $sClass Declaration],\
-                    [readAttribute $scomp Name])"
-            set tstore "offsetof([GetClassProperty $tClass Declaration],\
-                    [readAttribute $tcomp Name])"
-
-            append result\
-                "$indent2.relType = mrtClassAssoc,\n"\
-                "$indent2.relInfo.classAssociation = \{\n"
-
-            append result\
-                "$indent3.source = \{\n"\
-                "$indent4.classDesc = &${domain}__CLASSES\[$sNum\], // $sClass\n"\
-                "$indent4.cardinality = [MapToCardinality $tCond $tMult],\n"\
-                "$indent4.storageType = $stype,\n"\
-                "$indent4.storageOffset = $sstore,\n"\
-                "$indent4.linkOffset = $slink,\n"\
-                "$indent3\},\n"
-
-            append result\
-                "$indent3.target = \{\n"\
-                "$indent4.classDesc = &${domain}__CLASSES\[$tNum\], // $tClass\n"\
-                "$indent4.cardinality = [MapToCardinality $sCond $sMult],\n"\
-                "$indent4.storageType = $ttype,\n"\
-                "$indent4.storageOffset = $tstore,\n"\
-                "$indent4.linkOffset = $tlink\n"\
-                "$indent3\},\n"
-
-            set aClassDecl [GetClassProperty $aClass Declaration]
-            set aClassForw "offsetof($aClassDecl, ${relName}.forward)"
-            set aClassBack "offsetof($aClassDecl, ${relName}.backward)"
-            append result\
-                "$indent3.associator = \{\n"\
-                "$indent4.classDesc = &${domain}__CLASSES\[$aNum\], // $aClass\n"\
-                "$indent4.forwardOffset = $aClassForw,\n"\
-                "$indent4.backwardOffset = $aClassBack,\n"\
-                "$indent3\}\n"
-
-            append result\
-                "$indent2\},\n"\
-                "${indent3}#ifndef MRT_NO_NAMES\n"\
-                "$indent2.name = ${relName}__NAME\n"\
-                "${indent3}#endif /* MRT_NO_NAMES */\n"\
-                "$indent\},\n"
-            continue
-        }
-
-        set typeRef [findRelated $relRef\
-                {~R30 Generalization} {~R43 ReferenceGeneralization}]
-        if {[isNotEmptyRef $typeRef]} {
-            set superRef [findRelated $typeRef ~R36]
-            assignAttribute $superRef {Class superClass}
-            set supNum [readAttribute [findRelated $superRef R48 R40 R41] Number]
-
-            set subRefs [findRelated $typeRef ~R37]
-            set subClasses [findRelated $subRefs R47 R40 R41]
-
-            set subs [pipe {
-                deRef $subRefs |
-                relation join ~ [deRef $subClasses]\
-                    -using {Domain Domain Class Name} |
-                relation extend ~ stup\
-                    classDesc string {
-                        "&${domain}__CLASSES\[[tuple extract $stup Number]\],\
-                        // [tuple extract $stup Class]"}\
-                    storageOffset string {
-                        "offsetof([GetClassProperty\
-                            [tuple extract $stup Class] Declaration],\
-                            $relName)"} |
-                relation project ~ Class classDesc storageOffset
-            }]
-
-            append subroles "static struct mrtrefsubclassrole const\
-                    ${relName}__SROLES\[[refMultiplicity $subRefs]\] = \{\n"
-            relation foreach sub $subs -ascending Class {
-                relation assign $sub
-                append subroles\
-                    "    \{\n"\
-                    "        .classDesc = $classDesc,\n"\
-                    "        .storageOffset = $storageOffset\n"\
-                    "    \},\n"
-            }
-            append subroles "\} ;\n"
-
-            append result\
-                "$indent2.relType = mrtRefGeneralization,\n"\
-                "$indent2.relInfo.refGeneralization = \{\n"
-
-            append result\
-                "$indent3.superclass = \{\n"\
-                "$indent4.classDesc = &${domain}__CLASSES\[$supNum\], // $superClass\n"\
-                "$indent4.storageOffset =\
-                    offsetof([GetClassProperty $superClass Declaration],\
-                    $relName)\n"\
-                "$indent3\},\n"
-
-            append result\
-                "$indent3.subclassCount = [refMultiplicity $subRefs],\n"\
-                "$indent3.subclasses = ${relName}__SROLES\n"
-
-            append result\
-                "$indent2\},\n"\
-                "${indent3}#ifndef MRT_NO_NAMES\n"\
-                "$indent2.name = ${relName}__NAME\n"\
-                "${indent3}#endif /* MRT_NO_NAMES */\n"\
-                "$indent\},\n"
-            continue
-        }
-
-        set typeRef [findRelated $relRef\
-                {~R30 Generalization} {~R43 UnionGeneralization}]
-        if {[isNotEmptyRef $typeRef]} {
-            set superRef [findRelated $typeRef ~R44]
-            assignAttribute $superRef {Class superClass}
-            set supNum [readAttribute [findRelated $superRef R48 R40 R41] Number]
-            set subRefs [findRelated $typeRef ~R45]
-            set subClasses [findRelated $subRefs R47 R40 R41]
-            set subs [pipe {
-                deRef $subRefs |
-                relation join ~ [deRef $subClasses]\
-                    -using {Domain Domain Class Name} |
-                relation extend ~ stup\
-                    classDesc string {
-                        "&${domain}__CLASSES\[[tuple extract $stup Number]\],\
-                        // [tuple extract $stup Class]"} |
-                relation project ~ Class classDesc
-            }]
-
-            append subroles "static MRT_Class const * const\
-                    ${relName}__SROLES\[[refMultiplicity $subRefs]\] = \{\n"
-            relation foreach sub $subs -ascending Class {
-                relation assign $sub
-                append subroles "    $classDesc\n"
-            }
-            append subroles "\} ;\n"
-
-            append result\
-                "$indent2.relType = mrtUnionGeneralization,\n"\
-                "$indent2.relInfo.unionGeneralization = \{\n"
-
-            append result\
-                "$indent3.superclass = \{\n"\
-                "$indent4.classDesc = &${domain}__CLASSES\[$supNum\], // $superClass\n"\
-                "$indent4.storageOffset =\
-                    offsetof([GetClassProperty $superClass Declaration],\
-                    $relName)\n"\
-                "$indent3\},\n"
-
-            append result\
-                "$indent3.subclassCount = [refMultiplicity $subRefs],\n"\
-                "$indent3.subclasses = ${relName}__SROLES\n"
-
-            append result\
-                "$indent2\},\n"\
-                "${indent3}#ifndef MRT_NO_NAMES\n"\
-                "$indent2.name = ${relName}__NAME\n"\
-                "${indent3}#endif /* MRT_NO_NAMES */\n"\
-                "$indent\},\n"
-            continue
-        }
+        <<relationshipDefinitions: simple associations>>
+        <<relationshipDefinitions: class based associations>>
+        <<relationshipDefinitions: reference generalizations>>
+        <<relationshipDefinitions: union generalizations>>
     }
 
     append result "\} ;\n"
@@ -4452,6 +4260,264 @@ proc relationshipDefinitions {} {
     ]
 }
 ----
+
+[source,tcl]
+----
+<<relationshipDefinitions: simple associations>>=
+set typeRef [findRelated $relRef {~R30 Association} {~R31 SimpleAssociation}]
+if {[isNotEmptyRef $typeRef]} {
+    set sourceRef [findRelated $typeRef ~R32]
+    assignAttribute $sourceRef {Class sClass} {Conditionality sCond}\
+        {Multiplicity sMult}
+    set sNum [readAttribute [findRelated $sourceRef R40 R41] Number]
+
+    set targetRef [findRelated $typeRef ~R33]
+    assignAttribute $targetRef {Class tClass} {Conditionality tCond}
+    set tNum [readAttribute [findRelated $targetRef R38 R40 R41] Number]
+
+    set tMult false
+    set stype mrtSingular
+    set slink 0
+
+    set tcomp [findRelated $targetRef R38 R94 R28]
+    lassign [FindRelOffsets $tcomp] ttype tlink
+
+    set sstore "offsetof([GetClassProperty $sClass Declaration],\
+            $relName)"
+    set tstore "offsetof([GetClassProperty $tClass Declaration],\
+            [readAttribute $tcomp Name])"
+
+    append result\
+        "$indent2.relType = mrtSimpleAssoc,\n"\
+        "$indent2.relInfo.simpleAssociation = \{\n"
+
+    append result\
+        "$indent3.source = \{\n"\
+        "$indent4.classDesc = &${domain}__CLASSES\[$sNum\], // $sClass\n"\
+        "$indent4.cardinality = [MapToCardinality $tCond $tMult],\n"\
+        "$indent4.storageType = $stype,\n"\
+        "$indent4.storageOffset = $sstore,\n"\
+        "$indent4.linkOffset = $slink\n"\
+        "$indent3\},\n"
+
+    append result\
+        "$indent3.target = \{\n"\
+        "$indent4.classDesc = &${domain}__CLASSES\[$tNum\], // $tClass\n"\
+        "$indent4.cardinality = [MapToCardinality $sCond $sMult],\n"\
+        "$indent4.storageType = $ttype,\n"\
+        "$indent4.storageOffset = $tstore,\n"\
+        "$indent4.linkOffset = $tlink\n"\
+        "$indent3\}\n"
+
+    append result\
+        "$indent2\},\n"\
+        "${indent3}#ifndef MRT_NO_NAMES\n"\
+        "$indent2.name = ${relName}__NAME\n"\
+        "${indent3}#endif /* MRT_NO_NAMES */\n"\
+        "$indent\},\n"
+    continue
+}
+----
+
+[source,tcl]
+----
+<<relationshipDefinitions: class based associations>>=
+set typeRef [findRelated $relRef\
+        {~R30 Association} {~R31 ClassBasedAssociation}]
+if {[isNotEmptyRef $typeRef]} {
+    set sourceRef [findRelated $typeRef ~R34]
+    assignAttribute $sourceRef {Class sClass} {Conditionality sCond}\
+        {Multiplicity sMult}
+    set sNum [readAttribute [findRelated $sourceRef R40 R41] Number]
+
+    set targetRef [findRelated $typeRef ~R35]
+    assignAttribute $targetRef {Class tClass} {Conditionality tCond}\
+        {Multiplicity tMult}
+    set tNum [readAttribute [findRelated $targetRef R38 R40 R41] Number]
+
+    set asstorRef [findRelated $typeRef ~R42]
+    assignAttribute $asstorRef {Class aClass}
+    set aNum [readAttribute [findRelated $asstorRef R40 R41] Number]
+
+    set scomp [findRelated $sourceRef R95 R28]
+    lassign [FindRelOffsets $scomp] stype slink
+
+    set tcomp [findRelated $targetRef R38 R94 R28]
+    lassign [FindRelOffsets $tcomp] ttype tlink
+
+    set sstore "offsetof([GetClassProperty $sClass Declaration],\
+            [readAttribute $scomp Name])"
+    set tstore "offsetof([GetClassProperty $tClass Declaration],\
+            [readAttribute $tcomp Name])"
+
+    append result\
+        "$indent2.relType = mrtClassAssoc,\n"\
+        "$indent2.relInfo.classAssociation = \{\n"
+
+    append result\
+        "$indent3.source = \{\n"\
+        "$indent4.classDesc = &${domain}__CLASSES\[$sNum\], // $sClass\n"\
+        "$indent4.cardinality = [MapToCardinality $tCond $tMult],\n"\
+        "$indent4.storageType = $stype,\n"\
+        "$indent4.storageOffset = $sstore,\n"\
+        "$indent4.linkOffset = $slink,\n"\
+        "$indent3\},\n"
+
+    append result\
+        "$indent3.target = \{\n"\
+        "$indent4.classDesc = &${domain}__CLASSES\[$tNum\], // $tClass\n"\
+        "$indent4.cardinality = [MapToCardinality $sCond $sMult],\n"\
+        "$indent4.storageType = $ttype,\n"\
+        "$indent4.storageOffset = $tstore,\n"\
+        "$indent4.linkOffset = $tlink\n"\
+        "$indent3\},\n"
+
+    set aClassDecl [GetClassProperty $aClass Declaration]
+    set aClassForw "offsetof($aClassDecl, ${relName}.forward)"
+    set aClassBack "offsetof($aClassDecl, ${relName}.backward)"
+    append result\
+        "$indent3.associator = \{\n"\
+        "$indent4.classDesc = &${domain}__CLASSES\[$aNum\], // $aClass\n"\
+        "$indent4.forwardOffset = $aClassForw,\n"\
+        "$indent4.backwardOffset = $aClassBack,\n"\
+        "$indent3\}\n"
+
+    append result\
+        "$indent2\},\n"\
+        "${indent3}#ifndef MRT_NO_NAMES\n"\
+        "$indent2.name = ${relName}__NAME\n"\
+        "${indent3}#endif /* MRT_NO_NAMES */\n"\
+        "$indent\},\n"
+    continue
+}
+----
+
+[source,tcl]
+----
+<<relationshipDefinitions: reference generalizations>>=
+set typeRef [findRelated $relRef\
+        {~R30 Generalization} {~R43 ReferenceGeneralization}]
+if {[isNotEmptyRef $typeRef]} {
+    set superRef [findRelated $typeRef ~R36]
+    assignAttribute $superRef {Class superClass}
+    set supNum [readAttribute [findRelated $superRef R48 R40 R41] Number]
+
+    set subRefs [findRelated $typeRef ~R37]
+    set subClasses [findRelated $subRefs R47 R40 R41]
+
+    set subs [pipe {
+        deRef $subRefs |
+        relation join ~ [deRef $subClasses]\
+            -using {Domain Domain Class Name} |
+        relation extend ~ stup\
+            classDesc string {
+                "&${domain}__CLASSES\[[tuple extract $stup Number]\],\
+                // [tuple extract $stup Class]"}\
+            storageOffset string {
+                "offsetof([GetClassProperty\
+                    [tuple extract $stup Class] Declaration],\
+                    $relName)"} |
+        relation project ~ Class classDesc storageOffset
+    }]
+
+    append subroles "static struct mrtrefsubclassrole const\
+            ${relName}__SROLES\[[refMultiplicity $subRefs]\] = \{\n"
+    relation foreach sub $subs -ascending Class {
+        relation assign $sub
+        append subroles\
+            "    \{\n"\
+            "        .classDesc = $classDesc,\n"\
+            "        .storageOffset = $storageOffset\n"\
+            "    \},\n"
+    }
+    append subroles "\} ;\n"
+
+    append result\
+        "$indent2.relType = mrtRefGeneralization,\n"\
+        "$indent2.relInfo.refGeneralization = \{\n"
+
+    append result\
+        "$indent3.superclass = \{\n"\
+        "$indent4.classDesc = &${domain}__CLASSES\[$supNum\], // $superClass\n"\
+        "$indent4.storageOffset =\
+            offsetof([GetClassProperty $superClass Declaration],\
+            $relName)\n"\
+        "$indent3\},\n"
+
+    append result\
+        "$indent3.subclassCount = [refMultiplicity $subRefs],\n"\
+        "$indent3.subclasses = ${relName}__SROLES\n"
+
+    append result\
+        "$indent2\},\n"\
+        "${indent3}#ifndef MRT_NO_NAMES\n"\
+        "$indent2.name = ${relName}__NAME\n"\
+        "${indent3}#endif /* MRT_NO_NAMES */\n"\
+        "$indent\},\n"
+    continue
+}
+----
+
+[source,tcl]
+----
+<<relationshipDefinitions: union generalizations>>=
+set typeRef [findRelated $relRef\
+        {~R30 Generalization} {~R43 UnionGeneralization}]
+if {[isNotEmptyRef $typeRef]} {
+    set superRef [findRelated $typeRef ~R44]
+    assignAttribute $superRef {Class superClass}
+    set supNum [readAttribute [findRelated $superRef R48 R40 R41] Number]
+    set subRefs [findRelated $typeRef ~R45]
+    set subClasses [findRelated $subRefs R47 R40 R41]
+    set subs [pipe {
+        deRef $subRefs |
+        relation join ~ [deRef $subClasses]\
+            -using {Domain Domain Class Name} |
+        relation extend ~ stup\
+            classDesc string {
+                "&${domain}__CLASSES\[[tuple extract $stup Number]\],\
+                // [tuple extract $stup Class]"} |
+        relation project ~ Class classDesc
+    }]
+
+    append subroles "static MRT_Class const * const\
+            ${relName}__SROLES\[[refMultiplicity $subRefs]\] = \{\n"
+    relation foreach sub $subs -ascending Class {
+        relation assign $sub
+        append subroles "    $classDesc\n"
+    }
+    append subroles "\} ;\n"
+
+    append result\
+        "$indent2.relType = mrtUnionGeneralization,\n"\
+        "$indent2.relInfo.unionGeneralization = \{\n"
+
+    append result\
+        "$indent3.superclass = \{\n"\
+        "$indent4.classDesc = &${domain}__CLASSES\[$supNum\], // $superClass\n"\
+        "$indent4.storageOffset =\
+            offsetof([GetClassProperty $superClass Declaration],\
+            $relName)\n"\
+        "$indent3\},\n"
+
+    append result\
+        "$indent3.subclassCount = [refMultiplicity $subRefs],\n"\
+        "$indent3.subclasses = ${relName}__SROLES\n"
+
+    append result\
+        "$indent2\},\n"\
+        "${indent3}#ifndef MRT_NO_NAMES\n"\
+        "$indent2.name = ${relName}__NAME\n"\
+        "${indent3}#endif /* MRT_NO_NAMES */\n"\
+        "$indent\},\n"
+    continue
+}
+----
+
+We use a helper function to compute the byte offset to link list pointers
+used for dynamic multiple reference pointer storage.
+If it's not a linked list storage scheme,
+then the offset is always 0.
 
 [source,tcl]
 ----
@@ -4477,6 +4543,9 @@ proc FindRelOffsets {complRef} {
 }
 ----
 
+Map separate conditionality and multiplicity values to a single
+encoded enumerator used by the run-time.
+
 [source,tcl]
 ----
 <<generation code commands>>=
@@ -4495,6 +4564,7 @@ proc MapToCardinality {cond mult} {
 
 === Class Instance Definitions
 
+(((micca,Code Generation,classInstanceDefinitions)))
 [source,tcl]
 ----
 <<generation code commands>>=
@@ -4515,7 +4585,9 @@ proc classInstanceDefinitions {} {
             "\[[GetClassProperty $Class TotalInstance]\] = \{\n"
 
         relation foreach inst $Instances -ascending InstNumber {
-            append result [GenInstanceInitializers $Class $ClassNumber $inst]
+            append result\
+                "    \[[relation extract $inst InstNumber]\] = "\
+                [string trimleft [GenInstanceInitializers $Class $ClassNumber $inst]]
         }
 
         append result "\} ;\n"
@@ -4871,6 +4943,7 @@ proc GenInstanceInitializers {className classNumber inst} {
 
 === Assigner Instance Definitions
 
+(((micca,Code Generation,assignerInstanceDefinitions)))
 [source,tcl]
 ----
 <<generation code commands>>=
@@ -4946,6 +5019,7 @@ proc assignerInstanceDefinitions {} {
 
 === Operation Definitions
 
+(((micca,Code Generation,operationDefinitions)))
 [source,tcl]
 ----
 <<generation code commands>>=
@@ -5010,6 +5084,7 @@ proc operationDefinitions {} {
 
 === Constructor Definitions
 
+(((micca,Code Generation,ctorDefinitions)))
 [source,tcl]
 ----
 <<generation code commands>>=
@@ -5060,6 +5135,7 @@ proc TorDefinitions {which} {
 
 === Destructor Definitions
 
+(((micca,Code Generation,dtorDefinitions)))
 [source,tcl]
 ----
 <<generation code commands>>=
@@ -5132,6 +5208,7 @@ endif::showtests[]
 
 === Activity Definitions
 
+(((micca,Code Generation,activityDefinitions)))
 [source,tcl]
 ----
 <<generation code commands>>=
@@ -5226,12 +5303,13 @@ proc FindParamsFromSig {psigRef} {
 
 === Domain Constructor Definition
 
+(((micca,Code Generation,domainCtorDefinition)))
 [source,tcl]
 ----
 <<generation code commands>>=
 proc domainCtorDefinition {} {
     variable domain
-    set result {}
+    set result [comment "Definition of Function to Construct Initial Instances"]
 
     set ctorinsts [pipe {
         Constructor findWhere {$Domain eq $domain} |
@@ -5242,8 +5320,6 @@ proc domainCtorDefinition {} {
     }]
 
     if {[relation isnotempty $ctorinsts]} {
-        append result [comment "Definition of Function to Construct\
-            Initial Instances"]
         relation foreach ctorinst $ctorinsts {
             relation assign $ctorinst
             relation foreach instance $Instances -ascending Number {
@@ -5267,12 +5343,13 @@ proc domainCtorDefinition {} {
 
 === Domain Operation Definitions
 
+(((micca,Code Generation,domainOpDefinitions)))
 [source,tcl]
 ----
 <<generation code commands>>=
 proc domainOpDefinitions {} {
     variable domain
-    set result {}
+    set result [comment "Domain Operation Definitions"]
 
     set ops [pipe {
         DomainOperation findWhere {$Domain eq $domain} |
@@ -5281,49 +5358,46 @@ proc domainOpDefinitions {} {
         ralutil::rvajoin ~ $::micca::DomainOperationParameter Parameters
     }]
 
-    if {[relation isnotempty $ops]} {
-        append result [comment "Domain Operation Definitions"]
-        relation foreach op $ops {
-            relation assign $op
-            append result\
-                "$ReturnDataType\n${domain}_${Operation}"
+    relation foreach op $ops {
+        relation assign $op
+        append result\
+            "$ReturnDataType\n${domain}_${Operation}"
 
-            if {[relation isempty $Parameters]} {
-                set decl "\(void\)\n"
-                append result $decl
-                set syms [relation create {
-                    Name string Ctype string Type string Class string
-                }]
-            } else {
-                set pdecls {}
-                relation foreach param $Parameters -ascending Number {
-                    relation assign $param
-                    append pdecls\
-                        [typeCheck composeDeclaration $DataType $Name]\
-                        ,\n
-                }
-                set pdecls [string trimright $pdecls ",\n"]\)\n
-                set decl [string cat\
-                    "\(\n"\
-                    [indentCode $pdecls]\
-                ]
-                append result $decl
-                set syms [pipe {
-                    relation project $Parameters Name DataType |
-                    relation rename ~ DataType Ctype |
-                    relation extend ~ stup\
-                        Type string {{}}\
-                        Class string {{}}
-                }]
+        if {[relation isempty $Parameters]} {
+            set decl "\(void\)\n"
+            append result $decl
+            set syms [relation create {
+                Name string Ctype string Type string Class string
+            }]
+        } else {
+            set pdecls {}
+            relation foreach param $Parameters -ascending Number {
+                relation assign $param
+                append pdecls\
+                    [typeCheck composeDeclaration $DataType $Name]\
+                    ,\n
             }
-
-            append result\
-                [blockcomment $Body]\
-                "\{\n"\
-                "    MRT_INSTRUMENT_ENTRY\n"\
-                [ExpandActivity "$Operation domain operation" $Body $syms]\
-                "\}\n"
+            set pdecls [string trimright $pdecls ",\n"]\)\n
+            set decl [string cat\
+                "\(\n"\
+                [indentCode $pdecls]\
+            ]
+            append result $decl
+            set syms [pipe {
+                relation project $Parameters Name DataType |
+                relation rename ~ DataType Ctype |
+                relation extend ~ stup\
+                    Type string {{}}\
+                    Class string {{}}
+            }]
         }
+
+        append result\
+            [blockcomment $Body]\
+            "\{\n"\
+            "    MRT_INSTRUMENT_ENTRY\n"\
+            [ExpandActivity "$Operation domain operation" $Body $syms]\
+            "\}\n"
     }
 
     return $result
@@ -5370,6 +5444,7 @@ endif::showtests[]
 
 === External Operation Definitions
 
+(((micca,Code Generation,externalOpDefinitions)))
 [source,tcl]
 ----
 <<generation code commands>>=
@@ -5380,7 +5455,7 @@ proc externalOpDefinitions {} {
     }
 
     variable domain
-    set result {}
+    set result [comment "External Operation Stub Definitions"]
 
     set ops [pipe {
         ExternalOperation findWhere {$Domain eq $domain} |
@@ -5389,7 +5464,6 @@ proc externalOpDefinitions {} {
         ralutil::rvajoin ~ $::micca::ExternalOperationParameter Parameters
     }]
 
-    append result [comment "External Operation Stub Definitions"]
     relation foreach op $ops {
         relation assign $op
         append result\
@@ -5472,6 +5546,7 @@ endif::showtests[]
 
 === Portal Data Definitions
 
+(((micca,Code Generation,portalDefinitions)))
 [source,tcl]
 ----
 <<generation code commands>>=
@@ -5498,6 +5573,7 @@ proc portalDefinition {} {
 
 === Epilogue Declarations
 
+(((micca,Code Generation,epilogueDeclarations)))
 [source,tcl]
 ----
 <<generation code commands>>=
@@ -5506,7 +5582,7 @@ proc epilogueDeclarations {} {
 
     return [string cat\
         [comment "Domain Epilogue"]\
-        [indentCode [string trim $epilogue \n] 0]\
+        [indentCode [string trim $epilogue] 0]\
     ]
 }
 ----
@@ -6617,7 +6693,7 @@ proc InstanceAssign {instref args} {
         }
         assignAttribute $attrRef {DataType attrtype} Dimension
 
-        set sym [LookUpSym $varname]
+        set sym [LookUpSymbol $varname]
         if {[dict size $sym] != 0} {
             CheckSymProperties $sym Ctype $attrtype
         } else {
@@ -8430,7 +8506,7 @@ proc FindEventNumber {class event} {
     variable domain
     set eventRef [Event findById Domain $domain Model $class Event $event]
     if {[isEmptyRef $eventRef]} {
-        error "event, $event, is not a known event for class, $Class"
+        error "event, $event, is not a known event for class, $class"
     }
     return [readAttribute $eventRef Number]
 }
@@ -8571,7 +8647,7 @@ proc InstanceSetForeachSelected {set inst} {
 ==== Testing for an Empty Set
 
 *****
-`%<instset` _instsetvar_ `empty``>%`
+`%<instset` _instsetvar_ `empty>%`
 
 instsetvar::
     The name of a ``C'' variable which holds an instance set.
@@ -8594,7 +8670,7 @@ proc InstanceSetEmpty {set} {
 ==== Testing for an Non-Empty Set
 
 *****
-`%<instset` _instsetvar_ `notempty``>%`
+`%<instset` _instsetvar_ `notempty>%`
 
 instsetvar::
     The name of a ``C'' variable which holds an instance set.
@@ -8616,7 +8692,7 @@ proc InstanceSetNotEmpty {set} {
 ==== Number of Instances in a Set
 
 *****
-`%<instset` _instsetvar_ `cardinality``>%`
+`%<instset` _instsetvar_ `cardinality>%`
 
 instsetvar::
     The name of a ``C'' variable which holds an instance set.
@@ -8635,6 +8711,21 @@ proc InstanceSetCardinality {set} {
 }
 ----
 
+==== Instance Set Equality
+
+*****
+`%<instset` _instsetvar_ `equal` _instsetvar2_ `>%`
+
+instsetvar::
+    The name of a ``C'' variable which holds an instance set.
+instsetvar2::
+    The name of a ``C'' variable which holds an instance set.
+
+The `equal` subcommand generates a ``C'' expression that evaluates
+to non-zero if the instance set held in _instsetvar_ is equal to the
+instance set held in _instsetvar2_.
+*****
+
 [source,tcl]
 .Implementation
 ----
@@ -8646,6 +8737,21 @@ proc InstanceSetEqual {set1 set2} {
 }
 ----
 
+==== Instance Set Inequality
+
+*****
+`%<instset` _instsetvar_ `notequal` _instsetvar2_ `>%`
+
+instsetvar::
+    The name of a ``C'' variable which holds an instance set.
+instsetvar2::
+    The name of a ``C'' variable which holds an instance set.
+
+The `notequal` subcommand generates a ``C'' expression that evaluates
+to non-zero if the instance set held in _instsetvar_ is *not* equal to the
+instance set held in _instsetvar2_.
+*****
+
 [source,tcl]
 .Implementation
 ----
@@ -8654,6 +8760,22 @@ proc InstanceSetNotEqual {set1 set2} {
     return (![InstanceSetEqual $set1 $set2])
 }
 ----
+
+==== Adding to an Instance Set
+
+*****
+`%<instset` _instsetvar_ `add` _instref_ `>%`
+
+instsetvar::
+    The name of a ``C'' variable which holds an instance set.
+instref::
+    The name of a ``C'' variable which holds an instance reference.
+
+The `add` subcommand generates a ``C'' statement that
+adds the instance held in the _instref_ variable to the instance
+set held in the _instservar_ variable.
+It is not an error if _instref_ is already contained in _instsetvar_.
+*****
 
 [source,tcl]
 .Implementation
@@ -8669,6 +8791,22 @@ proc InstanceSetAdd {set inst} {
 }
 ----
 
+==== Removing from an Instance Set
+
+*****
+`%<instset` _instsetvar_ `remove` _instref_ `>%`
+
+instsetvar::
+    The name of a ``C'' variable which holds an instance set.
+instref::
+    The name of a ``C'' variable which holds an instance reference.
+
+The `remove` subcommand generates a ``C'' statement that
+removes the instance held in the _instref_ variable to the instance
+set held in the _instservar_ variable.
+It is not an error if _instref_ is not present in _instsetvar_.
+*****
+
 [source,tcl]
 .Implementation
 ----
@@ -8682,6 +8820,21 @@ proc InstanceSetRemove {set inst} {
     ]]
 }
 ----
+
+==== Instance Set Membership
+
+*****
+`%<instset` _instsetvar_ `contains` _instsetvar2_ `>%`
+
+instsetvar::
+    The name of a ``C'' variable which holds an instance set.
+instref::
+    The name of a ``C'' variable which holds an instance reference.
+
+The `contains` subcommand generates a ``C'' expression that evaluates
+to non-zero if the instance held in _instvar_ is a member of the
+instance set held in _instsetvar_.
+*****
 
 [source,tcl]
 .Implementation
@@ -8873,7 +9026,22 @@ proc InstanceSetSelectRelatedWhere {set instref where startref args} {
 }
 ----
 
+==== Instance Set Union
+
+*****
+`%<instset` _resultsetvar_ `union` _instsetvar1_ _instsetvar2_ _?...?_ `>%`
+
+instsetvarN::
+    The name of a ``C'' variable which holds an instance set.
+
+The `union` subcommand generates ``C'' statements that
+computes the set union of the _instsetvarN_ instance sets placing
+the result in _resultsetvar_.
+The _instsetvarN_ instance sets must contain instances of the same class.
+*****
+
 [source,tcl]
+.Implementation
 ----
 <<generation support commands>>=
 proc InstanceSetUnion {opset set1 set2 args} {
@@ -8882,7 +9050,22 @@ proc InstanceSetUnion {opset set1 set2 args} {
 }
 ----
 
+==== Instance Set Intersection
+
+*****
+`%<instset` _resultsetvar_ `intersect` _instsetvar1_ _instsetvar2_ _?...?_ `>%`
+
+instsetvarN::
+    The name of a ``C'' variable which holds an instance set.
+
+The `intersect` subcommand generates ``C'' statements that
+computes the set intersection of the _instsetvarN_ instance sets placing
+the result in _resultsetvar_.
+The _instsetvarN_ instance sets must contain instances of the same class.
+*****
+
 [source,tcl]
+.Implementation
 ----
 <<generation support commands>>=
 proc InstanceSetIntersect {opset set1 set2 args} {
@@ -8890,6 +9073,8 @@ proc InstanceSetIntersect {opset set1 set2 args} {
             $set1 $set2 {*}$args
 }
 ----
+
+We can factor the basic set operation code generation into a common procedure.
 
 [source,tcl]
 ----
@@ -8915,7 +9100,22 @@ proc InstanceSetOperation {label op opset set1 set2 args} {
 }
 ----
 
+==== Instance Set Difference
+
+*****
+`%<instset` _resultsetvar_ `minus` _instsetvar1_ _instsetvar2_ `>%`
+
+instsetvarN::
+    The name of a ``C'' variable which holds an instance set.
+
+The `minus` subcommand generates ``C'' statements that
+computes the set difference of the _instsetvar1_ and _instvarset2_
+(in that order) placing the result in _resultsetvar_.
+The _instsetvarN_ instance sets must contain instances of the same class.
+*****
+
 [source,tcl]
+.Implementation
 ----
 <<generation support commands>>=
 proc InstanceSetMinus {diffset set1 set2} {
@@ -9006,6 +9206,12 @@ proc ClassCreate {className instref args} {
 }
 ----
 
+After any instance creation,
+we have to generate code to assign values to the attributes of
+the newly created instance.
+We factor that into a common procedure as it will be needed
+for other instance creation situations.
+
 [source,tcl]
 ----
 <<generation support commands>>=
@@ -9035,6 +9241,9 @@ proc AssignAttributeValues {className instref attrvalues} {
 }
 ----
 
+The values assigned to attributes come from the ones provided by
+the caller supplemented by any defined default values.
+
 [source,tcl]
 ----
 <<generation support commands>>=
@@ -9063,6 +9272,9 @@ proc GetAttrInitialValues {className attrvalues} {
 }
 ----
 
+The attribues that must be provided are those that do not have
+a defined default value.
+
 [source,tcl]
 ----
 <<generation support commands>>=
@@ -9077,7 +9289,11 @@ proc FindRequiredAttributes {className} {
         relation list ~ Name
     }]
 }
+----
 
+[source,tcl]
+----
+<<generation support commands>>=
 proc FindDefaultedAttributes {className} {
     variable domain
     return [pipe {
@@ -9986,6 +10202,7 @@ an instance reference to instances of _class_.
 *****
 
 [source,tcl]
+.Implementation
 ----
 <<generation support commands>>=
 proc ClassInstanceReference {className varName} {
@@ -9998,6 +10215,7 @@ proc ClassInstanceReference {className varName} {
 ----
 
 [source,tcl]
+.Implementation
 ----
 <<generation support commands>>=
 proc ClassIdToRef {className instid instref} {
@@ -10012,6 +10230,7 @@ proc ClassIdToRef {className instid instref} {
 ----
 
 [source,tcl]
+.Implementation
 ----
 <<generation support commands>>=
 proc ClassFindByName {className instName instref} {
@@ -10032,6 +10251,7 @@ proc ClassFindByName {className instName instref} {
 ----
 
 [source,tcl]
+.Implementation
 ----
 <<generation support commands>>=
 proc ClassOperation {className opName args} {
@@ -10062,6 +10282,7 @@ proc ClassOperation {className opName args} {
 ----
 
 [source,tcl]
+.Implementation
 ----
 <<generation support commands>>=
 proc ClassInstanceSet {className varName} {
