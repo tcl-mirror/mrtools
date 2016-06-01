@@ -2984,9 +2984,12 @@ void
 mrtEndTransaction(void)
 {
     MRT_Relationship const **rships = mrtTransaction.relationships ;
-    for (unsigned count = mrtTransaction.count ; count != 0 ;
-            --count, ++rships) {
+    for (unsigned count = 0 ; count < mrtTransaction.count ; count++, ++rships) {
         if (!mrtCheckRelationship(*rships)) {
+            mrtTransaction.count -= count ;
+            memmove(mrtTransaction.relationships, rships,
+                mrtTransaction.count * sizeof(*rships)) ; // <1>
+
 #               ifndef MRT_NO_NAMES
             mrtFatalError(mrtRefIntegrity, (*rships)->name) ;
 #               else
@@ -2997,6 +3000,20 @@ mrtEndTransaction(void)
     mrtTransaction.count = 0 ;
 }
 ----
+<1> We "shuffle up" the contents of the transaction relationships array
+before giving up with a fatal error.
+The reason for this is that it is possible to install a fatal error handler
+that long jumps out of the event loop.
+We don't want to remove the relationship that failed from the transaction list,
+but all those that have passed the integrity check need to be discarded.
+It is possible for a fatal error that has long jumped out of the event
+loop to repair the damage and want to continue on.
+This is certainly the case when we are testing the run-time code itself.
+Test cases know what problem they have created and can correct it
+so that subsequenct tests can proceed along.
+However, the failed relationships will still be checked at the next
+end of transaction time.
+So we insure that any recovery of the integrity check happened correctly.
 
 ==== Verifying Referential Integrity
 
@@ -3514,7 +3531,7 @@ target instance storage. This will eliminate any NULL values also.
 Note we also insist that the target instance be active.
 <2> We want to avoid the possibility of overflow of the reference counter.
 It is only an unsigned 8-bit quantity.
-Should if overflow, we could misinterpret the count.
+Should it overflow, we could misinterpret the count.
 If we are at its max value, then we set it back to 2.
 Why 2? Zero and one are significant in this case and we know the values
 has already passed two, so we resume our count from there.
@@ -3675,8 +3692,7 @@ mrtCountClassAssocRefs(
 To count class based associations,
 we have to count the references from each participant to the associator
 class.
-References from the participant to the associator class can be singular
-or linked.
+References from the participant to the associator class can be of any type.
 References from the associator class back to the participant are always
 singular.
 
@@ -3965,11 +3981,11 @@ mrtLink(
         break ;
 
     case mrtLinkedList: { // <2>
-        MRT_LinkRef *sourceRef = (MRT_LinkRef *)
+        MRT_LinkRef *sourceList = (MRT_LinkRef *)
                 ((uintptr_t)source + sourceRole->storageOffset) ;
         MRT_LinkRef *targetRef = (MRT_LinkRef *)
                 ((uintptr_t)target + sourceRole->linkOffset) ;
-        mrtLinkRefInsert(targetRef, sourceRef) ;
+        mrtLinkRefInsert(targetRef, sourceList) ;
     }
         break ;
 
@@ -4524,7 +4540,7 @@ The run-time supplies a set of linked list operations for use
 in manipulating the lists of instance pointers used to realize and
 navigate associations.
 They are the usual circularly, doubly linked list manipulations
-and are presented here without further comment.
+and are presented here without little further comment.
 
 [source,c]
 ----
@@ -4544,37 +4560,41 @@ mrtLinkRefEnd(
     return iter ;
 }
 static inline
-void
-mrtLinkRefInit(
-    MRT_LinkRef *ref)
-{
-    ref->next = ref->prev = mrtLinkRefEnd(ref) ;
-}
-static inline
 bool
 mrtLinkRefEmpty(
-    MRT_LinkRef *iter)
+    MRT_LinkRef *ref)
 {
-    return iter->next == iter ;
+    return ref->next == ref ;
 }
 static inline
 bool
 mrtLinkRefNotEmpty(
-    MRT_LinkRef *iter)
+    MRT_LinkRef *ref)
 {
-    return iter->next != iter ;
+    return ref->next != ref ;
 }
+----
+
+Note that an empty list is one where the list terminus points back to itself.
+
+[source,c]
+----
+<<mrt implementation static inlines>>=
 static inline
 void
-mrtLinkRefInsert(
-    MRT_LinkRef *item,
-    MRT_LinkRef *at)
+mrtLinkRefInit(
+    MRT_LinkRef *ref)
 {
-    item->prev = at->prev ;
-    item->next = at ;
-    at->prev->next = item ;
-    at->prev = item ;
+    ref->next = ref->prev = ref ;
 }
+----
+
+Because the list is doubly linked,
+we only have to have a pointer to the item to remove it.
+
+[source,c]
+----
+<<mrt implementation static inlines>>=
 static inline
 void
 mrtLinkRefRemove(
@@ -4582,9 +4602,41 @@ mrtLinkRefRemove(
 {
     item->prev->next = item->next ;
     item->next->prev = item->prev ;
-    item->next = item->prev = NULL ;
+    item->next = item->prev = NULL ; // <1>
 }
 ----
+
+The insert function inserts an item before a given point in the list.
+Since it is usually called with a list head as the insertion place,
+the net effect is to place the item last in the list.
+
+[source,c]
+----
+<<mrt implementation static inlines>>=
+static inline
+void
+mrtLinkRefInsert(
+    MRT_LinkRef *item,
+    MRT_LinkRef *at)
+{
+    if (item->next != NULL || item->prev != NULL) { // <2>
+        mrtFatalError(mrtRelationshipLinkage) ;
+    }
+    item->prev = at->prev ;
+    item->next = at ;
+    at->prev->next = item ;
+    at->prev = item ;
+}
+----
+
+<1> Since all the linked lists maintained as part of a set of references
+form a set,
+we set the values of the `next` and `prev` members to `NULL` when
+the item has been removed from a list.
+<2> We also test that they are `NULL` before inserting an item into a list
+to insure that we are not inserting a duplicate.
+Inserting an item already in the list destroys the pointer structure
+of the list.
 
 == Managing Execution
 
@@ -9268,7 +9320,7 @@ static char const * const errMsgs[] = {
     [mrtSyncOverflow] = "synchronization queue overflow\n",
     [mrtTransOverflow] = "transaction markings overflow\n",
     [mrtStaticRelationship] = "attempt to modify static relationship\n",
-    [mrtRelationshipLinkage] = "attempt to link non-participant\n",
+    [mrtRelationshipLinkage] = "invalid instance linkage operation or value\n",
 
 #       ifndef MRT_NO_NAMES
     [mrtCantHappen] = "can't happen transition: %s.%s: %s - %s -> CH\n",
@@ -11383,7 +11435,6 @@ mrt_Initialize(void)
  */
 <<mrt interface static inlines>>
 
-
 /*
  * External Functions
  */
@@ -11435,6 +11486,11 @@ mrt_Initialize(void)
 
 <<mrt static data>>
 <<posix static data>>
+
+/*
+ * Static Inline Functions
+ */
+<<mrt implementation static inlines>>
 
 /*
  * Static Functions
@@ -11500,7 +11556,6 @@ mrt_Initialize(void)
  */
 <<mrt interface static inlines>>
 
-
 /*
  * External Functions
  */
@@ -11549,6 +11604,11 @@ mrt_Initialize(void)
 
 <<mrt static data>>
 <<arm7m static data>>
+
+/*
+ * Static Inline Functions
+ */
+<<mrt implementation static inlines>>
 
 /*
  * Static Functions
@@ -11612,7 +11672,6 @@ mrt_Initialize(void)
  */
 <<mrt interface static inlines>>
 
-
 /*
  * External Functions
  */
@@ -11661,6 +11720,11 @@ mrt_Initialize(void)
 
 <<mrt static data>>
 <<msp430 static data>>
+
+/*
+ * Static Inline Functions
+ */
+<<mrt implementation static inlines>>
 
 /*
  * Static Functions
