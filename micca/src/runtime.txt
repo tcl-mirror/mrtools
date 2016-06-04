@@ -688,16 +688,51 @@ each class has a data structure that contains all the class invariant
 information.
 
 First, we consider class attributes.
-We will have need to obtain attribute values in a generic way
-and so need some offset and size information.
+We will have need to obtain attribute values in a generic way.
+From the platform model,
+we see that there are two types of attributes, independent and dependent.
+We will need to encode that difference.
+
+(((micca,Run Time Data,MRT_AttrType)))
+[source,c]
+.Attribute Type Data Type
+----
+<<mrt interface simple types>>=
+typedef enum {
+    mrtIndependentAttr,
+    mrtDependentAttr
+} MRT_AttrType ;
+----
+
+Dependent attributes are those computed by some formula.
+The code generator will enclose the formula in a function that
+we can invoke to obtain the attribute value.
+
+(((micca,Run Time Data,MRT_AttrFormula)))
+[source,c]
+.Attribute Formula Data Type
+----
+<<mrt interface aggregate types>>=
+typedef void MRT_AttrFormula(void *const self, void *pvalue, MRT_AttrSize vsize) ;
+----
+
+Formula functions will be invoked with a pointer to the instance,
+a pointer to where the result is to be stored and the size of the
+result area in bytes.
+
+The description of an attribute is then a discriminated union.
 
 (((micca,Run Time Data,MRT_Attribute)))
 [source,c]
 ----
 <<mrt interface aggregate types>>=
 typedef struct mrtattribute {
-    MRT_AttrOffset offset ;
     MRT_AttrSize size ;
+    MRT_AttrType type ;
+    union {
+        MRT_AttrOffset offset ;
+        MRT_AttrFormula *formula ;
+    } access ;
 
 #       ifndef MRT_NO_NAMES
     char const *name ;
@@ -705,10 +740,19 @@ typedef struct mrtattribute {
 } MRT_Attribute ;
 ----
 
-`offset`::
-    The offset in bytes from the beginning of the instance to the attribute.
 `size`::
     The number of bytes of memory occupied by the attribute value.
+`type`::
+    The type of the attribute, independent or dependent.
+`access`::
+    A union whose value depends upon the value of the `type` member.
+    `offset`;;
+        For `mrtIndependentAttr` types, the `offset` member contains
+        the offset in bytes from the beginning of the instance memory
+        to the attribute.
+    `formula`;;
+        For `mrtDependentAttr` types, the `formula` member contains
+        a pointer to a function that computes the value of the attribute.
 `name`::
     The name of the attribute.
 
@@ -7325,22 +7369,26 @@ Negative return values indicate errors as described below.
 [source,c]
 ----
 <<mrt constants>>=
-     // No such class.
+    // No such class.
 #define MICCA_PORTAL_NO_CLASS       (-1)
-     // No such instance.
+    // No such instance.
 #define MICCA_PORTAL_NO_INST        (-2)
-     // No such attribute.
+    // No such attribute.
 #define MICCA_PORTAL_NO_ATTR        (-3)
-     // Instance slot is not in use.
+    // Instance slot is not in use.
 #define MICCA_PORTAL_UNALLOC        (-4)
-     // Class does not have a state model.
+    // Class does not have a state model.
 #define MICCA_PORTAL_NO_STATE_MODEL (-5)
-     // No such event for the class.
+    // No such event for the class.
 #define MICCA_PORTAL_NO_EVENT       (-6)
-     // No such state for the class.
+    // No such state for the class.
 #define MICCA_PORTAL_NO_STATE       (-7)
-     // Class does not support dynamic instances.
+    // Class does not support dynamic instances.
 #define MICCA_PORTAL_NO_DYNAMIC     (-8)
+    // Operation not allowed on a dependent attribute.
+#define MICCA_PORTAL_DEPENDENT_ATTR (-9)
+    // Value was truncated due to lack of space.
+#define MICCA_PORTAL_TRUNCATED      (-10)
 ----
 
 Internally,
@@ -7444,21 +7492,26 @@ mrt_PortalGetAttrRef(
 
     result = mrtPortalGetInstRef(portal, classId, instId, &instref) ;
     if (result == 0) {
-        MRT_Class const *class = portal->classes + classId ;
-        if (attrId < class->attrCount) {
-            MRT_Attribute const *attr = class->classAttrs + attrId ;
-            if (instref->alloc != 0) {
-                if (pref) {
-                    *pref = (void *)((uintptr_t)instref + attr->offset) ;
-                }
-                if (size) {
-                    *size = attr->size ;
+        assert(instref != NULL) ;
+        if (instref->alloc != 0) {
+            MRT_Class const *class = portal->classes + classId ;
+            if (attrId < class->attrCount) {
+                MRT_Attribute const *attr = class->classAttrs + attrId ;
+                if (attr->type == mrtIndependentAttr) {
+                    if (pref) {
+                        *pref = (void *)((uintptr_t)instref + attr->access.offset) ;
+                    }
+                    if (size) {
+                        *size = attr->size ;
+                    }
+                } else {
+                    result = MICCA_PORTAL_DEPENDENT_ATTR ;
                 }
             } else {
-                result = MICCA_PORTAL_UNALLOC ;
+                result = MICCA_PORTAL_NO_ATTR ;
             }
         } else {
-            result = MICCA_PORTAL_NO_ATTR ;
+            result = MICCA_PORTAL_UNALLOC ;
         }
     }
 
@@ -7524,16 +7577,35 @@ mrt_PortalReadAttr(
 {
     assert(dst != NULL) ;
 
-    void *src ;
-    MRT_AttrSize srcSize ;
+    MRT_Instance *instref ;
+    int result ;
 
-    int result = mrt_PortalGetAttrRef(portal, classId, instId, attrId, &src,
-            &srcSize) ;
+    result = mrtPortalGetInstRef(portal, classId, instId, &instref) ;
     if (result == 0) {
-        assert(src != NULL) ;
-        int copied = dstSize < srcSize ? dstSize : srcSize ;
-        memcpy(dst, src, copied) ;
-        result = copied ;
+        assert(instref != NULL);
+        if (instref->alloc != 0) {
+            MRT_Class const *class = portal->classes + classId ;
+            if (attrId < class->attrCount) {
+                MRT_Attribute const *attr = class->classAttrs + attrId ;
+                MRT_AttrSize srcSize = attr->size ;
+                if (dstSize >= srcSize) {
+                    result = srcSize ;
+                    if (attr->type == mrtIndependentAttr) {
+                        void *src = (void *)((uintptr_t)instref +
+                                attr->access.offset) ;
+                        memcpy(dst, src, srcSize) ;
+                    } else {
+                        attr->access.formula(instref, dst, srcSize) ;
+                    }
+                } else {
+                    result = MICCA_PORTAL_TRUNCATED ;
+                }
+            } else {
+                result = MICCA_PORTAL_NO_ATTR ;
+            }
+        } else {
+            result = MICCA_PORTAL_UNALLOC ;
+        }
     }
 
     return result ;

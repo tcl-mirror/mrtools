@@ -1346,6 +1346,7 @@ set codeTemplate [textutil::adjust::undent {
     [operationDeclarations]
     [ctorDeclarations]
     [dtorDeclarations]
+    [formulaDeclarations]
     [activityDeclarations]
     [storageDeclarations]
     [nameDefinitions]
@@ -1360,6 +1361,7 @@ set codeTemplate [textutil::adjust::undent {
     [operationDefinitions]
     [ctorDefinitions]
     [dtorDefinitions]
+    [formulaDefinitions]
     [activityDefinitions]
     [domainCtorDefinition]
     [domainOpDefinitions]
@@ -2805,6 +2807,30 @@ proc dtorDeclarations {} {
 }
 ----
 
+=== Formula Declarations
+
+Formula declarations arise for dependent attributes.
+
+(((micca,Code Generation,formulaDeclarations)))
+[source,tcl]
+----
+<<generation code commands>>=
+proc formulaDeclarations {} {
+    variable domain
+    set result [comment "Dependent Attribute Formula Forward Declarations"]
+
+    set deps [DependentAttribute findWhere {$Domain eq $domain}]
+    forAllRefs dep $deps {
+        assignAttribute $dep {Class className} {Name attrName}
+        append result\
+            "static void ${className}_${attrName}__FORMULA\(void *const,\
+                void*, MRT_AttrSize) ;\n"
+    }
+
+    return $result
+}
+----
+
 === Activity Declarations
 
 State activities must also be declared so that pointers to them
@@ -3970,6 +3996,8 @@ proc classDefinitions {} {
     set attrs [pipe {
         findRelated $classRefs ~R20 {~R25 PopulatedComponent} {~R21 Attribute} |
         deRef % |
+        ralutil::rvajoin % $::micca::IndependentAttribute Indep |
+        ralutil::rvajoin % $::micca::DependentAttribute Dep |
         relation rename % Name Attribute Class Name
     } {} |%]
     # puts [relformat $attrs attrs]
@@ -4070,8 +4098,6 @@ proc classDefinitions {} {
 
             relation foreach attr $Attributes -ascending Attribute {
                 relation assign $attr
-                set offset "offsetof([GetClassProperty $Name Declaration],\
-                        $Attribute)"
                 set size "sizeof($DataType"
                 if {$Dimension > 0} {
                     append size "\[$Dimension\]"
@@ -4079,8 +4105,20 @@ proc classDefinitions {} {
                 append size )
                 append attrrefs\
                     "    \{\n"\
-                    "        .offset = $offset,\n"\
-                    "        .size = $size,\n"\
+                    "        .size = $size,\n"
+                if {[relation isnotempty $Indep]} {
+                    set offset "offsetof([GetClassProperty $Name Declaration],\
+                            $Attribute)"
+                    append attrrefs\
+                        "        .type = mrtIndependentAttr,\n"\
+                        "        .access.offset = $offset,\n"
+                } else {
+                    set formfunc "${Name}_${Attribute}__FORMULA"
+                    append attrrefs\
+                        "        .type = mrtDependentAttr,\n"\
+                        "        .access.formula = $formfunc,\n"
+                }
+                append attrrefs\
                     "            #ifndef MRT_NO_NAMES\n"\
                     "        .name = \"$Attribute\"\n"\
                     "            #endif /* MRT_NO_NAMES */\n"\
@@ -4195,8 +4233,10 @@ proc assignerDefinitions {} {
                 append attrResult\
                     "static MRT_Attribute const ${Association}__CATTRS\[1\] = \{\n"\
                     "    \{\n"\
-                    "        .offset = offsetof(struct $Association, idinstance),\n"\
                     "        .size = sizeof([GetClassProperty $Class Reference]),\n"\
+                    "        .type = mrtIndependentAttr,\n"\
+                    "        .access.offset = offsetof(struct $Association,\
+                                idinstance),\n"\
                     "            #ifndef MRT_NO_NAMES\n"\
                     "        .name = multi_assigner_attribute__NAME\n"\
                     "            #endif /* MRT_NO_NAMES */\n"\
@@ -5113,31 +5153,26 @@ proc TorDefinitions {which} {
         Constructor CTOR\
         Destructor DTOR\
     ]
-    set result {}
+    set result [comment "$which Definitions"]
 
     set tors [$which findWhere {$Domain eq $domain}]
 
-    if {[isNotEmptyRef $tors]} {
-        append result [comment "$which Definitions"]
-        forAllRefs tor $tors {
-            assignAttribute $tor
+    forAllRefs tor $tors {
+        assignAttribute $tor
 
-            set selfdecl [GetClassProperty $Class Reference]const
-            set syms [relation create {
-                Name string Ctype string Type string Class string
-            } [list Name self Ctype $selfdecl Type Reference Class $Class]]
-            append result\
-                "static void\n${Class}__[dict get $suffixmap $which]\(\n"\
-                "    void *const s__SELF\)\n"\
-                [blockcomment $Body]\
-                "\{\n"\
-                [string cat\
-                    "    MRT_INSTRUMENT_ENTRY\n"\
-                    "    $selfdecl self = s__SELF ;\n"\
-                    [ExpandActivity "$Class $which" $Body $syms]\
-                ]\
-                "\}\n"
-        }
+        set selfdecl [GetClassProperty $Class Reference]const
+        set syms [relation create {
+            Name string Ctype string Type string Class string
+        } [list Name self Ctype $selfdecl Type Reference Class $Class]]
+        append result\
+            "static void\n${Class}__[dict get $suffixmap $which]\(\n"\
+            "    void *const s__SELF\)\n"\
+            [blockcomment $Body]\
+            "\{\n"\
+            "    MRT_INSTRUMENT_ENTRY\n"\
+            "    $selfdecl self = s__SELF ;\n"\
+            [ExpandActivity "$Class $which" $Body $syms]\
+            "\}\n"
     }
 
     return $result
@@ -5211,6 +5246,102 @@ test codegen-17.0 {
             MRT_INSTRUMENT_ENTRY
             struct X *const self = s__SELF ;
             self->color -= 20 ;
+        }
+    }]}
+} -result {1}
+----
+endif::showtests[]
+
+=== Formula Definitions
+
+(((micca,Code Generation,formulaDefinitions)))
+[source,tcl]
+----
+<<generation code commands>>=
+proc formulaDefinitions {} {
+    variable domain
+    set result [comment "Dependent Attribute Formula Definitions"]
+
+    set deps [DependentAttribute findWhere {$Domain eq $domain}]
+
+    forAllRefs dep $deps {
+        assignAttribute $dep
+        set type [readAttribute [findRelated $dep R29] DataType]
+
+        set selfdecl [GetClassProperty $Class Reference]const
+        set syms [relation create {
+            Name string Ctype string Type string Class string
+        }\
+            [list Name self Ctype $selfdecl Type Reference Class $Class]\
+            [list Name value Ctype void* Type {} Class {}]\
+            [list Name size Ctype MRT_AttrSize Type {} Class {}]\
+        ]
+        append result\
+            "static void\n${Class}_${Name}__FORMULA\(\n"\
+            "    void *const s__,\n"\
+            "    void *v__,\n"\
+            "    MRT_AttrSize size\)\n"\
+            [blockcomment $Formula]\
+            "\{\n"\
+            "    MRT_INSTRUMENT_ENTRY\n"\
+            "    $selfdecl self = s__ ;\n"\
+            "    $type *value = v__ ;\n"\
+            [ExpandActivity "$Class $Name Formula" $Formula $syms]\
+            "\}\n"
+    }
+
+    return $result
+}
+----
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-54.0 {
+    Generated code file with dependent attribute
+} -setup {
+    validateutils genMiccaFile codegen54 {
+        domain codegen54 {
+            class X {
+                attribute width unsigned -default 10
+                attribute length unsigned -default 15
+                attribute area unsigned -dependent {
+                    *value = %<my attr width>% * %<my attr length>% ;
+                }
+
+                classop {struct X *} findByArea {requestedArea unsigned} {
+                    %<X foreachInstance xref>%
+                        %<instance xref assign area>%
+                        if (area == requestedArea) {
+                            return xref ;
+                        }
+                    %<end>%
+                }
+            }
+        }
+        population codegen54 {
+            class X {
+                instance x1
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen54.c
+    testConditions\
+    {[validateutils matchLines codegen54.c {
+        struct X *const self = s__ ;
+        unsigned *value = v__ ;
+        *value = self->width * self->length ;
+    }]}\
+    {[validateutils matchLines codegen54.c {
+        unsigned area ;
+        X_area__FORMULA(xref, &area, sizeof(area)) ;
+        if (area == requestedArea) {
+            return xref ;
         }
     }]}
 } -result {1}
@@ -6526,7 +6657,7 @@ proc ExpandActivity {name body parameters} {
             string map [list \" {}] ~ |
             join ~
         }] ; # <1>
-        return "#error \"$msg\"" ; <2>
+        return "#error \"$msg\"\n" ; <2>
     } finally {
         relvar set Symbol [relation emptyof [relvar set Symbol]]
         variable symcounter 0
@@ -6650,6 +6781,12 @@ proc InstanceAttrRead {instref attr} {
             class, [dict get $sym Class], which does not have an attribute\
             named, $attr"
     }
+
+    set depRef [findRelated $attrRef {~R29 DependentAttribute}]
+    if {[isNotEmptyRef $depRef]} {
+        error "cannot use \"attr\" command for dependent attribute:\
+            use \"assign\" command instead"
+    }
     return "$instref->$attr"
 }
 ----
@@ -6687,6 +6824,12 @@ proc InstanceAttrUpdate {instref attr value} {
             class, [dict get $sym Class], which does not have an attribute\
             named, $attr"
     }
+
+    set depRef [findRelated $attrRef {~R29 DependentAttribute}]
+    if {[isNotEmptyRef $depRef]} {
+        error "cannot update dependent attribute"
+    }
+
     return [IndentToBlock [string cat\
         [linecomment "instance $instref update $attr $value"]\
         "$instref->$attr = ($value) ;\n"\
@@ -6726,6 +6869,7 @@ proc InstanceAssign {instref args} {
     variable domain
 
     set sym [CheckInstRefSymbol $instref]
+    set className [dict get $sym Class]
 
     set result [linecomment "instance $instref assign [list $args]"]
     foreach attrspec $args {
@@ -6738,18 +6882,18 @@ proc InstanceAssign {instref args} {
             error "bad attribute specification, \"$attrspec\":\
                 expected 1 or 2 element list"
         }
-        set attrRef [Attribute findById Domain $domain\
-                Class [dict get $sym Class] Name $attrname]
+        set attrRef [Attribute findById Domain $domain Class $className\
+                Name $attrname]
         if {[isEmptyRef $attrRef]} {
             error "instance reference, $instref, refers to an instance of\
-                class, [dict get $sym Class], which does not have an attribute\
+                class, $className, which does not have an attribute\
                 named, $attrname"
         }
         assignAttribute $attrRef {DataType attrtype} Dimension
 
-        set sym [LookUpSymbol $varname]
-        if {[dict size $sym] != 0} {
-            CheckSymProperties $sym Ctype $attrtype
+        set varsym [LookUpSymbol $varname]
+        if {[dict size $varsym] != 0} {
+            CheckSymProperties $varsym Ctype $attrtype
         } else {
             InsertSymbol Name $varname Ctype $attrtype Type {} Class {}
             set vardecl [typeCheck composeDeclaration $attrtype $varname]
@@ -6760,11 +6904,19 @@ proc InstanceAssign {instref args} {
             append result " ;\n"
         }
 
-        if {$Dimension > 0} {
-            append result\
-                "memcpy($varname, $instref->$attrname, sizeof($varname)) ;\n"
+        set indepRef [findRelated $attrRef {~R29 IndependentAttribute}]
+        if {[isNotEmptyRef $indepRef]} {
+            if {$Dimension > 0} {
+                append result\
+                    "memcpy($varname, $instref->$attrname, sizeof($varname)) ;\n"
+            } else {
+                append result "$varname = $instref->$attrname ;\n"
+            }
         } else {
-            append result "$varname = $instref->$attrname ;\n"
+            set varref [expr {$Dimension > 0 ? "$varname" : "&$varname"}]
+            append result\
+                "${className}_${attrname}__FORMULA($instref, $varref,\
+                sizeof($varname)) ;\n"
         }
     }
 
