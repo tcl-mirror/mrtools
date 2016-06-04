@@ -1232,7 +1232,13 @@ test headergen-4.0 {
         }
         population header4 {
             class c1 {
-                instance fred1
+                table {
+                    color
+                    temp
+                } fred1 {
+                    20
+                    3.4
+                }
             }
             class c2 {
                 instance fred1
@@ -1688,7 +1694,8 @@ arrays.
 [source,tcl]
 ----
 <<DeclareClassStructure: attribute declarations>>=
-set attrRefs [findRelated $compRefs {~R25 PopulatedComponent} {~R21 Attribute}] ; # <1>
+set attrRefs [findRelated $compRefs {~R25 PopulatedComponent}\
+    {~R21 Attribute} {~R29 IndependentAttribute} R29] ; # <1>
 forAllRefs attrRef $attrRefs {
     assignAttribute $attrRef {Name attrName} DataType Dimension
     append result "    [typeCheck composeDeclaration $DataType $attrName]"
@@ -1698,7 +1705,9 @@ forAllRefs attrRef $attrRefs {
     append result " ;\n"
 }
 ----
-<1> This query finds all the attributes of the class.
+<1> This query finds all the attributes of the class
+that are independent attributes. Those are the ones that will have
+a structure member.
 <2> Check if we need to make this attribute an array.
 
 
@@ -4618,7 +4627,8 @@ proc FindClassPopulation {classRefs} {
 
     # Attribute Components
     set attrs [pipe {
-        findRelated $popCompRefs {~R21 Attribute} |
+        findRelated $popCompRefs {~R21 Attribute} {~R29 IndependentAttribute}\
+                R29 |
         deRef % |
         relation rename % Name Component
     } {} |%]
@@ -5607,7 +5617,7 @@ the macro to access the *Color* attribute of an instance could be written
 as:
 
 *****
-ColorType c = %<my attribute Color>% ;
+ColorType c = %<my attr Color>% ;
 *****
 
 For this example,
@@ -6029,7 +6039,8 @@ are simply enumerated in the command map of the ensemble.
 ----
 <<CreateActivityCommands: instances>>=
 set cmdmap [dict create\
-    attribute ${suppns}::InstanceAttribute\
+    attr ${suppns}::InstanceAttrRead\
+    update ${suppns}::InstanceAttrUpdate\
     assign ${suppns}::InstanceAssign\
     signal ${suppns}::InstanceSignal\
     delaysignal ${suppns}::InstanceDelaySignal\
@@ -6056,7 +6067,8 @@ we create an ensemble command named `my` which is just a shorthand for
 ----
 <<CreateActivityCommands: instances>>=
 set cmdmap [dict create\
-    attribute [list ${suppns}::InstanceAttribute self]\
+    attr [list ${suppns}::InstanceAttrRead self]\
+    update [list ${suppns}::InstanceAttrUpdate self]\
     assign [list ${suppns}::InstanceAssign self]\
     signal [list ${suppns}::InstanceSignal self]\
     delaysignal [list ${suppns}::InstanceDelaySignal self]\
@@ -6608,16 +6620,17 @@ The command has the advantage of checking that the attribute name is
 valid for the class and thus catching potential errors before compilation.
 
 *****
-`%<instance` _instvar_ `attribute` _attrname_ `>%`
+`%<instance` _instvar_ `attr` _attrname_ `>%`
 
 instvar::
     The name of a ``C'' variable that holds a reference to a class instance.
 attrname::
-    The name of the attribute to be accessed.
+    The name of the attribute to be retrieved.
 
-The `attribute` subccommand generates a ``C'' expression to access
+The `attr` subccommand generates a ``C'' expression to read
 _attrname_ for the instance whose reference is contained in the
 variable named, _instvar_.
+The generated code is suitable for use in either an rvalue or lvalue context.
 The class whose instance is held in _instvar_ must contain an attribute whose
 name is _attrname_ or an error is generated.
 *****
@@ -6626,7 +6639,7 @@ name is _attrname_ or an error is generated.
 .Implementation
 ----
 <<generation support commands>>=
-proc InstanceAttribute {instref attr} {
+proc InstanceAttrRead {instref attr} {
     variable domain
 
     set sym [CheckInstRefSymbol $instref]
@@ -6638,6 +6651,46 @@ proc InstanceAttribute {instref attr} {
             named, $attr"
     }
     return "$instref->$attr"
+}
+----
+
+*****
+`%<instance` _instvar_ `update` _attrname_ _value_`>%`
+
+instvar::
+    The name of a ``C'' variable that holds a reference to a class instance.
+attrname::
+    The name of the attribute to be updated.
+value::
+    A valid ``C'' rvalue expression to be used as the new value for the
+    attribute
+
+The `update` subccommand generates a ``C'' statement to update the value
+of _attrname_ to _value_ for the instance whose reference is contained in the
+variable named, _instvar_.
+The class whose instance is held in _instvar_ must contain an attribute whose
+name is _attrname_ or an error is generated.
+*****
+
+[source,tcl]
+.Implementation
+----
+<<generation support commands>>=
+proc InstanceAttrUpdate {instref attr value} {
+    variable domain
+
+    set sym [CheckInstRefSymbol $instref]
+    set attrRef [Attribute findById Domain $domain Class [dict get $sym Class]\
+            Name $attr]
+    if {[isEmptyRef $attrRef]} {
+        error "instance reference, $instref, refers to an instance of\
+            class, [dict get $sym Class], which does not have an attribute\
+            named, $attr"
+    }
+    return [IndentToBlock [string cat\
+        [linecomment "instance $instref update $attr $value"]\
+        "$instref->$attr = ($value) ;\n"\
+    ]]
 }
 ----
 
@@ -6674,7 +6727,7 @@ proc InstanceAssign {instref args} {
 
     set sym [CheckInstRefSymbol $instref]
 
-    set result {}
+    set result [linecomment "instance $instref assign [list $args]"]
     foreach attrspec $args {
         if {[llength $attrspec] == 1} {
             set attrname [lindex $attrspec 0]
@@ -6737,9 +6790,10 @@ class instance whose reference is contained in _instvar_.
 <<generation support commands>>=
 proc InstanceDelete {instref} {
     CheckInstRefSymbol $instref
-    append result\
+    return [IndentToBlock [string cat\
         [linecomment "instance $instref delete"]\
-        "mrt_DeleteInstance($instref) ;\n"
+        "mrt_DeleteInstance($instref) ;\n"\
+    ]]
     return [IndentToBlock $result]
 }
 ----
@@ -6844,7 +6898,7 @@ test codegen-49.0 {
                 attribute temp int -default 10
 
                 instop void incrTemp {quantity int} {
-                    %<my attribute temp>% += quantity ;
+                    %<my attr temp>% += quantity ;
                 }
             }
             domainop void findys {} {
@@ -7060,8 +7114,7 @@ test codegen-36.0 {
             domainop void findys {} {
                 %<X findByName x1 xs>%
                 %<instance z foreachRelated xs R1 ~R2>%
-                    printf("z.value = %d\n",
-                        %<instance z attribute value>%) ;
+                    printf("z.value = %d\n", %<instance z attr value>%) ;
                 %<end>%
             }
         }
@@ -7084,14 +7137,13 @@ test codegen-36.0 {
     validateutils compileFiles codegen36.c
     testConditions\
         {[validateutils matchLines codegen36.c {
-    struct Y *t__T1 = xs->R1 ; // R1
-    struct Z *t__T2 = t__T1->R2__BACK ; // ~R2
-    if (t__T2 != NULL) {
-        struct Z *z ;
-        z = t__T2 ;
-        printf("z.value = %d\n",
-z->value) ;
-    }
+            struct Y *t__T1 = xs->R1 ; // R1
+            struct Z *t__T2 = t__T1->R2__BACK ; // ~R2
+            if (t__T2 != NULL) {
+                struct Z *z ;
+                z = t__T2 ;
+                printf("z.value = %d\n", z->value) ;
+            }
         }]}
 } -result {1}
 ----
@@ -7116,7 +7168,7 @@ test codegen-43.0 {
             domainop void findys {} {
                 %<X findByName x1 xs>%
                 %<instance y foreachRelated xs R1>%
-                    printf("y.value = %d\n", %<instance y attribute value>%) ;
+                    printf("y.value = %d\n", %<instance y attr value>%) ;
                 %<end>%
             }
         }
@@ -7167,7 +7219,7 @@ test codegen-44.0 {
             domainop void findys {} {
                 %<X findByName x1 xs>%
                 %<instance a foreachRelated xs {R1 A}>%
-                    printf("a.value = %d\n", %<instance a attribute value>%) ;
+                    printf("a.value = %d\n", %<instance a attr value>%) ;
                 %<end>%
             }
         }
@@ -7302,8 +7354,7 @@ test codegen-37.0 {
             domainop void findys {} {
                 %<X findByName x1 xs>%
                 %<instance z foreachRelated xs R1 ~R2>%
-                    printf("z.value = %d\n",
-                        %<instance z attribute value>%) ;
+                    printf("z.value = %d\n", %<instance z attr value>%) ;
                 %<end>%
             }
         }
@@ -7333,8 +7384,7 @@ test codegen-37.0 {
         struct Z *t__T4 = *t__T2 ;
         struct Z *z ;
         z = t__T4 ;
-        printf("z.value = %d\n",
-z->value) ;
+        printf("z.value = %d\n", z->value) ;
     }
         }]}
 } -result {1}
@@ -7360,7 +7410,7 @@ test codegen-45.0 {
             domainop void findys {} {
                 %<X findByName x1 xs>%
                 %<instance y foreachRelated xs R1>%
-                    printf("y.value = %d\n", %<instance y attribute value>%) ;
+                    printf("y.value = %d\n", %<instance y attr value>%) ;
                 %<end>%
             }
         }
@@ -7453,8 +7503,7 @@ test codegen-38.0 {
             domainop void findys {} {
                 %<X findByName x1 xs>%
                 %<instance z foreachRelated xs R1 ~R2>%
-                    printf("z.value = %d\n",
-                        %<instance z attribute value>%) ;
+                    printf("z.value = %d\n", %<instance z attr value>%) ;
                 %<end>%
             }
         }
@@ -7485,8 +7534,7 @@ test codegen-38.0 {
         t__T2 = t__T2->next ;
         struct Z *z ;
         z = t__T3 ;
-        printf("z.value = %d\n",
-z->value) ;
+        printf("z.value = %d\n", z->value) ;
     }
         }]}
 } -result {1}
@@ -7512,7 +7560,7 @@ test codegen-46.0 {
             domainop void findys {} {
                 %<X findByName x1 xs>%
                 %<instance y foreachRelated xs R1>%
-                    printf("y.value = %d\n", %<instance y attribute value>%) ;
+                    printf("y.value = %d\n", %<instance y attr value>%) ;
                 %<end>%
             }
         }
@@ -7581,7 +7629,7 @@ test codegen-39.0 {
             domainop void findss {} {
                 %<Y findByName y1 ys>%
                 %<instance s foreachRelated ys R1>%
-                    printf("s.value = %d\n", %<instance s attribute value>%) ;
+                    printf("s.value = %d\n", %<instance s attr value>%) ;
                 %<end>%
             }
         }
@@ -7649,7 +7697,7 @@ test codegen-41.0 {
             domainop void findss {} {
                 %<S findByName s1 ss>%
                 %<instance y foreachRelated ss {~R1 Y}>%
-                    printf("y.value = %d\n", %<instance y attribute value>%) ;
+                    printf("y.value = %d\n", %<instance y attr value>%) ;
                 %<end>%
             }
         }
@@ -7716,7 +7764,7 @@ test codegen-40.0 {
             domainop void findss {} {
                 %<Y findByName y1 ys>%
                 %<instance s foreachRelated ys R1>%
-                    printf("s.value = %d\n", %<instance s attribute value>%) ;
+                    printf("s.value = %d\n", %<instance s attr value>%) ;
                 %<end>%
             }
         }
@@ -7786,7 +7834,7 @@ test codegen-42.0 {
             domainop void findss {} {
                 %<S findByName s1 ss>%
                 %<instance y foreachRelated ss {~R1 Y}>%
-                    printf("y.value = %d\n", %<instance y attribute value>%) ;
+                    printf("y.value = %d\n", %<instance y attr value>%) ;
                 %<end>%
             }
         }
@@ -8370,7 +8418,7 @@ test codegen-50.0 {
                     transition Idle - E1 -> Running
 
                     state Running {incr int} {
-                        %<my attribute temp>% += incr ;
+                        %<my attr temp>% += incr ;
                     }
                     transition Running - E1 -> Running ;
                 }
@@ -9274,7 +9322,7 @@ proc GetAttrInitialValues {className attrvalues} {
 ----
 
 The attribues that must be provided are those that do not have
-a defined default value.
+a defined default value and which are not dependent attributes.
 
 [source,tcl]
 ----
@@ -9283,9 +9331,12 @@ proc FindRequiredAttributes {className} {
     variable domain
     set attrRefs [Attribute findWhere\
         {$Domain eq $domain && $Class eq $className}]
-    set defRefs [findRelated $attrRefs ~R22 R22]
+    set defRefs [findRelated $attrRefs {~R29 IndependentAttribute}\
+            ~R22 R22 R29]
+    set depRefs [findRelated $attrRefs {~R29 DependentAttribute} R29]
     return [pipe {
         refMinus $attrRefs $defRefs |
+        refMinus ~ $depRefs |
         deRef ~ |
         relation list ~ Name
     }]
@@ -9320,7 +9371,7 @@ test codegen-26.0 {
             }
             domainop void newX {} {
                 %<X create newx color 30 temp 22>%
-                printf("%d\n", %<instance newx attribute color>%) ;
+                printf("%d\n", %<instance newx attr color>%) ;
             }
         }
         population codegen26 {
@@ -9453,7 +9504,7 @@ test codegen-26.4 {
             }
             domainop void newX {} {
                 %<X create newx color {"blue"} temp 22>%
-                printf("%s\n", %<instance newx attribute color>%) ;
+                printf("%s\n", %<instance newx attr color>%) ;
                 char *newcolor = "yellow" ;
                 %<X create newx color newcolor temp 10>%
             }
@@ -9569,7 +9620,7 @@ test codegen-27.0 {
             }
             domainop void newX {} {
                 %<X createin newx s2 color 30>%
-                printf("%d\n", %<instance newx attribute color>%) ;
+                printf("%d\n", %<instance newx attr color>%) ;
             }
         }
         population codegen27 {
@@ -9615,7 +9666,7 @@ test codegen-27.1 {
             }
             domainop void newX {} {
                 %<X createin newx s3>%
-                printf("%d\n", %<instance newx attribute color>%) ;
+                printf("%d\n", %<instance newx attr color>%) ;
             }
         }
         population codegen27_1 {
@@ -9856,7 +9907,7 @@ test codegen-29.0 {
 
             domainop void printcolors {} {
                 %<X foreachInstance xref>%
-                    printf("%d\n", %<instance xref attribute color>%) ;
+                    printf("%d\n", %<instance xref attr color>%) ;
                 %<end>%
             }
         }
@@ -9910,7 +9961,7 @@ test codegen-25.0 {
                     state s1 {} {
                         (void)self ;
                         %<Z foreachInstance zref>%
-                            printf("%d\n", %<instance zref attribute plus>%) ;
+                            printf("%d\n", %<instance zref attr plus>%) ;
                         %<end>%
                     }
                     transition s1 - e1 -> s1

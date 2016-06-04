@@ -107,6 +107,7 @@
  */
 typedef int16_t MRT_AllocStatus ;
 typedef int8_t MRT_StateCode ;
+typedef uint8_t MRT_RefCount ;
 typedef enum {
     mrtTransitionEvent,
     mrtPolymorphicEvent,
@@ -146,7 +147,7 @@ typedef struct mrtinstance {
     struct mrtclass const *classDesc ;
     MRT_AllocStatus alloc ;
     MRT_StateCode currentState ;
-    unsigned refCount ;
+    MRT_RefCount refCount ;
 
 #       ifndef MRT_NO_NAMES
     char const *name ;
@@ -377,47 +378,19 @@ mrtLinkRefEnd(
     return iter ;
 }
 static inline
-void
-mrtLinkRefInit(
-    MRT_LinkRef *ref)
-{
-    ref->next = ref->prev = mrtLinkRefEnd(ref) ;
-}
-static inline
 bool
 mrtLinkRefEmpty(
-    MRT_LinkRef *iter)
+    MRT_LinkRef *ref)
 {
-    return iter->next == iter ;
+    return ref->next == ref ;
 }
 static inline
 bool
 mrtLinkRefNotEmpty(
-    MRT_LinkRef *iter)
+    MRT_LinkRef *ref)
 {
-    return iter->next != iter ;
+    return ref->next != ref ;
 }
-static inline
-void
-mrtLinkRefInsert(
-    MRT_LinkRef *item,
-    MRT_LinkRef *at)
-{
-    item->prev = at->prev ;
-    item->next = at ;
-    at->prev->next = item ;
-    at->prev = item ;
-}
-static inline
-void
-mrtLinkRefRemove(
-    MRT_LinkRef *item)
-{
-    item->prev->next = item->next ;
-    item->next->prev = item->prev ;
-    item->next = item->prev = NULL ;
-}
-
 
 /*
  * External Functions

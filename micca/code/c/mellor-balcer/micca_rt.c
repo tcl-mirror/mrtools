@@ -155,7 +155,9 @@ mrtDefaultFatalErrorHandler(
     char const *fmt,
     va_list ap) ;
 static noreturn void mrtFatalError(MRT_ErrorCode errNum, ...) ;
+#   ifndef MRT_NO_TRACE
 static char const *mrtTimestamp(void) ;
+#   endif /* MRT_NO_TRACE */
 
 /*
  * Static Data
@@ -182,7 +184,7 @@ static char const * const errMsgs[] = {
     [mrtSyncOverflow] = "synchronization queue overflow\n",
     [mrtTransOverflow] = "transaction markings overflow\n",
     [mrtStaticRelationship] = "attempt to modify static relationship\n",
-    [mrtRelationshipLinkage] = "attempt to link non-participant\n",
+    [mrtRelationshipLinkage] = "invalid instance linkage operation or value\n",
 
 #       ifndef MRT_NO_NAMES
     [mrtCantHappen] = "can't happen transition: %s.%s: %s - %s -> CH\n",
@@ -209,6 +211,40 @@ static int mrtMaxFD = -1 ;
 static fd_set mrtReadFDS ;
 static fd_set mrtWriteFDS ;
 static fd_set mrtExceptFDS ;
+
+/*
+ * Static Inline Functions
+ */
+static inline
+void
+mrtLinkRefInit(
+    MRT_LinkRef *ref)
+{
+    ref->next = ref->prev = ref ;
+}
+static inline
+void
+mrtLinkRefRemove(
+    MRT_LinkRef *item)
+{
+    item->prev->next = item->next ;
+    item->next->prev = item->prev ;
+    item->next = item->prev = NULL ; // <1>
+}
+static inline
+void
+mrtLinkRefInsert(
+    MRT_LinkRef *item,
+    MRT_LinkRef *at)
+{
+    if (item->next != NULL || item->prev != NULL) { // <2>
+        mrtFatalError(mrtRelationshipLinkage) ;
+    }
+    item->prev = at->prev ;
+    item->next = at ;
+    at->prev->next = item ;
+    at->prev = item ;
+}
 
 /*
  * Static Functions
@@ -475,6 +511,7 @@ mrtWait(void)
     }
     endCriticalSection() ;
 }
+#   ifndef MRT_NO_TRACE
 #   ifndef MRT_NO_NAMES
 static
 void
@@ -588,7 +625,7 @@ mrtPrintTraceInfo(
         break ;
 
     case mrtPolymorphicEvent:
-        printf("%s: Polymorphic: %p - %u -> %p: %u - %u -> %p\n",
+        printf("%s: Polymorphic: %p - %u -> %p: %u - %u -> %d\n",
                 mrtTimestamp(), traceInfo->sourceInst, traceInfo->eventNumber,
                 traceInfo->targetInst,traceInfo->info.polyTrace.genNumber,
                 traceInfo->info.polyTrace.mappedEvent,
@@ -609,6 +646,8 @@ mrtPrintTraceInfo(
     }
 }
 #   endif /* MRT_NO_NAMES */
+#   endif /* MRT_NO_TRACE */
+#   ifndef MRT_NO_TRACE
 static
 char const *
 mrtTimestamp(void)
@@ -640,6 +679,7 @@ mrtTimestamp(void)
 
     return timestamp ;
 }
+#   endif /* MRT_NO_TRACE */
 static MRT_Instance *
 mrtFindInstSlot(
     MRT_iab *iab)
@@ -758,9 +798,12 @@ void
 mrtEndTransaction(void)
 {
     MRT_Relationship const **rships = mrtTransaction.relationships ;
-    for (unsigned count = mrtTransaction.count ; count != 0 ;
-            --count, ++rships) {
+    for (unsigned count = 0 ; count < mrtTransaction.count ; count++, ++rships) {
         if (!mrtCheckRelationship(*rships)) {
+            mrtTransaction.count -= count ;
+            memmove(mrtTransaction.relationships, rships,
+                mrtTransaction.count * sizeof(*rships)) ; // <1>
+
 #               ifndef MRT_NO_NAMES
             mrtFatalError(mrtRefIntegrity, (*rships)->name) ;
 #               else
@@ -1017,7 +1060,8 @@ mrtCountSingularRefs(
         if ((void *)targetInst >= targetiab->storageStart &&
                 (void *)targetInst < targetiab->storageFinish &&
                 targetInst->alloc > 0) { // <1>
-            targetInst->refCount += 1 ;
+            targetInst->refCount = targetInst->refCount == UINT8_MAX ?
+                    2 : targetInst->refCount + 1 ; // <2>
         }
     }
 }
@@ -1041,7 +1085,8 @@ mrtCountArrayRefs(
             if ((void *)targetInst >= targetiab->storageStart &&
                     (void *)targetInst < targetiab->storageFinish &&
                     targetInst->alloc > 0) {
-                targetInst->refCount += 1 ;
+                targetInst->refCount = targetInst->refCount == UINT8_MAX ?
+                        2 : targetInst->refCount + 1 ;
             }
         }
     }
@@ -1067,7 +1112,8 @@ mrtCountLinkedListRefs(
                 if ((void *)targetInst >= targetiab->storageStart &&
                         (void *)targetInst < targetiab->storageFinish &&
                         targetInst->alloc > 0) {
-                    targetInst->refCount += 1 ;
+                    targetInst->refCount = targetInst->refCount == UINT8_MAX ?
+                            2 : targetInst->refCount + 1 ;
                 }
             }
         }
@@ -1120,7 +1166,8 @@ mrtCountGenRefs(
             if ((void *)subInst >= subiab->storageStart &&
                     (void *)subInst < subiab->storageFinish &&
                     subInst->alloc > 0) {
-                subInst->refCount += 1 ;
+                subInst->refCount = subInst->refCount == UINT8_MAX ?
+                        2 : subInst->refCount + 1 ;
             }
         }
     }
@@ -1153,11 +1200,11 @@ mrtLink(
         break ;
 
     case mrtLinkedList: { // <2>
-        MRT_LinkRef *sourceRef = (MRT_LinkRef *)
+        MRT_LinkRef *sourceList = (MRT_LinkRef *)
                 ((uintptr_t)source + sourceRole->storageOffset) ;
         MRT_LinkRef *targetRef = (MRT_LinkRef *)
                 ((uintptr_t)target + sourceRole->linkOffset) ;
-        mrtLinkRefInsert(targetRef, sourceRef) ;
+        mrtLinkRefInsert(targetRef, sourceList) ;
     }
         break ;
 
@@ -2144,7 +2191,9 @@ mrt_Initialize(void)
     mrtInitSysTimer() ;
     mrtInitFDService() ;
     setvbuf(stdout, NULL, _IOLBF, 0) ; // set up line buffering on stdout
+#       ifndef MRT_NO_TRACE
     mrt_RegisterTraceHandler(mrtPrintTraceInfo) ;
+#       endif /* MRT_NO_TRACE */
 }
 void
 mrt_EventLoop(void)
@@ -3377,14 +3426,16 @@ mrt_PortalClassName(
 
     int result ;
     if (classId < portal->classCount) {
+#           ifndef MRT_NO_NAMES
         MRT_Class const *class = portal->classes + classId ;
         if (nameRef) {
-#               ifndef MRT_NO_NAMES
             *nameRef = class->name ;
-#               else
-            *nameRef = NULL ;
-#               endif /* MRT_NO_NAMES */
         }
+#           else
+        if (nameRef) {
+            *nameRef = NULL ;
+        }
+#           endif /* MRT_NO_NAMES */
         result = 0 ;
     } else {
         result = MICCA_PORTAL_NO_CLASS ;
@@ -3474,8 +3525,8 @@ mrt_PortalClassAttributeName(
     if (classId < portal->classCount) {
         MRT_Class const *class = portal->classes + classId ;
         if (attrId < class->attrCount) {
-#                   ifndef MRT_NO_NAMES
             if (nameRef) {
+#                   ifndef MRT_NO_NAMES
                 *nameRef = class->classAttrs[attrId].name ;
 #                   else
                 *nameRef = NULL ;
@@ -3525,16 +3576,18 @@ mrt_PortalClassEventName(
     int result ;
     if (classId < portal->classCount) {
         MRT_Class const *class = portal->classes + classId ;
-        char const *const *eventNames = class->eventNames ;
-        if (eventNames != NULL) {
+        if (class->eventCount != 0) {
             if (eventCode >= 0 && eventCode < class->eventCount) {
-                if (nameRef) {
-#                       ifndef MRT_NO_NAMES
+#                   ifndef MRT_NO_NAMES
+                char const *const *eventNames = class->eventNames ;
+                if (eventNames != NULL && nameRef != NULL) {
                     *nameRef = eventNames[eventCode] ;
-#                       else
-                    *nameRef = NULL ;
-#                       endif /* MRT_NO_NAMES */
                 }
+#                   else
+                if (nameRef != NULL) {
+                    *nameRef = NULL ;
+                }
+#                   endif /* MRT_NO_NAMES */
                 result = 0 ;
             } else {
                 result = MICCA_PORTAL_NO_EVENT ;
