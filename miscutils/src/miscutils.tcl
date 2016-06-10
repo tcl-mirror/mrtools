@@ -1,4 +1,4 @@
-# This software is copyrighted by G. Andrew Mangogna.
+# This software is copyrighted 2016 by G. Andrew Mangogna.
 # The following terms apply to all files associated with the software unless
 # explicitly disclaimed in individual files.
 # 
@@ -36,95 +36,71 @@
 # the authors grant the U.S. Government and others acting in its behalf
 # permission to use and distribute the software in accordance with the
 # terms specified in this license.
-#*++
-# PROJECT:
-#  mrtools
+
+package require Tcl 8.6
+
+namespace eval ::miscutils {
+    namespace export hashcolor
+    namespace ensemble create
+
+    variable revision 1.0
+}
+
+# This is a Tcl rendering of the fossil algorithm that hashes an arbitrary
+# string to a RGB color spec. When you need colors but don't want to have to
+# choose them yourself, this gives an interesting set of colors.
+# This is a direct rendering of the "C" code from fossil. I have no idea
+# how it really works and there was no commentary in the original code.
 #
-# MODULE:
-#  Makefile -- build commands for elfdecode package
+# "s" is the string to hash into a color
+# "fgwhite" is a boolean indicating if the foreground text is white. This
+# causes a choice of darker colors to maintain contrast.
 #
-# ABSTRACT:
-#
-#*--
-#
+# returns an RGB color value as a #RRGGBB hex style color literal
 
-DOCSRC 	=\
-	elfdecode.aweb\
-	$(NULL)
+proc ::miscutils::hashcolor {s {fgwhite false}} {
+    if {$fgwhite} {
+        set ix0 140
+        set ix1 40
+    } else {
+        set ix0 216
+        set ix1 16
+    }
 
-PDF 	=\
-     	../doc/$(patsubst %.aweb,%.pdf,$(DOCSRC))\
-     	$(NULL)
+    # Convert the string into binary numbers
+    binary scan $s c* sbin
+    set h 0
+    # Hash togther the numerical values of the string.
+    foreach c $sbin {
+        set h [expr {($h << 11) ^ ($h << 1) ^ ($h >> 3) ^ $c}]
+    }
+    set h1 [expr {$h % 6}] ; set h [expr {$h / 6}]
+    set h3 [expr {$h % 30}] ; set h [expr {$h / 30}]
+    set h4 [expr {$h % 40}] ; set h [expr {$h / 40}]
+    set mx [expr {$ix0 - $h3}]
+    set mn [expr {$mx - $h4 - $ix1}]
+    set h2 [expr {($h % ($mx - $mn)) + $mn}]
+    switch -exact -- $h1 {
+        0 {
+            set r $mx ; set g $h2 ; set b $mn
+        }
+        1 {
+            set r $h1 ; set g $mx ; set b $mn
+        }
+        2 {
+            set r $mn ; set g $mx ; set b $h2
+        }
+        3 {
+            set r $mn ; set g $h2 ; set b $mx
+        }
+        4 {
+            set r $h2 ; set g $mn ; set b $mx
+        }
+        default {
+            set r $mx ; set g $mn ; set b $h2
+        }
+    }
+    return [format #%02x%02x%02x $r $g $b]
+}
 
-TCLSRC	=\
-     	$(patsubst %.aweb,%.tcl,$(DOCSRC))\
-	$(NULL)
-
-CLEANFILES =\
-	$(PDF)\
-	$(TCLSRC)\
-	$(NULL)
-
-A2XOPTS =\
-	--verbose\
-	$(NULL)
-
-ATANGLEOPTS	=\
-	$(NULL)
-
-DBLATEX_PARAMS	=\
-		doc.publisher.show=0\
-		glossary.numbered=0\
-		index.numbered=0\
-		doc.lot.show=figure,table\
-		toc.section.depth=3\
-		doc.section.depth=0\
-		$(NULL)
-
-EXTRAS =\
-	docinfo.xml\
-	elfdecode-docinfo.xml\
-	$(NULL)
-
-ASCIIDOC_ATTRS	=\
-		docinfo2\
-		$(NULL)
-
-
-DBLATEX_OPTS	=\
-		--dblatex-opts="$(patsubst %,--param=%,$(DBLATEX_PARAMS))"\
-		--dblatex-opts=--fig-path=.\
-		$(NULL)
-
-ASCIIDOC_OPTS	=\
-		$(patsubst %,--attribute=%,$(ASCIIDOC_ATTRS))\
-		$(NULL)
-
-all : doc code package
-
-doc : $(PDF)
-
-code : $(TCLSRC)
-
-package : pkgIndex.tcl
-
-$(PDF) : $(DOCSRC) $(EXTRAS)
-
-$(TCLSRC) : $(DOCSRC)
-
-pkgIndex.tcl : $(DOCSRC)
-	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
-
-clean :
-	$(RM) $(CLEANFILES)
-
-../doc/%.pdf : %.aweb
-	a2x $(A2XOPTS) --doctype=article  --format=pdf --destination-dir=../doc\
-	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) $<
-
-%.tcl : %.aweb
-	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
-
-#
-# vim :set sw=8 ts=8 sts=8 noexpandtab:
-#
+package provide miscutils $::miscutils::revision
