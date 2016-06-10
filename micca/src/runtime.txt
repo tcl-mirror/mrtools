@@ -1459,8 +1459,9 @@ mrt_DeleteInstance(
     if (inst == NULL) {
         return ;
     }
-    assert(inst->classDesc != NULL) ;
-    MRT_iab *iab = inst->classDesc->iab ;
+    MRT_Class const *classDesc = inst->classDesc ;
+    assert(classDesc != NULL) ;
+    MRT_iab *iab = classDesc->iab ;
     assert(iab != NULL) ;
     /*
      * Run the destructor, if there is one.
@@ -1469,13 +1470,21 @@ mrt_DeleteInstance(
         iab->destruct(inst) ;
     }
     /*
+     * Add the class relationships to the transaction.
+     */
+    struct mrtrelationship const * const * classRels = classDesc->classRels ;
+    unsigned relCount = classDesc->relCount ;
+    mrtMarkTransaction(classRels, relCount) ;
+    /*
+     * Unlink the instance from its relationships.
+     */
+    for ( ; relCount != 0 ; relCount--) {
+        mrtUnrelate(*classRels++, instref) ;
+    }
+    /*
      * Mark the slot as free.
      */
     inst->alloc = 0 ;
-    /*
-     * Add the class relationships to the transaction.
-     */
-    mrtMarkTransaction(inst->classDesc->classRels, inst->classDesc->relCount) ;
 }
 ----
 
@@ -4207,71 +4216,58 @@ The inverse of relating instances is to unrelate them.
 ----
 <<mrt external interfaces>>=
 extern void
-mrt_Unrelate(
+mrtUnrelate(
     MRT_Relationship const *rel,
-    void *source,
-    void *target,
-    ...) ;
+    void *inst) ;
 ----
 
 `rel`::
     A pointer to a relationship description for the relationship
     across which the relate operation is to happen.
-`source`::
-    A pointer to a class instance that serves the source role in the
+`inst`::
+    A pointer to the class instance that is to be unlinked from the
     relationship.
-`target`::
-    A pointer to a class instance that serves the target role in the
-    relationship.
-`?associator?`::
-    For simple associations and generalizations this argument may be omitted
-    and, if supplied, it is ignored.
-    For class based association,
-    it must be supplied and is the instance reference to the associator class.
 *****
 
-(((micca,Run Time Function,mrt_Unrelate)))
+(((micca,Run Time Function,mrtUnrelate)))
 [source,c]
 ----
-<<mrt external functions>>=
+<<mrt static functions>>=
 void
-mrt_Unrelate(
+mrtUnrelate(
     MRT_Relationship const *rel,
-    void *source,
-    void *target,
-    ...)
+    void *inst)
 {
-    assert(source != NULL) ;
-    assert(target != NULL) ;
+    assert(rel != NULL) ;
+    assert(inst != NULL) ;
 
-    va_list ap ;
+    MRT_Instance *instref = inst ;
+    MRT_Class const *instclass = instref->classDesc ;
 
     switch (rel->relType) {
     case mrtSimpleAssoc: {
-        <<mrt_Unrelate: unlink simple association>>
+        <<mrtUnrelate: unlink simple association>>
     }
         break ;
 
     case mrtClassAssoc: {
-        <<mrt_Unrelate: unlink class based association>>
+        <<mrtUnrelate: unlink class based association>>
     }
         break ;
 
     case mrtRefGeneralization: {
-        <<mrt_Unrelate: unlink reference generalization>>
+        <<mrtUnrelate: unlink reference generalization>>
     }
         break ;
 
-    case mrtUnionGeneralization: {
-        <<mrt_Unrelate: unlink union generalization>>
-    }
+    case mrtUnionGeneralization:
+        // for a union generalization, there are no pointer links.
         break ;
 
     default:
+        mrtFatalError(mrtRelationshipLinkage) ;
         break ;
     }
-
-    mrtMarkTransaction(&rel, 1) ;
 }
 ----
 
@@ -4281,69 +4277,201 @@ perform the pointer operations to unlink the instances.
 
 [source,c]
 ----
-<<mrt_Unrelate: unlink simple association>>=
-struct mrtsimpleassociation const *assoc = &rel->relInfo.simpleAssociation ;
+<<mrtUnrelate: unlink simple association>>=
+struct mrtsimpleassociation const *s_assoc = &rel->relInfo.simpleAssociation ;
 
-if (assoc->source.classDesc != ((MRT_Instance *)source)->classDesc ||
-        assoc->target.classDesc != ((MRT_Instance *)target)->classDesc) {
+if (instclass == s_assoc->source.classDesc) {
+    mrtSimpUnlinkForw(s_assoc, inst) ;
+} else if (instclass == s_assoc->target.classDesc) {
+    mrtSimpUnlinkBack(s_assoc, inst) ;
+} else {
     mrtFatalError(mrtRelationshipLinkage) ;
 }
-
-mrtUnlink(&assoc->source, source, target) ;
-mrtUnlink(&assoc->target, target, source) ;
 ----
 
-The pointer operation for unlinking mirror those for linking.
-For singular associations, we need only find the pointer member in the
-instance structure.
-For linked associations,
-we must unlink the target from the list.
+[source,c]
+----
+<<mrt forward references>>=
+static void
+mrtSimpUnlinkForw(
+    struct mrtsimpleassociation const *assoc,
+    void *source) ;
+----
 
-(((micca,Run Time Function,mrtUnlink)))
 [source,c]
 ----
 <<mrt static functions>>=
+/*
+ * Unlink the target from the source in the forward direction.
+ */
 static
 void
-mrtUnlink(
-    struct mrtassociationrole const *sourceRole,
-    void *source,
-    void *target)
+mrtSimpUnlinkForw(
+    struct mrtsimpleassociation const *assoc,
+    void *source)
 {
-    switch (sourceRole->storageType) {
-    case mrtSingular: {
-        void **ref = (void **)((uintptr_t)source + sourceRole->storageOffset) ;
-        if (*ref != target) {// <1>
-            mrtFatalError(mrtRelationshipLinkage) ;
+    struct mrtassociationrole const *sourceRole = &assoc->source ;
+    struct mrtassociationrole const *targetRole = &assoc->target ;
+
+    if (sourceRole->storageType == mrtSingular) {
+        // Point to where the target reference is located in the source instance.
+        void **p_targetref = (void **)((uintptr_t)source +
+                sourceRole->storageOffset) ;
+        // Fetch the target reference.
+        void *targetref = *p_targetref ;
+        *p_targetref = NULL ;
+
+        // It's possible for the target reference to be NULL if the target was
+        // deleted first. Othewise, we have to go unlink the back reference
+        // from the target to the source.
+        if (targetref != NULL) {
+            mrtUnlinkBackref(source, targetref, targetRole) ;
         }
-        *ref = NULL ; // <2>
-    }
-        break ;
-
-    case mrtArray:
-        // can't unlink array types
-        mrtFatalError(mrtStaticRelationship) ;
-        break ;
-
-    case mrtLinkedList: {
-        MRT_LinkRef *targetRef = (MRT_LinkRef *)
-                ((uintptr_t)target + sourceRole->linkOffset) ;
-        mrtLinkRefRemove(targetRef) ;
-    }
-        break ;
-
-    default:
+    } else {
+        // Simple forward association links are always singular.
         mrtFatalError(mrtRelationshipLinkage) ;
-        break ;
     }
 }
 ----
-<1> Check that we are indeed related to the instance from which we are
-unlinking.
-<2> Note that we set the pointer to `NULL` when it is unlinked.
-This is essential for the referential integrity checks.
-A `NULL` reference pointer means this instance does not add anything to
-the reference counts.
+
+[source,c]
+----
+<<mrt forward references>>=
+static void
+mrtUnlinkBackref(
+    void *source,
+    void *target,
+    struct mrtassociationrole const *targetRole) ;
+----
+
+[source,c]
+----
+<<mrt static functions>>=
+static void
+mrtUnlinkBackref(
+    void *source,
+    void *target,
+    struct mrtassociationrole const *targetRole)
+{
+    assert(source != NULL) ;
+    assert(target != NULL) ;
+    assert(targetRole != NULL) ;
+
+    if (targetRole->storageType == mrtSingular) {
+        // The entity at the storageOffset is a simple pointer back to the
+        // source instance.  Point to where the source reference is located
+        // in the target instance.
+        void **p_sourceref = (void **)((uintptr_t)target +
+                targetRole->storageOffset) ;
+        // We should be pointing back to where we came from.
+        assert(*p_sourceref == source) ;
+        *p_sourceref = NULL ;
+    } else if (targetRole->storageType == mrtLinkedList) {
+        // The source instance is linked onto a list contained in the target
+        // instance.  We need to remove the source instance from that list. We
+        // only need a pointer to the links in the source instance to remove it
+        // from the list (it is doubly linked).  The links are offset into the
+        // source instance by the offset given in the "target" role.
+        MRT_LinkRef *sourcelink = (MRT_LinkRef *)
+                ((uintptr_t)source + targetRole->linkOffset) ;
+
+        // Check that the instance is actually linked on the list.
+        assert(sourcelink->next != NULL && sourcelink->prev != NULL) ;
+        if (sourcelink->next == NULL || sourcelink->prev == NULL) {
+            mrtFatalError(mrtRelationshipLinkage) ;
+        } else {
+            mrtLinkRefRemove(sourcelink) ;
+        }
+    } else {
+        // Can't unlink array type linkages.
+        mrtFatalError(mrtStaticRelationship) ;
+    }
+}
+----
+
+[source,c]
+----
+<<mrt forward references>>=
+static
+void
+mrtSimpUnlinkBack(
+    struct mrtsimpleassociation const *s_assoc,
+    void *target) ;
+----
+
+[source,c]
+----
+<<mrt static functions>>=
+/*
+ * Unlink the source from the target in the backward direction.
+ */
+static
+void
+mrtSimpUnlinkBack(
+    struct mrtsimpleassociation const *s_assoc,
+    void *target)
+{
+    struct mrtassociationrole const *sourceRole = &s_assoc->source ;
+    struct mrtassociationrole const *targetRole = &s_assoc->target ;
+
+    if (targetRole->storageType == mrtSingular) {
+        // Point to where the source reference is located in the target
+        // instance.
+        void **p_sourceref = (void **)((uintptr_t)target +
+                targetRole->storageOffset) ;
+        // Fetch the source reference.
+        void *sourceref = *p_sourceref ;
+        *p_sourceref = NULL ;
+
+        // It's possible for the source reference to be NULL if the
+        // source was deleted first.
+        if (sourceref != NULL) {
+            if (sourceRole->storageType == mrtSingular) {
+                // The entity at the storageOffset is a simple pointer to the
+                // target Point to where the source reference is located in the
+                // target
+                void **p_targetref = (void **)((uintptr_t)sourceref +
+                        sourceRole->storageOffset) ;
+                // We should be pointing back to the association source where
+                // we came from.
+                assert(*p_targetref == target) ;
+                *p_targetref = NULL ;
+            } else {
+                // Simple association links from the source are always singular.
+                mrtFatalError(mrtRelationshipLinkage) ;
+            }
+        }
+    } else if (targetRole->storageType == mrtLinkedList) {
+        // The target has a linked list terminus to the set of source
+        // instances. We must iterate across the set of source instances
+        // and remove them from the list and NULL out their pointer
+        // to the target.
+        MRT_LinkRef *sourcelist = (MRT_LinkRef *)((uintptr_t)target +
+                targetRole->storageOffset) ;
+        for (MRT_LinkRef *srcIter = mrtLinkRefBegin(sourcelist) ;
+                srcIter != mrtLinkRefEnd(sourcelist) ; ) {
+            MRT_LinkRef *sourcelink = srcIter ;
+            srcIter = srcIter->next ; // move the iterator before removing
+            mrtLinkRefRemove(sourcelink) ;
+
+            // Point to the begining of the source instance.
+            void *sourceinst = (void *)((uintptr_t)sourcelink -
+                    targetRole->linkOffset) ;
+            if (sourceRole->storageType == mrtSingular) {
+                // Find the pointer to the target.
+                void **p_targetref = (void **)((uintptr_t)sourceinst +
+                        sourceRole->storageOffset) ;
+                *p_targetref = NULL ;
+            } else {
+                // Simple association links from the source are always singular.
+                mrtFatalError(mrtRelationshipLinkage) ;
+            }
+        }
+    } else {
+        mrtFatalError(mrtStaticRelationship) ;
+    }
+}
+----
 
 For class based associations,
 we deal with the association in two steps, between each participant and
@@ -4351,37 +4479,118 @@ the associator class.
 
 [source,c]
 ----
-<<mrt_Unrelate: unlink class based association>>=
-struct mrtclassassociation const *assoc = &rel->relInfo.classAssociation ;
+<<mrtUnrelate: unlink class based association>>=
+struct mrtclassassociation const *c_assoc = &rel->relInfo.classAssociation ;
 
-va_start(ap, target) ;
-void *associator = va_arg(ap, void *) ;
-assert(associator != NULL) ;
-va_end(ap) ;
-
-if (!(assoc->source.classDesc == ((MRT_Instance *)source)->classDesc &&
-        assoc->target.classDesc == ((MRT_Instance *)target)->classDesc &&
-        assoc->associator.classDesc == ((MRT_Instance *)associator)->classDesc)) {
+if (instclass == c_assoc->associator.classDesc) {
+    mrtClassUnlinkParticipants(c_assoc, inst) ;
+} else if (instclass == c_assoc->source.classDesc) {
+    mrtClassUnlinkAssocs(&c_assoc->source, inst) ;
+} else if (instclass == c_assoc->target.classDesc) {
+    mrtClassUnlinkAssocs(&c_assoc->target, inst) ;
+} else {
     mrtFatalError(mrtRelationshipLinkage) ;
 }
-
-void **fref = (void **)((uintptr_t)associator + assoc->associator.forwardOffset) ;
-if (*fref != target) {// <1>
-    mrtFatalError(mrtRelationshipLinkage) ;
-}
-*fref = NULL ;
-mrtUnlink(&assoc->source, source, associator) ;
-
-void **bref = (void **)((uintptr_t)associator + assoc->associator.backwardOffset) ;
-if (*bref != source) {
-    mrtFatalError(mrtRelationshipLinkage) ;
-}
-*bref = NULL ;
-mrtUnlink(&assoc->target, target, associator) ;
 ----
-<1> The associator class instance references must refer to the
-proper source and target instances.
-Otherwise, we were never related in the first place.
+
+[source,c]
+----
+<<mrt forward references>>=
+static
+void
+mrtClassUnlinkParticipants(
+    struct mrtclassassociation const *relRole,
+    void *assoc) ;
+----
+
+[source,c]
+----
+<<mrt static functions>>=
+/*
+ * Unlink the participants from an associative instance
+ */
+static
+void
+mrtClassUnlinkParticipants(
+    struct mrtclassassociation const *relRole,
+    void *assoc)
+{
+    struct mrtassociatorrole const *assocRole = &relRole->associator ;
+    struct mrtassociationrole const *sourceRole = &relRole->source ;
+    struct mrtassociationrole const *targetRole = &relRole->target ;
+
+    // Start with the forward direction to the target.  Point to where the
+    // target reference is located in the associator instance.
+    void **p_targetref = (void **)((uintptr_t)assoc + assocRole->forwardOffset) ;
+    void *targetref = *p_targetref ;
+    *p_targetref = NULL ;
+    if (targetref != NULL) {
+        mrtUnlinkBackref(assoc, targetref, targetRole) ;
+    }
+
+    void **p_sourceref = (void **)((uintptr_t)assoc + assocRole->backwardOffset) ;
+    void *sourceref = *p_sourceref ;
+    *p_sourceref = NULL ;
+    if (sourceref != NULL) {
+        mrtUnlinkBackref(assoc, sourceref, sourceRole) ;
+    }
+}
+----
+
+[source,c]
+----
+<<mrt forward references>>=
+static
+void
+mrtClassUnlinkAssocs(
+    struct mrtassociationrole const *role,
+    void *inst) ;
+----
+
+[source,c]
+----
+<<mrt static functions>>=
+/*
+ * Unlink the associative instance from a participant.
+ * This deletes the associative instance.
+ */
+static
+void
+mrtClassUnlinkAssocs(
+    struct mrtassociationrole const *role,
+    void *inst)
+{
+    if (role->storageType == mrtSingular) {
+        // The entity at the storageOffset is a simple pointer back to the
+        // associator instance.  Point to where the associator reference is
+        // located in the inst instance.
+        void **p_assocref = (void **)((uintptr_t)inst + role->storageOffset) ;
+        void *associnst = *p_assocref ;
+        *p_assocref = NULL ;
+        if (associnst) {
+            // Simply delete the associator instance. This will cause the
+            // links to be updated recursively.
+            mrt_DeleteInstance(associnst) ;
+        }
+    } else if (role->storageType == mrtLinkedList) {
+        // Otherwise we have a linked list of associator instances.
+        // Find the link list terminus in the inst.
+        MRT_LinkRef *assoclist = (MRT_LinkRef *)((uintptr_t)inst +
+                role->storageOffset) ;
+        // Iterate over the list, deleting each one.
+        for (MRT_LinkRef *assocIter = mrtLinkRefBegin(assoclist) ;
+                assocIter != mrtLinkRefEnd(assoclist) ; ) {
+            void *associnst = (void *)((uintptr_t)assocIter -
+                    role->linkOffset) ;
+            assocIter = assocIter->next ; // advance the iterator before delete
+            mrt_DeleteInstance(associnst) ;
+        }
+    } else {
+        // Can't unlink static associations.
+        mrtFatalError(mrtStaticRelationship) ;
+    }
+}
+----
 
 For reference generalizations,
 the references are singular pointers between the superclass and subclass
@@ -4391,39 +4600,41 @@ generalization.
 
 [source,c]
 ----
-<<mrt_Unrelate: unlink reference generalization>>=
+<<mrtUnrelate: unlink reference generalization>>=
 struct mrtrefgeneralization const *gen = &rel->relInfo.refGeneralization ;
 
-MRT_Class const *superclassClass = ((MRT_Instance *)target)->classDesc ;
-if (gen->superclass.classDesc != superclassClass) {
-    mrtFatalError(mrtRelationshipLinkage) ;
+if (instclass == gen->superclass.classDesc) {
+    // Instance is a superclass instance
+    void **p_subinst = (void **)((uintptr_t)inst +
+            gen->superclass.storageOffset) ;
+    void *subinst = *p_subinst ;
+    *p_subinst = NULL ;
+    if (subinst) {
+        // NULL out the pointer to the superclass instance.
+        MRT_Class const *subclass = ((MRT_Instance *)subinst)->classDesc ;
+        int subclassCode = mrtFindRefGenSubclassCode(subclass, gen->subclasses,
+                gen->subclassCount) ;
+        void **p_superinst = (void **)((uintptr_t)subinst +
+                gen->subclasses[subclassCode].storageOffset) ;
+        *p_superinst = NULL ;
+    }
+} else {
+    // Instance is a subclass instance
+    int subclassCode = mrtFindRefGenSubclassCode(instclass, gen->subclasses,
+            gen->subclassCount) ;
+    // Obtain the pointer to the superclass instance.
+    void **p_superinst = (void **)((uintptr_t)inst +
+            gen->subclasses[subclassCode].storageOffset) ;
+    void *superinst = *p_superinst ;
+    *p_superinst = NULL ;
+    // NULL out the pointer in the superclass instance pointing to the subclass
+    // instance.
+    if (superinst) {
+        void **p_subinst = (void **)((uintptr_t)superinst +
+                gen->superclass.storageOffset) ;
+        *p_subinst = NULL ;
+    }
 }
-
-MRT_Class const *subclassClass = ((MRT_Instance *)source)->classDesc ;
-int subclassCode = mrtFindRefGenSubclassCode(subclassClass, gen->subclasses,
-        gen->subclassCount) ;
-
-void **superref =
-    (void **)((uintptr_t)target + gen->superclass.storageOffset) ;
-if (*superref != source) {
-    mrtFatalError(mrtRelationshipLinkage) ;
-}
-*superref = NULL ;
-
-void **subref = (void **)((uintptr_t)source +
-        gen->subclasses[subclassCode].storageOffset) ;
-if (*subref != target) {
-    mrtFatalError(mrtRelationshipLinkage) ;
-}
-*subref = NULL ;
-----
-
-Unlinking is not an allowed operation for union generalizations.
-
-[source,c]
-----
-<<mrt_Unrelate: unlink union generalization>>=
-mrtFatalError(mrtRelationshipLinkage) ;
 ----
 
 === Reclassifying Subclasses
