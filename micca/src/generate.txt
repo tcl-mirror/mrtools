@@ -4918,10 +4918,9 @@ proc GenInstanceInitializers {className classNumber inst} {
         }
 
         if {[relation isnotempty $AssociationRefs]} {
-            set refvalue [expr {$Value eq "@nil@" ?\
-                "NULL" : [GenInstanceAddress $domain\
+            set refvalue [GenInstanceAddress $domain\
                     [relation extract $AssociationRefs ReferencedClass]\
-                    $Value]}]
+                    $Value]
             append result "$indent2.$Component = $refvalue,\n"
             continue
         }
@@ -6080,8 +6079,7 @@ set simpassocs [findRelated $assocs {~R31 SimpleAssociation}]
 forAllRefs simpassoc $simpassocs {
     set simpname [readAttribute $simpassoc Name]
     set cmdmap [dict create\
-        relate [list ${suppns}::RelSimpleRelateForw $simpname]\
-        unrelate [list ${suppns}::RelSimpleUnrelateForw $simpname]\
+        swap [list ${suppns}::RelSimpleSwap $simpname]\
     ]
     set assigner [findRelated $simpassoc R31 ~R52]
     if {[isNotEmptyRef $assigner]} {
@@ -6096,14 +6094,6 @@ forAllRefs simpassoc $simpassocs {
     namespace ensemble create\
         -command ${actns}::$simpname\
         -map $cmdmap
-
-    set cmdmap [dict create\
-        relate [list ${suppns}::RelSimpleRelateBack $simpname]\
-        unrelate [list ${suppns}::RelSimpleUnrelateBack $simpname]\
-    ]
-    namespace ensemble create\
-        -command ${actns}::~$simpname\
-        -map $cmdmap
 }
 ----
 
@@ -6114,8 +6104,7 @@ set classassocs [findRelated $assocs {~R31 ClassBasedAssociation}]
 forAllRefs classassoc $classassocs {
     set cbname [readAttribute $classassoc Name]
     set cmdmap [dict create\
-        relate [list ${suppns}::RelClassRelateForw $cbname]\
-        unrelate [list ${suppns}::RelClassUnrelateForw $cbname]\
+        swap [list ${suppns}::RelClassSwap $cbname]\
     ]
     set assigner [findRelated $classassoc R31 ~R52]
     if {[isNotEmptyRef $assigner]} {
@@ -6129,14 +6118,6 @@ forAllRefs classassoc $classassocs {
     }
     namespace ensemble create\
         -command ${actns}::$cbname\
-        -map $cmdmap
-
-    set cmdmap [dict create\
-        relate [list ${suppns}::RelClassRelateBack $cbname]\
-        unrelate [list ${suppns}::RelClassUnrelateBack $cbname]\
-    ]
-    namespace ensemble create\
-        -command ${actns}::~$cbname\
         -map $cmdmap
 }
 ----
@@ -6165,20 +6146,10 @@ set gens [findRelated $relRefs {~R30 Generalization}]
 set refgens [findRelated $gens {~R43 ReferenceGeneralization}]
 foreach rgname [relation list [deRef $refgens] Name] {
     set cmdmap [dict create\
-        relate [list ${suppns}::RelRefGenRelateForw $rgname]\
-        unrelate [list ${suppns}::RelRefGenUnrelateForw $rgname]\
         reclassify [list ${suppns}::RelRefGenReclassify $rgname]\
     ]
     namespace ensemble create\
         -command ${actns}::$rgname\
-        -map $cmdmap
-
-    set cmdmap [dict create\
-        relate [list ${suppns}::RelRefGenRelateBack $rgname]\
-        unrelate [list ${suppns}::RelRefGenUnrelateBack $rgname]\
-    ]
-    namespace ensemble create\
-        -command ${actns}::~$rgname\
         -map $cmdmap
 }
 ----
@@ -9428,122 +9399,206 @@ synchronously.
 proc ClassCreate {className instref args} {
     variable domain
 
+    set classDesc [GetClassDescriptor $domain $className]
     append result\
         [linecomment "$className create $instref [list $args]"]\
         [CreateInstRefSymbol $className $instref]\
-        [CreateAndInitInstance $className $instref MRT_StateCode_IG $args]
+        "$instref = mrt_CreateInstance(&$classDesc, MRT_StateCode_IG) ;\n"\
+        [AssignComponentValues $className $instref $args]
 
     return [IndentToBlock $result]
 }
-
-proc CreateAndInitInstance {className instref initialstate arglist} {
-    variable domain
-    set attrvalues [GetAttrInitialValues $className $arglist]
-    set classDesc [GetClassDescriptor $domain $className]
-    append result\
-        "$instref = mrt_CreateInstance(&$classDesc, $initialstate) ;\n"\
-        [AssignAttributeValues $className $instref $attrvalues]
-}
 ----
 
-After any instance creation,
-we have to generate code to assign values to the attributes of
-the newly created instance.
-We factor that into a common procedure as it will be needed
-for other instance creation situations.
 
 [source,tcl]
 ----
 <<generation support commands>>=
-proc AssignAttributeValues {className instref attrvalues} {
-    variable domain
+proc AssignComponentValues {className instref suppliedvalues} {
     set result {}
-    foreach {attrName attrValue} $attrvalues {
-        set attrRef [Attribute findById Domain $domain Class $className\
-            Name $attrName]
-        lassign [readAttribute $attrRef DataType Dimension] type dim
-        if {$dim > 0} {
-            # Got a matrix, see if it is a string
-            if {$type eq "char"} {
-                set maxchars [expr {$dim - 1}]
-                append result\
-                    "strncpy($instref->$attrName, $attrValue, $maxchars) ;\n"\
-                    "$instref->$attrName\[$maxchars\] = '\\0' ;\n"
+
+    set popcomps [GetPopComponents $className]
+    # puts [relformat $popcomps popcomps]
+    relation foreach popcomp $popcomps {
+        relation assign $popcomp
+        switch -exact -- $Type {
+        association {
+            if {![dict exists $suppliedvalues $Name]} {
+                error "no value supplied for association reference, \"$Name\""
             } else {
-                append result "memcpy($instref->$attrName, $attrValue,\
-                    sizeof($instref->$attrName)) ;\n"
+                set assocrefvar [dict get $suppliedvalues $Name]
             }
-        } else {
-            append result "$instref->$attrName = $attrValue ;\n"
+            set refclass [pipe {
+                AssociationReference findById Domain $Domain Class $Class\
+                        Name $Name |
+                findRelated % ~R90 R32 ~R33 |
+                readAttribute % Class
+            } {} |%]
+            CheckInstRefSymbol $assocrefvar Class $refclass
+
+            set relDesc [GetRelationshipDescriptor $Domain $Name]
+            append result "mrt_CreateSimpleLinks($relDesc, $instref,\
+                    $assocrefvar) ;\n"
         }
+        associator {
+            if {![dict exists $suppliedvalues $Name]} {
+                error "no value supplied for associator reference, \"$Name\""
+            } else {
+                set atorrefs [dict get $suppliedvalues $Name]
+            }
+            set atorclass [pipe {
+                AssociatorReference findById Domain $Domain Class $Class\
+                        Name $Name |
+                findRelated % ~R93
+            } {} |%]
+            set srcclass [pipe {
+                findRelated $atorclass R42 ~R34 |
+                readAttribute % Class
+            } {} |%]
+            set trgclass [pipe {
+                findRelated $atorclass R42 ~R35 |
+                readAttribute % Class
+            } {} |%]
+
+            # Reflexive case
+            if {$srcclass eq $trgclass} {
+                if {[dict exists $atorrefs backward]} {
+                    set srcinstref [dict get $atorrefs backward]
+                } else {
+                    error "for reflexive associator references, expected\
+                        \"backward\" reference: got \"$atorrefs\""
+                }
+                if {[dict exists $atorrefs forward]} {
+                    set trginstref [dict get $atorrefs forward]
+                } else {
+                    error "for reflexive associator references, expected\
+                        \"forward\" reference: got \"$atorrefs\""
+                }
+            } else {
+                if {[dict exists $atorrefs $srcclass]} {
+                    set srcinstref [dict get $atorrefs $srcclass]
+                } else {
+                    error "for associator references, expected\
+                        \"$srcclass\" reference: got \"$atorrefs\""
+                }
+                if {[dict exists $atorrefs $trgclass]} {
+                    set trginstref [dict get $atorrefs $trgclass]
+                } else {
+                    error "for associator references, expected\
+                        \"$trgclass\" reference: got \"$atorrefs\""
+                }
+            }
+            CheckInstRefSymbol $srcinstref Class $srcclass
+            CheckInstRefSymbol $trginstref Class $trgclass
+
+            set relDesc [GetRelationshipDescriptor $Domain $Name]
+            append result "mrt_CreateAssociatorLinks($relDesc, $instref,\
+                    $srcinstref, $trginstref) ;\n"
+        }
+        superclass {
+            if {![dict exists $suppliedvalues $Name]} {
+                error "no value supplied for superclass reference, \"$Name\""
+            } else {
+                set superrefvar [dict get $suppliedvalues $Name]
+            }
+            set superref [pipe {
+                SuperclassReference findById Domain $Domain Class $Class\
+                        Name $Name |
+                findRelated % ~R91 {~R47 ReferringSubclass} R37 ~R36
+            } {} |%]
+            if {[isNotEmptyRef $superref]} {
+                CheckInstRefSymbol $superrefvar\
+                        Class [readAttribute $superref Class]
+
+                set relDesc [GetRelationshipDescriptor $Domain $Name]
+                append result "mrt_CreateSimpleLinks($relDesc, $instref,\
+                        $superrefvar) ;\n"
+            }
+        }
+        attribute {
+            if {![dict exists $suppliedvalues $Name]} {
+                set defvalueref [DefaultValue findById Domain $Domain\
+                        Class $Class Attribute $Name]
+                if {[isEmptyRef $defvalueref]} {
+                    error "attribute, \"$Name\", has no supplied value and\
+                        no default value"
+                }
+                set attrValue [readAttribute $defvalueref Value]
+            } else {
+                set attrValue [dict get $suppliedvalues $Name]
+            }
+            set attrref [Attribute findById Domain $Domain Class $Class\
+                    Name $Name]
+            assignAttribute $attrref {DataType type} {Dimension dim}
+            if {$dim > 0} {
+                # Got a matrix, see if it is a string
+                if {$type eq "char"} {
+                    set maxchars [expr {$dim - 1}]
+                    append result\
+                        "strncpy($instref->$Name, $attrValue, $maxchars) ;\n"\
+                        "$instref->$Name\[$maxchars\] = '\\0' ;\n"
+                } else {
+                    append result "memcpy($instref->$Name, $attrValue,\
+                        sizeof($instref->$Name)) ;\n"
+                }
+            } else {
+                append result "$instref->$Name = $attrValue ;\n"
+            }
+        }
+        }
+        dict unset suppliedvalues $Name
     }
+
+    if {[dict size $suppliedvalues] != 0} {
+        error "class, $Class, has no attribute(s) named,\
+            \"[join [dict keys $suppliedvalues] {, }]\""
+    }
+
     return $result
 }
-----
 
-The values assigned to attributes come from the ones provided by
-the caller supplemented by any defined default values.
-
-[source,tcl]
-----
-<<generation support commands>>=
-proc GetAttrInitialValues {className attrvalues} {
-    if {[llength $attrvalues] % 2 != 0} {
-        error "attribute names / values must be given in pairs,\
-            got: \"$attrvalues\""
-    }
-    set required [FindRequiredAttributes $className]
-    set defaulted [FindDefaultedAttributes $className]
-    set supplied [dict keys $attrvalues]
-
-    set missing [::struct::set difference $required $supplied]
-    if {![::struct::set empty $missing]} {
-        error "values for attributes, \"[join $missing {, }]\", must be\
-            provided"
-    }
-    set all [::struct::set union $required [dict keys $defaulted]]
-    set extra [::struct::set difference $supplied $all]
-    if {![::struct::set empty $extra]} {
-        error "class, $className, has no attribute(s) named,\
-            \"[join $extra {, }]\""
-    }
-
-    return [dict merge $defaulted $attrvalues]
-}
-----
-
-The attribues that must be provided are those that do not have
-a defined default value and which are not dependent attributes.
-
-[source,tcl]
-----
-<<generation support commands>>=
-proc FindRequiredAttributes {className} {
+proc GetPopComponents {className} {
     variable domain
-    set attrRefs [Attribute findWhere\
-        {$Domain eq $domain && $Class eq $className}]
-    set defRefs [findRelated $attrRefs {~R29 IndependentAttribute}\
-            ~R22 R22 R29]
-    set depRefs [findRelated $attrRefs {~R29 DependentAttribute} R29]
-    return [pipe {
-        refMinus $attrRefs $defRefs |
-        refMinus ~ $depRefs |
-        deRef ~ |
-        relation list ~ Name
-    }]
-}
-----
 
-[source,tcl]
-----
-<<generation support commands>>=
-proc FindDefaultedAttributes {className} {
-    variable domain
-    return [pipe {
-        DefaultValue findWhere {$Domain eq $domain && $Class eq $className} |
-        deRef ~ |
-        relation dict ~ Attribute Value
+    set popcomps [PopulatedComponent findWhere\
+            {$Domain eq $domain && $Class eq $className}]
+    set typedcomps [pipe {
+        findRelated $popcomps {~R21 Reference} {~R23 AssociationReference} |
+        deRef % |
+        relation extend % artup Type string {"association"}
+    } {} |%]
+
+    set typedcomps [pipe {
+        findRelated $popcomps {~R21 Reference} {~R23 AssociatorReference} |
+        deRef % |
+        relation extend % artup Type string {"associator"} |
+        relation union $typedcomps %
+    } {} |%]
+
+    set typedcomps [pipe {
+        findRelated $popcomps {~R21 Reference} {~R23 SuperclassReference} |
+        deRef % |
+        relation extend % artup Type string {"superclass"} |
+        relation union $typedcomps %
+    } {} |%]
+
+    set typedcomps [pipe {
+        findRelated $popcomps {~R21 Attribute} {~R29 IndependentAttribute} |
+        deRef % |
+        relation extend % artup Type string {"attribute"} |
+        relation union $typedcomps %
+    } {} |%]
+    # puts [relformat $typedcomps typedcomps]
+
+    return $typedcomps
+}
+
+proc GetRelationshipDescriptor {domain name} {
+    set relnum [pipe {
+        Relationship findById Domain $domain Name $name |
+        readAttribute ~ Number
     }]
+    return &${domain}__RSHIPS\[$relnum\]
 }
 ----
 
@@ -9756,11 +9811,13 @@ since the instance creation is done synchronously.
 proc ClassCreateIn {className instref state args} {
     variable domain
     set statenum [GetStateNumber $domain $className $state]
+    set classDesc [GetClassDescriptor $domain $className]
 
     append result\
         [linecomment "$className create $instref [list $args]"]\
         [CreateInstRefSymbol $className $instref]\
-        [CreateAndInitInstance $className $instref $statenum $args]
+        "$instref = mrt_CreateInstance(&$classDesc, $statenum) ;\n"\
+        [AssignComponentValues $className $instref $args]
 
     return [IndentToBlock $result]
 }
@@ -9964,11 +10021,10 @@ proc ClassCreateAsync {className event eventparams args} {
     lassign [CreateTempRefSymbol $className] reftype refvar
     variable domain
     set classDesc [GetClassDescriptor $domain $className]
-    set attrvalues [GetAttrInitialValues $className $args]
     append result\
         "$reftype$refvar = mrt_CreateAsync(&$classDesc, $eventNum,\
             $paramptr, $paramsize, $sourceinst) ;\n"\
-        [AssignAttributeValues $className $refvar $attrvalues]
+        [AssignComponentValues $className $refvar $args]
 
     return [IndentToBlock $result]
 }
@@ -10548,10 +10604,10 @@ reverse direction, _i.e._ a relationship `R42` will have two commands,
 [source,tcl]
 ----
 <<generation support commands>>=
-proc RelSimpleRelateForw {relName source target} {
+proc RelSimpleSwap {relName source target} {
     return [string cat [IndentToBlock\
-        [linecomment "$relName relate $source $target"]]\
-        [SimpleAssocLinkage $relName $source $target mrt_Relate]\
+        [linecomment "$relName swap $source $target"]]\
+        [SimpleAssocLinkage $relName $source $target]\
     ]
 }
 ----
@@ -10559,40 +10615,7 @@ proc RelSimpleRelateForw {relName source target} {
 [source,tcl]
 ----
 <<generation support commands>>=
-proc RelSimpleRelateBack {relName target source} {
-    return [string cat [IndentToBlock\
-        [linecomment "~$relName relate $target $source"]]\
-        [SimpleAssocLinkage $relName $source $target mrt_Relate]\
-    ]
-}
-----
-
-[source,tcl]
-----
-<<generation support commands>>=
-proc RelSimpleUnrelateForw {relName source target} {
-    return [string cat [IndentToBlock\
-        [linecomment "$relName unrelate $source $target"]]\
-        [SimpleAssocLinkage $relName $source $target mrt_Unrelate]\
-    ]
-}
-----
-
-[source,tcl]
-----
-<<generation support commands>>=
-proc RelSimpleUnrelateBack {relName target source} {
-    return [string cat [IndentToBlock\
-        [linecomment "~$relName unrelate $source $target"]]\
-        [SimpleAssocLinkage $relName $source $target mrt_Unrelate]\
-    ]
-}
-----
-
-[source,tcl]
-----
-<<generation support commands>>=
-proc SimpleAssocLinkage {relName sourceref targetref opname} {
+proc SimpleAssocLinkage {relName sourceref targetref} {
     variable domain
     set relRef [SimpleAssociation findById Domain $domain Name $relName]
     set relNum [readAttribute [findRelated $relRef R31 R30] Number]
@@ -10604,7 +10627,8 @@ proc SimpleAssocLinkage {relName sourceref targetref opname} {
     set targetClass [readAttribute [findRelated $relRef ~R33] Class]
     CheckInstRefSymbol $targetref Class $targetClass
 
-    return [IndentToBlock "$opname\($rship, $sourceref, $targetref\) ;\n"]
+    return [IndentToBlock "mrt_CreateSimpleLinks\($rship, $sourceref,\
+            $targetref\) ;\n"]
 }
 ----
 
@@ -10613,33 +10637,18 @@ ifdef::showtests[]
 ----
 <<generate command tests>>=
 test codegen-30.0 {
-    Relate and unrelate simple association
+    Create simple association
 } -setup {
-    # makeFile {} codegen30.h
-    # makeFile {} codegen30.c
-    micca configure {
+    validateutils genMiccaFile codegen30 {
         domain codegen30 {
             class X {}
             class Y {}
-            class A {}
 
-            association R1 -associator A X 0..1--0..1 Y
+            association R1 X 0..1--1 Y
 
             domainop void makePair {} {
-                %<X create xref>%
                 %<Y create yref>%
-                %<A create aref>%
-                %<~R1 relate yref xref aref>%
-            }
-
-            domainop void breakPair {} {
-                %<X foreachInstance xref>%
-                    %<instance aref findOneRelated xref {R1 A}>%
-                    if (aref != NULL) {
-                        %<instance yref findOneRelated aref {R1 Y}>%
-                        %<R1 unrelate xref yref aref>%
-                    }
-                %<end>%
+                %<X create xref R1 yref>%
             }
         }
         population codegen30 {
@@ -10649,38 +10658,33 @@ test codegen-30.0 {
             class Y {
                 allocate 4
             }
-            class A {
-                allocate 4
-            }
         }
     }
 } -cleanup {
     cleanupDomain
+    validateutils forgetFiles
 } -body {
-    micca generate
-    testConditions\
-        {[llength [fileutil::grep {mrt_Relate} codegen30.c]] == 1}\
-        {[llength [fileutil::grep {mrt_Unrelate} codegen30.c]] == 1}
+    validateutils compileFiles codegen30.c
+    validateutils matchLines codegen30.c {
+        // Y create yref {}
+        struct Y *yref ;
+        yref = mrt_CreateInstance(&codegen30__CLASSES[1], MRT_StateCode_IG) ;
+        // X create xref {R1 yref}
+        struct X *xref ;
+        xref = mrt_CreateInstance(&codegen30__CLASSES[0], MRT_StateCode_IG) ;
+        mrt_CreateSimpleLinks(&codegen30__RSHIPS[0], xref, yref) ;
+    }
 } -result {1}
 ----
 endif::showtests[]
 
-// HERE
-// Improve this interface to take advantage of automatically creating
-// the associator class instance.
-// proc arguments should be:
-// proc RelClassRelate {relName oneref otherref {assocref {}} args}
-// If the assocref is empty, then create an instance using args as the
-// attribute values. Otherwise, use the named reference and args must
-// be empty.
-
 [source,tcl]
 ----
 <<generation support commands>>=
-proc RelClassRelateForw {relName source target assoc} {
+proc RelClassSwap {relName assoc participant} {
     return [string cat [IndentToBlock\
-        [linecomment "$relName relate $source $target $assoc"]]\
-        [ClassAssocLinkage $relName $source $target $assoc mrt_Relate]\
+        [linecomment "$relName swap $assoc $participant"]]\
+        [ClassAssocLinkage $relName $assoc $participant]\
     ]
 }
 ----
@@ -10688,55 +10692,25 @@ proc RelClassRelateForw {relName source target assoc} {
 [source,tcl]
 ----
 <<generation support commands>>=
-proc RelClassRelateBack {relName target source assoc} {
-    return [string cat [IndentToBlock\
-        [linecomment "$relName relate $target $source $assoc"]]\
-        [ClassAssocLinkage $relName $source $target $assoc mrt_Relate]\
-    ]
-}
-----
-
-[source,tcl]
-----
-<<generation support commands>>=
-proc RelClassUnrelateForw {relName source target assoc} {
-    return [string cat [IndentToBlock\
-        [linecomment "$relName unrelate $source $target $assoc"]]\
-        [ClassAssocLinkage $relName $source $target $assoc mrt_Unrelate]\
-    ]
-}
-----
-
-[source,tcl]
-----
-<<generation support commands>>=
-proc RelClassUnrelateBack {relName target source assoc} {
-    return [string cat [IndentToBlock\
-        [linecomment "$relName unrelate $target $source $assoc"]]\
-        [ClassAssocLinkage $relName $source $target $assoc mrt_Unrelate]\
-    ]
-}
-----
-
-[source,tcl]
-----
-<<generation support commands>>=
-proc ClassAssocLinkage {relName sourceref targetref assocref opname} {
+proc ClassAssocLinkage {relName assocref partref} {
     variable domain
     set relRef [ClassBasedAssociation findById Domain $domain Name $relName]
     set relNum [readAttribute [findRelated $relRef R31 R30] Number]
     set rship &${domain}__RSHIPS\[$relNum\]
 
-    set sourceClass [readAttribute [findRelated $relRef ~R34] Class]
-    CheckInstRefSymbol $sourceref Class $sourceClass
-
-    set targetClass [readAttribute [findRelated $relRef ~R35] Class]
-    CheckInstRefSymbol $targetref Class $targetClass
-
     set assocClass [readAttribute [findRelated $relRef ~R42] Class]
     set assocsym [CheckInstRefSymbol $assocref Class $assocClass]
 
-    return [IndentToBlock "$opname\($rship, $sourceref, $targetref, $assocref\) ;\n"]
+    set sourceClass [readAttribute [findRelated $relRef ~R34] Class]
+    set targetClass [readAttribute [findRelated $relRef ~R35] Class]
+    set partClass [dict get [LookUpSym $partref] Class]
+    if {$partClass nq $sourceClass && $partClass ne $targetClass} {
+        error "$partref is a reference to an instance of class, $partClass,\
+            which does not participate in relationship, $relName"
+    }
+
+    return [IndentToBlock "mrt_CreateSimpleLinks\($rship, $assocref,\
+            $partref\) ;\n"]
 }
 ----
 
@@ -10745,11 +10719,9 @@ ifdef::showtests[]
 ----
 <<generate command tests>>=
 test codegen-31.0 {
-    Relate and unrelate class based association
+    Create class based association
 } -setup {
-    # makeFile {} codegen31.h
-    # makeFile {} codegen31.c
-    micca configure {
+    validateutils genMiccaFile codegen31 {
         domain codegen31 {
             class A {}
             class X {}
@@ -10760,9 +10732,7 @@ test codegen-31.0 {
             domainop void makePair {} {
                 %<X create xref>%
                 %<Y create yref>%
-                %<A create aref>%
-                %<~R1 relate yref xref aref>%
-                %<R1 unrelate xref yref aref>%
+                %<A create aref R1 {X xref Y yref}>%
             }
         }
         population codegen31 {
@@ -10779,93 +10749,33 @@ test codegen-31.0 {
     }
 } -cleanup {
     cleanupDomain
+    validateutils forgetFiles
 } -body {
-    micca generate
-    testConditions\
-        {[llength [fileutil::grep {mrt_Relate} codegen31.c]] == 1}\
-        {[llength [fileutil::grep {mrt_Unrelate} codegen31.c]] == 1}
+    validateutils compileFiles codegen31.c
+    validateutils matchLines codegen31.c {
+        // X create xref {}
+        struct X *xref ;
+        xref = mrt_CreateInstance(&codegen31__CLASSES[1], MRT_StateCode_IG) ;
+        // Y create yref {}
+        struct Y *yref ;
+        yref = mrt_CreateInstance(&codegen31__CLASSES[2], MRT_StateCode_IG) ;
+        // A create aref {R1 {X xref Y yref}}
+        struct A *aref ;
+        aref = mrt_CreateInstance(&codegen31__CLASSES[0], MRT_StateCode_IG) ;
+        mrt_CreateAssociatorLinks(&codegen31__RSHIPS[0], aref, xref, yref) ;
+    }
 } -result {1}
 ----
 endif::showtests[]
-
-[source,tcl]
-----
-<<generation support commands>>=
-proc RelRefGenRelateForw {relName subref superref} {
-    return [string cat [IndentToBlock\
-        [linecomment "$relName relate $subref $superref"]]\
-        [RefGenLinkage $relName $subref $superref mrt_Relate]\
-    ]
-}
-----
-
-[source,tcl]
-----
-<<generation support commands>>=
-proc RelRefGenRelateBack {relName superref subref} {
-    return [string cat [IndentToBlock\
-        [linecomment "$relName relate $superref $subref"]]\
-        [RefGenLinkage $relName $subref $superref mrt_Relate]\
-    ]
-}
-----
-
-[source,tcl]
-----
-<<generation support commands>>=
-proc RelRefGenUnrelateForw {relName subref superref} {
-    return [string cat [IndentToBlock\
-        [linecomment "$relName unrelate $subref $superref"]]\
-        [RefGenLinkage $relName $subref $superref mrt_Unrelate]\
-    ]
-}
-----
-
-[source,tcl]
-----
-<<generation support commands>>=
-proc RelRefGenUnrelateBack {relName superref subref} {
-    return [string cat [IndentToBlock\
-        [linecomment "$relName unrelate $superref $subref"]]\
-        [RefGenLinkage $relName $subref $superref mrt_Unrelate]\
-    ]
-}
-----
-
-[source,tcl]
-----
-<<generation support commands>>=
-proc RefGenLinkage {relName source target opname} {
-    variable domain
-    set relRef [ReferenceGeneralization findById Domain $domain Name $relName]
-    set relNum [readAttribute [findRelated $relRef R43 R30] Number]
-    set rship &${domain}__RSHIPS\[$relNum\]
-
-    set superClass [readAttribute [findRelated $relRef ~R36] Class]
-    CheckInstRefSymbol $target Class $superClass
-
-    set subsym [CheckInstRefSymbol $source]
-    set subrefs [findRelated $relRef ~R37]
-    set subclasses [relation list [deRef $subrefs] Class]
-    if {[dict get $subsym Class] ni $subclasses} {
-        error "expected $source to be a reference to one of,\
-            \"[join $subclasses {, }]\", got: [dict get $subsym Class]"
-    }
-
-    return [IndentToBlock "$opname\($rship, $source, $target\) ;\n"]
-}
-----
 
 ifdef::showtests[]
 [source,tcl]
 ----
 <<generate command tests>>=
 test codegen-32.0 {
-    Relate and unrelate reference generalization
+    Create reference super class instance
 } -setup {
-    # makeFile {} codegen32.h
-    # makeFile {} codegen32.c
-    micca configure {
+    validateutils genMiccaFile codegen32 {
         domain codegen32 {
             class S {}
             class X {}
@@ -10874,10 +10784,8 @@ test codegen-32.0 {
             generalization R1 S X Y
 
             domainop void makePair {} {
-                %<X create x1>%
                 %<S create s1>%
-                %<~R1 relate s1 x1>%
-                %<R1 unrelate x1 s1>%
+                %<X create x1 R1 s1>%
             }
         }
         population codegen32 {
@@ -10894,11 +10802,15 @@ test codegen-32.0 {
     }
 } -cleanup {
     cleanupDomain
+    validateutils forgetFiles
 } -body {
-    micca generate
-    testConditions\
-        {[llength [fileutil::grep {mrt_Relate} codegen32.c]] == 1}\
-        {[llength [fileutil::grep {mrt_Unrelate} codegen32.c]] == 1}
+    validateutils compileFiles codegen32.c
+    validateutils matchLines codegen32.c {
+        // X create x1 {R1 s1}
+        struct X *x1 ;
+        x1 = mrt_CreateInstance(&codegen32__CLASSES[1], MRT_StateCode_IG) ;
+        mrt_CreateSimpleLinks(&codegen32__RSHIPS[0], x1, s1) ;
+    }
 } -result {1}
 ----
 endif::showtests[]
@@ -10923,10 +10835,8 @@ proc RelRefGenReclassify {relName superref subclass subref args} {
         "$subref = mrt_Reclassify\(&${domain}__RSHIPS\[$relNum\], $superref, "\
         "&$classDesc\) ;\n"
 
-    set attrvalues [GetAttrInitialValues $subclass $args]
-    foreach {attrName attrValue} $attrvalues {
-        append result "$subref->$attrName = $attrValue ;\n"
-    }
+    lappend args $relName $superref
+    append result [AssignComponentValues $subclass $subref $args]
 
     return [IndentToBlock $result]
 }
@@ -10954,9 +10864,7 @@ ifdef::showtests[]
 test codegen-33.0 {
     Reclassify reference generalization
 } -setup {
-    # makeFile {} codegen33.h
-    # makeFile {} codegen33.c
-    micca configure {
+    validateutils genMiccaFile codegen33 {
         domain codegen33 {
             class S {}
             class X {}
@@ -10967,9 +10875,8 @@ test codegen-33.0 {
             generalization R1 S X Y
 
             domainop void makePair {} {
-                %<X create x1>%
                 %<S create s1>%
-                %<~R1 relate s1 x1>%
+                %<X create x1 R1 s1>%
                 %<R1 reclassify s1 Y y1 color 20>%
             }
         }
@@ -10987,10 +10894,16 @@ test codegen-33.0 {
     }
 } -cleanup {
     cleanupDomain
+    validateutils forgetFiles
 } -body {
-    micca generate
-    testConditions\
-        {[llength [fileutil::grep {mrt_Reclassify} codegen33.c]] == 1}
+    validateutils compileFiles codegen33.c
+    validateutils matchLines codegen33.c {
+        // R1 reclassify s1 Y y1
+        struct Y *y1 ;
+        y1 = mrt_Reclassify(&codegen33__RSHIPS[0], s1, &codegen33__CLASSES[2]) ;
+        mrt_CreateSimpleLinks(&codegen33__RSHIPS[0], y1, s1) ;
+        y1->color = 20 ;
+    }
 } -result {1}
 ----
 endif::showtests[]
@@ -11026,10 +10939,8 @@ proc RelUnionGenReclassify {relName superref subclass subref args} {
         "$subref = mrt_Reclassify\(&${domain}__RSHIPS\[$relNum\], $superref, "\
         "&$classDesc\) ;\n"
 
-    set attrvalues [GetAttrInitialValues $subclass $args]
-    foreach {attrName attrValue} $attrvalues {
-        append result "$subref->$attrName = $attrValue ;\n"
-    }
+    lappend args $relName $superref
+    append result [AssignComponentValues $subclass $subref $args]
 
     return [IndentToBlock $result]
 }
@@ -11042,9 +10953,7 @@ ifdef::showtests[]
 test codegen-34.0 {
     Reclassify union generalization
 } -setup {
-    # makeFile {} codegen34.h
-    # makeFile {} codegen34.c
-    micca configure {
+    validateutils genMiccaFile codegen34 {
         domain codegen34 {
             class S {}
             class X {}
@@ -11067,10 +10976,15 @@ test codegen-34.0 {
     }
 } -cleanup {
     cleanupDomain
+    validateutils forgetFiles
 } -body {
-    micca generate
-    testConditions\
-        {[llength [fileutil::grep {mrt_Reclassify} codegen34.c]] == 1}
+    validateutils compileFiles codegen34.c
+    validateutils matchLines codegen34.c {
+        // R1 reclassify s1 Y y1
+        struct Y *y1 ;
+        y1 = mrt_Reclassify(&codegen34__RSHIPS[0], s1, &codegen34__CLASSES[2]) ;
+        y1->color = 30 ;
+    }
 } -result {1}
 ----
 endif::showtests[]
