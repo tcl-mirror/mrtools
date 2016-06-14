@@ -6797,50 +6797,121 @@ proc InstanceAttrRead {instref attr} {
 ----
 
 *****
-`%<instance` _instvar_ `update` _attrname_ _value_`>%`
+`%<instance` _instvar_ `update` ? _attrname1_ _value1_ ... ? `>%`
 
 instvar::
     The name of a ``C'' variable that holds a reference to a class instance.
-attrname::
+attrnameN::
     The name of the attribute to be updated.
-value::
+valueN::
     A valid ``C'' rvalue expression to be used as the new value for the
     attribute
 
-The `update` subccommand generates a ``C'' statement to update the value
-of _attrname_ to _value_ for the instance whose reference is contained in the
-variable named, _instvar_.
+The `update` subccommand generates a ``C'' statements to update zero or more
+attribute values for the instance whose reference is contained in the variable
+named, _instvar_.
+Arguments are given in _attrname_ / _value_ pairs.
 The class whose instance is held in _instvar_ must contain an attribute whose
 name is _attrname_ or an error is generated.
+Updating dependent attributes is not allowed.
 *****
 
 [source,tcl]
 .Implementation
 ----
 <<generation support commands>>=
-proc InstanceAttrUpdate {instref attr value} {
+proc InstanceAttrUpdate {instref args} {
     variable domain
 
+    if {[llength $args] % 2 != 0} {
+        error "attribute name / values must be given in pairs, got:\
+            \"$args\""
+    }
+
     set sym [CheckInstRefSymbol $instref]
-    set attrRef [Attribute findById Domain $domain Class [dict get $sym Class]\
-            Name $attr]
-    if {[isEmptyRef $attrRef]} {
-        error "instance reference, $instref, refers to an instance of\
-            class, [dict get $sym Class], which does not have an attribute\
-            named, $attr"
+    set className [dict get $sym Class]
+
+    set result [linecomment "instance $instref update $args"]
+    foreach {attr value} $args {
+        set attrRef [Attribute findById Domain $domain Class $className Name $attr]
+        if {[isEmptyRef $attrRef]} {
+            error "instance reference, $instref, refers to an instance of\
+                class, $className, which does not have an attribute\
+                named, $attr"
+        }
+
+        set depRef [findRelated $attrRef {~R29 DependentAttribute}]
+        if {[isNotEmptyRef $depRef]} {
+            error "cannot update dependent attribute"
+        }
+
+        assignAttribute $attrRef DataType Dimension
+        if {$Dimension > 0} {
+            # Got a matrix, see if it is a string
+            if {$DataType eq "char"} {
+                set maxchars [expr {$Dimension - 1}]
+                append result\
+                    "strncpy($instref->$attr, $value, $maxchars) ;\n"\
+                    "$instref->$attr\[$maxchars\] = '\\0' ;\n"
+            } else {
+                append result "memcpy($instref->$attr, $value,\
+                    sizeof($instref->$attr)) ;\n"
+            }
+        } else {
+            append result "$instref->$attr = ($value) ;\n"
+        }
     }
 
-    set depRef [findRelated $attrRef {~R29 DependentAttribute}]
-    if {[isNotEmptyRef $depRef]} {
-        error "cannot update dependent attribute"
-    }
-
-    return [IndentToBlock [string cat\
-        [linecomment "instance $instref update $attr $value"]\
-        "$instref->$attr = ($value) ;\n"\
-    ]]
+    return [IndentToBlock $result]
 }
 ----
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-55.0 {
+    Update attributes
+} -setup {
+    validateutils genMiccaFile codegen55 {
+        domain codegen55 {
+            class X {
+                attribute name char -dimension 32 -default {"n"}
+                attribute temp int -dimension 2 -default {{0, 1}}
+                attribute total int -default 0
+
+                instop void updateAttrs {\
+                        name {char const *}\
+                        temp {int const *}\
+                        total int} {
+                    %<my update\
+                        name name\
+                        temp temp\
+                        total total>%
+                }
+            }
+        }
+        population codegen55 {
+            class X {
+                instance x1
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen55.c
+    validateutils matchLines codegen55.c {
+        // instance self update name name temp temp total total
+        strncpy(self->name, name, 31) ;
+        self->name[31] = '\0' ;
+        memcpy(self->temp, temp, sizeof(self->temp)) ;
+        self->total = (total) ;
+    }
+} -result {1}
+----
+endif::showtests[]
 
 ==== Assigning Instance Attributes to Variables
 
