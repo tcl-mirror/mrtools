@@ -82,22 +82,26 @@
 #ifndef MRT_ECB_PARAM_SIZE
 #   define MRT_ECB_PARAM_SIZE  32
 #endif /* MRT_ECB_PARAM_SIZE */
-     // No such class.
+    // No such class.
 #define MICCA_PORTAL_NO_CLASS       (-1)
-     // No such instance.
+    // No such instance.
 #define MICCA_PORTAL_NO_INST        (-2)
-     // No such attribute.
+    // No such attribute.
 #define MICCA_PORTAL_NO_ATTR        (-3)
-     // Instance slot is not in use.
+    // Instance slot is not in use.
 #define MICCA_PORTAL_UNALLOC        (-4)
-     // Class does not have a state model.
+    // Class does not have a state model.
 #define MICCA_PORTAL_NO_STATE_MODEL (-5)
-     // No such event for the class.
+    // No such event for the class.
 #define MICCA_PORTAL_NO_EVENT       (-6)
-     // No such state for the class.
+    // No such state for the class.
 #define MICCA_PORTAL_NO_STATE       (-7)
-     // Class does not support dynamic instances.
+    // Class does not support dynamic instances.
 #define MICCA_PORTAL_NO_DYNAMIC     (-8)
+    // Operation not allowed on a dependent attribute.
+#define MICCA_PORTAL_DEPENDENT_ATTR (-9)
+    // Value was truncated due to lack of space.
+#define MICCA_PORTAL_TRUNCATED      (-10)
 #ifndef MRT_SYNCQUEUESIZE
 #   define MRT_SYNCQUEUESIZE 10
 #endif /* MRT_SYNCQUEUESIZE */
@@ -108,6 +112,10 @@
 typedef int16_t MRT_AllocStatus ;
 typedef int8_t MRT_StateCode ;
 typedef uint8_t MRT_RefCount ;
+typedef enum {
+    mrtIndependentAttr,
+    mrtDependentAttr
+} MRT_AttrType ;
 typedef enum {
     mrtTransitionEvent,
     mrtPolymorphicEvent,
@@ -153,9 +161,14 @@ typedef struct mrtinstance {
     char const *name ;
 #       endif /* MRT_NO_NAMES */
 } MRT_Instance ;
+typedef void MRT_AttrFormula(void *const self, void *pvalue, MRT_AttrSize vsize) ;
 typedef struct mrtattribute {
-    MRT_AttrOffset offset ;
     MRT_AttrSize size ;
+    MRT_AttrType type ;
+    union {
+        MRT_AttrOffset offset ;
+        MRT_AttrFormula *formula ;
+    } access ;
 
 #       ifndef MRT_NO_NAMES
     char const *name ;
@@ -491,18 +504,22 @@ mrt_InstSetIterGet(
 extern void
 mrt_InstSetIterNext(
     MRT_InstSetIterator *iter) ;
-extern void *
-mrt_Relate(
-    MRT_Relationship const *rel,
-    void *source,
-    void *target,
-    ...) ;
 extern void
-mrt_Unrelate(
+mrt_CreateSimpleLinks(
     MRT_Relationship const *rel,
     void *source,
-    void *target,
-    ...) ;
+    void *target) ;
+extern void
+mrt_CreateAssociatorLinks(
+    MRT_Relationship const *rel,
+    void *assoc,
+    void *source,
+    void *target) ;
+extern void
+mrtUnrelate(
+    struct mrtrelationship const * const *classRels,
+    unsigned relCount,
+    void *inst) ;
 extern void *
 mrt_Reclassify(
     MRT_Relationship const *rel,
