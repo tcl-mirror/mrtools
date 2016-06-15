@@ -56,7 +56,7 @@ domain bookstore {
             %<end>%
     
             return NULL ;
-        }
+        } ; # <1>
     }
     generalization R12 Product SpecialOrderProduct StockedProduct
     generalization R11 Product BookProduct RecordingProduct SoftwareProduct
@@ -79,7 +79,8 @@ domain bookstore {
         attribute postCredit char -dimension 32 -default {""}
     }
     association R2 -associator Authorship BookProduct 1..*--0..* Author
-    association R3 Authorship 0..1--0..1 Authorship
+    class AuthorshipSequence {}
+    association R3 -associator AuthorshipSequence Authorship 0..1--0..1 Authorship
     class BookProduct {
         attribute bookNumber char -dimension 32
         attribute titleCode char -dimension 32
@@ -108,7 +109,9 @@ domain bookstore {
     class ProductCategory {
         attribute categoryName char -dimension 32
     }
-    association R14 ProductCategory 0..*--0..1 ProductCategory
+    class CategoryGroup {}
+    association R14 -associator CategoryGroup\
+            ProductCategory 0..*--0..1 ProductCategory
     class Recording {
         attribute title char -dimension 128
     }
@@ -119,7 +122,9 @@ domain bookstore {
         attribute role char -dimension 32 -default {""}
     }
     association R17 -associator PerformanceCredit Recording 1..*--1..* Artist
-    association R18 PerformanceCredit 0..1--0..1 PerformanceCredit
+    class PerformanceCreditSequence {}
+    association R18 -associator PerformanceCreditSequence\
+            PerformanceCredit 0..1--0..1 PerformanceCredit
     class RecordingFormat {
         attribute formatName char -dimension 32
     }
@@ -155,14 +160,11 @@ domain bookstore {
         statemodel {
             transition @ - checkOut -> EstablishingCustomerandVerifyingPayment ; # <1>
             state EstablishingCustomerandVerifyingPayment {
-                    cart {struct ShoppingCart *}
                     accountNumber {char const *}
                     billingAddress {char const *}
                     cardExpirationDate DateType
                     cardholderName {char const *}
                     customerEmail {char const *}} {
-                %<R10 relate self cart>%
-            
                 %<Customer instref customer>%
                 customer = %<Customer operation findByEmail email customerEmail>% ;
                 if (customer == NULL) {
@@ -172,13 +174,13 @@ domain bookstore {
                         shippingAddress self->deliveryAddress\
                         phone self->contactPhone>%
                 } else {
-                    strcpy(%<instance customer attribute name>%, self->recipient) ;
-                    strcpy(%<instance customer attribute shippingAddress>%,
-                            self->deliveryAddress) ;
-                    strcpy(%<instance customer attribute phone>%, self->contactPhone) ;
+                    %<instance customer update\
+                        name self->recipient\
+                        shippingAddress self->deliveryAddress\
+                        phone self->contactPhone>%
                 }
             
-                %<R5 relate self customer>%
+                %<OrderPlacement create op R5 {Order self Customer customer}>% // <1>
                 time(&self->dateOrderPlaced) ;
             
                 %<my signal submitCharge\
@@ -196,14 +198,15 @@ domain bookstore {
                     cardExpirationDate DateType
                     cardholderName {char const *}} {
                 unsigned chargeID = %<CreditCardCharge operation genChargeID>% ;
-                unsigned totalValue = %<my attribute totalValue>% ;
+                %<my assign totalValue>%
                 %<CreditCardCharge createasync makeCharge {order self}\
                     chargeID chargeID\
                     accountNumber accountNumber\
                     billingAddress billingAddress\
                     cardholderName cardholderName\
                     cardExpirationDate cardExpirationDate\
-                    chargeAmount totalValue>% // <1>
+                    chargeAmount totalValue\
+                    R7 self>% // <1> <2>
             }
             
             transition SubmittingCharge - paymentApproved -> BeingPackedandShipped
@@ -218,18 +221,23 @@ domain bookstore {
             transition PaymentNotApproved - subCharge -> SubmittingCharge
             state BeingPackedandShipped {} {
                 %<instance customer findOneRelated self R5>%
-                %<instance customer attribute purchasesMade>% += 1 ; // <1>
+                %<instance customer attr purchasesMade>% += 1 ; // <1>
             
                 MRT_InstId customerID = %<instance customer instid>% ;
                 %<external OnlineCustomer_chargeApproved customerID customerID\
                         email customer->email>% ;
             
                 unsigned shipmentID = %<Shipment operation genShipmentID>% ;
-                %<Shipment createasync requestShipment {order self}\
+                %<Warehouse instref warehouse>% // <2>
+                %<my assign orderID>%
+                warehouse = %<Warehouse operation chooseWarehouse orderID orderID>% ;
+                %<Shipment createasync requestShipment {}\
                     shipmentID shipmentID\
                     recipient self->recipient\
                     deliveryAddress self->deliveryAddress\
-                    contactPhone self->contactPhone>%
+                    contactPhone self->contactPhone\
+                    R6 self\
+                    R24 warehouse>%
             }
             transition BeingPackedandShipped - orderDelivered -> DeliveredtoCustomer
             state DeliveredtoCustomer {} {
@@ -244,60 +252,48 @@ domain bookstore {
             static unsigned orderID = 100 ;
     
             return orderID ++ ;
-        }
+        } ; # <1>
     }
     association R10 Order 0..1--1 ShoppingCart
-    association R5 Order 1..*--0..1 Customer ; # <1>
+    class OrderPlacement {}
+    association R5 -associator OrderPlacement Order 1..*--0..1 Customer ; # <1>
     class ProductSelection {
         attribute quantity unsigned -default 0
         attribute unitPriceOfSelection unsigned -default 0
-        attribute selectionValue unsigned -default 0
+        attribute selectionValue unsigned -dependent {
+            *selectionValue = %<my attr unitPriceOfSelection>% * %<my attr quantity>% ;
+        }
     
         statemodel {
             initialstate NewSelection ; # <1>
             transition @ - addSelection -> NewSelection
             
             state NewSelection {
-                    cartID unsigned
                     productID {char const *}
                     quantity unsigned} {
-                %<my attribute quantity>% = quantity ;
+                %<my update quantity quantity>%
             
-                %<ShoppingCart instref cart>%
-                cart = %<ShoppingCart operation findByCartID cartID cartID>% ;
                 %<Product instref product>%
                 product = %<Product operation findByProductID productID productID>% ;
-                %<R4 relate cart product self>%
-            
-                %<my attribute unitPriceOfSelection>% =
-                        %<instance product attribute unitPrice>% ;
+                %<instance product assign unitPrice>%
+                %<my update unitPriceOfSelection unitPrice>%
             
                 %<my signal changeQuantity quantity quantity>%
             }
             transition NewSelection - changeQuantity -> ChangingQuantity
             state ChangingQuantity {quantity unsigned} {
-                %<my attribute quantity>% = quantity ;
-                %<my attribute selectionValue>% = quantity *
-                        %<my attribute unitPriceOfSelection>% ;
-                if (%<my attribute quantity>% == 0) {
+                %<my update quantity quantity>%
+                if (%<my attr quantity>% == 0) {
                     %<my signal removeSelection>%
-                } else {
-                    %<instance cart findOneRelated self ~R4>%
-                    %<instance cart operation cartUpdated>% ;
                 }
             }
             transition ChangingQuantity - removeSelection -> RemovingSelection
             
             state RemovingSelection {} {
-                %<instance product findOneRelated self R4>%
                 %<instance cart findOneRelated self ~R4>%
-                %<R4 unrelate cart product self>%
-            
                 %<instset prodset selectRelated cart R4>%
-                if (%<instset prodset empty>%) {
+                if (%<instset prodset cardinality>% <= 1) { // <1>
                     %<instance cart signal cancel>%
-                } else {
-                    %<instance cart operation cartUpdated>% ;
                 }
             }
             terminal RemovingSelection
@@ -306,13 +302,20 @@ domain bookstore {
     association R4 -associator ProductSelection ShoppingCart 0..*--1..* Product
     class ShoppingCart {
         attribute cartID unsigned -default 0
-        attribute totalValue unsigned -default 0
+        attribute totalValue unsigned -dependent {
+            unsigned total = 0 ;
+            %<instance psel foreachRelated self {R4 ProductSelection}>%
+                %<instance psel assign selectionValue>% ;
+                total += selectionValue ;
+            %<end>%
+            *totalValue = total ;
+        }
     
         statemodel {
             transition @ - startCart -> NewOrder
             
             state NewOrder {productID {char const *} quantity unsigned} {
-                %<my attribute cartID>% = %<ShoppingCart operation genCartID>% ;
+                %<my attr cartID>% = %<ShoppingCart operation genCartID>% ;
                 %<my signal addSelection productID productID quantity quantity>%
             }
             transition NewOrder - addSelection -> AddingSelectiontoOrder
@@ -320,13 +323,10 @@ domain bookstore {
             state AddingSelectiontoOrder {productID {char const *} quantity unsigned} {
                 %<Product instref product>%
                 product = %<Product operation findByProductID productID productID>% ;
-                unsigned selectionValue = product->unitPrice * quantity ;
                 %<ProductSelection create newSelection\
                         quantity quantity\
                         unitPriceOfSelection product->unitPrice\
-                        selectionValue selectionValue>%
-                %<R4 relate self product newSelection>%
-                %<my operation cartUpdated>% ;
+                        R4 {Product product ShoppingCart self}>%
             }
             transition AddingSelectiontoOrder - addSelection -> AddingSelectiontoOrder
             transition AddingSelectiontoOrder - cancel -> CancelingEntireOrder
@@ -334,12 +334,10 @@ domain bookstore {
                     EstablishingCustomerandVerifyingPayment
             state CancelingEntireOrder {} {
                 %<instance selection foreachRelated self {R4 ProductSelection}>%
-                    %<instance product findOneRelated selection R4>%
-                    %<R4 unrelate self product selection>%
                     %<instance selection delete>% // <1>
                 %<end>%
             }
-            terminal CancelingEntireOrder ; # <2>
+            terminal CancelingEntireOrder
             state EstablishingCustomerandVerifyingPayment {
                     accountNumber {char const *}
                     billingAddress {char const *}
@@ -350,27 +348,20 @@ domain bookstore {
                     customerPhone {char const *}
                     shippingAddress {char const *}} {
                 unsigned orderID = %<Order operation genOrderID>% ;
+                %<my assign totalValue>%
                 %<Order createasync checkOut {
-                            cart self
                             accountNumber accountNumber
                             billingAddress billingAddress
                             cardExpirationDate cardExpirationDate
                             cardholderName cardholderName
                             customerEmail customerEmail}\
                         orderID orderID\
-                        totalValue self->totalValue\
+                        totalValue totalValue\
                         recipient customerName\
                         deliveryAddress shippingAddress\
-                        contactPhone customerPhone>%
+                        contactPhone customerPhone\
+                        R10 self>%
             }
-        }
-    
-        instop void cartUpdated {} {
-            %<my attribute totalValue>% = 0 ;
-            %<instance psel foreachRelated self {R4 ProductSelection}>%
-                %<my attribute totalValue>% +=
-                        %<instance psel attribute selectionValue>% ;
-            %<end>%
         }
     
         classop unsigned genCartID {} {
@@ -401,7 +392,6 @@ domain bookstore {
             transition @ - makeCharge -> RequestingChargeApproval
             
             state RequestingChargeApproval {order {struct Order *}} {
-                %<R7 relate self order>% // <1>
                 MRT_InstId cccID = %<my instid>% ;
                 %<external CreditCardCompany_requestChargeApproval\
                     cccID cccID\
@@ -418,18 +408,18 @@ domain bookstore {
             transition RequestingChargeApproval - chargeProcessingNotCompleted ->\
                 DeclineForTimeout
             state ProcessingCompleted {resultCode AP_Code} {
-                %<my attribute approvalCode>% = resultCode ;
+                %<my update approvalCode resultCode>%
                 %<instance order findOneRelated self R7>% // <1>
                 %<my canceldelayed chargeProcessingNotCompleted>% // <2>
                 if (resultCode == AP_approved) {
-                    %<R8 relate self order>% // <3>
+                    %<OrderPayment create payment R8 {CreditCardCharge self Order order}>% // <3>
                     %<instance order signal paymentApproved>%
                 } else {
                     %<instance order signal paymentDeclined>%
                 }
             }
             state DeclineForTimeout {} {
-                %<my attribute approvalCode>% = AP_connectionFailed ;
+                %<my update approvalCode AP_connectionFailed>%
                 %<instance order findOneRelated self R7>% // <1>
                 %<instance order signal paymentDeclined>%
             }
@@ -441,7 +431,8 @@ domain bookstore {
         }
     }
     association R7 CreditCardCharge 0..*--1 Order
-    association R8 CreditCardCharge 0..1--0..1 Order ; #<1>
+    class OrderPayment {}
+    association R8 -associator OrderPayment CreditCardCharge 0..1--0..1 Order ; #<1>
     class Shipment {
         attribute shipmentID unsigned
         attribute trackingNumber char -dimension 32 -default {""}
@@ -457,19 +448,16 @@ domain bookstore {
         statemodel {
             transition @ - requestShipment -> PreparingShipment
             
-            state PreparingShipment {order {struct Order *}} {
-                %<R6 relate self order>%
-            
+            state PreparingShipment {} {
+                %<instance order findOneRelated self R6>%
                 %<instance order assign orderID>%
-                %<Warehouse instref warehouse>% // <1>
-                warehouse = %<Warehouse operation chooseWarehouse orderID orderID>% ;
-                %<R24 relate self warehouse>%
             
                 %<instance selection foreachRelated order R10 {R4 ProductSelection}>%
-                    %<ShipmentItem create item>%
-                    %<R9 relate self selection item>%
-                %<end>% // <2>
-                %<instance warehouse signal shipmentReadyToPack>% // <3>
+                    %<ShipmentItem create item\
+                            R9 {Shipment self ProductSelection selection}>%
+                %<end>% // <1>
+                %<instance warehouse findOneRelated self R24>%
+                %<instance warehouse signal shipmentReadyToPack>% // <2>
             }
             transition PreparingShipment - packed -> PackedandAwaitingTrackingNumber
             transition PreparingShipment - trackingNumberAssigned ->\
@@ -517,18 +505,18 @@ domain bookstore {
         instop void updateTrackingInfo {
                 shippingCompany {char const *}\
                 trackingNumber {char const *}} {
-            strcpy(%<my attribute trackingNumber>%,trackingNumber) ;
+            %<my update trackingNumber trackingNumber>%
             %<ShippingCompany instref company>%
             company = %<ShippingCompany operation findByCompanyName\
                     companyName shippingCompany>% ;
-            %<R21 relate self company>%
+            %<Delivery create delivery R21 {Shipment self ShippingCompany company}>%
         }
         
         instop void updatePackingInfo {clerkID unsigned} {
             time(&self->timePrepared) ;
             %<WarehouseClerk instref clerk>%
             clerk = %<WarehouseClerk operation findByClerkID clerkID clerkID>% ;
-            %<R22 relate self clerk>%
+            %<PastPacking create pp R22 {Shipment self WarehouseClerk clerk}>%
             
             MRT_InstId shipmentID = %<my instid>% ;
             %<external ShippingCompany_shipmentReadyForPickup shipmentID shipmentID>% ;
@@ -540,10 +528,14 @@ domain bookstore {
             return shipmentID++ ;
         }
     }
-    association R21 Shipment 0..*--0..1 ShippingCompany ; #<1>
     association R24 Shipment 0..*--1 Warehouse
-    association R22 Shipment 0..*--0..1 WarehouseClerk
     association R6 Shipment 0..1--1 Order
+    class Delivery {}
+    association R21 -associator Delivery Shipment 0..*--0..1 ShippingCompany ; #<1>
+    class PastPacking {}
+    association R22 -associator PastPacking Shipment 0..*--0..1 WarehouseClerk
+    class Packing {}
+    association R23 -associator Packing ShippingClerk 0..1--0..1 Shipment
     class ShippingCompany {
         attribute companyName char -dimension 32
         attribute trackingWebsite char -dimension 256
@@ -609,9 +601,9 @@ domain bookstore {
                 %<ShippingClerk instref freeClerk>%
                 freeClerk = %<my operation findFreeShippingClerk>% ;
             
-                %<R23 relate freeClerk readyShipment>%
-                %<instance readyShipment attribute waitingToBePacked>% = false ;
-                %<instance freeClerk attribute awaitingAssignment>% = false ;
+                %<Packing create pack R23 {ShippingClerk freeClerk Shipment readyShipment}>% // <1>
+                %<instance readyShipment update waitingToBePacked false>%
+                %<instance freeClerk update awaitingAssignment false>%
             
                 %<instance freeClerk signal clerkAssigned>%
                 %<my signal clerkAssignedToShipment>%
@@ -621,10 +613,9 @@ domain bookstore {
         }
     
         classop {struct Warehouse *} chooseWarehouse {orderID unsigned} {
-            %<Warehouse idtoref 0 warehouse>%
+            %<Warehouse idtoref 0 warehouse>% // <1>
             return warehouse ;
         }
-        
         instop {struct Shipment *} findReadyShipment {} {
             %<instance readyShipment foreachRelatedWhere\
                     {readyShipment->waitingToBePacked} self ~R24>%
@@ -650,7 +641,7 @@ domain bookstore {
             transition @ - startShipping -> WaitingforaJob
             
             state WaitingforaJob {} {
-                %<my attribute awaitingAssignment>% = true ;
+                %<my update awaitingAssignment true>%
                 %<instance warehouse findOneRelated self R27 R25>%
                 %<instance warehouse signal clerkFree>%
             }
@@ -677,8 +668,8 @@ domain bookstore {
                 %<instset items selectRelated self R23 {R9 ShipmentItem}>%
                 %<instset items foreachSelected item>%
                     %<instance selection findOneRelated item R9>%
-                    %<instance item attribute quantityShipped>% =
-                            %<instance selection attribute quantity>% ;
+                    %<instance selection assign quantity>%
+                    %<instance item update quantityShipped quantity>%
                 %<end>%
                 MRT_DelayTime time = %<ShippingClerk operation randomdelay>% ;
                 %<my delaysignal time boxSealed>%
@@ -700,13 +691,15 @@ domain bookstore {
             state CompletingJob {} {
                 %<instance currentShipment findOneRelated self R23>%
                 %<instance clerk findOneRelated self R27>%
-                unsigned clerkID = %<instance clerk attribute clerkID>% ;
+                %<instance clerk assign clerkID>%
                 %<instance currentShipment signal packed clerkID clerkID>%
-                %<R23 unrelate self currentShipment>%
-                if (%<instance clerk attribute goOffDutyAtEndOfJob>%) {
+            
+                %<instance packing findOneRelated self {R23 Packing}>%
+                %<instance packing delete>%
+                if (%<instance clerk attr goOffDutyAtEndOfJob>%) {
                     %<my signal offDuty>%
                 } else {
-                    %<my attribute awaitingAssignment>% = true ;
+                    %<my update awaitingAssignment true>%
                     %<instance myWarehouse findOneRelated self R27 R25>%
                     %<instance myWarehouse signal clerkFree>%
                 }
@@ -725,7 +718,6 @@ domain bookstore {
             return (MRT_DelayTime)((rand() % 10 + 1) * 100) ;
         } ; # <1>
     }
-    association R23 ShippingClerk 0..1--0..1 Shipment
     class StockClerk {
         attribute idle bool -default true
     }
