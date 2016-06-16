@@ -1358,7 +1358,7 @@ mrtInitializeInstance(
     if (iab->construct) {
         iab->construct(inst) ;
     }
-    mrtMarkTransaction(classDesc->classRels, classDesc->relCount) ; // <5>
+    mrtMarkRelationship(classDesc->classRels, classDesc->relCount) ; // <5>
 }
 ----
 <1> Setting the memory of the instance to zero is very important.
@@ -1471,7 +1471,7 @@ mrt_DeleteInstance(
     /*
      * Unlink the instance from its relationships.
      */
-    mrtUnrelate(classDesc->classRels, classDesc->relCount, instref) ;
+    mrtDeleteLinks(classDesc->classRels, classDesc->relCount, instref) ;
     /*
      * Mark the slot as free.
      */
@@ -2561,12 +2561,14 @@ when we deal with managing execution.
 
 Because of our design choice to use the address of a class instance as
 an identifier,
-to manage referential integrity we must supply:
+to manage referential integrity we need:
 
-* Functions to relate and unrelate class instances across the data model
+* Functions to create, delete and update reference pointers that implement
 relationships.
 * Data structures and values that encode the specifications of the
 relationships from the platform model.
+* Run-time code that, using the relationship specifications, evaluates
+whether referential integrity was maintained.
 
 In keeping with our goal that the run-time be completely data driven,
 the code generator will supply the necessary information about all the
@@ -2902,7 +2904,7 @@ For example,
 consider two classes in a one-to-one unconditional relationship.
 If an instance of one class is created we do not want to check referential
 integrity until the code has had an opportunity to create a corresponding
-instance of the associated class and to relate the two instances together.
+instance of the associated class.
 
 The precise rules of data integrity are that each state activity must
 leave the domain data in a consistent state or signal one or more events
@@ -2917,11 +2919,10 @@ data integrity is to be verified.
 
 Each time a relationship is manipulated, by:
 
-* creating instances that participate in a relationship
-* deleting instances that participate in a relationship
-* relating instances together
-* unrelating instances
-* reclassifying subclass instances
+.. creating instances that participate in a relationship
+.. deleting instances that participate in a relationship
+.. updating references between participating instances
+.. reclassifying subclass instances in a generalization
 
 the relationship pointer references must be verified.
 As described below,
@@ -2963,7 +2964,7 @@ static struct mrtTransaction mrtTransaction ;
 During a transaction,
 run-time functions that either modify the relationship pointer storage
 or change the number of active instances invoke
-`mrtMarkTransaction` to save away the relationships that will need to
+`mrtMarkRelationship` to save away the relationships that will need to
 be checked at the end of the transaction.
 This prevents us from having to check every relationship at the end
 of every transaction.
@@ -2980,17 +2981,18 @@ marked relationships to eliminate any duplicate mark.
 ----
 <<mrt forward references>>=
 static void
-mrtMarkTransaction(
+mrtMarkRelationship(
     MRT_Relationship const *const *rel,
     unsigned relCount) ;
 ----
 
-(((micca,Run Time Function,mrtMarkTransaction)))
+(((micca,Run Time Function,mrtMarkRelationship)))
 [source,c]
+.Implementation
 ----
 <<mrt static functions>>=
 static void
-mrtMarkTransaction(
+mrtMarkRelationship(
     MRT_Relationship const * const *rel,
     unsigned relCount)
 {
@@ -2998,7 +3000,7 @@ mrtMarkTransaction(
         bool found = false ;
         MRT_Relationship const **marked = mrtTransaction.relationships ;
         for (unsigned markedCount = mrtTransaction.count ; markedCount != 0 ;
-                --markedCount, ++marked) {
+                --markedCount, ++marked) { // <1>
             if (*marked == *rel) {
                 found = true ;
                 break ;
@@ -3006,16 +3008,20 @@ mrtMarkTransaction(
         }
 
         if (!found) {
-            if (mrtTransaction.count >=
-                    COUNTOF(mrtTransaction.relationships)) {
-                mrtFatalError(mrtTransOverflow) ; // <1>
+            if (mrtTransaction.count >= COUNTOF(mrtTransaction.relationships)) {
+                mrtFatalError(mrtTransOverflow) ; // <2>
             }
             mrtTransaction.relationships[mrtTransaction.count++] = *rel ;
         }
     }
 }
 ----
-<1> As usual, exceeding resource limits is a fatal error.
+<1> First we iterate over the set of relationship description pointers
+already marked to see if we can find a match to the one we are trying
+to insert.
+<2> Since we are about to insert a new relationship description,
+we have to check for overflow.
+As usual, exceeding resource limits is a fatal error.
 
 At the end of a transaction,
 we iterate across all the relationship descriptions that were
@@ -3421,12 +3427,13 @@ mrtCheckAssociatorRefs(
     for (mrt_InstIteratorStart(&iter, associator->classDesc) ;
             mrt_InstIteratorMore(&iter) ; mrt_InstIteratorNext(&iter)) {
         void *inst = mrt_InstIteratorGet(&iter) ;
-        void **ref = (void **)((uintptr_t)inst + associator->forwardOffset) ;
-        if (*ref == NULL) {
+        MRT_Instance *ref = *(MRT_Instance **)
+                ((uintptr_t)inst + associator->forwardOffset) ;
+        if (ref == NULL || ref->alloc == 0) { // <1>
             return false ;
         }
-        ref = (void **)((uintptr_t)inst + associator->backwardOffset) ;
-        if (*ref == NULL) {
+        ref = *(MRT_Instance **)((uintptr_t)inst + associator->backwardOffset) ;
+        if (ref == NULL || ref->alloc == 0) {
             return false ;
         }
     }
@@ -3434,6 +3441,8 @@ mrtCheckAssociatorRefs(
     return true ;
 }
 ----
+<1> Reference pointers in an associator class must be non-NULL and must
+point to an allocated instance.
 
 ==== Counting References
 
@@ -3824,7 +3833,7 @@ mrtCountGenRefs(
 }
 ----
 
-=== Relating Instances
+=== Operations on Relationship Instances
 
 Since the relationship descriptions have sufficient information
 to manage referential integrity,
@@ -3855,7 +3864,7 @@ the new instance of the association.
 * Conversely, deleting an instance of an associator class is sufficient
 to delete an instance of the class based association itself.
 * Deleting an instance of a class participating in a class based association
-also causes the corresponding instance (or instances) of the associator
+*does not* cause the corresponding instance (or instances) of the associator
 to be deleted.
 * An operation to swap a different instance of a participating class
 is also provided.
@@ -3929,13 +3938,14 @@ mrt_CreateSimpleLinks(
 `target`::
     A pointer to a class instance that serves the target role in the
     relationship.
-
 *****
 
-==== Implementation
+This function is used to establish pointer links when instances are create
+as well as when they are "swapped".
 
 (((micca,Run Time Function,mrt_CreateSimpleLinks)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 void
@@ -3948,21 +3958,41 @@ mrt_CreateSimpleLinks(
     assert(source != NULL) ;
     assert(target != NULL) ;
 
-    if (rel->relType == mrtSimpleAssoc) {
+    switch (rel->relType) {
+    case mrtSimpleAssoc: {
         <<mrt_CreateSimpleLinks: link simple association>>
-    } else if (rel->relType == mrtClassAssoc) {
+    }
+        break ;
+
+    case mrtClassAssoc: {
         <<mrt_CreateSimpleLinks: link class association>>
-    } else if (rel->relType == mrtRefGeneralization) {
+    }
+        break ;
+
+    case mrtRefGeneralization: {
         <<mrt_CreateSimpleLinks: link reference generalization>>
-    } else {
-        // Must use mrt_CreateAssociatorLinks to link an associator.
-        // Cannot link across a union generalization.
+    }
+        break ;
+
+    case mrtUnionGeneralization:
+        // There are no pointer linkages for a union generalization.
+        // N.B. fall through
+
+    default:
         mrtFatalError(mrtRelationshipLinkage) ;
+        break ;
     }
 
-    mrtMarkTransaction(&rel, 1) ;
+    mrtMarkRelationship(&rel, 1) ;
 }
 ----
+
+For simple associations,
+we must establish two sets of pointer linkages.
+From source to target is the primary referring direction.
+This is always a simple, single pointer value.
+From target to source is in the back link direction and
+may be either singular or a linked list.
 
 [source,c]
 ----
@@ -3990,6 +4020,7 @@ updates the instance pointers.
 
 (((micca,Run Time Function,mrtLink)))
 [source,c]
+.Implementation
 ----
 <<mrt static functions>>=
 static void
@@ -4011,19 +4042,17 @@ mrtLink(
         mrtFatalError(mrtStaticRelationship) ;
         break ;
 
-    case mrtLinkedList: { // <2>
-        // If the target is already on a linked list somewhere, then we unlink
-        // it before placing it on the new list.  We can do this since we do
-        // not need the list head to unlink an item from a list.  Find the link
-        // pointers in the target.
-        MRT_LinkRef *targetLinks = (MRT_LinkRef *)
-                ((uintptr_t)target + sourceRole->linkOffset) ;
+    case mrtLinkedList: {
+        MRT_LinkRef *targetLinks = (MRT_LinkRef *)((uintptr_t)target +
+                sourceRole->linkOffset) ;
         if (targetLinks->next != NULL && targetLinks->prev != NULL) {
-            mrtLinkRefRemove(targetLinks) ;
+            mrtLinkRefRemove(targetLinks) ; // <2>
         }
 
+        // Find the linked list terminus in the source instance and
+        // insert the target on the list.
         MRT_LinkRef *sourceList = (MRT_LinkRef *)((uintptr_t)source +
-                sourceRole->storageOffset) ;
+                sourceRole->storageOffset) ; // <3>
         assert(targetLinks->next == NULL && targetLinks->prev == NULL) ;
         mrtLinkRefInsert(targetLinks, sourceList) ;
     }
@@ -4037,13 +4066,27 @@ mrtLink(
 ----
 <1> For a singular pointer, the `storageOffset` is to a simple pointer
 location.
-<2> For linked reference storage,
-we have to compute the location in the source of the link terminus
-(`storageOffset`) and
-the location in the target of where the linked list pointers are stored
-(`linkOffset`).
-The latter is necessary since a given instance may reside on many different
-linked lists associated with different associations.
+If the value stored at the pointer location was not `NULL`,
+overwriting it serves to unlink any previously linked participant.
+<2> If the target is already on a linked list somewhere,
+then we unlink it before placing it on the new list.
+We can do this since we do not need the list head to unlink an item from a
+list.
+To find the link pointers in the target,
+note the offset into the target is actually given in the association
+description of the source.
+This arrangement is convenient in other cases, despite its the confusion
+of using a source description to access something in the target instance.
+Note also that we might be removing the target from the same list
+to which we will immediately insert it.
+That's alright, it is necessary to insure the referenced instances form a set.
+<3> For linked reference storage,
+the `storageOffset` is the byte offset to the linked list terminus.
+
+For class based associations,
+the `mrt_CreateSimpleLinks` function updates only one of the pointer
+references, from the associator class to either the source or target
+participant of the relationship.
 
 [source,c]
 ----
@@ -4053,57 +4096,71 @@ struct mrtassociatorrole const *arole = &cassoc->associator ;
 struct mrtassociationrole const *srole = &cassoc->source ;
 struct mrtassociationrole const *trole = &cassoc->target ;
 
-if (arole->classDesc != ((MRT_Instance *)source)->classDesc) {
+if (arole->classDesc != ((MRT_Instance *)source)->classDesc) { // <1>
     mrtFatalError(mrtRelationshipLinkage) ;
 }
 
-if (srole->classDesc == ((MRT_Instance *)target)->classDesc) {
-    // Update associator to source link (backward)
-    void **p_backref = (void **)((uintptr_t)source + arole->backwardOffset) ;
-    *p_backref = target ;
+if (srole->classDesc == ((MRT_Instance *)target)->classDesc) { // <2>
+    void **p_backRef = (void **)((uintptr_t)source + arole->backwardOffset) ;
+    *p_backRef = target ;
     mrtLink(srole, target, source) ;
-} else if (trole->classDesc == ((MRT_Instance *)target)->classDesc) {
-    // Update associator to target link (forward)
-    void **p_forwref = (void **)((uintptr_t)source + arole->forwardOffset) ;
-    *p_forwref = target ;
+} else if (trole->classDesc == ((MRT_Instance *)target)->classDesc) { // <3>
+    void **p_forwRef = (void **)((uintptr_t)source + arole->forwardOffset) ;
+    *p_forwRef = target ;
     mrtLink(trole, target, source) ;
 } else {
     mrtFatalError(mrtRelationshipLinkage) ;
 }
 ----
+<1> When invoked on a class based association,
+we insist that the "source" instance reference argument be an instance
+reference to the associator class.
+<2> Test to determine if the "target" instance reference refers to
+the source participant of the association.
+If so, then we update the "backward" side of the associative class,
+_i.e._ the reference from the associator instance to the source
+participant.
+The naming is a bit strained here.
+<3> Conversely, test to determin if the "target" instance reference refers
+to the target participant of the association.
+This corresponds to the "forward" reference by the associative class,
+_i.e._ the reference from the associator instance to the target
+participant.
+Again, the naming is a bit difficult.
 
 When relating reference generalizations,
 the reference from the subclass to the superclass is singular and
 unconditional.
-The reference from the superclass to the subclass is singular but also
-includes an encoding of the type of the subclass.
-The reference is unconditional when all the subclasses are considered.
-
-First we have to find the subclass type of the subclass instance
-(for generalizations, the subclass plays the _source_ role).
+The reference from the superclass to the subclass is also singular.
 
 [source,c]
 ----
 <<mrt_CreateSimpleLinks: link reference generalization>>=
 struct mrtrefgeneralization const *gen = &rel->relInfo.refGeneralization ;
 
-MRT_Class const *superclassClass = ((MRT_Instance *)target)->classDesc ;
+MRT_Class const *subclassClass = ((MRT_Instance *)source)->classDesc ; // <1>
+int subclassCode = mrtFindRefGenSubclassCode(subclassClass, gen->subclasses,
+        gen->subclassCount) ;
+
+MRT_Class const *superclassClass = ((MRT_Instance *)target)->classDesc ; // <2>
 if (gen->superclass.classDesc != superclassClass) {
     mrtFatalError(mrtRelationshipLinkage) ;
 }
 
-MRT_Class const *subclassClass = ((MRT_Instance *)source)->classDesc ;
-int subclassCode = mrtFindRefGenSubclassCode(subclassClass, gen->subclasses,
-        gen->subclassCount) ;
-
-void **superref =
-    (void **)((uintptr_t)target + gen->superclass.storageOffset) ;
-*superref = source ;
-
-void **subref = (void **)((uintptr_t)source +
+void **p_superRef = (void **)((uintptr_t)source +
         gen->subclasses[subclassCode].storageOffset) ;
-*subref = target ;
+*p_superRef = target ;
+
+void **p_subRef = (void **)((uintptr_t)target + gen->superclass.storageOffset) ;
+*p_subRef = source ;
 ----
+<1> For reference generalizations,
+the "source" instance reference must be one of the subclasses that
+participates in the relationship.
+The primary reference in a generalization is from subclass instance to
+superclass instance.
+<2> The "target" instance reference must then be to the superclass of the
+generalization.
 
 Finding the participating subclass of the generalization is a linear search
 of the subclass roles in the relationship description.
@@ -4130,37 +4187,13 @@ mrtFindRefGenSubclassCode(
 }
 ----
 
-(((micca,Run Time Function,mrtFindUnionGenSubclassCode)))
-[source,c]
-----
-<<mrt static functions>>=
-static int
-mrtFindUnionGenSubclassCode(
-    MRT_Class const *subclassClass,
-    MRT_Class const * const *subclasses,
-    unsigned count)
-{
-    int subcode ;
-
-    for (subcode = 0 ; subcode < count ; ++subcode, ++subclasses) {
-        if (subclassClass == *subclasses) {
-            return subcode ;
-        }
-    }
-
-    mrtFatalError(mrtRelationshipLinkage) ;
-}
-----
-
 === Create Associator Links
 
-Linking class based associations must account for the associator class.
-The class based association is treated as being decomposed into
+Linking class based associations must account for the nature
+of the associator class.
+A class based association is treated as being decomposed into
 two associations, one each between the participants and the associator
 class.
-For a class based association,
-each instance of the associator class represents an instance of the
-association itself.
 
 [source,c]
 ----
@@ -4173,10 +4206,9 @@ mrt_CreateAssociatorLinks(
     void *target) ;
 ----
 
-==== Implementation
-
 (((micca,Run Time Function,mrt_CreateAssociatorLinks)))
 [source,c]
+.Implementation
 ----
 <<mrt external functions>>=
 void
@@ -4191,46 +4223,48 @@ mrt_CreateAssociatorLinks(
     assert(source != NULL) ;
     assert(target != NULL) ;
 
-    if (rel->relType != mrtClassAssoc) {
-        mrtFatalError(mrtRelationshipLinkage) ;
-    }
-
-    mrt_CreateSimpleLinks(rel, assoc, source) ;
+    mrt_CreateSimpleLinks(rel, assoc, source) ; // <1>
     mrt_CreateSimpleLinks(rel, assoc, target) ;
 
-    mrtMarkTransaction(&rel, 1) ;
+    mrtMarkRelationship(&rel, 1) ;
 }
 ----
+<1> In keeping with the concept that a class based assocation is
+decomposed into two association legs, we need only create the links
+for both sides.
 
-=== Unrelate Class Instances
+=== Deleting Relationship Linkage
 
-The inverse of relating instances is to unrelate them.
+We must also provide a function to delete relationship linkage pointers.
 
 *****
 [source,c]
 ----
 <<mrt external interfaces>>=
 extern void
-mrtUnrelate(
+mrtDeleteLinks(
     struct mrtrelationship const * const *classRels,
     unsigned relCount,
     void *inst) ;
 ----
 
-`rel`::
-    A pointer to a relationship description for the relationship
-    across which the relate operation is to happen.
+`classRels`::
+    A pointer to an array of relationships description pointers
+    that describe the relationships in which `inst` is a participant.
+`relCount`::
+    The number of elements in the `classRels` array.
 `inst`::
-    A pointer to the class instance that is to be unlinked from the
+    A pointer to the class instance that is to be unlinked from its
     relationship.
 *****
 
-(((micca,Run Time Function,mrtUnrelate)))
+(((micca,Run Time Function,mrtDeleteLinks)))
 [source,c]
+.Implementation
 ----
 <<mrt static functions>>=
 void
-mrtUnrelate(
+mrtDeleteLinks(
     struct mrtrelationship const * const *classRels,
     unsigned relCount,
     void *inst)
@@ -4239,7 +4273,7 @@ mrtUnrelate(
     /*
      * Mark the transaction since we are updating the reference pointers.
      */
-    mrtMarkTransaction(classRels, relCount) ;
+    mrtMarkRelationship(classRels, relCount) ;
 
     MRT_Instance *instref = inst ;
     MRT_Class const *instclass = instref->classDesc ;
@@ -4248,17 +4282,17 @@ mrtUnrelate(
         struct mrtrelationship const * const rel = *classRels ;
         switch (rel->relType) {
         case mrtSimpleAssoc: {
-            <<mrtUnrelate: unlink simple association>>
+            <<mrtDeleteLinks: unlink simple association>>
         }
             break ;
 
         case mrtClassAssoc: {
-            <<mrtUnrelate: unlink class based association>>
+            <<mrtDeleteLinks: unlink class based association>>
         }
             break ;
 
         case mrtRefGeneralization: {
-            <<mrtUnrelate: unlink reference generalization>>
+            <<mrtDeleteLinks: unlink reference generalization>>
         }
             break ;
 
@@ -4274,19 +4308,21 @@ mrtUnrelate(
 }
 ----
 
-To unrelate simple associations we must verify that the classes of the
-instance actually participate in the association and the
-perform the pointer operations to unlink the instances.
+To unrelate simple associations,
+we must verify that the classes of the instance actually participate in the
+association and the perform the pointer operations to unlink the instances.
 
 [source,c]
 ----
-<<mrtUnrelate: unlink simple association>>=
+<<mrtDeleteLinks: unlink simple association>>=
 struct mrtsimpleassociation const *s_assoc = &rel->relInfo.simpleAssociation ;
 
 if (instclass == s_assoc->source.classDesc) {
-    mrtSimpUnlinkForw(s_assoc, inst) ;
+    mrtSimpUnlinkForward(s_assoc, inst) ;
 } else if (instclass == s_assoc->target.classDesc) {
     mrtSimpUnlinkBack(s_assoc, inst) ;
+} else {
+    mrtFatalError(mrtRelationshipLinkage) ;
 }
 ----
 
@@ -4294,39 +4330,39 @@ if (instclass == s_assoc->source.classDesc) {
 ----
 <<mrt forward references>>=
 static void
-mrtSimpUnlinkForw(
+mrtSimpUnlinkForward(
     struct mrtsimpleassociation const *assoc,
     void *source) ;
 ----
 
+Unlinking a simple association in the forward direction implies that we
+are unlinking the primary reference.
+This primary reference is always singular and always non-NULL.
+When we are unlinking the primary reference we will follow the reference
+and try to unlink any back references.
+
 [source,c]
+.Implementation
 ----
 <<mrt static functions>>=
-/*
- * Unlink the target from the source in the forward direction.
- * Null out the pointer in the source and unlink the target back reference
- * if the target is still allocated.
- */
 static void
-mrtSimpUnlinkForw(
+mrtSimpUnlinkForward(
     struct mrtsimpleassociation const *assoc,
     void *source)
 {
     struct mrtassociationrole const *sourceRole = &assoc->source ;
 
     if (sourceRole->storageType == mrtSingular) {
-        // Point to where the target reference is located in the source instance.
-        void **p_targetref = (void **)((uintptr_t)source +
-                sourceRole->storageOffset) ;
-        // Fetch the target reference.
-        MRT_Instance *targetinst = *p_targetref ;
-        assert(targetinst != NULL) ;
-        *p_targetref = NULL ;
+        void **p_targetInst = (void **)
+                ((uintptr_t)source + sourceRole->storageOffset) ;
+        MRT_Instance *targetInst = *p_targetInst ;
+        *p_targetInst = NULL ; // <1>
 
         struct mrtassociationrole const *targetRole = &assoc->target ;
-        if (targetinst->alloc > 0 &&
-                targetinst->classDesc == targetRole->classDesc) {
-            mrtUnlinkBackref(targetRole, source, targetinst) ;
+        assert(targetInst != NULL) ;
+        if (targetInst != NULL && targetInst->alloc > 0 &&
+                targetInst->classDesc == targetRole->classDesc) { // <2>
+            mrtUnlinkBackref(targetRole, source, targetInst) ;
         }
     } else {
         // Simple forward association links are always singular.
@@ -4334,6 +4370,18 @@ mrtSimpUnlinkForw(
     }
 }
 ----
+<1> Assigning `NULL` to the primary reference effectively unlinks
+the target instance.
+<2> The test for `NULL` is just _belt and suspenders_ for when the
+`assert` macro is conditionally compiled out.
+We only want to attempt to unlink the back reference is the target instance
+is still allocated and of the same class.
+Normally, instance don't just change their class out from under themselves.
+However, union based subclass instances do.
+Migrating a union subclass instance results in any back reference pointers
+to the instance remaining valid, but the class of the instance now
+occupying the memory has changed.
+Union subclasses are somewhat painful.
 
 [source,c]
 ----
@@ -4344,12 +4392,25 @@ mrtSimpUnlinkBack(
     void *target) ;
 ----
 
+The case of unlinking back references for a simple association,
+occurs when the target instance is being deleted.
+In this case,
+we only delete the back references made by the target.
+In particular we make no attempt to follow the source references
+and delete the primary reference pointer.
+If the refering instance is not later deleted,
+then referential integrity checking will find a pointer to
+an unallocated instance.
+This will be caught in referential integrity checking.
+we must be prepared for the fact that the back references are
+already gone.
+This is because it is possible to delete the referenced instance of
+a simple association before deleting the refering instance.
+
 [source,c]
+.Implementation
 ----
 <<mrt static functions>>=
-/*
- * Unlink the source from the target in the backward direction.
- */
 static void
 mrtSimpUnlinkBack(
     struct mrtsimpleassociation const *assoc,
@@ -4358,21 +4419,18 @@ mrtSimpUnlinkBack(
     struct mrtassociationrole const *targetRole = &assoc->target ;
 
     if (targetRole->storageType == mrtSingular) {
-        // Point to where the source reference is located in the target instance.
-        void **p_sourceref = (void **)((uintptr_t)target +
-                targetRole->storageOffset) ;
-        *p_sourceref = NULL ;
-    } else if (targetRole->storageType == mrtLinkedList) {
-        // In this case we are deleting the target and all the
-        // links the target makes need to be deleted.
-        MRT_LinkRef *targetList = (MRT_LinkRef *)
+        void **p_sourceInst = (void **)
                 ((uintptr_t)target + targetRole->storageOffset) ;
-        assert(targetList->next != NULL && targetList->prev != NULL) ;
-        for (MRT_LinkRef *iter = mrtLinkRefBegin(targetList) ;
-                iter != mrtLinkRefEnd(targetList) ; ) {
-            MRT_LinkRef *sourceinst = iter ;
-            iter = iter->next ;
-            mrtLinkRefRemove(sourceinst) ;
+        *p_sourceInst = NULL ; // <1>
+    } else if (targetRole->storageType == mrtLinkedList) { // <2>
+        MRT_LinkRef *sourceList = (MRT_LinkRef *)
+                ((uintptr_t)target + targetRole->storageOffset) ; // <3>
+        assert(sourceList->next != NULL && sourceList->prev != NULL) ;
+        for (MRT_LinkRef *iter = mrtLinkRefBegin(sourceList) ;
+                iter != mrtLinkRefEnd(sourceList) ; ) {
+            MRT_LinkRef *sourceInst = iter ;
+            iter = iter->next ; // <4>
+            mrtLinkRefRemove(sourceInst) ;
         }
     } else {
         // Can't unlink array type linkages.
@@ -4380,6 +4438,19 @@ mrtSimpUnlinkBack(
     }
 }
 ----
+<1> For the singular pointer case we can just write `NULL` to the
+back reference.
+Even if it was already `NULL`, it won't matter.
+The link is severed.
+<2> In this case, the target instance is being deleted and all of
+its back links must be removed.
+<3> This is the list of back links to source instances.
+<4> Be careful to advance the iterator before deleting the item from the list.
+
+In this function we are trying to delete a single back link from the "target"
+to the "source".
+This is the back link deletion associated with deleting the primary
+reference pointer and we have tracked to a target instance.
 
 [source,c]
 ----
@@ -4405,25 +4476,15 @@ mrtUnlinkBackref(
     assert(targetRole != NULL) ;
 
     if (targetRole->storageType == mrtSingular) {
-        // The entity at the storageOffset is a simple pointer back to the
-        // source instance.  Point to where the source reference is located
-        // in the target instance.
-        void **p_sourceref = (void **)((uintptr_t)target +
-                targetRole->storageOffset) ;
-        *p_sourceref = NULL ;
+        void **p_sourceInst = (void **)
+                ((uintptr_t)target + targetRole->storageOffset) ; // <1>
+        *p_sourceInst = NULL ;
     } else if (targetRole->storageType == mrtLinkedList) {
-        // The source instance is linked onto a list whose list terminus is
-        // contained in the target instance.  We need to remove the source
-        // instance from that list. We only need a pointer to the links in the
-        // source instance to remove it from the list (it is doubly linked).
-        // The links are offset into the source instance by the offset given in
-        // the "target" role.
-        MRT_LinkRef *sourcelink = (MRT_LinkRef *)
-                ((uintptr_t)source + targetRole->linkOffset) ;
+        MRT_LinkRef *sourcelinks = (MRT_LinkRef *)
+                ((uintptr_t)source + targetRole->linkOffset) ; // <2>
 
-        // Check that the instance is actually linked on the list.
-        if (sourcelink->next != NULL && sourcelink->prev != NULL) {
-            mrtLinkRefRemove(sourcelink) ;
+        if (sourcelinks->next != NULL && sourcelinks->prev != NULL) { // <3>
+            mrtLinkRefRemove(sourcelinks) ;
         }
     } else {
         // Can't unlink array type linkages.
@@ -4431,6 +4492,19 @@ mrtUnlinkBackref(
     }
 }
 ----
+<1> The entity at the storageOffset is a simple pointer back to the
+source instance.  Point to where the source reference is located
+in the target instance.
+<2> The source instance is linked onto a list whose list terminus is
+contained in the target instance.
+We need to remove the source instance from that list.
+We only need a pointer to the links member in the
+source instance to remove it from the list (it is doubly linked).
+The links are offset into the source instance by the `linkOffset` given in
+the "target" role relationship descriptor.
+<3> Check that the instance is actually linked on the list.
+If the source has been deleted previously,
+then it will have been removed from the list already.
 
 For class based associations,
 we deal with the association in two steps, between each participant and
@@ -4438,57 +4512,35 @@ the associator class.
 
 [source,c]
 ----
-<<mrtUnrelate: unlink class based association>>=
+<<mrtDeleteLinks: unlink class based association>>=
 struct mrtclassassociation const *c_assoc = &rel->relInfo.classAssociation ;
 
 if (instclass == c_assoc->associator.classDesc) {
-    mrtClassUnlinkParticipants(c_assoc, inst) ;
-}
-----
+    struct mrtassociatorrole const *assocRole = &c_assoc->associator ;
+    struct mrtassociationrole const *sourceRole = &c_assoc->source ;
+    struct mrtassociationrole const *targetRole = &c_assoc->target ;
 
-[source,c]
-----
-<<mrt forward references>>=
-static void
-mrtClassUnlinkParticipants(
-    struct mrtclassassociation const *relRole,
-    void *assoc) ;
-----
-
-[source,c]
-----
-<<mrt static functions>>=
-/*
- * Unlink the participants from an associative instance
- */
-static void
-mrtClassUnlinkParticipants(
-    struct mrtclassassociation const *relRole,
-    void *assoc)
-{
-    struct mrtassociatorrole const *assocRole = &relRole->associator ;
-    struct mrtassociationrole const *sourceRole = &relRole->source ;
-    struct mrtassociationrole const *targetRole = &relRole->target ;
-
-    // Start with the forward direction to the target.  Point to where the
-    // target reference is located in the associator instance.
-    void **p_targetref = (void **)((uintptr_t)assoc + assocRole->forwardOffset) ;
-    void *targetref = *p_targetref ;
-    *p_targetref = NULL ;
-    assert(targetref != NULL) ;
-    if (((MRT_Instance *)targetref)->alloc > 0) {
-        mrtUnlinkBackref(targetRole, assoc, targetref) ;
+    void **p_targetInst = (void **)
+            ((uintptr_t)inst + assocRole->forwardOffset) ; // <1>
+    MRT_Instance *targetInst = *p_targetInst ;
+    *p_targetInst = NULL ;
+    assert(targetInst != NULL) ;
+    if (targetInst != NULL && targetInst->alloc > 0) {
+        mrtUnlinkBackref(targetRole, inst, targetInst) ;
     }
 
-    void **p_sourceref = (void **)((uintptr_t)assoc + assocRole->backwardOffset) ;
-    void *sourceref = *p_sourceref ;
-    *p_sourceref = NULL ;
-    assert(sourceref != NULL) ;
-    if (((MRT_Instance *)sourceref)->alloc > 0) {
-        mrtUnlinkBackref(sourceRole, assoc, sourceref) ;
+    void **p_sourceInst = (void **)
+            ((uintptr_t)inst + assocRole->backwardOffset) ;
+    MRT_Instance *sourceInst = *p_sourceInst ;
+    *p_sourceInst = NULL ;
+    assert(sourceInst != NULL) ;
+    if (sourceInst != NULL && sourceInst->alloc > 0) {
+        mrtUnlinkBackref(sourceRole, inst, sourceInst) ;
     }
 }
 ----
+<1> Start with the forward direction to the target.
+Point to where the target reference is located in the associator instance.
 
 For reference generalizations,
 the references are singular pointers between the superclass and subclass
@@ -4498,7 +4550,7 @@ generalization.
 
 [source,c]
 ----
-<<mrtUnrelate: unlink reference generalization>>=
+<<mrtDeleteLinks: unlink reference generalization>>=
 struct mrtrefgeneralization const *gen = &rel->relInfo.refGeneralization ;
 
 if (instclass != gen->superclass.classDesc) {
@@ -4506,18 +4558,24 @@ if (instclass != gen->superclass.classDesc) {
     int subclassCode = mrtFindRefGenSubclassCode(instclass, gen->subclasses,
             gen->subclassCount) ;
     // Obtain the pointer to the superclass instance.
-    void **p_superinst = (void **)((uintptr_t)inst +
-            gen->subclasses[subclassCode].storageOffset) ;
-    void *superinst = *p_superinst ;
-    *p_superinst = NULL ;
-    assert(superinst != NULL) ;
+    void **p_superInst = (void **)
+            ((uintptr_t)inst + gen->subclasses[subclassCode].storageOffset) ;
+    MRT_Instance *superInst = *p_superInst ;
+    *p_superInst = NULL ;
+    assert(superInst != NULL) ;
     // NULL out the pointer in the superclass instance pointing to the subclass
     // instance.
-    if (((MRT_Instance *)superinst)->alloc > 0) {
-        void **p_subinst = (void **)((uintptr_t)superinst +
-                gen->superclass.storageOffset) ;
-        *p_subinst = NULL ;
+    if (superInst != NULL && superInst->alloc > 0) {
+        void **p_subInst = (void **)
+                ((uintptr_t)superInst + gen->superclass.storageOffset) ;
+        *p_subInst = NULL ;
     }
+} else {
+    // Instance is a superclass instance
+    // NULL out the pointer to the subclass instance only,
+    // i.e. only the back reference.
+    void **p_subInst = (void **)((uintptr_t)inst + gen->superclass.storageOffset) ;
+    *p_subInst = NULL ;
 }
 ----
 
@@ -4615,14 +4673,14 @@ if (gen->superclass.classDesc != superclassClass) {
  * Offset into the superclass instance to where the pointer to the
  * subclass instance is located.
  */
-void **p_subinst = (void **)((uintptr_t)super + gen->superclass.storageOffset) ;
-void *subinst = *p_subinst ;
-if (subinst != NULL) {
+void **p_subInst = (void **)((uintptr_t)super + gen->superclass.storageOffset) ;
+void *subInst = *p_subInst ;
+if (subInst != NULL) {
     /*
      * Delete the old subclass instance.  Deleting will cause the subclass
      * instance to be unlinked from the generalization.
      */
-    mrt_DeleteInstance(subinst) ;
+    mrt_DeleteInstance(subInst) ;
 }
 
 /*
@@ -4660,18 +4718,43 @@ mrtFindUnionGenSubclassCode(newSubclass, gen->subclasses, gen->subclassCount) ;
  * Point to where the subclass instance is stored within the superclass.
  */
 newSubInst = (void *)((uintptr_t)super + gen->superclass.storageOffset) ;
-MRT_Instance *subinst = newSubInst ;
+MRT_Instance *subInst = newSubInst ;
 /*
  * Clean up any relationship pointers.
  */
-if (subinst->alloc > 0) {
-    mrtUnrelate(subinst->classDesc->classRels,
-            subinst->classDesc->relCount, subinst) ;
+if (subInst->alloc > 0) {
+    MRT_Class const *newSubClass = subInst->classDesc ;
+    mrtDeleteLinks(newSubClass->classRels, newSubClass->relCount, subInst) ;
 }
 /*
  * Set up the memory for the subclass instance according to the new subclass.
  */
-mrtInitializeInstance(subinst, newSubclass, MRT_StateCode_IG) ;
+mrtInitializeInstance(subInst, newSubclass, MRT_StateCode_IG) ;
+----
+
+This function is the counterpart for finding a subclass among the
+subclasses for a union generalization.
+
+(((micca,Run Time Function,mrtFindUnionGenSubclassCode)))
+[source,c]
+----
+<<mrt static functions>>=
+static int
+mrtFindUnionGenSubclassCode(
+    MRT_Class const *subclassClass,
+    MRT_Class const * const *subclasses,
+    unsigned count)
+{
+    int subcode ;
+
+    for (subcode = 0 ; subcode < count ; ++subcode, ++subclasses) {
+        if (subclassClass == *subclasses) {
+            return subcode ;
+        }
+    }
+
+    mrtFatalError(mrtRelationshipLinkage) ;
+}
 ----
 
 === Linked List Operations
