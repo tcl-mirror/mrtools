@@ -104,7 +104,7 @@ micca_rt.h : $(RTSRC)
 	    	-output $@ micca.aweb
 	mv $(MICCADIR)/micca_rt.h .
 
-micca_rt.c : $(RTSRC)
+micca_rt.c : $(RTSRC) micca_rt.h
 	cd $(MICCADIR) ; atangle $(ATANGLEOPTS) -root micca_rt_posix.c -output $@ micca.aweb
 	mv $(MICCADIR)/micca_rt.c .
 

@@ -1,0 +1,749 @@
+// vim:set syntax=asciidoc:
+
+= Generating a Test Harness
+
+[partintro]
+.Generating a Test Harness
+--
+The `micca` run-time is capable of executing in a POSIX environment.
+This is intended primarily to be able to simulate and integrate
+a system that is ultimately targeted for a micro-processor in an
+environment that has more capability for testing and introspection.
+To support this important activity,
+`micca` can automatically generate a test harness in which one or
+more domains may be run.
+
+== Introduction
+
+Place holder.
+
+== Test Harness Operation
+
+Place holder.
+
+=== Harness Data Structures
+
+Place holder.
+
+==== Domain Harness Information
+
+Each domain is well encapsulated and stands alone.
+The test harness will resolve to which domain an operation is directed
+and then will need the information about that domain to carry out
+the operation.
+
+One of the most important pieces of information is the
+domain portal data that `micca` generates.
+This provides much information to the test harness and provides the
+means, via the
+<<portal-access-functions>>
+of the run-time,
+to access the various aspects of a domain, _e.g._ send events and read
+attributes.
+
+[source,c]
+----
+<<mth interface aggregate types>>=
+typedef struct mthdomainharness {
+    MRT_DomainPortal const *portal ;
+    struct mthoperationmap const *operations ;
+    unsigned operationCount ;
+    struct mthclassmap const *classes ;
+    unsigned classCount ;
+} MTH_DomainHarness ;
+----
+
+[source,c]
+----
+<<mth interface aggregate types>>=
+typedef struct mthoperationmap {
+    char const *opName ;
+    MTH_DomainOpFunc *opFunc ;
+} MTH_OperationMap ;
+----
+
+[source,c]
+----
+<<mth interface simple types>>=
+typedef bool MTH_DomainOpFunc(int, char const *const *, char const **) ;
+----
+
+[source,c]
+----
+<<mth interface aggregate types>>=
+typedef struct mthclassmap {
+    MRT_ClassId id ;
+    struct mthattrmap const *attrs ;
+    unsigned attrCount ;
+    struct mthinstmap const *insts ;
+    unsigned instCount ;
+    struct mtheventmap const *events ;
+    unsigned eventCount ;
+} MTH_ClassMap ;
+----
+
+[source,c]
+----
+<<mth interface aggregate types>>=
+typedef struct mthattrmap {
+    char const *name ;
+    MRT_AttrId id ;
+    MTH_AttrReadFunc *readFunc ;
+    MTH_AttrUpdateFunc *updateFunc ;
+} MTH_AttrMap ;
+----
+
+[source,c]
+----
+<<mth interface simple types>>=
+typedef bool MTH_AttrReadFunc(MRT_DomainPortal const *, MRT_ClassId,
+        MRT_InstId, MRT_AttrId, char const **) ;
+----
+
+[source,c]
+----
+<<mth interface simple types>>=
+typedef bool MTH_AttrUpdateFunc(MRT_DomainPortal const *, MRT_ClassId,
+        MRT_InstId, MRT_AttrId, char const *, char const **) ;
+----
+
+[source,c]
+----
+<<mth interface aggregate types>>=
+typedef struct mthinstmap {
+    char const *name ;
+    MRT_InstId id ;
+} MTH_InstMap ;
+----
+
+[source,c]
+----
+<<mth interface aggregate types>>=
+typedef struct mtheventmap {
+    char const *name ;
+    MRT_EventCode number ;
+    MTH_EventParamFunc *paramFunc ;
+    size_t paramCount ;
+} MTH_EventMap ;
+----
+
+[source,c]
+----
+<<mth interface simple types>>=
+typedef bool MTH_EventParamFunc(int, char const **, MRT_EventParams) ;
+----
+
+=== Harness Functions
+
+Place holder.
+
+==== Harness Initialization
+
+Before any harness activity can happen,
+it is necessary invoke the initialization function for the harness
+library.
+This is typically done in `main` and must be done after
+the `micca` run-time is initialized, _i.e._ after `mrt_Initialize`
+has been invoked.
+
+[source,c]
+----
+<<mth external function declarations>>=
+extern int mth_Initialize(void) ;
+----
+
+[source,c]
+----
+<<mth implementation includes>>=
+#include <sys/socket.h>
+#include <errno.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <signal.h>
+----
+
+[source,c]
+----
+<<mth external function definitions>>=
+int
+mth_Initialize(void)
+{
+    mthServiceSock = socket(AF_INET, SOCK_STREAM, 0) ;
+    if (mthServiceSock == -1) {
+        perror("unable to obtain AF_INET stream socket") ;
+        return -1 ;
+    }
+
+    struct sockaddr_in hsrvAddr ;
+    memset(&hsrvAddr, 0, sizeof(hsrvAddr)) ;
+#       ifdef __APPLE__
+    hsrvAddr.sin_len = sizeof(hsrvAddr) ;
+#       endif /* __APPLE__ */
+    hsrvAddr.sin_family = AF_INET ;
+    hsrvAddr.sin_port = htons(HARNESS_PORT) ;
+
+    static char const host[] = "localhost" ;
+    struct hostent *hostAddr = gethostbyname(host) ;
+    if (hostAddr == NULL) {
+        perror(host) ;
+        return -1 ;
+    }
+    assert(hostAddr->h_addrtype == AF_INET) ;
+    memcpy(&hsrvAddr.sin_addr, hostAddr->h_addr_list[0], hostAddr->h_length) ;
+
+    int err = bind(mthServiceSock, (struct sockaddr const *)&hsrvAddr,
+            sizeof(hsrvAddr)) ;
+    if (err == -1) {
+        perror("bind()") ;
+        return -1 ;
+    }
+
+    err = listen(mthServiceSock, 1) ;
+    if (err == -1) {
+        perror("listen()") ;
+        return -1 ;
+    }
+
+    mrt_RegisterFDService(mthServiceSock, mthAcceptConnection, NULL, NULL) ;
+    mrt_RegisterSignal(SIGQUIT, mthExit) ;
+    mrt_RegisterSignal(SIGINT, mthExit) ;
+    mrt_RegisterSignal(SIGTERM, mthExit) ;
+
+    return mthServiceSock ;
+}
+----
+
+[source,c]
+----
+<<mth implementation constants>>=
+#ifndef HARNESS_PORT
+#   define HARNESS_PORT 3906
+#endif /* HARNESS_PORT */
+----
+
+[source,c]
+----
+<<mth static data>>=
+int mthServiceSock = -1 ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static void
+mthExit(
+    int signal)
+{
+    dbgprintf("caught signal %d\n", signal) ;
+    if (mthServiceSock != -1) {
+        shutdown(mthServiceSock, SHUT_RDWR) ;
+    }
+    if (mthCmdStream != NULL) {
+        fclose(mthCmdStream) ;
+    }
+    exit(EXIT_SUCCESS) ;
+}
+----
+[source,c]
+----
+<<mth static functions>>=
+static void
+mthAcceptConnection(
+    int sock)
+{
+    int fd = accept(sock, NULL, 0) ;
+
+    int err = shutdown(mthServiceSock, SHUT_RDWR) ;
+    if (err == -1) {
+        perror("shutdown()") ;
+        exit(EXIT_FAILURE) ;
+    }
+    mrt_UnregisterFDService(sock, true, false, false) ;
+    mthServiceSock = -1 ;
+
+    if (fd == -1) {
+        perror("accept()") ;
+        exit(EXIT_FAILURE) ;
+    }
+
+    mrt_RegisterFDService(fd, mthReadAndEvalCommand, NULL, NULL) ;
+    mthCmdStream = fdopen(fd, "w+") ;
+    err = setvbuf(mthCmdStream, NULL, _IOLBF, 0) ;
+}
+----
+
+[source,c]
+----
+<<mth implementation includes>>=
+#include <unistd.h>
+----
+
+[source,c]
+----
+<<mth static data>>=
+FILE *mthCmdStream ;
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static void mthReadAndEvalCommand(int) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static void
+mthReadAndEvalCommand(
+    int rfd)
+{
+    static char cmdBuffer[BUFSIZ] ;
+
+    char *cmd = fgets(cmdBuffer, sizeof(cmdBuffer), mthCmdStream) ;
+    if (cmd == NULL) {
+        if (feof(mthCmdStream)) {
+            dbgprintf("goodbye\n") ;
+            fclose(mthCmdStream) ;
+            exit(EXIT_SUCCESS) ;
+        } else if (ferror(mthCmdStream)) {
+            perror("fgets()") ;
+            fclose(mthCmdStream) ;
+            exit(EXIT_FAILURE) ;
+        } else {
+            printf("partial\n") ;
+            return ;
+        }
+    }
+    for (char *end = cmdBuffer + strlen(cmdBuffer) - 1 ; isspace(*end) ; end--) {
+        *end = ASCII_NUL ;
+    }
+    dbgprintf("%s\n", cmdBuffer) ;
+
+    int argc ;
+    char *const *argv ;
+    static char parseBuffer[BUFSIZ] ;
+    strcpy(parseBuffer, cmdBuffer) ;
+
+    int err = mthParseCommand(parseBuffer, &argc, &argv) ;
+    if (err == -1) {
+        fprintf(mthCmdStream, "code error result {failed to parse command: \"%s\"}\n",
+            cmdBuffer) ;
+        return ;
+    }
+
+#if 0
+    dbgprintf("got %d arguments\n", argc) ;
+#       ifndef NDEBUG
+    for (int i = 0 ; i < argc ; i++) {
+        printf("%d: \"%s\"\n", i, argv[i]) ;
+    }
+#       endif /* NDEBUG */
+#endif
+
+    if (argc > 0) {
+        mthExecCommand(argc, argv) ;
+    }
+}
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static int mthParseCommand(char *, int *, char *const **) ;
+----
+
+[source,c]
+----
+<<mth implementation includes>>=
+#include <ctype.h>
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static int
+mthParseCommand(
+    char *line,
+    int *pargc,
+    char *const **pargv)
+{
+    #define MAX_ARGS    64
+    static char *args[MAX_ARGS] ;
+
+    char **pArgv = args ;
+    char **const argvEnd = pArgv + MAX_ARGS ;
+
+    int quoteCount = 0 ;
+    int parseState = OutOfWord ;
+    int parseStackStorage[2] ;
+    int *parseStackTop = parseStackStorage ;
+
+    char *pWord = line ;
+    for ( ; *line != ASCII_NUL ; line++) {
+        char c = *line ;
+        switch (parseState) {
+        case OutOfWord:
+            if (isgraph(c)) {
+                if (c == ESCAPE_CHAR) {
+                    *parseStackTop++ = InWord ;
+                    parseState = InEscape ;
+                    if (pArgv < argvEnd) {
+                        *pArgv++ = ++pWord ;
+                    } else {
+                        return -1 ;
+                    }
+                } else if (c == BEGIN_QUOTE) {
+                    *parseStackTop++ = OutOfWord ;
+                    parseState = InQuote ;
+                    ++quoteCount ;
+                    if (pArgv < argvEnd) {
+                        *pArgv++ = ++pWord ;
+                    } else {
+                        return -1 ;
+                    }
+                } else {
+                    // new word beginning
+                    if (pArgv < argvEnd) {
+                        *pArgv++ = pWord ;
+                    } else {
+                        fprintf(stderr, "exceeded max arguments") ;
+                        return -1 ;
+                    }
+                    *pWord++ = c ;
+                    parseState = InWord ;
+                }
+            } // else the character is just space to skip
+            break ;
+
+        case InWord:
+            if (c == ESCAPE_CHAR) {
+                *parseStackTop++ = parseState ;
+                parseState = InEscape ;
+            } else if (c == BEGIN_QUOTE) {
+                *parseStackTop++ = parseState ;
+                parseState = InQuote ;
+                ++quoteCount ;
+            } else if (isspace(c)) {
+                // end of word
+                parseState = OutOfWord ;
+                *pWord++ = ASCII_NUL ;
+            } else {
+                *pWord++ = c ;
+            }
+            break ;
+
+        case InEscape:
+            switch (c) {
+                case 'a':
+                    *pWord++ = '\a' ;
+                    break ;
+                case 'b':
+                    *pWord++ = '\b' ;
+                    break ;
+                case 't':
+                    *pWord++ = '\t' ;
+                    break ;
+                case 'n':
+                    *pWord++ = '\n' ;
+                    break ;
+                case 'v':
+                    *pWord++ = '\v' ;
+                    break ;
+                case 'f':
+                    *pWord++ = '\f' ;
+                    break ;
+                case 'r':
+                    *pWord++ = '\r' ;
+                    break ;
+                default:
+                    *pWord++ = c ;
+                    break ;
+            }
+            parseState = *--parseStackTop ;
+            break ;
+
+        case InQuote:
+            if (c == BEGIN_QUOTE) {
+                ++quoteCount ;
+                *pWord++ = c ;
+            } else if (c == END_QUOTE) {
+                if (--quoteCount == 0) {
+                    parseState = *--parseStackTop ;
+                    // check if ending the quote also ended the word
+                    if (parseState == OutOfWord) {
+                        *pWord++ = ASCII_NUL ;
+                    }
+                } else {
+                    *pWord++ = c ;
+                }
+            } else if (c == ESCAPE_CHAR) {
+                *parseStackTop++ = parseState ;
+                parseState = InEscape ;
+            } else {
+                *pWord++ = c ;
+            }
+            break ;
+        }
+    }
+
+    *pWord = ASCII_NUL ;
+    *pArgv = NULL ;
+    if (quoteCount == 0 && parseState != InEscape) {
+        if (pargc) {
+            *pargc = pArgv - args ;
+        }
+        if (pargv) {
+            *pargv = args ;
+        }
+        return 0 ;
+    } else {
+        return -1 ;
+    }
+}
+----
+
+[source,c]
+----
+<<mth implementation aggregate types>>=
+typedef struct mthcommandmap {
+    char const *name ;
+    MTH_CommandFunc *commandFunc ;
+} MTH_CommandMap ;
+----
+
+[source,c]
+----
+<<mth implementation simple types>>=
+typedef void MTH_CommandFunc(int, char * const*) ;
+----
+
+[source,c]
+----
+<<mth static data>>=
+static MTH_CommandMap const commands[] = {
+{
+    .name = "trace",
+    .commandFunc = mthTraceCommand
+},
+} ;
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static void mthExecCommand(int, char * const *) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static void
+mthExecCommand(
+    int argc,
+    char *const *argv)
+{
+    MTH_CommandMap key = {
+        .name = argv[0],
+        .commandFunc = NULL
+    } ;
+
+    MTH_CommandMap const *cmd = (MTH_CommandMap const *)
+            bsearch(&key, commands, COUNTOF(commands), sizeof(commands[0]),
+            mthCommandMapCompare) ;
+    if (cmd != NULL) {
+        assert(cmd->commandFunc != NULL) ;
+        cmd->commandFunc(argc, argv) ;
+    } else {
+        fprintf(mthCmdStream, "code error result {unknown command: %s}\n",
+                argv[0]) ;
+    }
+}
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static int mthCommandMapCompare(void const*, void const*) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static int
+mthCommandMapCompare(
+    void const *m1,
+    void const *m2)
+{
+    MTH_CommandMap const *cm1 = m1 ;
+    MTH_CommandMap const *cm2 = m2 ;
+
+    return strcmp(cm1->name, cm2->name) ;
+}
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static void mthTraceCommand(int, char *const *) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static void
+mthTraceCommand(
+    int argc,
+    char *const *argv)
+{
+    if (argc == 1) {
+        MRT_TraceHandler handler = mrt_RegisterTraceHandler(NULL) ;
+        mrt_RegisterTraceHandler(handler) ;
+        fprintf(mthCmdStream, "code ok result %s\n",
+                handler == NULL ? "off" : "on") ;
+    } else if (argc == 2) {
+        if (strcmp(argv[1], "on") == 0) {
+            // HERE!
+            // Register the real trace handler.
+            fprintf(mthCmdStream, "code ok result on\n") ;
+        } else if (strcmp(argv[1], "off") == 0) {
+            mrt_RegisterTraceHandler(NULL) ;
+            fprintf(mthCmdStream, "code ok result off\n") ;
+        } else {
+            fprintf(mthCmdStream,
+                    "code error result {unknown trace option: %s}\n",
+                    argv[1]) ;
+        }
+    } else {
+        fprintf(mthCmdStream, "code error result "
+        "{wrong # of arguments: %d, expected \"trace ?on | off?\"}\n", argc) ;
+        return ;
+    }
+}
+----
+
+== Generating Harness Data
+
+Place holder.
+
+== Harness Code Organization
+
+Place holder.
+
+=== Harness Header File
+
+[source,c]
+----
+<<micca_harness.h>>=
+/*
+<<copyright info>>
+*/
+
+#ifndef MICCA_HARNESS_H_
+#define MICCA_HARNESS_H_
+
+/*
+ * Include Files
+ */
+#include "micca_rt.h"
+<<mth interface includes>>
+
+/*
+ * Preprocessor Defines
+ */
+<<mth interface defines>>
+
+/*
+ * Constants
+ */
+<<mth interface constants>>
+
+/*
+ * Data Types
+ */
+<<mth interface simple types>>
+<<mth interface aggregate types>>
+
+/*
+ * Static Inline Functions
+ */
+<<mth interface static inlines>>
+
+/*
+ * External Functions
+ */
+<<mth external function declarations>>
+
+#endif /* MICCA_HARNESS_H_ */
+----
+
+=== Harness Code File
+
+[source,c]
+----
+<<micca_harness.c>>=
+/*
+<<copyright info>>
+*/
+
+/*
+ * Include Files
+ */
+#define _POSIX_C_SOURCE 200112L
+#include "micca_harness.h"
+<<mth implementation includes>>
+
+/*
+ * Macros
+ */
+#ifndef NDEBUG
+#   define  dbgprintf(...)    printf(__VA_ARGS__)
+#else
+#   define  dbgprintf(...)
+#endif /* NDEBUG */
+
+#define ASCII_NUL       '\0'
+#define BEGIN_QUOTE     '{'
+#define END_QUOTE       '}'
+#define ESCAPE_CHAR     '\\'
+
+#define OutOfWord   0
+#define InWord      1
+#define InEscape    2
+#define InQuote     3
+
+/*
+ * Constants
+ */
+<<mth implementation constants>>
+
+/*
+ * Data Types
+ */
+<<mth implementation simple types>>
+<<mth implementation aggregate types>>
+
+/*
+ * Forward References
+ */
+<<mth forward references>>
+
+/*
+ * Static Data
+ */
+<<mth static data>>
+
+/*
+ * Static Inline Functions
+ */
+<<mth implementation static inlines>>
+
+/*
+ * Static Functions
+ */
+<<mth static functions>>
+
+/*
+ * External Functions
+ */
+<<mth external function definitions>>
+----
