@@ -12,6 +12,7 @@ environment that has more capability for testing and introspection.
 To support this important activity,
 `micca` can automatically generate a test harness in which one or
 more domains may be run.
+--
 
 == Introduction
 
@@ -209,6 +210,8 @@ mth_Initialize(void)
     mrt_RegisterSignal(SIGINT, mthExit) ;
     mrt_RegisterSignal(SIGTERM, mthExit) ;
 
+    mrt_RegisterTraceHandler(NULL) ; // start with tracing off
+
     return mthServiceSock ;
 }
 ----
@@ -326,8 +329,8 @@ mthReadAndEvalCommand(
 
     int err = mthParseCommand(parseBuffer, &argc, &argv) ;
     if (err == -1) {
-        fprintf(mthCmdStream, "code error result {failed to parse command: \"%s\"}\n",
-            cmdBuffer) ;
+        mthResponse(mthCmdResponse, "unknown", mthErrorCode, 
+                "failed to parse command: \"%s\"", cmdBuffer) ;
         return ;
     }
 
@@ -554,8 +557,8 @@ mthExecCommand(
         assert(cmd->commandFunc != NULL) ;
         cmd->commandFunc(argc, argv) ;
     } else {
-        fprintf(mthCmdStream, "code error result {unknown command: %s}\n",
-                argv[0]) ;
+        mthResponse(mthCmdResponse, argv[0], mthErrorCode, 
+                "unknown command, \"%s\"", argv[0]) ;
     }
 }
 ----
@@ -598,26 +601,145 @@ mthTraceCommand(
     if (argc == 1) {
         MRT_TraceHandler handler = mrt_RegisterTraceHandler(NULL) ;
         mrt_RegisterTraceHandler(handler) ;
-        fprintf(mthCmdStream, "code ok result %s\n",
-                handler == NULL ? "off" : "on") ;
+        mthResponse(mthCmdResponse,
+            argv[0], mthOkCode, handler == NULL ? "off" : "on") ;
     } else if (argc == 2) {
         if (strcmp(argv[1], "on") == 0) {
             // HERE!
             // Register the real trace handler.
-            fprintf(mthCmdStream, "code ok result on\n") ;
+            mthResponse(mthCmdResponse, argv[0], mthOkCode, "on") ;
         } else if (strcmp(argv[1], "off") == 0) {
             mrt_RegisterTraceHandler(NULL) ;
-            fprintf(mthCmdStream, "code ok result off\n") ;
+            mthResponse(mthCmdResponse, argv[0], mthOkCode, "off") ;
         } else {
-            fprintf(mthCmdStream,
-                    "code error result {unknown trace option: %s}\n",
+            mthResponse(mthCmdResponse, argv[0], mthErrorCode, 
+                    "unknown trace option, \"%s\": expected, \"on | off\"",
                     argv[1]) ;
         }
     } else {
-        fprintf(mthCmdStream, "code error result "
-        "{wrong # of arguments: %d, expected \"trace ?on | off?\"}\n", argc) ;
+        mthResponse(mthCmdResponse,
+            argv[0], mthErrorCode, 
+            "wrong # of arguments: %d: expected \"trace ?on | off?\"", argc) ;
         return ;
     }
+}
+----
+
+=== Common Functions
+
+[source,c]
+----
+<<mth static data>>=
+static char const mthOkCode[] = "ok" ;
+static char const mthErrorCode[] = "error" ;
+----
+
+[source,c]
+----
+<<mth interface simple types>>=
+typedef enum mthresponsetype {
+    mthCmdResponse = 1, // because 0's are common for uninitialized things.
+    mthTraceResponse,
+    mthInstrResponse
+} MTH_ResponseType ;
+----
+
+[source,c]
+----
+<<mth implementation includes>>=
+#include <stdarg.h>
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static void mthResponse(MTH_ResponseType, char const *, char const *,
+        char const *, ...) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static void
+mthResponse(
+    MTH_ResponseType type,
+    char const *cmdName,
+    char const *errCode,
+    char const *resultFmt,
+    ...)
+{
+    va_list resultArgs ;
+    va_start(resultArgs, resultFmt) ;
+
+    static char resultBuf[BUFSIZ] ;
+    int n = vsnprintf(resultBuf, sizeof(resultBuf), resultFmt, resultArgs) ;
+
+    va_end(resultArgs) ;
+
+    if (n < 0) {
+        strcpy(resultBuf, "error formating response") ;
+    } else if (n > sizeof(resultBuf)) {
+        strcpy(resultBuf, "response truncated") ;
+    }
+
+    static char preamble[] = "%s {" ;
+    static char postamble[] = "}\n" ;
+    static char nameKey[] = "name" ; // N.B. no leading blank, it's first.
+    static char returnKey[] = " return" ;
+    static char resultKey[] = " result" ;
+    static char unQuotedFmt[] = " %s" ;
+    static char quotedFmt[] = " {%s}" ;
+
+    char fmt[sizeof(preamble) +
+            sizeof(postamble) +
+            sizeof(nameKey) +
+            sizeof(returnKey) +
+            sizeof(resultKey) +
+            3 * sizeof(quotedFmt) +
+            1] ; // +1 for NUL terminator
+    strcpy(fmt, preamble) ;
+    strcat(fmt, nameKey) ;
+    strcat(fmt, mthQuoteWord(cmdName) ? quotedFmt : unQuotedFmt) ;
+    strcat(fmt, returnKey) ;
+    strcat(fmt, mthQuoteWord(errCode) ? quotedFmt : unQuotedFmt) ;
+    strcat(fmt, resultKey) ;
+    strcat(fmt, mthQuoteWord(resultBuf) ? quotedFmt : unQuotedFmt) ;
+    strcat(fmt, postamble) ;
+
+    static char const *typeNames[] = {
+        "unknown", // placeholder
+        "cmd",
+        "trace",
+        "instr"
+    } ;
+    assert(type < COUNTOF(typeNames)) ;
+    fprintf(mthCmdStream, fmt, typeNames[type], cmdName, errCode, resultBuf) ;
+}
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static bool mthQuoteWord(char const *) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static bool
+mthQuoteWord(
+    char const *pWord)
+{
+    assert(pWord != NULL) ;
+    int wlen = strlen(pWord) ;
+
+    for (char c = *pWord++ ; c != ASCII_NUL ; c = *pWord++) {
+        if (isspace(c) || c == '\\' || c == '\"') {
+            return true ;
+        }
+    }
+
+    return wlen == 0 ? true : false ;
 }
 ----
 
