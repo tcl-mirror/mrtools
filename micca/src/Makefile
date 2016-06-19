@@ -37,6 +37,7 @@ DOCPARTS=\
 	configure.txt\
 	example.txt\
 	generate.txt\
+	harness.txt\
 	litprog.txt\
 	platform.txt\
 	preface.txt\
@@ -159,6 +160,13 @@ ASCIIDOC_OPTS =\
 	$(patsubst %,--attribute=%,$(ASCIIDOC_ATTRS))\
 	$(NULL)
 
+TESTOPTS =\
+	-verbose bet\
+	-level debug\
+	-noconfig\
+	-nogenerate\
+	$(NULL)
+
 .PHONY : all doc code tests runtests package
 
 all : doc code tests package
@@ -170,7 +178,7 @@ code : $(CODEFILE)
 tests : code $(TESTS)
 
 runtests : tests
-	cd $(TESTDIR) ; tclsh $(TESTS) -verbose bet -level debug
+	cd $(TESTDIR) ; tclsh $(TESTS) $(TESTOPTS)
 
 package : $(PKGDIR)/package-micca-$(VERSION)-tcl.zip
 

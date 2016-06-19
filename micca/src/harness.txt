@@ -47,9 +47,9 @@ attributes.
 <<mth interface aggregate types>>=
 typedef struct mthdomainharness {
     MRT_DomainPortal const *portal ;
-    struct mthoperationmap const *operations ;
+    struct mthoperationmap const *const operations ;
     unsigned operationCount ;
-    struct mthclassmap const *classes ;
+    struct mthclassmap const *const classes ;
     unsigned classCount ;
 } MTH_DomainHarness ;
 ----
@@ -58,21 +58,70 @@ typedef struct mthdomainharness {
 ----
 <<mth interface aggregate types>>=
 typedef struct mthoperationmap {
-    char const *opName ;
-    MTH_DomainOpFunc *opFunc ;
+    char const *name ;
+    MTH_DomainOpFunc *func ;
 } MTH_OperationMap ;
 ----
 
 [source,c]
 ----
 <<mth interface simple types>>=
-typedef bool MTH_DomainOpFunc(int, char const *const *, char const **) ;
+typedef void MTH_DomainOpFunc(int, char *const *) ;
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static MTH_OperationMap const *const
+mthFindOperation(
+    MTH_DomainHarness const *const harness,
+    char const *opName) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static MTH_OperationMap const *const
+mthFindOperation(
+    MTH_DomainHarness const *const harness,
+    char const *opName)
+{
+    MTH_OperationMap key = {
+        .name = opName,
+        .func = NULL
+    } ;
+    return (MTH_OperationMap const *const)
+            bsearch(&key, harness->operations, harness->operationCount,
+            sizeof(key), mthOperationMapCompare) ;
+}
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static int mthOperationMapCompare(void const*, void const*) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static int
+mthOperationMapCompare(
+    void const *m1,
+    void const *m2)
+{
+    MTH_OperationMap const *cm1 = m1 ;
+    MTH_OperationMap const *cm2 = m2 ;
+
+    return strcmp(cm1->name, cm2->name) ;
+}
 ----
 
 [source,c]
 ----
 <<mth interface aggregate types>>=
 typedef struct mthclassmap {
+    char const *name ;
     MRT_ClassId id ;
     struct mthattrmap const *attrs ;
     unsigned attrCount ;
@@ -124,7 +173,6 @@ typedef struct mtheventmap {
     char const *name ;
     MRT_EventCode number ;
     MTH_EventParamFunc *paramFunc ;
-    size_t paramCount ;
 } MTH_EventMap ;
 ----
 
@@ -161,6 +209,7 @@ extern int mth_Initialize(void) ;
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <signal.h>
+#include <inttypes.h>
 ----
 
 [source,c]
@@ -287,6 +336,8 @@ mthAcceptConnection(
 FILE *mthCmdStream ;
 ----
 
+==== Command Execution
+
 [source,c]
 ----
 <<mth forward references>>=
@@ -329,7 +380,7 @@ mthReadAndEvalCommand(
 
     int err = mthParseCommand(parseBuffer, &argc, &argv) ;
     if (err == -1) {
-        mthResponse(mthCmdResponse, "unknown", mthErrorCode, 
+        mth_CmdResponse(mthErrorReturn, "unknown",
                 "failed to parse command: \"%s\"", cmdBuffer) ;
         return ;
     }
@@ -520,10 +571,20 @@ typedef struct mthcommandmap {
 typedef void MTH_CommandFunc(int, char * const*) ;
 ----
 
+==== Defined Commands
+
 [source,c]
 ----
 <<mth static data>>=
-static MTH_CommandMap const commands[] = {
+static MTH_CommandMap const commands[] = { // must be in ascending "name" order
+{
+    .name = "dop",
+    .commandFunc = mthDopCommand
+},
+{
+    .name = "query",
+    .commandFunc = mthQueryCommand
+},
 {
     .name = "trace",
     .commandFunc = mthTraceCommand
@@ -557,7 +618,7 @@ mthExecCommand(
         assert(cmd->commandFunc != NULL) ;
         cmd->commandFunc(argc, argv) ;
     } else {
-        mthResponse(mthCmdResponse, argv[0], mthErrorCode, 
+        mth_CmdResponse(mthErrorReturn, argv[0],
                 "unknown command, \"%s\"", argv[0]) ;
     }
 }
@@ -584,6 +645,317 @@ mthCommandMapCompare(
 }
 ----
 
+==== Registering a Domain
+
+[source,c]
+----
+<<mth external function declarations>>=
+extern bool mth_RegisterDomain(MTH_DomainHarness const *harness) ;
+----
+
+[source,c]
+----
+<<mth external function definitions>>=
+bool
+mth_RegisterDomain(
+    MTH_DomainHarness const *harness)
+{
+    assert(harness != NULL) ;
+    assert(harness->portal != NULL) ;
+    assert(harness->portal->name != NULL) ;
+
+    MTH_DomainHarness const *const registeredHarness =
+            mthFindHarness(harness->portal->name) ;
+
+    bool inserted ;
+    if (registeredHarness == NULL) {
+        mthInsertHarness(harness) ;
+        inserted = true ;
+    } else {
+        inserted = false ;
+    }
+
+    return inserted ;
+}
+----
+
+[source,c]
+----
+<<mth implementation aggregate types>>=
+typedef struct mthharnessregistry {
+    unsigned count ;
+    MTH_DomainHarness const *harnesses[MTH_MAX_DOMAINS] ;
+} MTH_HarnessRegistry ;
+----
+
+[source,c]
+----
+<<mth implementation constants>>=
+#ifndef MTH_MAX_DOMAINS
+#   define MTH_MAX_DOMAINS  16
+#endif /* MTH_MAX_DOMAINS */
+----
+
+[source,c]
+----
+<<mth static data>>=
+MTH_HarnessRegistry mthHarnesses ;
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static MTH_DomainHarness const *const
+mthFindHarness(
+    char const *domainName) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static MTH_DomainHarness const *const
+mthFindHarness(
+    char const *domainName)
+{
+    assert(domainName != NULL) ;
+
+    MTH_DomainHarness const *const *hiter = mthHarnesses.harnesses ;
+    for (unsigned count = mthHarnesses.count ; count != 0 ; count--) {
+        MTH_DomainHarness const *const harness = *hiter++ ;
+        assert(harness->portal != NULL) ;
+        assert(harness->portal->name != NULL) ;
+        if (strcmp(domainName, harness->portal->name) == 0) {
+            return harness ;
+        }
+    }
+    return NULL ;
+}
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static void
+mthInsertHarness(
+    MTH_DomainHarness const *const) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static void
+mthInsertHarness(
+    MTH_DomainHarness const *const harness)
+{
+    assert(harness != NULL) ;
+    assert(mthHarnesses.count < COUNTOF(mthHarnesses.harnesses)) ;
+    if (mthHarnesses.count < COUNTOF(mthHarnesses.harnesses)) {
+        mthHarnesses.harnesses[mthHarnesses.count++] = harness ;
+    }
+}
+----
+
+=== Harness Command Functions
+
+==== Domain Operation Command
+
+[source,c]
+----
+<<mth forward references>>=
+static void mthDopCommand(int, char *const *) ;
+----
+
+[literal]
+--
+dop <domain> <operation> ?<arg1> <arg2> ...?
+--
+
+[source,c]
+----
+<<mth static functions>>=
+static void
+mthDopCommand(
+    int argc,
+    char *const *argv)
+{
+    if (argc < 3) {
+        mth_CmdResponse(mthErrorReturn, argv[0],
+            "wrong # of arguments, %d: expected, "
+            "dop <domain> <operation> ?<arg1> <arg2> ...?",
+            argc) ;
+        return ;
+    }
+
+    char *domainName = argv[1] ;
+    MTH_DomainHarness const *const harness = mthFindHarness(domainName) ;
+    if (harness == NULL) {
+        mth_CmdResponse(mthErrorReturn, argv[0],
+                "unknown domain, \"%s\"", domainName) ;
+        return ;
+    }
+
+    char *opName = argv[2] ;
+    MTH_OperationMap const *const opMap = mthFindOperation(harness, opName) ;
+    if (opMap == NULL) {
+        mth_CmdResponse(mthErrorReturn, argv[0],
+            "unknown operation, \"%s\"", opName) ;
+        return ;
+    }
+    opMap->func(argc, argv) ;
+}
+----
+
+==== Query Command
+
+[source,c]
+----
+<<mth forward references>>=
+static void mthQueryCommand(int, char *const *) ;
+----
+
+[literal]
+--
+query domains
+query classes <domain>
+query attributes <domain> <class>
+query instances <domain> <class>
+query events <domain> <class>
+query states <domain> <class>
+query currentstate <domain> <class>
+--
+
+[source,c]
+----
+<<mth static functions>>=
+static void
+mthQueryCommand(
+    int argc,
+    char *const *argv)
+{
+    if (argc < 2) {
+        mth_CmdResponse(mthErrorReturn, argv[0],
+            "wrong # of arguments, %d: expected, "
+            "query <subcmd> ?<domain> <arg1> <arg2> ...?",
+            argc) ;
+        return ;
+    }
+
+    char *subcmdName = argv[1] ;
+    if (strcmp(subcmdName, "domains") == 0) {
+        mthQueryDomains(argc, argv) ;
+    } else if (strcmp(subcmdName, "classes") == 0) {
+        mthQueryClasses(argc, argv) ;
+    } else {
+        mth_CmdResponse(mthErrorReturn, argv[0],
+            "unknown subcommand, \"%s\": expected, "
+            "\"domains | classes | attributes | instances | events "
+            "| states | currentstate\"", subcmdName) ;
+    }
+}
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static void mthQueryDomains(
+    int argc,
+    char *const *argv) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static void
+mthQueryDomains(
+    int argc,
+    char *const *argv)
+{
+    static char queryBuf[BUFSIZ] ;
+
+    *queryBuf = ASCII_NUL ;
+    size_t bufSize = sizeof(queryBuf) - 1 ; // -1 to account for a NUL
+
+    MTH_DomainHarness const *const *hiter = mthHarnesses.harnesses ;
+    for (unsigned count = mthHarnesses.count ; count != 0 ; count--) {
+        MTH_DomainHarness const *const harness = *hiter++ ;
+        assert(harness->portal != NULL) ;
+        assert(harness->portal->name != NULL) ;
+
+        char const *domainName = harness->portal->name ;
+        int nameLen = strlen(domainName) ;
+        if (nameLen >= bufSize) {
+            strncat(queryBuf, domainName, bufSize) ;
+            bufSize -= nameLen ;
+        } else {
+            strncat(queryBuf, "...", bufSize) ;
+            break ;
+        }
+    }
+    mth_CmdResponse(mthOkReturn, argv[0], queryBuf) ;
+}
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static void mthQueryClasses(
+    int argc,
+    char *const *argv) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static void
+mthQueryClasses(
+    int argc,
+    char *const *argv)
+{
+    if (argc != 3) {
+        mth_CmdResponse(mthErrorReturn, argv[0],
+            "wrong # of arguments, %d: expected, \"query classes <domain>\"",
+            argc) ;
+        return ;
+    }
+
+    char *domainName = argv[2] ;
+    MTH_DomainHarness const *const harness = mthFindHarness(domainName) ;
+    if (harness == NULL) {
+        mth_CmdResponse(mthErrorReturn, argv[0],
+                "unknown domain, \"%s\"", domainName) ;
+        return ;
+    }
+    MRT_DomainPortal const *portal = harness->portal ;
+    assert(portal != NULL) ;
+
+    static char queryBuf[BUFSIZ] ;
+    *queryBuf = ASCII_NUL ;
+    size_t bufSize = sizeof(queryBuf) - 1 ; // -1 to account for a NUL
+
+    unsigned classCount = mrt_PortalDomainClassCount(portal) ;
+    for (MRT_ClassId id = 0 ; id < classCount ; id++) {
+        char const *className = NULL ;
+        int pcode = mrt_PortalClassName(portal, id, &className) ;
+        if (pcode == 0) {
+            int nameLen = strlen(className) ;
+            if (nameLen >= bufSize) {
+                strncat(queryBuf, className, bufSize) ;
+                bufSize -= nameLen ;
+            } else {
+                strncat(queryBuf, "...", bufSize) ;
+                break ;
+            }
+        } else {
+            mthPortalErrorResponse(pcode, argv[0]) ;
+        }
+    }
+
+    mth_CmdResponse(mthOkReturn, argv[0], queryBuf) ;
+}
+----
+
+==== Trace Command
+
 [source,c]
 ----
 <<mth forward references>>=
@@ -601,25 +973,22 @@ mthTraceCommand(
     if (argc == 1) {
         MRT_TraceHandler handler = mrt_RegisterTraceHandler(NULL) ;
         mrt_RegisterTraceHandler(handler) ;
-        mthResponse(mthCmdResponse,
-            argv[0], mthOkCode, handler == NULL ? "off" : "on") ;
+        mth_CmdResponse(mthOkReturn, argv[0], handler == NULL ? "off" : "on") ;
     } else if (argc == 2) {
         if (strcmp(argv[1], "on") == 0) {
-            // HERE!
-            // Register the real trace handler.
-            mthResponse(mthCmdResponse, argv[0], mthOkCode, "on") ;
+            mrt_RegisterTraceHandler(mthTraceResponse) ;
+            mth_CmdResponse(mthOkReturn, argv[0], "on") ;
         } else if (strcmp(argv[1], "off") == 0) {
             mrt_RegisterTraceHandler(NULL) ;
-            mthResponse(mthCmdResponse, argv[0], mthOkCode, "off") ;
+            mth_CmdResponse(mthOkReturn, argv[0], "off") ;
         } else {
-            mthResponse(mthCmdResponse, argv[0], mthErrorCode, 
+            mth_CmdResponse(mthErrorReturn, argv[0],
                     "unknown trace option, \"%s\": expected, \"on | off\"",
                     argv[1]) ;
         }
     } else {
-        mthResponse(mthCmdResponse,
-            argv[0], mthErrorCode, 
-            "wrong # of arguments: %d: expected \"trace ?on | off?\"", argc) ;
+        mth_CmdResponse(mthErrorReturn, argv[0],
+            "wrong # of arguments, %d: expected, \"trace ?on | off?\"", argc) ;
         return ;
     }
 }
@@ -629,19 +998,11 @@ mthTraceCommand(
 
 [source,c]
 ----
-<<mth static data>>=
-static char const mthOkCode[] = "ok" ;
-static char const mthErrorCode[] = "error" ;
-----
-
-[source,c]
-----
 <<mth interface simple types>>=
-typedef enum mthresponsetype {
-    mthCmdResponse = 1, // because 0's are common for uninitialized things.
-    mthTraceResponse,
-    mthInstrResponse
-} MTH_ResponseType ;
+typedef enum mthreturntype {
+    mthOkReturn,
+    mthErrorReturn
+} MTH_ReturnType ;
 ----
 
 [source,c]
@@ -652,19 +1013,22 @@ typedef enum mthresponsetype {
 
 [source,c]
 ----
-<<mth forward references>>=
-static void mthResponse(MTH_ResponseType, char const *, char const *,
-        char const *, ...) ;
+<<mth external function declarations>>=
+extern void
+mth_CmdResponse(
+    MTH_ReturnType returnCode,
+    char const *cmdName,
+    char const *resultFmt,
+    ...) ;
 ----
 
 [source,c]
 ----
-<<mth static functions>>=
-static void
-mthResponse(
-    MTH_ResponseType type,
+<<mth external function definitions>>=
+void
+mth_CmdResponse(
+    MTH_ReturnType returnCode,
     char const *cmdName,
-    char const *errCode,
     char const *resultFmt,
     ...)
 {
@@ -682,7 +1046,7 @@ mthResponse(
         strcpy(resultBuf, "response truncated") ;
     }
 
-    static char preamble[] = "%s {" ;
+    static char preamble[] = "cmd {" ;
     static char postamble[] = "}\n" ;
     static char nameKey[] = "name" ; // N.B. no leading blank, it's first.
     static char returnKey[] = " return" ;
@@ -694,26 +1058,254 @@ mthResponse(
             sizeof(postamble) +
             sizeof(nameKey) +
             sizeof(returnKey) +
+            sizeof(mthErrorReturn) +
             sizeof(resultKey) +
             3 * sizeof(quotedFmt) +
             1] ; // +1 for NUL terminator
     strcpy(fmt, preamble) ;
+
     strcat(fmt, nameKey) ;
     strcat(fmt, mthQuoteWord(cmdName) ? quotedFmt : unQuotedFmt) ;
+
+    static char const mthOkValue[] = " ok" ;
+    static char const mthErrorValue[] = " error" ;
     strcat(fmt, returnKey) ;
-    strcat(fmt, mthQuoteWord(errCode) ? quotedFmt : unQuotedFmt) ;
+    strcat(fmt, returnCode == mthOkReturn ? mthOkValue : mthErrorValue) ;
+
     strcat(fmt, resultKey) ;
     strcat(fmt, mthQuoteWord(resultBuf) ? quotedFmt : unQuotedFmt) ;
+
     strcat(fmt, postamble) ;
 
-    static char const *typeNames[] = {
-        "unknown", // placeholder
-        "cmd",
-        "trace",
-        "instr"
+    fprintf(mthCmdStream, fmt, cmdName, resultBuf) ;
+}
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static void mthTraceResponse(MRT_TraceInfo const *) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static void
+mthTraceResponse(
+    MRT_TraceInfo const *traceInfo)
+{
+    char const *sourceName ;
+    char const *sourceClassName ;
+    char sourceIdNum[32] ;
+
+    if (traceInfo->sourceInst == NULL) {
+        sourceName = "?" ;
+        sourceClassName = "?" ;
+    } else {
+        sourceClassName = traceInfo->sourceInst->classDesc->name ;
+        sourceName = traceInfo->sourceInst->name ;
+        if (sourceName == NULL) {
+            unsigned instid = mrt_InstanceIndex(traceInfo->sourceInst) ;
+            snprintf(sourceIdNum, sizeof(sourceIdNum), "%u", instid) ;
+            sourceName = sourceIdNum ;
+        }
+    }
+    
+    char const *targetName = traceInfo->targetInst->name ;
+    char targetIdNum[32] ;
+    if (targetName == NULL) {
+        unsigned instid = mrt_InstanceIndex(traceInfo->targetInst) ;
+        snprintf(targetIdNum, sizeof(targetIdNum), "%u", instid) ;
+        targetName = targetIdNum ;
+    }
+
+    switch (traceInfo->eventType) {
+    case mrtTransitionEvent: {
+        MRT_StateCode newState = traceInfo->info.transitionTrace.newState ;
+        char const *newStateName ;
+        if (newState == MRT_StateCode_IG) {
+            newStateName = "IG" ;
+        } else if (newState == MRT_StateCode_CH) {
+            newStateName = "CH" ;
+        } else {
+            newStateName = traceInfo->targetInst->classDesc->edb->stateNames[
+                traceInfo->info.transitionTrace.newState] ;
+        }
+
+        fprintf(mthCmdStream,
+                "trace {"
+                "type transition "
+                "event %s "
+                "source %s.%s "
+                "target %s.%s "
+                "currstate %s "
+                "newstate %s "
+                "time %s"
+                "}\n",
+            traceInfo->targetInst->classDesc->eventNames[traceInfo->eventNumber],
+            sourceClassName, sourceName,
+            traceInfo->targetInst->classDesc->name, targetName,
+            traceInfo->targetInst->classDesc->edb->stateNames[
+                traceInfo->info.transitionTrace.currentState],
+            newStateName,
+            mthTimestamp()) ;
+    }
+        break ;
+
+    case mrtPolymorphicEvent: {
+        MRT_Relationship const *rel = traceInfo->targetInst->classDesc->pdb->
+                genDispatch[traceInfo->info.polyTrace.genNumber].relship ;
+        MRT_Class const *subclass ;
+        char const *subname = NULL ;
+        if (rel->relType == mrtRefGeneralization) {
+            subclass = rel->relInfo.refGeneralization.
+                subclasses[traceInfo->info.polyTrace.subcode].classDesc ;
+            subname = subclass->name ;
+        } else if (rel->relType == mrtUnionGeneralization) {
+            subclass = rel->relInfo.unionGeneralization.
+                subclasses[traceInfo->info.polyTrace.subcode] ;
+            subname = subclass->name ;
+        } else {
+            printf("%s: bad relationship type in polymorphic event, %d\n",
+                mthTimestamp(), rel->relType) ;
+            break ;
+        }
+        fprintf(mthCmdStream,
+                "trace {"
+                "type polymorphic "
+                "event %s "
+                "source %s.%s "
+                "target %s.%s "
+                "relationship %s "
+                "newevent %s "
+                "subclass %s "
+                "time %s"
+                "}\n",
+            traceInfo->targetInst->classDesc->eventNames[traceInfo->eventNumber],
+            sourceClassName, sourceName,
+            traceInfo->targetInst->classDesc->name, targetName,
+            traceInfo->targetInst->classDesc->pdb->genNames[
+                traceInfo->info.polyTrace.genNumber],
+            subclass->eventNames[traceInfo->info.polyTrace.mappedEvent],
+            subname,
+            mthTimestamp()) ;
+    }
+        break ;
+
+    case mrtCreationEvent:
+        fprintf(mthCmdStream,
+                "trace {"
+                "type creation "
+                "event %s "
+                "source %s.%s "
+                "target %s.%s "
+                "time %s"
+                "}\n",
+            traceInfo->targetInst->classDesc->eventNames[traceInfo->eventNumber],
+            sourceClassName, sourceName,
+            traceInfo->info.creationTrace.targetClass->name, targetName,
+            mthTimestamp()) ;
+        break ;
+
+    default:
+        fprintf(mthCmdStream,
+                "trace {"
+                "type error "
+                "result {unknown trace event type, \"%u\"} "
+                "time %s"
+                "}\n",
+            traceInfo->eventType,
+            mthTimestamp()) ;
+        break ;
+    }
+}
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static void
+mthPortalErrorResponse(
+    int portalCode,
+    char *cmdName) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static void
+mthPortalErrorResponse(
+    int portalCode,
+    char *cmdName)
+{
+    static char const *const portalErrNames[] = {
+        "no error",             // place holder for 0
+        "no such class",        // MICCA_PORTAL_NO_CLASS
+        "no such instance",     // MICCA_PORTAL_NO_INST
+        "no such attribute",    // MICCA_PORTAL_NO_ATTR
+        "instance slot is not in use", // MICCA_PORTAL_UNALLOC
+        "class has no state model", // MICCA_PORTAL_NO_STATE_MODEL
+        "no such event for the class", // MICCA_PORTAL_NO_EVENT
+        "no such state for the class", // MICCA_PORTAL_NO_STATE
+        "class does not support dynamic instances", // MICCA_PORTAL_NO_DYNAMIC
+        "operation not allowed on a dependent attribute", // MICCA_PORTAL_DEPENDENT_ATTR
+        "value was truncated due to lack of space", // MICCA_PORTAL_TRUNCATED
     } ;
-    assert(type < COUNTOF(typeNames)) ;
-    fprintf(mthCmdStream, fmt, typeNames[type], cmdName, errCode, resultBuf) ;
+
+    portalCode = -portalCode ;
+    assert(portalCode < COUNTOF(portalErrNames)) ;
+    char const *const errMsg = portalCode < COUNTOF(portalErrNames) ?
+            portalErrNames[portalCode] : "unknown portal error" ;
+
+    mth_CmdResponse(mthErrorReturn, cmdName, errMsg) ;
+}
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static char const *mthTimestamp(void) ;
+----
+
+[source,c]
+----
+<<mth implementation includes>>=
+#include <sys/time.h>
+#include <time.h>
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static char const *
+mthTimestamp(void)
+{
+    static char timestamp[128] ;
+
+    struct timeval now ;
+    if (gettimeofday(&now, NULL) != 0) {
+        return "unknown" ;
+    }
+
+    struct tm *ltime ;
+    ltime = localtime(&now.tv_sec) ;
+    if (ltime == NULL) {
+        return strerror(errno) ;
+    }
+
+    int tlen = strftime(timestamp, sizeof(timestamp), "%FT%T", ltime) ;
+    if (tlen == 0) {
+        return strerror(errno) ;
+    }
+
+    int flen = snprintf(timestamp + tlen, sizeof(timestamp) - tlen,
+            ".%03u.%03u", (unsigned)(now.tv_usec / 1000),
+            (unsigned)(now.tv_usec % 1000)) ;
+    if (flen > (sizeof(timestamp) - tlen)) {
+        return "too big" ;
+    }
+
+    return timestamp ;
 }
 ----
 
@@ -743,9 +1335,501 @@ mthQuoteWord(
 }
 ----
 
-== Generating Harness Data
+== Generating a Test Harness
 
-Place holder.
+[source,tcl]
+----
+<<micca configuration>>=
+operation harness {} {
+    return [@Harness@::miccaHarness]
+}
+----
+
+[source,tcl]
+----
+<<generation commands namespace>>=
+namespace eval @Harness@ {
+    logger::initNamespace [namespace current]
+
+    <<tclral imports>>
+
+    namespace path {
+        ::micca
+        ::micca::@Gen@::Helpers
+        ::micca::@Config@::Helpers
+        ::rosea::InstCmds
+    }
+
+    <<harness data>>
+    <<harness commands>>
+}
+----
+
+[source,tcl]
+----
+<<harness commands>>=
+proc miccaHarness {} {
+    <<miccaHarness: set up template expansion>>
+
+    set harnessfiles [list]
+
+    <<miccaHarness: generate harness files>>
+
+    return $harnessfiles
+}
+----
+
+[source,tcl]
+----
+<<miccaHarness: set up template expansion>>=
+textutil::expander harnessExpand
+harnessExpand errmode fail
+----
+
+[source,tcl]
+----
+<<miccaHarness: generate harness files>>=
+try {
+    variable domain
+    forAllRefs domainRef [Domain findAll] {
+        assignAttribute $domainRef {Name domain}
+
+        lappend harnessfiles ${domain}_harness.c
+        <<miccaHarness: generate file>>
+    }
+} finally {
+    rename harnessExpand {}
+}
+----
+
+[source,tcl]
+----
+<<miccaHarness: generate file>>=
+
+harnessExpand evalcmd "namespace eval [namespace current]"
+set hchan [::open ${domain}_harness.c w]
+try {
+    variable harnessTemplate
+    puts $hchan [harnessExpand expand $harnessTemplate]
+} on error {result opts} {
+    puts $::errorInfo
+    return -options $opts $result
+} finally {
+    chan close $hchan
+}
+----
+
+[source,tcl]
+----
+<<harness data>>=
+set harnessTemplate [textutil::adjust::undent {
+    [banner]
+    /*
+     * Include Files
+     */
+    #include "micca_harness.h"
+    /*
+     * Static Data
+     */
+    [staticData]
+    /*
+     * Domain Operation Functions
+     */
+    [opFuncDefinitions]
+    /*
+     * Domain Operations Map
+     */
+    [opMapDefinition]
+    /*
+     * Domain Attributes Map
+     */
+    [attrMapDefinitions]
+    /*
+     * Domain Classes Map
+     */
+    [classMapDefinition]
+    /*
+     * Harness Definition
+     */
+    [harnessDefinition]
+}]
+----
+
+==== Template Commands
+
+[source,tcl]
+----
+<<harness commands>>=
+proc staticData {} {
+    append result\
+        "static char responseBuffer\[BUFSIZ\] ;\n"\
+        "static char emptyString\[\] = \"\" ;\n"\
+        "static char wrongNumArgsMsg\[\] = \"wrong # arguments, %d\" ;\n"\
+        "static char badParamMsg\[\] = \"bad parameter, \\\"%s\\\"\" ;\n"
+}
+----
+
+[source,tcl]
+----
+<<harness commands>>=
+proc opFuncDefinitions {} {
+    variable domain
+
+    set opRefs [pipe {
+        Domain findWhere {$Name eq $domain} |
+        findRelated % ~R5
+    } {} |%]
+
+    set result {}
+    forAllRefs opRef $opRefs {
+        assignAttribute $opRef {Name opName} {ReturnDataType retType}
+        append result\
+            "static void ${opName}__OPFUNC(\n"\
+            "    int argc,\n"\
+            "    char *const *argv)\n"\
+            "\{\n"\
+
+        set paramRefs [deRef [findRelated $opRef ~R6]]
+        set nparams [expr {[relation cardinality $paramRefs] + 1}]
+        append result\
+            "    if (argc != $nparams) \{\n"\
+            "        mth_CmdResponse(mthErrorReturn, argv\[0],\
+                        wrongNumArgsMsg, argc) ;\n"\
+            "        return ;\n"\
+            "    \}\n"
+
+        set argIndex 1
+        relation foreach paramRef $paramRefs -ascending Number {
+            relation assign $paramRef {DataType type} {Name paramName}
+            append result\
+                "    [typeCheck composeDeclaration $type $paramName] ;\n"
+            set scnfmt [GetFormat $type Scan]
+            if {$scnfmt ne {}} {
+                append result\
+                    "    if (sscanf(argv\[$argIndex\], \"%\"$scnfmt, "\
+                    "&$paramName) != 1) \{\n"\
+                    "        mrt_CmdResponse(mthErrorReturn, argv\[0],\
+                                badParamMsg, argv\[$argIndex]) ;\n"\
+                    "        return ;\n"\
+                    "    \}\n"
+            } else {
+                append result "    $paramName = argv\[$argIndex\] ;\n"
+            }
+
+            incr argIndex ;
+        }
+
+        set invokeParams [pipe {
+            relation list $paramRefs Name -ascending Number |
+            join ~ {, }
+        }]
+
+        set invocation "${domain}_${opName}($invokeParams) ;\n"
+        if {$retType ne "void"} {
+            append result\
+                    "    [typeCheck composeDeclaration $retType result__P] = "\
+                    $invocation
+            set prifmt [GetFormat $retType Print]
+            append result\
+                "    mth_CmdResponse(mthOkReturn, argv\[0], \"%\"$prifmt,\
+                        result__P) ;\n"
+        } else {
+            append result\
+                "    $invocation"\
+                "    mth_CmdResponse(mthOkReturn, argv\[0], emptyString) ;\n"
+        }
+
+        append result "\}\n"\
+    }
+
+    return $result
+}
+----
+
+[source,tcl]
+----
+<<harness commands>>=
+proc opMapDefinition {} {
+    variable domain
+
+    set opRefs [pipe {
+        Domain findWhere {$Name eq $domain} |
+        findRelated % ~R5 |
+        deRef %
+    } {} |%]
+
+    set result {}
+    if {[relation isnotempty $opRefs]} {
+        append result\
+            "static MTH_OperationMap const "\
+            "${domain}__OPMAP\[[relation cardinality $opRefs]\] = \{\n"
+
+        relation foreach opRef $opRefs -ascending Name {
+            relation assign $opRef Name
+            append result\
+                "    \{\n"\
+                "        .name = \"$Name\",\n"\
+                "        .func = ${Name}__OPFUNC\n"\
+                "    \},\n"
+        }
+
+        append result "\} ;\n"
+    }
+    return $result
+}
+----
+
+[source,tcl]
+----
+<<harness commands>>=
+proc attrMapDefinitions {} {
+    variable domain
+
+    set classRefs [pipe {
+        Domain findWhere {$Name eq $domain} |
+        findRelated % ~R1 {~R2 Class}
+    } {} |%]
+
+    set result {}
+    forAllRefs classRef $classRefs {
+        assignAttribute $classRef {Name className}
+
+        set attrRefs [findRelated $classRefs ~R20 {~R25 PopulatedComponent}\
+            {~R21 Attribute}]
+        if {[isNotEmptyRef $attrRefs]} {
+            set nAttrs [refMultiplicity $attrRefs]
+            append result\
+                "static MTH_AttrMap const\
+                    ${className}__ATTRMAP\[$nAttrs\] = \{\n"
+            set attrNum -1
+            relation foreach attr [deRef $attrRefs] -ascending Name {
+                relation assign $attr {Name attrName}
+                set rdFuncName ${className}_${attrName}__RD
+                set upFuncName ${className}_${attrName}__UP
+                append result\
+                    "    \{\n"\
+                    "        .name = \"$attrName\",\n"\
+                    "        .id = [incr attrNum],\n"\
+                    "        .readFunc = $rdFuncName,\n"\
+                    "        .updateFunc = $upFuncName,\n"\
+                    "    \},\n"
+            }
+        }
+    }
+    return $result
+}
+----
+
+[source,tcl]
+----
+<<harness commands>>=
+proc classMapDefinition {} {
+    variable domain
+
+    set classRefs [pipe {
+        Domain findWhere {$Name eq $domain} |
+        findRelated % ~R1 {~R2 Class} |
+        deRef %
+    } {} |%]
+
+    set result {}
+    if {[relation isnotempty $classRefs]} {
+        append result\
+            "static MTH_ClassMap const "\
+            "${domain}__CLASSMAP\[[relation cardinality $classRefs]\] = \{\n"
+
+        relation foreach ref $classRefs -ascending Name {
+            set classRef [::rosea::Helpers::ToRef ::micca::Class $ref]
+            assignAttribute $classRef {Name className} {Number classId}
+
+            set compRefs [findRelated $classRef ~R20]
+
+            set attrRefs [findRelated $compRefs {~R25 PopulatedComponent}\
+                {~R21 Attribute}]
+            set attrMap [expr {[isNotEmptyRef $attrRefs] ?\
+                "${className}__ATTRMAP" : "NULL"}]
+
+            set instRefs [findRelated $compRefs ~R103]
+            set instMap [expr {[isNotEmptyRef $instRefs] ?\
+                "${className}__INSTMAP" : "NULL"}]
+
+            set eventRefs [findRelated $classRef ~R51 R50 ~R87 R80]
+            set eventMap [expr {[isNotEmptyRef $eventRefs] ?\
+                "${className}__EVENTMAP" : "NULL"}]
+
+            append result\
+                "    \{\n"\
+                "        .name = \"$className\",\n"\
+                "        .id = $classId,\n"\
+                "        .attrs = $attrMap,\n"\
+                "        .attrCount = [refMultiplicity $attrRefs],\n"\
+                "        .insts = $instMap,\n"\
+                "        .instCount = [refMultiplicity $instRefs],\n"\
+                "        .events = $eventMap,\n"\
+                "        .eventCount = [refMultiplicity $eventRefs],\n"\
+                "    \},\n"
+        }
+
+        append result "\} ;\n"
+    }
+    return $result
+}
+----
+
+[source,tcl]
+----
+<<harness commands>>=
+proc harnessDefinition {} {
+    variable domain
+
+    append result\
+        "extern MRT_DomainPortal const ${domain}__PORTAL ;\n\n"\
+        "MTH_DomainHarness const ${domain}__HARNESS = \{\n"\
+        "    .portal = &${domain}__PORTAL,\n"
+
+    set domainRef [Domain findWhere {$Name eq $domain}]
+    set opRefs [findRelated $domainRef ~R5]
+    set opsMap [expr {[isNotEmptyRef $opRefs] ?\
+            "${domain}__OPMAP" : "NULL"}]
+    append result\
+        "    .operations = $opsMap,\n"\
+        "    .operationCount = [refMultiplicity $opRefs],\n"
+
+    set classRefs [findRelated $domainRef ~R1 {~R2 Class}]
+    set classMap [expr {[isNotEmptyRef $classRefs] ?\
+            "${domain}__CLASSMAP" : "NULL"}]
+    append result\
+        "    .classes = $classMap,\n"\
+        "    .classCount = [refMultiplicity $classRefs],\n"
+    append result "\} ;\n"
+}
+----
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<harness command tests>>=
+test harness-1.0 {
+    Generate harness data structure
+} -setup {
+    validateutils genHarnessFile harness1 {
+        domain harness1 {
+            class X {
+                attribute temp int -default 20
+                attribute color int -default 30
+                attribute status int -default 40
+
+                statemodel {
+                    state s1 {} {
+                        printf("in s1\n") ;
+                    }
+                    transition s1 - e1 -> s2
+                    state s2 {} {
+                        printf("in s2\n") ;
+                    }
+                    transition s2 - e2 -> s1
+                }
+            }
+
+            domainop void init {a int b {char *}} {
+                printf("initialized\n") ;
+            }
+
+            domainop int get5 {} {
+                return 5 ;
+            }
+        }
+        population harness1 {
+            class X {
+                instance x1
+                instance x2
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    validateutils matchLines harness1_harness.c {
+        extern MRT_DomainPortal const harness1__PORTAL ;
+
+        MTH_DomainHarness const harness1__HARNESS = {
+            .portal = &harness1__PORTAL,
+            .operations = harness1__OPMAP,
+            .operationCount = 2,
+            .classes = harness1__CLASSMAP,
+            .classCount = 1,
+        } ;
+    }
+} -result {1}
+----
+
+=== Helper Commands
+
+[source,tcl]
+----
+<<harness data>>=
+# Create a simple map that maps "C" implementation types onto
+# printf/scanf format strings.
+relvar create FormatMap {
+    ImplType string
+    Print string
+    Scan string
+} ImplType
+
+relvar set FormatMap [relation table {
+    ImplType string             Print string         Scan  string   } {
+    int                         {"d"}                {"i"}              } {
+    unsigned                    {"u"}                {"i"}              } {
+    {unsigned int}              {"u"}                {"i"}              } {
+    short                       {"hd"}               {"hi"}             } {
+    {short int}                 {"hd"}               {"hi"}             } {
+    {unsigned short}            {"hu"}               {"hi"}             } {
+    {unsigned short int}        {"hu"}               {"hi"}             } {
+    long                        {"ld"}               {"li"}             } {
+    {long int}                  {"ld"}               {"li"}             } {
+    {unsigned long}             {"lu"}               {"li"}             } {
+    {unsigned long int}         {"lu"}               {"li"}             } {
+    {long long}                 {"lld"}              {"lli"}            } {
+    {long long int}             {"lld"}              {"lli"}            } {
+    {unsigned long long}        {"llu"}              {"lli"}            } {
+    {unsigned long long int}    {"llu"}              {"lli"}            } {
+    {char *}                    {"s"}                {}                 } {
+    {char const *}              {"s"}                {}                 } {
+    {const char *}              {"s"}                {}                 } {
+    {void *}                    {"p"}                {"p"}              } {
+    {const void *}              {"p"}                {"p"}              } {
+    {void const *}              {"p"}                {"p"}              } {
+    float                       {"g"}                {"g"}              } {
+    double                      {"lg"}               {"lg"}             } {
+    {long double}               {"Lg"}               {"Lg"}             } {
+    char                        {"hhd"}              {"hhi"}            } {
+    {unsigned char}             {"hhu"}              {"hhi"}            } {
+    void                        void                 {}                 } {
+    bool                        {"u"}                {"u"}              } {
+    uint8_t                     PRIu8                SCNi8              } {
+    uint16_t                    PRIu16               SCNi16             } {
+    uint32_t                    PRIu32               SCNi32             } {
+    uint64_t                    PRIu64               SCNi64             } {
+    int8_t                      PRId8                SCNi8              } {
+    int16_t                     PRId16               SCNi16             } {
+    int32_t                     PRId32               SCNi32             } {
+    int64_t                     PRId64               SCNi64             } {
+    intmax_t                    PRIdMAX              SCNiMAX            } {
+    uintmax_t                   PRIuMAX              SCNiMAX            } ]
+----
+
+[source,tcl]
+----
+<<harness commands>>=
+proc GetFormat {implType which} {
+    set fmt [relvar restrictone FormatMap ImplType $implType]
+    if {[relation isempty $fmt]} {
+        error "unknown implementation data type, $implType"
+    }
+    return [relation extract $fmt $which]
+}
+----
 
 == Harness Code Organization
 
