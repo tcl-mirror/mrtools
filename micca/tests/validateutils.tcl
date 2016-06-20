@@ -49,7 +49,6 @@ namespace eval ::validateutils {
     namespace export forgetFiles
     namespace export matchLines
     namespace export genMiccaFile
-    namespace export genHarnessFile
     namespace export compileFiles
     namespace ensemble create
 
@@ -161,17 +160,10 @@ proc ::validateutils::genMiccaFile {domain content args} {
     micca configure $content
     micca generate {*}$args
     indexFiles $domain.c $domain.h
-}
-
-proc ::validateutils::genHarnessFile {domain content} {
-    variable keepTemps
-    if {!$keepTemps} {
-        makeFile {} ${domain}_harness.c
+    if {[dict exists $args harness] && [dict get $args harness]} {
+        micca harness
+        indexFiles ${domain}_harness.c
     }
-
-    micca configure $content
-    micca harness
-    indexFiles ${domain}_harness.c
 }
 
 proc ::validateutils::compileFiles {args} {
