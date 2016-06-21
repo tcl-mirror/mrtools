@@ -134,6 +134,53 @@ typedef struct mthclassmap {
 
 [source,c]
 ----
+<<mth forward references>>=
+static MTH_ClassMap const *const
+mthFindClass(
+    MTH_DomainHarness const *const harness,
+    char const *className) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static MTH_ClassMap const *const
+mthFindClass(
+    MTH_DomainHarness const *const harness,
+    char const *className)
+{
+    MTH_ClassMap key = {
+        .name = className
+    } ;
+    return (MTH_ClassMap const *const)
+            bsearch(&key, harness->classes, harness->classCount,
+            sizeof(key), mthClassMapCompare) ;
+}
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static int mthClassMapCompare(void const*, void const*) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static int
+mthClassMapCompare(
+    void const *m1,
+    void const *m2)
+{
+    MTH_ClassMap const *cm1 = m1 ;
+    MTH_ClassMap const *cm2 = m2 ;
+
+    return strcmp(cm1->name, cm2->name) ;
+}
+----
+
+[source,c]
+----
 <<mth interface aggregate types>>=
 typedef struct mthattrmap {
     char const *name ;
@@ -603,6 +650,12 @@ static MTH_CommandMap const commands[] = { // must be in ascending "name" order
 static void mthExecCommand(int, char * const *) ;
 ----
 
+// HERE!
+// use the buffer context from the top down.
+// push the stack before calling each level and then have the level
+// return the ok/error indication. Here we can pop the stack down
+// and format the final reply with the result left in the buffer.
+
 [source,c]
 ----
 <<mth static functions>>=
@@ -850,6 +903,10 @@ mthQueryCommand(
         mthQueryDomains(argc, argv) ;
     } else if (strcmp(subcmdName, "classes") == 0) {
         mthQueryClasses(argc, argv) ;
+    } else if (strcmp(subcmdName, "attributes") == 0) {
+        mthQueryAttrs(argc, argv) ;
+    } else if (strcmp(subcmdName, "instances") == 0) {
+        mthQueryInsts(argc, argv) ;
     } else {
         mth_CmdResponse(mthErrorReturn, argv[0],
             "unknown subcommand, \"%s\": expected, "
@@ -875,10 +932,7 @@ mthQueryDomains(
     int argc,
     char *const *argv)
 {
-    static char queryBuf[BUFSIZ] ;
-
-    *queryBuf = ASCII_NUL ;
-    size_t bufSize = sizeof(queryBuf) - 1 ; // -1 to account for a NUL
+    mthResetContext() ;
 
     MTH_DomainHarness const *const *hiter = mthHarnesses.harnesses ;
     for (unsigned count = mthHarnesses.count ; count != 0 ; count--) {
@@ -886,17 +940,13 @@ mthQueryDomains(
         assert(harness->portal != NULL) ;
         assert(harness->portal->name != NULL) ;
 
-        char const *domainName = harness->portal->name ;
-        int nameLen = strlen(domainName) ;
-        if (nameLen >= bufSize) {
-            strncat(queryBuf, domainName, bufSize) ;
-            bufSize -= nameLen ;
-        } else {
-            strncat(queryBuf, "...", bufSize) ;
-            break ;
+        if (mthFormatToContext(strfmtspace, harness->portal->name) == -1) {
+            mth_CmdResponse(mthErrorReturn, argv[0], truncateMsg) ;
+            return ;
         }
     }
-    mth_CmdResponse(mthOkReturn, argv[0], queryBuf) ;
+    mthTrimBufContextRight() ;
+    mth_CmdResponse(mthOkReturn, argv[0], mthContextGetBuf()) ;
 }
 ----
 
@@ -933,30 +983,179 @@ mthQueryClasses(
     MRT_DomainPortal const *portal = harness->portal ;
     assert(portal != NULL) ;
 
-    static char queryBuf[BUFSIZ] ;
-    *queryBuf = ASCII_NUL ;
-    size_t bufSize = sizeof(queryBuf) - 1 ; // -1 to account for a NUL
+    mthResetContext() ;
 
     unsigned classCount = mrt_PortalDomainClassCount(portal) ;
     for (MRT_ClassId id = 0 ; id < classCount ; id++) {
         char const *className = NULL ;
         int pcode = mrt_PortalClassName(portal, id, &className) ;
         if (pcode == 0) {
-            int nameLen = strlen(className) ;
-            if (nameLen >= bufSize) {
-                strncat(queryBuf, className, bufSize) ;
-                bufSize -= nameLen ;
-            } else {
-                strncat(queryBuf, "...", bufSize) ;
-                break ;
+            if (mthFormatToContext(strfmtspace, className) == -1) {
+                mth_CmdResponse(mthErrorReturn, argv[0], truncateMsg) ;
+                return ;
             }
         } else {
             mthPortalErrorResponse(pcode, argv[0]) ;
         }
     }
 
-    mth_CmdResponse(mthOkReturn, argv[0], queryBuf) ;
+    mthTrimBufContextRight() ;
+    mth_CmdResponse(mthOkReturn, argv[0], mthContextGetBuf()) ;
 }
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static void mthQueryAttrs(
+    int argc,
+    char *const *argv) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static void
+mthQueryAttrs(
+    int argc,
+    char *const *argv)
+{
+    if (argc != 4) {
+        mth_CmdResponse(mthErrorReturn, argv[0],
+            "wrong # of arguments, %d: expected, "
+            "\"query attributes <domain> <class>\"",
+            argc) ;
+        return ;
+    }
+
+    char *domainName = argv[2] ;
+    MTH_DomainHarness const *const harness = mthFindHarness(domainName) ;
+    if (harness == NULL) {
+        mth_CmdResponse(mthErrorReturn, argv[0],
+                "unknown domain, \"%s\"", domainName) ;
+        return ;
+    }
+
+    char *className = argv[3] ;
+    MTH_ClassMap const *const classMap = mthFindClass(harness, className) ;
+    if (classMap == NULL) {
+        mth_CmdResponse(mthErrorReturn, argv[0],
+                "unknown class, \"%s\"", className) ;
+        return ;
+    }
+    MRT_ClassId classId = classMap->id ;
+
+
+    MRT_DomainPortal const *portal = harness->portal ;
+    assert(portal != NULL) ;
+
+    int attrCount = mrt_PortalClassAttributeCount(portal, classId) ;
+    assert(attrCount >= 0) ;
+    if (attrCount < 0) {
+        mthPortalErrorResponse(attrCount, argv[0]) ;
+        return ;
+    }
+
+    mthResetContext() ;
+
+    for (MRT_AttrId attrId = 0 ; attrId < attrCount ; attrId++) {
+        char const *attrName = NULL ;
+        int pcode = mrt_PortalClassAttributeName(portal, classId, attrId,
+                &attrName) ;
+        if (pcode == 0) {
+            if (mthFormatToContext(strfmtspace, attrName) == -1) {
+                mth_CmdResponse(mthErrorReturn, argv[0], truncateMsg) ;
+                return ;
+            }
+        } else {
+            mthPortalErrorResponse(pcode, argv[0]) ;
+        }
+    }
+
+    mthTrimBufContextRight() ;
+    mth_CmdResponse(mthOkReturn, argv[0], mthContextGetBuf()) ;
+}
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static void mthQueryInsts(
+    int argc,
+    char *const *argv) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static void
+mthQueryInsts(
+    int argc,
+    char *const *argv)
+{
+    if (argc != 4) {
+        mth_CmdResponse(mthErrorReturn, argv[0],
+            "wrong # of arguments, %d: expected, "
+            "\"query instances <domain> <class>\"",
+            argc) ;
+        return ;
+    }
+
+    char *domainName = argv[2] ;
+    MTH_DomainHarness const *const harness = mthFindHarness(domainName) ;
+    if (harness == NULL) {
+        mth_CmdResponse(mthErrorReturn, argv[0],
+                "unknown domain, \"%s\"", domainName) ;
+        return ;
+    }
+
+    char *className = argv[3] ;
+    MTH_ClassMap const *const classMap = mthFindClass(harness, className) ;
+    if (classMap == NULL) {
+        mth_CmdResponse(mthErrorReturn, argv[0],
+                "unknown class, \"%s\"", className) ;
+        return ;
+    }
+    MRT_ClassId classId = classMap->id ;
+
+
+    MRT_DomainPortal const *portal = harness->portal ;
+    assert(portal != NULL) ;
+
+    int instCount = mrt_PortalClassInstanceCount(portal, classId) ;
+    assert(instCount >= 0) ;
+    if (instCount < 0) {
+        mthPortalErrorResponse(instCount, argv[0]) ;
+        return ;
+    }
+
+    mthResetContext() ;
+    if (mthFormatToContext("total %d named ", instCount) == -1) {
+        mth_CmdResponse(mthErrorReturn, argv[0], truncateMsg) ;
+        return ;
+    }
+
+    mthPushContext() ;
+    MTH_InstMap const *inst = classMap->insts ;
+    for (unsigned namedCount = classMap->instCount ; namedCount != 0 ;
+            namedCount--, inst++) {
+        if (mthAddWord(inst->name) == -1) {
+            mth_CmdResponse(mthErrorReturn, argv[0], truncateMsg) ;
+            return ;
+        }
+    }
+    mthPopContext() ;
+    mthTrimBufContextRight() ;
+
+    mth_CmdResponse(mthOkReturn, argv[0], mthContextGetBuf()) ;
+}
+----
+
+[source,c]
+----
+<<mth static data>>=
+static char const truncateMsg[] = "truncated" ;
+static char const strfmtspace[] = "%s " ;
 ----
 
 ==== Trace Command
@@ -1232,6 +1431,7 @@ mthTraceResponse(
 extern void
 mth_InstrResponse(
     char const *,
+    char const *,
     ...) ;
 ----
 
@@ -1240,6 +1440,7 @@ mth_InstrResponse(
 <<mth static functions>>=
 void
 mth_InstrResponse(
+    char const *resultKey,
     char const *resultFmt,
     ...)
 {
@@ -1257,20 +1458,21 @@ mth_InstrResponse(
         strcpy(resultBuf, "response truncated") ;
     }
 
-    static char preamble[] = "instr {result" ;
+    static char preamble[] = "instr {" ;
     static char postamble[] = "}\n" ;
     static char unQuotedFmt[] = " %s" ;
     static char quotedFmt[] = " {%s}" ;
 
     char fmt[sizeof(preamble) +
             sizeof(postamble) +
-            sizeof(quotedFmt) +
+            2 * sizeof(quotedFmt) +
             1] ; // +1 for NUL terminator
     strcpy(fmt, preamble) ;
+    strcat(fmt, mth_QuoteWord(resultKey) ? "{%s}" : "%s") ;
     strcat(fmt, mth_QuoteWord(resultBuf) ? quotedFmt : unQuotedFmt) ;
     strcat(fmt, postamble) ;
 
-    fprintf(mthCmdStream, fmt, resultBuf) ;
+    fprintf(mthCmdStream, fmt, resultKey, resultBuf) ;
 }
 ----
 
@@ -1385,6 +1587,217 @@ mth_QuoteWord(
     }
 
     return wlen == 0 ? true : false ;
+}
+----
+
+=== Buffer Context
+
+[source,c]
+----
+<<mth implementation aggregate types>>=
+typedef struct mthbufcontext {
+    char buf[BUFSIZ] ;
+    char *location ;
+    size_t remaining ;
+} MTH_BufContext ;
+----
+
+[source,c]
+----
+<<mth implementation constants>>=
+#ifndef MTH_NESTLIMIT
+#   define  MTH_NESTLIMIT   4
+#endif /* MTH_NESTLIMIT */
+<<mth static data>>=
+static MTH_BufContext contextStack[MTH_NESTLIMIT] ;
+static MTH_BufContext *contextTOS ;
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static void
+mthResetContext(void) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static void
+mthResetContext(void)
+{
+    contextTOS = contextStack ;
+    mthInitBufContext() ;
+}
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static void
+mthPushContext(void) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static void
+mthPushContext(void)
+{
+    assert(contextTOS != NULL) ;
+    assert(contextTOS < contextStack + COUNTOF(contextStack)) ;
+    if (contextTOS >= contextStack + COUNTOF(contextStack)) {
+        fprintf(stderr, "buffer context stack overflow\n") ;
+        abort() ;
+    }
+    contextTOS++ ;
+    mthInitBufContext() ;
+}
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static void
+mthPopContext(void) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static void
+mthPopContext(void)
+{
+    assert(contextTOS > contextStack) ;
+    if (contextTOS <= contextStack) {
+        fprintf(stderr, "buffer context stack underflow\n") ;
+        abort() ;
+    }
+
+    mthTrimBufContextRight() ;
+    char *prevBuf = mthContextGetBuf() ;
+    contextTOS -= 1 ;
+    mthAddWord(prevBuf) ;
+}
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static void mthInitBufContext(void) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static void
+mthInitBufContext(void)
+{
+    assert(contextTOS != NULL) ;
+    contextTOS->location = contextTOS->buf ;
+    *contextTOS->location = ASCII_NUL ;
+    contextTOS->remaining = sizeof(contextTOS->buf) ;
+}
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static int
+mthFormatToContext(
+    char const *format,
+    ...) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static int
+mthFormatToContext(
+    char const *format,
+    ...)
+{
+    va_list params ;
+    va_start(params, format) ;
+    int nbytes = vsnprintf(contextTOS->location, contextTOS->remaining,
+            format, params) ;
+    va_end(params) ;
+
+    if (nbytes < 0 || nbytes >= contextTOS->remaining) {
+        return -1 ;
+    } else {
+        contextTOS->remaining -= nbytes ;
+        contextTOS->location += nbytes ;
+    }
+
+    return nbytes ;
+}
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static int
+mthAddWord(
+    char const *word) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static int
+mthAddWord(
+    char const *word)
+{
+    int nbytes = snprintf(contextTOS->location, contextTOS->remaining,
+            mth_QuoteWord(word) ? "{%s} " : "%s ", word) ;
+
+    if (nbytes < 0 || nbytes >= contextTOS->remaining) {
+        return -1 ;
+    } else {
+        contextTOS->remaining -= nbytes ;
+        contextTOS->location += nbytes ;
+    }
+
+    return nbytes ;
+}
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static void mthTrimBufContextRight(void) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static void
+mthTrimBufContextRight(void)
+{
+    while (contextTOS->location > contextTOS->buf) {
+        if (isspace(*(contextTOS->location - 1))) {
+            *--contextTOS->location = ASCII_NUL ;
+        } else {
+            break ;
+        }
+    }
+}
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static inline char *mthContextGetBuf(void) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static inline char *
+mthContextGetBuf(void)
+{
+    return contextTOS->buf ;
 }
 ----
 
