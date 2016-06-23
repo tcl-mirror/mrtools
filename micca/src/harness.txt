@@ -66,7 +66,7 @@ typedef struct mthoperationmap {
 [source,c]
 ----
 <<mth interface simple types>>=
-typedef void MTH_DomainOpFunc(int, char *const *) ;
+typedef bool MTH_DomainOpFunc(int, char *const *) ;
 ----
 
 [source,c]
@@ -90,9 +90,15 @@ mthFindOperation(
         .name = opName,
         .func = NULL
     } ;
-    return (MTH_OperationMap const *const)
+
+    MTH_OperationMap const *const opMap = (MTH_OperationMap const *const)
             bsearch(&key, harness->operations, harness->operationCount,
             sizeof(key), mthOperationMapCompare) ;
+    if (opMap == NULL) {
+        mth_FormatToContext("unknown operation, \"%s\"", opName) ;
+    }
+
+    return opMap ;
 }
 ----
 
@@ -129,6 +135,8 @@ typedef struct mthclassmap {
     unsigned instCount ;
     struct mtheventmap const *events ;
     unsigned eventCount ;
+    struct mthstatemap const *states ;
+    unsigned stateCount ;
 } MTH_ClassMap ;
 ----
 
@@ -152,9 +160,15 @@ mthFindClass(
     MTH_ClassMap key = {
         .name = className
     } ;
-    return (MTH_ClassMap const *const)
+
+    MTH_ClassMap const *const classMap = (MTH_ClassMap const *const)
             bsearch(&key, harness->classes, harness->classCount,
             sizeof(key), mthClassMapCompare) ;
+    if (classMap == NULL) {
+        mth_FormatToContext("unknown class, \"%s\"", className) ;
+    }
+
+    return classMap ;
 }
 ----
 
@@ -193,14 +207,14 @@ typedef struct mthattrmap {
 [source,c]
 ----
 <<mth interface simple types>>=
-typedef int MTH_AttrReadFunc(MRT_DomainPortal const *, MRT_ClassId,
-        MRT_InstId, MRT_AttrId, char *, size_t) ;
+typedef bool MTH_AttrReadFunc(MRT_DomainPortal const *, MRT_ClassId,
+        MRT_InstId, MRT_AttrId) ;
 ----
 
 [source,c]
 ----
 <<mth interface simple types>>=
-typedef int MTH_AttrUpdateFunc(MRT_DomainPortal const *, MRT_ClassId,
+typedef bool MTH_AttrUpdateFunc(MRT_DomainPortal const *, MRT_ClassId,
         MRT_InstId, MRT_AttrId, char const *) ;
 ----
 
@@ -211,6 +225,73 @@ typedef struct mthinstmap {
     char const *name ;
     MRT_InstId id ;
 } MTH_InstMap ;
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static int
+mthFindInst(
+    MTH_ClassMap const *const class,
+    char const *instName) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static int
+mthFindInst(
+    MTH_ClassMap const *const class,
+    char const *instName)
+{
+    // First scan to see if we got a number.
+    int instId = -1 ;
+    int converted = sscanf(instName, "%i", &instId) ;
+    if (converted == 1) {
+        if (instId < 0) {
+            mth_FormatToContext("instance id's must be non-negative: "
+                    "got, %i", instId) ;
+        }
+    } else {
+        // Not a number, try to look up the name.
+        MTH_InstMap key = {
+            .name = instName
+        } ;
+
+        MTH_InstMap const *const instMap = (MTH_InstMap const *const)
+                bsearch(&key, class->insts, class->instCount,
+                sizeof(key), mthInstMapCompare) ;
+        if (instMap == NULL) {
+            mth_FormatToContext("unknown instance, \"%s\"", instName) ;
+            instId = -1 ;
+        } else {
+            instId = instMap->id ;
+        }
+    }
+
+    return instId ;
+}
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static int mthInstMapCompare(void const*, void const*) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static int
+mthInstMapCompare(
+    void const *m1,
+    void const *m2)
+{
+    MTH_InstMap const *cm1 = m1 ;
+    MTH_InstMap const *cm2 = m2 ;
+
+    return strcmp(cm1->name, cm2->name) ;
+}
 ----
 
 [source,c]
@@ -226,7 +307,167 @@ typedef struct mtheventmap {
 [source,c]
 ----
 <<mth interface simple types>>=
-typedef bool MTH_EventParamFunc(int, char const **, MRT_EventParams) ;
+typedef bool MTH_EventParamFunc(int, char * const*, MRT_EventParams) ;
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static int
+mthFindEvent(
+    MTH_ClassMap const *const class,
+    char const *eventName,
+    MTH_EventParamFunc **paramFunc) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static int
+mthFindEvent(
+    MTH_ClassMap const *const class,
+    char const *eventName,
+    MTH_EventParamFunc **paramFuncRef)
+{
+    // First scan to see if we got a number.
+    MTH_EventMap const *eventMap = NULL ;
+    char *end ;
+    MRT_EventCode eventNumber = strtoul(eventName, &end, 0) ;
+    if (*end == ASCII_NUL) {
+        // search for the event number in the map
+        MTH_EventMap const *mapIter = class->events ;
+        for (unsigned eventCount = class->eventCount ; eventCount != 0 ;
+                eventCount--, mapIter++) {
+            if (mapIter->number == eventNumber) {
+                eventMap = mapIter ;
+                break ;
+            }
+        }
+    } else {
+        // Not a number, try to look up the name.
+        MTH_EventMap key = {
+            .name = eventName
+        } ;
+
+        eventMap = (MTH_EventMap const *)
+                bsearch(&key, class->events, class->eventCount,
+                sizeof(key), mthEventMapCompare) ;
+    }
+
+    if (eventMap == NULL) {
+        mth_FormatToContext("unknown event, \"%s\"", eventName) ;
+        eventNumber = -1 ;
+    } else {
+        eventNumber = eventMap->number ;
+        if (paramFuncRef) {
+            *paramFuncRef = eventMap->paramFunc ;
+        }
+    }
+
+    return eventNumber ;
+}
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static int mthEventMapCompare(void const*, void const*) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static int
+mthEventMapCompare(
+    void const *m1,
+    void const *m2)
+{
+    MTH_EventMap const *cm1 = m1 ;
+    MTH_EventMap const *cm2 = m2 ;
+
+    return strcmp(cm1->name, cm2->name) ;
+}
+----
+
+[source,c]
+----
+<<mth interface aggregate types>>=
+typedef struct mthstatemap {
+    char const *name ;
+    MRT_StateCode number ;
+} MTH_StateMap ;
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static int
+mthFindState(
+    MTH_ClassMap const *const class,
+    char const *stateName) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static int
+mthFindState(
+    MTH_ClassMap const *const class,
+    char const *stateName)
+{
+    // First scan to see if we got a number.
+    MTH_StateMap const *stateMap = NULL ;
+    char *end ;
+    MRT_StateCode stateNumber = strtoul(stateName, &end, 0) ;
+    if (*end == ASCII_NUL) {
+        // search for the state number in the map
+        MTH_StateMap const *mapIter = class->states ;
+        for (unsigned stateCount = class->stateCount ; stateCount != 0 ;
+                stateCount--, mapIter++) {
+            if (mapIter->number == stateNumber) {
+                stateMap = mapIter ;
+                break ;
+            }
+        }
+    } else {
+        // Not a number, try to look up the name.
+        MTH_StateMap key = {
+            .name = stateName
+        } ;
+
+        stateMap = (MTH_StateMap const *)
+                bsearch(&key, class->states, class->stateCount,
+                sizeof(key), mthStateMapCompare) ;
+    }
+
+    if (stateMap == NULL) {
+        mth_FormatToContext("unknown state, \"%s\"", stateName) ;
+        return -1 ;
+    }
+
+    return stateMap->number ;
+}
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static int mthStateMapCompare(void const*, void const*) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static int
+mthStateMapCompare(
+    void const *m1,
+    void const *m2)
+{
+    MTH_StateMap const *cm1 = m1 ;
+    MTH_StateMap const *cm2 = m2 ;
+
+    return strcmp(cm1->name, cm2->name) ;
+}
 ----
 
 === Harness Functions
@@ -430,25 +671,24 @@ mthReadAndEvalCommand(
     static char parseBuffer[BUFSIZ] ;
     strcpy(parseBuffer, cmdBuffer) ;
 
+    mthBeginResponse() ;
+    mthAddWord("cmd") ;
+    mthPushContext() ;
+
     int err = mthParseCommand(parseBuffer, &argc, &argv) ;
     if (err == -1) {
-        mth_CmdResponse(mthErrorReturn, "unknown",
-                "failed to parse command: \"%s\"", cmdBuffer) ;
+        mth_FormatToContext("name unknown return error result ") ;
+        mthPushContext() ;
+        mth_FormatToContext("failed to parse command: \"%s\"", cmdBuffer) ;
+        mthPopContext() ;
+    } else if (argc != 0) {
+        mthExecCommand(argc, argv) ;
+    } else {
         return ;
     }
 
-#if 0
-    dbgprintf("got %d arguments\n", argc) ;
-#       ifndef NDEBUG
-    for (int i = 0 ; i < argc ; i++) {
-        printf("%d: \"%s\"\n", i, argv[i]) ;
-    }
-#       endif /* NDEBUG */
-#endif
-
-    if (argc > 0) {
-        mthExecCommand(argc, argv) ;
-    }
+    mthPopContext() ;
+    mthEndResponse() ;
 }
 ----
 
@@ -480,7 +720,7 @@ mthParseCommand(
     char **const argvEnd = pArgv + MAX_ARGS ;
 
     int quoteCount = 0 ;
-    int parseState = OutOfWord ;
+    int parseState = OUTOFWORD ;
     int parseStackStorage[2] ;
     int *parseStackTop = parseStackStorage ;
 
@@ -488,19 +728,19 @@ mthParseCommand(
     for ( ; *line != ASCII_NUL ; line++) {
         char c = *line ;
         switch (parseState) {
-        case OutOfWord:
+        case OUTOFWORD:
             if (isgraph(c)) {
                 if (c == ESCAPE_CHAR) {
-                    *parseStackTop++ = InWord ;
-                    parseState = InEscape ;
+                    *parseStackTop++ = INWORD ;
+                    parseState = INESCAPE ;
                     if (pArgv < argvEnd) {
                         *pArgv++ = ++pWord ;
                     } else {
                         return -1 ;
                     }
                 } else if (c == BEGIN_QUOTE) {
-                    *parseStackTop++ = OutOfWord ;
-                    parseState = InQuote ;
+                    *parseStackTop++ = OUTOFWORD ;
+                    parseState = INQUOTE ;
                     ++quoteCount ;
                     if (pArgv < argvEnd) {
                         *pArgv++ = ++pWord ;
@@ -516,29 +756,29 @@ mthParseCommand(
                         return -1 ;
                     }
                     *pWord++ = c ;
-                    parseState = InWord ;
+                    parseState = INWORD ;
                 }
             } // else the character is just space to skip
             break ;
 
-        case InWord:
+        case INWORD:
             if (c == ESCAPE_CHAR) {
                 *parseStackTop++ = parseState ;
-                parseState = InEscape ;
+                parseState = INESCAPE ;
             } else if (c == BEGIN_QUOTE) {
                 *parseStackTop++ = parseState ;
-                parseState = InQuote ;
+                parseState = INQUOTE ;
                 ++quoteCount ;
             } else if (isspace(c)) {
                 // end of word
-                parseState = OutOfWord ;
+                parseState = OUTOFWORD ;
                 *pWord++ = ASCII_NUL ;
             } else {
                 *pWord++ = c ;
             }
             break ;
 
-        case InEscape:
+        case INESCAPE:
             switch (c) {
                 case 'a':
                     *pWord++ = '\a' ;
@@ -568,7 +808,7 @@ mthParseCommand(
             parseState = *--parseStackTop ;
             break ;
 
-        case InQuote:
+        case INQUOTE:
             if (c == BEGIN_QUOTE) {
                 ++quoteCount ;
                 *pWord++ = c ;
@@ -576,7 +816,7 @@ mthParseCommand(
                 if (--quoteCount == 0) {
                     parseState = *--parseStackTop ;
                     // check if ending the quote also ended the word
-                    if (parseState == OutOfWord) {
+                    if (parseState == OUTOFWORD) {
                         *pWord++ = ASCII_NUL ;
                     }
                 } else {
@@ -584,7 +824,7 @@ mthParseCommand(
                 }
             } else if (c == ESCAPE_CHAR) {
                 *parseStackTop++ = parseState ;
-                parseState = InEscape ;
+                parseState = INESCAPE ;
             } else {
                 *pWord++ = c ;
             }
@@ -594,7 +834,7 @@ mthParseCommand(
 
     *pWord = ASCII_NUL ;
     *pArgv = NULL ;
-    if (quoteCount == 0 && parseState != InEscape) {
+    if (quoteCount == 0 && parseState != INESCAPE) {
         if (pargc) {
             *pargc = pArgv - args ;
         }
@@ -620,7 +860,7 @@ typedef struct mthcommandmap {
 [source,c]
 ----
 <<mth implementation simple types>>=
-typedef void MTH_CommandFunc(int, char * const*) ;
+typedef bool MTH_CommandFunc(int, char * const*) ;
 ----
 
 ==== Defined Commands
@@ -630,12 +870,32 @@ typedef void MTH_CommandFunc(int, char * const*) ;
 <<mth static data>>=
 static MTH_CommandMap const commands[] = { // must be in ascending "name" order
 {
+    .name = "delaysignal",
+    .commandFunc = mthDelaySignalCommand
+},
+{
+    .name = "delete",
+    .commandFunc = mthDeleteCommand
+},
+{
     .name = "dop",
     .commandFunc = mthDopCommand
 },
 {
+    .name = "instr",
+    .commandFunc = mthInstrCommand
+},
+{
+    .name = "null",
+    .commandFunc = mthNullCommand
+},
+{
     .name = "query",
     .commandFunc = mthQueryCommand
+},
+{
+    .name = "signal",
+    .commandFunc = mthSignalCommand
 },
 {
     .name = "trace",
@@ -649,12 +909,6 @@ static MTH_CommandMap const commands[] = { // must be in ascending "name" order
 <<mth forward references>>=
 static void mthExecCommand(int, char * const *) ;
 ----
-
-// HERE!
-// use the buffer context from the top down.
-// push the stack before calling each level and then have the level
-// return the ok/error indication. Here we can pop the stack down
-// and format the final reply with the result left in the buffer.
 
 [source,c]
 ----
@@ -672,13 +926,24 @@ mthExecCommand(
     MTH_CommandMap const *cmd = (MTH_CommandMap const *)
             bsearch(&key, commands, COUNTOF(commands), sizeof(commands[0]),
             mthCommandMapCompare) ;
+
+    mthAddWord("name") ;
+    mthAddWord(argv[0]) ;
+    mthAddWord("result") ;
+    mthPushContext() ;
+
+    bool success ;
     if (cmd != NULL) {
         assert(cmd->commandFunc != NULL) ;
-        cmd->commandFunc(argc, argv) ;
+        success = cmd->commandFunc(argc, argv) ;
     } else {
-        mth_CmdResponse(mthErrorReturn, argv[0],
-                "unknown command, \"%s\"", argv[0]) ;
+        mth_FormatToContext("unknown command, \"%s\"", argv[0]) ;
+        success = false ;
     }
+
+    mthPopContext() ;
+    mthAddWord("return") ;
+    mthAddWord(success ? "ok" : "error") ;
 }
 ----
 
@@ -815,12 +1080,105 @@ mthInsertHarness(
 
 === Harness Command Functions
 
+==== Delay Signal Command
+
+
+[literal]
+--
+delaysignal <domain> <class> <inst> <delay> <event> ?<arg1> <arg2> ...?
+--
+
+[source,c]
+----
+<<mth forward references>>=
+static bool mthDelaySignalCommand(int, char *const *) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static bool
+mthDelaySignalCommand(
+    int argc,
+    char *const *argv)
+{
+    if (argc < 6) {
+        mth_FormatToContext(
+            "wrong # of arguments, %d: expected, "
+            "\"delaysignal <domain> <class> <inst> <delay> <event> "
+            "?<arg1> <arg2> ...?\"",
+            argc) ;
+        return false ;
+    }
+
+    char *domainName = argv[1] ;
+    MTH_DomainHarness const *const harness = mthFindHarness(domainName) ;
+    if (harness == NULL) {
+        mth_FormatToContext("unknown domain, \"%s\"", domainName) ;
+        return false ;
+    }
+
+    char *className = argv[2] ;
+    MTH_ClassMap const *const class = mthFindClass(harness, className) ;
+    if (class == NULL) {
+        return false ;
+    }
+    MRT_ClassId classId = class->id ;
+
+    char *instName = argv[3] ;
+    int instId = mthFindInst(class, instName) ;
+    if (instId < 0) {
+        return false ;
+    }
+
+    char *delayTime = argv[4] ;
+    MRT_DelayTime delay ;
+    int converted = sscanf(delayTime, "%" SCNi32, &delay) ;
+    if (converted != 1) {
+        mth_FormatToContext("failed to scan, \"%s\" as a \"%s\"", delayTime,
+                SCNi32) ;
+        return false ;
+    }
+
+    char *eventName = argv[5] ;
+    MTH_EventParamFunc *epfunc ;
+    int eventNumber = mthFindEvent(class, eventName, &epfunc) ;
+    if (eventNumber < 0) {
+        return false ;
+    }
+
+    MRT_DomainPortal const *portal = harness->portal ;
+    assert(portal != NULL) ;
+
+    int pcode ;
+    if (epfunc != NULL) {
+        MRT_EventParams params ;
+        bool pstatus = epfunc(argc - 6, argv + 6, params) ;
+        if (!pstatus) {
+            return false ;
+        }
+        pcode = mrt_PortalSignalDelayedEvent(portal, classId, instId,
+                eventNumber, params, delay) ;
+    } else {
+        pcode = mrt_PortalSignalDelayedEvent(portal, classId, instId,
+                eventNumber, NULL, delay) ;
+    }
+
+    if (pcode < 0) {
+        mth_PortalErrorResponse(pcode) ;
+        return false ;
+    }
+
+    return true ;
+}
+----
+
 ==== Domain Operation Command
 
 [source,c]
 ----
 <<mth forward references>>=
-static void mthDopCommand(int, char *const *) ;
+static bool mthDopCommand(int, char *const *) ;
 ----
 
 [literal]
@@ -831,35 +1189,163 @@ dop <domain> <operation> ?<arg1> <arg2> ...?
 [source,c]
 ----
 <<mth static functions>>=
-static void
+static bool
 mthDopCommand(
     int argc,
     char *const *argv)
 {
     if (argc < 3) {
-        mth_CmdResponse(mthErrorReturn, argv[0],
+        mth_FormatToContext(
             "wrong # of arguments, %d: expected, "
             "dop <domain> <operation> ?<arg1> <arg2> ...?",
             argc) ;
-        return ;
+        return false ;
     }
 
     char *domainName = argv[1] ;
     MTH_DomainHarness const *const harness = mthFindHarness(domainName) ;
     if (harness == NULL) {
-        mth_CmdResponse(mthErrorReturn, argv[0],
-                "unknown domain, \"%s\"", domainName) ;
-        return ;
+        mth_FormatToContext("unknown domain, \"%s\"", domainName) ;
+        return false ;
     }
 
     char *opName = argv[2] ;
     MTH_OperationMap const *const opMap = mthFindOperation(harness, opName) ;
     if (opMap == NULL) {
-        mth_CmdResponse(mthErrorReturn, argv[0],
-            "unknown operation, \"%s\"", opName) ;
-        return ;
+        return false ;
     }
-    opMap->func(argc - 2, argv + 2) ;
+    return opMap->func(argc - 2, argv + 2) ;
+}
+----
+
+==== Delete Command
+
+[literal]
+--
+delete <domain> <class> <inst>
+--
+
+[source,c]
+----
+<<mth forward references>>=
+static bool mthDeleteCommand(int, char *const *) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static bool
+mthDeleteCommand(
+    int argc,
+    char *const *argv)
+{
+    if (argc < 4) {
+        mth_FormatToContext(
+            "wrong # of arguments, %d: expected, "
+            "\"delete <domain> <class> <inst>\"",
+            argc) ;
+        return false ;
+    }
+
+    char *domainName = argv[1] ;
+    MTH_DomainHarness const *const harness = mthFindHarness(domainName) ;
+    if (harness == NULL) {
+        mth_FormatToContext("unknown domain, \"%s\"", domainName) ;
+        return false ;
+    }
+
+    char *className = argv[2] ;
+    MTH_ClassMap const *const class = mthFindClass(harness, className) ;
+    if (class == NULL) {
+        return false ;
+    }
+    MRT_ClassId classId = class->id ;
+
+    char *instName = argv[3] ;
+    int instId = mthFindInst(class, instName) ;
+    if (instId < 0) {
+        return false ;
+    }
+
+    MRT_DomainPortal const *portal = harness->portal ;
+    assert(portal != NULL) ;
+
+    int pcode = mrt_PortalDeleteInstance(portal, classId, instId) ;
+    if (pcode < 0) {
+        mth_PortalErrorResponse(pcode) ;
+        return false ;
+    }
+
+    return true ;
+}
+----
+
+==== Instr Command
+
+[source,c]
+----
+<<mth forward references>>=
+static bool mthInstrCommand(int, char *const *) ;
+----
+
+[source,c]
+----
+<<mth static data>>=
+static bool instrOn = false ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static bool
+mthInstrCommand(
+    int argc,
+    char *const *argv)
+{
+    bool status = true ;
+
+    if (argc == 1) {
+        mthAddWord(instrOn ? "on" : "off") ;
+    } else if (argc == 2) {
+        if (strcmp(argv[1], "on") == 0) {
+            instrOn = true ;
+            mthAddWord("on") ;
+        } else if (strcmp(argv[1], "off") == 0) {
+            instrOn = false ;
+            mthAddWord("off") ;
+        } else {
+            mth_FormatToContext(
+                    "unknown instr option, \"%s\": expected, \"on | off\"",
+                    argv[1]) ;
+            status = false ;
+        }
+    } else {
+        mth_FormatToContext(
+            "wrong # of arguments, %d: expected, \"instr ?on | off?\"", argc) ;
+        status = false ;
+    }
+
+    return status ;
+}
+----
+
+==== Null Command
+
+[source,c]
+----
+<<mth forward references>>=
+static bool mthNullCommand(int, char *const *) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static bool
+mthNullCommand(
+    int argc,
+    char *const *argv)
+{
+    return true ;
 }
 ----
 
@@ -868,7 +1354,7 @@ mthDopCommand(
 [source,c]
 ----
 <<mth forward references>>=
-static void mthQueryCommand(int, char *const *) ;
+static bool mthQueryCommand(int, char *const *) ;
 ----
 
 [literal]
@@ -877,49 +1363,53 @@ query domains
 query classes <domain>
 query attributes <domain> <class>
 query instances <domain> <class>
-query events <domain> <class>
-query states <domain> <class>
-query currentstate <domain> <class>
+query currentstate <domain> <class> <instance>
 --
 
 [source,c]
 ----
 <<mth static functions>>=
-static void
+static bool
 mthQueryCommand(
     int argc,
     char *const *argv)
 {
     if (argc < 2) {
-        mth_CmdResponse(mthErrorReturn, argv[0],
+        mth_FormatToContext(
             "wrong # of arguments, %d: expected, "
             "query <subcmd> ?<domain> <arg1> <arg2> ...?",
             argc) ;
-        return ;
+        return false ;
     }
 
     char *subcmdName = argv[1] ;
+    bool status ;
     if (strcmp(subcmdName, "domains") == 0) {
-        mthQueryDomains(argc, argv) ;
+        status = mthQueryDomains(argc, argv) ;
     } else if (strcmp(subcmdName, "classes") == 0) {
-        mthQueryClasses(argc, argv) ;
+        status = mthQueryClasses(argc, argv) ;
     } else if (strcmp(subcmdName, "attributes") == 0) {
-        mthQueryAttrs(argc, argv) ;
+        status = mthQueryAttrs(argc, argv) ;
     } else if (strcmp(subcmdName, "instances") == 0) {
-        mthQueryInsts(argc, argv) ;
+        status = mthQueryInsts(argc, argv) ;
+    } else if (strcmp(subcmdName, "currentstate") == 0) {
+        status = mthQueryCurrentState(argc, argv) ;
     } else {
-        mth_CmdResponse(mthErrorReturn, argv[0],
+        mth_FormatToContext(
             "unknown subcommand, \"%s\": expected, "
             "\"domains | classes | attributes | instances | events "
             "| states | currentstate\"", subcmdName) ;
+        status = false ;
     }
+
+    return status ;
 }
 ----
 
 [source,c]
 ----
 <<mth forward references>>=
-static void mthQueryDomains(
+static bool mthQueryDomains(
     int argc,
     char *const *argv) ;
 ----
@@ -927,33 +1417,27 @@ static void mthQueryDomains(
 [source,c]
 ----
 <<mth static functions>>=
-static void
+static bool
 mthQueryDomains(
     int argc,
     char *const *argv)
 {
-    mthResetContext() ;
-
     MTH_DomainHarness const *const *hiter = mthHarnesses.harnesses ;
     for (unsigned count = mthHarnesses.count ; count != 0 ; count--) {
         MTH_DomainHarness const *const harness = *hiter++ ;
         assert(harness->portal != NULL) ;
         assert(harness->portal->name != NULL) ;
 
-        if (mthFormatToContext(strfmtspace, harness->portal->name) == -1) {
-            mth_CmdResponse(mthErrorReturn, argv[0], truncateMsg) ;
-            return ;
-        }
+        mthAddWord(harness->portal->name) ;
     }
-    mthTrimBufContextRight() ;
-    mth_CmdResponse(mthOkReturn, argv[0], mthContextGetBuf()) ;
+    return true ;
 }
 ----
 
 [source,c]
 ----
 <<mth forward references>>=
-static void mthQueryClasses(
+static bool mthQueryClasses(
     int argc,
     char *const *argv) ;
 ----
@@ -961,53 +1445,46 @@ static void mthQueryClasses(
 [source,c]
 ----
 <<mth static functions>>=
-static void
+static bool
 mthQueryClasses(
     int argc,
     char *const *argv)
 {
     if (argc != 3) {
-        mth_CmdResponse(mthErrorReturn, argv[0],
+        mth_FormatToContext(
             "wrong # of arguments, %d: expected, \"query classes <domain>\"",
             argc) ;
-        return ;
+        return false ;
     }
 
     char *domainName = argv[2] ;
     MTH_DomainHarness const *const harness = mthFindHarness(domainName) ;
     if (harness == NULL) {
-        mth_CmdResponse(mthErrorReturn, argv[0],
-                "unknown domain, \"%s\"", domainName) ;
-        return ;
+        mth_FormatToContext("unknown domain, \"%s\"", domainName) ;
+        return false ;
     }
     MRT_DomainPortal const *portal = harness->portal ;
     assert(portal != NULL) ;
-
-    mthResetContext() ;
 
     unsigned classCount = mrt_PortalDomainClassCount(portal) ;
     for (MRT_ClassId id = 0 ; id < classCount ; id++) {
         char const *className = NULL ;
         int pcode = mrt_PortalClassName(portal, id, &className) ;
         if (pcode == 0) {
-            if (mthFormatToContext(strfmtspace, className) == -1) {
-                mth_CmdResponse(mthErrorReturn, argv[0], truncateMsg) ;
-                return ;
-            }
+            mthAddWord(className) ;
         } else {
-            mthPortalErrorResponse(pcode, argv[0]) ;
+            mth_PortalErrorResponse(pcode) ;
+            return false ;
         }
     }
-
-    mthTrimBufContextRight() ;
-    mth_CmdResponse(mthOkReturn, argv[0], mthContextGetBuf()) ;
+    return true ;
 }
 ----
 
 [source,c]
 ----
 <<mth forward references>>=
-static void mthQueryAttrs(
+static bool mthQueryAttrs(
     int argc,
     char *const *argv) ;
 ----
@@ -1015,33 +1492,30 @@ static void mthQueryAttrs(
 [source,c]
 ----
 <<mth static functions>>=
-static void
+static bool
 mthQueryAttrs(
     int argc,
     char *const *argv)
 {
     if (argc != 4) {
-        mth_CmdResponse(mthErrorReturn, argv[0],
+        mth_FormatToContext(
             "wrong # of arguments, %d: expected, "
             "\"query attributes <domain> <class>\"",
             argc) ;
-        return ;
+        return false ;
     }
 
     char *domainName = argv[2] ;
     MTH_DomainHarness const *const harness = mthFindHarness(domainName) ;
     if (harness == NULL) {
-        mth_CmdResponse(mthErrorReturn, argv[0],
-                "unknown domain, \"%s\"", domainName) ;
-        return ;
+        mth_FormatToContext("unknown domain, \"%s\"", domainName) ;
+        return false ;
     }
 
     char *className = argv[3] ;
     MTH_ClassMap const *const classMap = mthFindClass(harness, className) ;
     if (classMap == NULL) {
-        mth_CmdResponse(mthErrorReturn, argv[0],
-                "unknown class, \"%s\"", className) ;
-        return ;
+        return false ;
     }
     MRT_ClassId classId = classMap->id ;
 
@@ -1052,35 +1526,30 @@ mthQueryAttrs(
     int attrCount = mrt_PortalClassAttributeCount(portal, classId) ;
     assert(attrCount >= 0) ;
     if (attrCount < 0) {
-        mthPortalErrorResponse(attrCount, argv[0]) ;
-        return ;
+        mth_PortalErrorResponse(attrCount) ;
+        return false ;
     }
-
-    mthResetContext() ;
 
     for (MRT_AttrId attrId = 0 ; attrId < attrCount ; attrId++) {
         char const *attrName = NULL ;
         int pcode = mrt_PortalClassAttributeName(portal, classId, attrId,
                 &attrName) ;
         if (pcode == 0) {
-            if (mthFormatToContext(strfmtspace, attrName) == -1) {
-                mth_CmdResponse(mthErrorReturn, argv[0], truncateMsg) ;
-                return ;
-            }
+            mthAddWord(attrName) ;
         } else {
-            mthPortalErrorResponse(pcode, argv[0]) ;
+            mth_PortalErrorResponse(pcode) ;
+            return false ;
         }
     }
 
-    mthTrimBufContextRight() ;
-    mth_CmdResponse(mthOkReturn, argv[0], mthContextGetBuf()) ;
+    return true ;
 }
 ----
 
 [source,c]
 ----
 <<mth forward references>>=
-static void mthQueryInsts(
+static bool mthQueryInsts(
     int argc,
     char *const *argv) ;
 ----
@@ -1088,33 +1557,30 @@ static void mthQueryInsts(
 [source,c]
 ----
 <<mth static functions>>=
-static void
+static bool
 mthQueryInsts(
     int argc,
     char *const *argv)
 {
     if (argc != 4) {
-        mth_CmdResponse(mthErrorReturn, argv[0],
+        mth_FormatToContext(
             "wrong # of arguments, %d: expected, "
             "\"query instances <domain> <class>\"",
             argc) ;
-        return ;
+        return false ;
     }
 
     char *domainName = argv[2] ;
     MTH_DomainHarness const *const harness = mthFindHarness(domainName) ;
     if (harness == NULL) {
-        mth_CmdResponse(mthErrorReturn, argv[0],
-                "unknown domain, \"%s\"", domainName) ;
-        return ;
+        mth_FormatToContext("unknown domain, \"%s\"", domainName) ;
+        return false ;
     }
 
     char *className = argv[3] ;
     MTH_ClassMap const *const classMap = mthFindClass(harness, className) ;
     if (classMap == NULL) {
-        mth_CmdResponse(mthErrorReturn, argv[0],
-                "unknown class, \"%s\"", className) ;
-        return ;
+        return false ;
     }
     MRT_ClassId classId = classMap->id ;
 
@@ -1125,37 +1591,169 @@ mthQueryInsts(
     int instCount = mrt_PortalClassInstanceCount(portal, classId) ;
     assert(instCount >= 0) ;
     if (instCount < 0) {
-        mthPortalErrorResponse(instCount, argv[0]) ;
-        return ;
+        mth_PortalErrorResponse(instCount) ;
+        return false ;
     }
 
-    mthResetContext() ;
-    if (mthFormatToContext("total %d named ", instCount) == -1) {
-        mth_CmdResponse(mthErrorReturn, argv[0], truncateMsg) ;
-        return ;
-    }
+    mth_FormatToContext("total %d named ", instCount) ;
 
     mthPushContext() ;
     MTH_InstMap const *inst = classMap->insts ;
     for (unsigned namedCount = classMap->instCount ; namedCount != 0 ;
             namedCount--, inst++) {
-        if (mthAddWord(inst->name) == -1) {
-            mth_CmdResponse(mthErrorReturn, argv[0], truncateMsg) ;
-            return ;
-        }
+        mthAddWord(inst->name) ;
     }
     mthPopContext() ;
-    mthTrimBufContextRight() ;
 
-    mth_CmdResponse(mthOkReturn, argv[0], mthContextGetBuf()) ;
+    return true ;
 }
 ----
 
 [source,c]
 ----
-<<mth static data>>=
-static char const truncateMsg[] = "truncated" ;
-static char const strfmtspace[] = "%s " ;
+<<mth forward references>>=
+static bool mthQueryCurrentState(
+    int argc,
+    char *const *argv) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static bool
+mthQueryCurrentState(
+    int argc,
+    char *const *argv)
+{
+    if (argc != 5) {
+        mth_FormatToContext(
+            "wrong # of arguments, %d: expected, "
+            "\"query currentstate <domain> <class> <instance>\"",
+            argc) ;
+        return false ;
+    }
+
+    char *domainName = argv[2] ;
+    MTH_DomainHarness const *const harness = mthFindHarness(domainName) ;
+    if (harness == NULL) {
+        mth_FormatToContext("unknown domain, \"%s\"", domainName) ;
+        return false ;
+    }
+
+    char *className = argv[3] ;
+    MTH_ClassMap const *const class = mthFindClass(harness, className) ;
+    if (class == NULL) {
+        return false ;
+    }
+    MRT_ClassId classId = class->id ;
+
+    char *instName = argv[4] ;
+    int instId = mthFindInst(class, instName) ;
+    if (instId < 0) {
+        return false ;
+    }
+
+    MRT_DomainPortal const *portal = harness->portal ;
+    assert(portal != NULL) ;
+
+    int statecode = mrt_PortalInstanceCurrentState(portal, classId, instId) ;
+    if (statecode < 0) {
+        mth_PortalErrorResponse(statecode) ;
+        return false ;
+    }
+
+    char const *stateName ;
+    int pcode = mrt_PortalClassStateName(portal, classId, statecode, &stateName) ;
+    if (pcode < 0) {
+        mth_PortalErrorResponse(pcode) ;
+        return false ;
+    }
+
+    mthAddWord(stateName) ;
+    return true ;
+}
+----
+
+==== Signal Command
+
+[literal]
+--
+signal <domain> <class> <inst> <event> ?<arg1> <arg2> ...?
+--
+
+[source,c]
+----
+<<mth forward references>>=
+static bool mthSignalCommand(int, char *const *) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static bool
+mthSignalCommand(
+    int argc,
+    char *const *argv)
+{
+    if (argc < 5) {
+        mth_FormatToContext(
+            "wrong # of arguments, %d: expected, "
+            "\"signal <domain> <class> <inst> <event> ?<arg1> <arg2> ...?\"",
+            argc) ;
+        return false ;
+    }
+
+    char *domainName = argv[1] ;
+    MTH_DomainHarness const *const harness = mthFindHarness(domainName) ;
+    if (harness == NULL) {
+        mth_FormatToContext("unknown domain, \"%s\"", domainName) ;
+        return false ;
+    }
+
+    char *className = argv[2] ;
+    MTH_ClassMap const *const class = mthFindClass(harness, className) ;
+    if (class == NULL) {
+        return false ;
+    }
+    MRT_ClassId classId = class->id ;
+
+    char *instName = argv[3] ;
+    int instId = mthFindInst(class, instName) ;
+    if (instId < 0) {
+        return false ;
+    }
+
+    char *eventName = argv[4] ;
+    MTH_EventParamFunc *epfunc ;
+    int eventNumber = mthFindEvent(class, eventName, &epfunc) ;
+    if (eventNumber < 0) {
+        return false ;
+    }
+
+    MRT_DomainPortal const *portal = harness->portal ;
+    assert(portal != NULL) ;
+
+    int pcode ;
+    if (epfunc != NULL) {
+        MRT_EventParams params ;
+        bool pstatus = epfunc(argc - 5, argv + 5, params) ;
+        if (!pstatus) {
+            return false ;
+        }
+        pcode = mrt_PortalSignalEvent(portal, classId, instId, eventNumber,
+            params) ;
+    } else {
+        pcode = mrt_PortalSignalEvent(portal, classId, instId, eventNumber,
+            NULL) ;
+    }
+
+    if (pcode < 0) {
+        mth_PortalErrorResponse(pcode) ;
+        return false ;
+    }
+
+    return true ;
+}
 ----
 
 ==== Trace Command
@@ -1163,127 +1761,47 @@ static char const strfmtspace[] = "%s " ;
 [source,c]
 ----
 <<mth forward references>>=
-static void mthTraceCommand(int, char *const *) ;
+static bool mthTraceCommand(int, char *const *) ;
 ----
 
 [source,c]
 ----
 <<mth static functions>>=
-static void
+static bool
 mthTraceCommand(
     int argc,
     char *const *argv)
 {
+    bool status = true ;
+
     if (argc == 1) {
         MRT_TraceHandler handler = mrt_RegisterTraceHandler(NULL) ;
         mrt_RegisterTraceHandler(handler) ;
-        mth_CmdResponse(mthOkReturn, argv[0], handler == NULL ? "off" : "on") ;
+        mthAddWord(handler == NULL ? "off" : "on") ;
     } else if (argc == 2) {
         if (strcmp(argv[1], "on") == 0) {
             mrt_RegisterTraceHandler(mthTraceResponse) ;
-            mth_CmdResponse(mthOkReturn, argv[0], "on") ;
+            mthAddWord("on") ;
         } else if (strcmp(argv[1], "off") == 0) {
             mrt_RegisterTraceHandler(NULL) ;
-            mth_CmdResponse(mthOkReturn, argv[0], "off") ;
+            mthAddWord("off") ;
         } else {
-            mth_CmdResponse(mthErrorReturn, argv[0],
+            mth_FormatToContext(
                     "unknown trace option, \"%s\": expected, \"on | off\"",
                     argv[1]) ;
+            status = false ;
         }
     } else {
-        mth_CmdResponse(mthErrorReturn, argv[0],
+        mth_FormatToContext(
             "wrong # of arguments, %d: expected, \"trace ?on | off?\"", argc) ;
-        return ;
+        status = false ;
     }
+
+    return status ;
 }
 ----
 
 === Common Functions
-
-[source,c]
-----
-<<mth interface simple types>>=
-typedef enum mthreturntype {
-    mthOkReturn,
-    mthErrorReturn
-} MTH_ReturnType ;
-----
-
-[source,c]
-----
-<<mth implementation includes>>=
-#include <stdarg.h>
-----
-
-[source,c]
-----
-<<mth external function declarations>>=
-extern void
-mth_CmdResponse(
-    MTH_ReturnType returnCode,
-    char const *cmdName,
-    char const *resultFmt,
-    ...) ;
-----
-
-[source,c]
-----
-<<mth external function definitions>>=
-void
-mth_CmdResponse(
-    MTH_ReturnType returnCode,
-    char const *cmdName,
-    char const *resultFmt,
-    ...)
-{
-    va_list resultArgs ;
-    va_start(resultArgs, resultFmt) ;
-
-    static char resultBuf[BUFSIZ] ;
-    int n = vsnprintf(resultBuf, sizeof(resultBuf), resultFmt, resultArgs) ;
-
-    va_end(resultArgs) ;
-
-    if (n < 0) {
-        strcpy(resultBuf, "error formating response") ;
-    } else if (n >= sizeof(resultBuf)) {
-        strcpy(resultBuf, "response truncated") ;
-    }
-
-    static char preamble[] = "cmd {" ;
-    static char postamble[] = "}\n" ;
-    static char nameKey[] = "name" ; // N.B. no leading blank, it's first.
-    static char returnKey[] = " return" ;
-    static char resultKey[] = " result" ;
-    static char unQuotedFmt[] = " %s" ;
-    static char quotedFmt[] = " {%s}" ;
-
-    char fmt[sizeof(preamble) +
-            sizeof(postamble) +
-            sizeof(nameKey) +
-            sizeof(returnKey) +
-            sizeof(mthErrorReturn) +
-            sizeof(resultKey) +
-            3 * sizeof(quotedFmt) +
-            1] ; // +1 for NUL terminator
-    strcpy(fmt, preamble) ;
-
-    strcat(fmt, nameKey) ;
-    strcat(fmt, mth_QuoteWord(cmdName) ? quotedFmt : unQuotedFmt) ;
-
-    static char const mthOkValue[] = " ok" ;
-    static char const mthErrorValue[] = " error" ;
-    strcat(fmt, returnKey) ;
-    strcat(fmt, returnCode == mthOkReturn ? mthOkValue : mthErrorValue) ;
-
-    strcat(fmt, resultKey) ;
-    strcat(fmt, mth_QuoteWord(resultBuf) ? quotedFmt : unQuotedFmt) ;
-
-    strcat(fmt, postamble) ;
-
-    fprintf(mthCmdStream, fmt, cmdName, resultBuf) ;
-}
-----
 
 [source,c]
 ----
@@ -1427,6 +1945,12 @@ mthTraceResponse(
 
 [source,c]
 ----
+<<mth implementation includes>>=
+#include <stdarg.h>
+----
+
+[source,c]
+----
 <<mth external function declarations>>=
 extern void
 mth_InstrResponse(
@@ -1444,6 +1968,10 @@ mth_InstrResponse(
     char const *resultFmt,
     ...)
 {
+    if (!instrOn) {
+        return ;
+    }
+
     va_list resultArgs ;
     va_start(resultArgs, resultFmt) ;
 
@@ -1453,9 +1981,9 @@ mth_InstrResponse(
     va_end(resultArgs) ;
 
     if (n < 0) {
-        strcpy(resultBuf, "error formating response") ;
+        strncpy(resultBuf, "error formating response", sizeof(resultBuf)) ;
     } else if (n >= sizeof(resultBuf)) {
-        strcpy(resultBuf, "response truncated") ;
+        strncpy(resultBuf, "response truncated", sizeof(resultBuf)) ;
     }
 
     static char preamble[] = "instr {" ;
@@ -1468,8 +1996,8 @@ mth_InstrResponse(
             2 * sizeof(quotedFmt) +
             1] ; // +1 for NUL terminator
     strcpy(fmt, preamble) ;
-    strcat(fmt, mth_QuoteWord(resultKey) ? "{%s}" : "%s") ;
-    strcat(fmt, mth_QuoteWord(resultBuf) ? quotedFmt : unQuotedFmt) ;
+    strcat(fmt, mthQuoteWord(resultKey) ? "{%s}" : "%s") ;
+    strcat(fmt, mthQuoteWord(resultBuf) ? quotedFmt : unQuotedFmt) ;
     strcat(fmt, postamble) ;
 
     fprintf(mthCmdStream, fmt, resultKey, resultBuf) ;
@@ -1478,20 +2006,18 @@ mth_InstrResponse(
 
 [source,c]
 ----
-<<mth forward references>>=
-static void
-mthPortalErrorResponse(
-    int portalCode,
-    char *cmdName) ;
+<<mth external function declarations>>=
+extern void
+mth_PortalErrorResponse(
+    int portalCode) ;
 ----
 
 [source,c]
 ----
-<<mth static functions>>=
-static void
-mthPortalErrorResponse(
-    int portalCode,
-    char *cmdName)
+<<mth external function definitions>>=
+void
+mth_PortalErrorResponse(
+    int portalCode)
 {
     static char const *const portalErrNames[] = {
         "no error",             // place holder for 0
@@ -1512,7 +2038,8 @@ mthPortalErrorResponse(
     char const *const errMsg = portalCode < COUNTOF(portalErrNames) ?
             portalErrNames[portalCode] : "unknown portal error" ;
 
-    mth_CmdResponse(mthErrorReturn, cmdName, errMsg) ;
+    mthInitBufContext() ;
+    mthAddWord(errMsg) ;
 }
 ----
 
@@ -1566,27 +2093,56 @@ mthTimestamp(void)
 
 [source,c]
 ----
-<<mth external function declarations>>=
-extern bool mth_QuoteWord(char const *) ;
+<<mth forward references>>=
+static bool mthQuoteWord(char const *) ;
 ----
 
 [source,c]
 ----
-<<mth external function definitions>>=
-bool
-mth_QuoteWord(
+<<mth static functions>>=
+static bool
+mthQuoteWord(
     char const *pWord)
 {
     assert(pWord != NULL) ;
-    int wlen = strlen(pWord) ;
-
-    for (char c = *pWord++ ; c != ASCII_NUL ; c = *pWord++) {
-        if (isspace(c) || c == '\\' || c == '\"') {
-            return true ;
-        }
+    if (strlen(pWord) == 0) {
+        return true ; // must quote the empty string
     }
 
-    return wlen == 0 ? true : false ;
+    enum {
+        OutOfQuote,
+        InQuote
+    } quoteState = OutOfQuote ;
+    int quoteCount = 0 ;
+
+    for (char c = *pWord++ ; c != ASCII_NUL ; c = *pWord++) {
+        if (c == '\\') {
+            pWord++ ;
+            continue ;
+        }
+        switch (quoteState) {
+        case OutOfQuote:
+            if (isspace(c)) {
+                return true ;
+            } else if (c == '{') {
+                quoteCount++ ;
+                quoteState = InQuote ;
+            }
+            break; 
+
+        case InQuote:
+            if (c == '{') {
+                quoteCount++ ;
+            } else if (c == '}') {
+                assert(quoteCount > 0) ;
+                if (--quoteCount == 0) {
+                    quoteState = OutOfQuote ;
+                }
+            }
+            break; 
+        }
+    }
+    return quoteCount == 0 ? false : true ;
 }
 ----
 
@@ -1617,17 +2173,34 @@ static MTH_BufContext *contextTOS ;
 ----
 <<mth forward references>>=
 static void
-mthResetContext(void) ;
+mthBeginResponse(void) ;
 ----
 
 [source,c]
 ----
 <<mth static functions>>=
 static void
-mthResetContext(void)
+mthBeginResponse(void)
 {
     contextTOS = contextStack ;
     mthInitBufContext() ;
+}
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static inline void
+mthEndResponse(void) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static inline void
+mthEndResponse(void)
+{
+    fprintf(mthCmdStream, "%s\n", contextTOS->buf) ;
 }
 ----
 
@@ -1702,18 +2275,18 @@ mthInitBufContext(void)
 
 [source,c]
 ----
-<<mth forward references>>=
-static int
-mthFormatToContext(
+<<mth external function declarations>>=
+extern int
+mth_FormatToContext(
     char const *format,
     ...) ;
 ----
 
 [source,c]
 ----
-<<mth static functions>>=
-static int
-mthFormatToContext(
+<<mth external function definitions>>=
+int
+mth_FormatToContext(
     char const *format,
     ...)
 {
@@ -1750,7 +2323,7 @@ mthAddWord(
     char const *word)
 {
     int nbytes = snprintf(contextTOS->location, contextTOS->remaining,
-            mth_QuoteWord(word) ? "{%s} " : "%s ", word) ;
+            mthQuoteWord(word) ? "{%s} " : "%s ", word) ;
 
     if (nbytes < 0 || nbytes >= contextTOS->remaining) {
         return -1 ;
@@ -1932,6 +2505,10 @@ set harnessTemplate [textutil::adjust::undent {
      */
     [eventMapDefinitions]
     /*
+     * Domain State Map
+     */
+    [stateMapDefinitions]
+    /*
      * Domain Classes Map
      */
     [classMapDefinition]
@@ -1959,8 +2536,8 @@ proc domainInclude {} {
 <<harness commands>>=
 proc staticData {} {
     append result\
-        "static char emptyString\[\] = \"\" ;\n"\
         "static char wrongNumArgsMsg\[\] = \"wrong # arguments, %d\" ;\n"\
+        "static char wrongNumParamsMsg\[\] = \"wrong # event parameters, %d\" ;\n"\
         "static char badParamMsg\[\] = \"bad parameter, \\\"%s\\\"\" ;\n"\
         "static char badTypeMsg\[\] = \"bad type, \\\"%s\\\"\" ;\n"
 }
@@ -1981,7 +2558,7 @@ proc opFuncDefinitions {} {
     forAllRefs opRef $opRefs {
         assignAttribute $opRef {Name opName} {ReturnDataType retType}
         append result\
-            "static void ${opName}__OPFUNC(\n"\
+            "static bool ${opName}__OPFUNC(\n"\
             "    int argc,\n"\
             "    char *const *argv)\n"\
             "\{\n"\
@@ -1990,9 +2567,8 @@ proc opFuncDefinitions {} {
         set nparams [expr {[relation cardinality $paramRefs] + 1}]
         append result\
             "    if (argc != $nparams) \{\n"\
-            "        mth_CmdResponse(mthErrorReturn, argv\[0],\
-                        wrongNumArgsMsg, argc) ;\n"\
-            "        return ;\n"\
+            "        mth_FormatToContext(wrongNumArgsMsg, argc) ;\n"\
+            "        return false ;\n"\
             "    \}\n"
 
         set argIndex 1
@@ -2006,9 +2582,8 @@ proc opFuncDefinitions {} {
                 log::error $fmtresult
                 append result\
                     "    // cannot input type, \"$type\"\n"\
-                    "    mth_CmdResponse(mthErrorReturn, argv\[0],\
-                                badTypeMsg, \"$type\") ;\n"\
-                    "    return ;\n"\
+                    "    mth_FormatToContext(badTypeMsg, \"$type\") ;\n"\
+                    "    return false ;\n"\
                     "\}\n"
                 break
             }
@@ -2016,9 +2591,8 @@ proc opFuncDefinitions {} {
                 append result\
                     "    if (sscanf(argv\[$argIndex\], \"%\" $scnfmt, "\
                     "&$paramName) != 1) \{\n"\
-                    "        mth_CmdResponse(mthErrorReturn, argv\[0],\
-                                badParamMsg, argv\[$argIndex]) ;\n"\
-                    "        return ;\n"\
+                    "        mth_FormatToContext(badParamMsg, argv\[$argIndex]) ;\n"\
+                    "        return false ;\n"\
                     "    \}\n"
             } else {
                 append result "    $paramName = argv\[$argIndex\] ;\n"
@@ -2038,9 +2612,8 @@ proc opFuncDefinitions {} {
             log::error $fmtresult
             append result\
                 "    // cannot output type, \"$retType\"\n"\
-                "    mth_CmdResponse(mthErrorReturn, argv\[0],\
-                            badTypeMsg, \"$retType\") ;\n"\
-                "    return ;\n"\
+                "    mth_FormatToContext(badTypeMsg, \"$retType\") ;\n"\
+                "    return false ;\n"\
                 "\}\n"
             continue
         }
@@ -2050,15 +2623,14 @@ proc opFuncDefinitions {} {
             append result\
                 "    [typeCheck composeDeclaration $retType result__OP] = "\
                 $invocation\
-                "    mth_CmdResponse(mthOkReturn, argv\[0], \"%\" $prifmt,\
-                        result__OP) ;\n"
+                "    mth_FormatToContext(\"%\" $prifmt,\ result__OP) ;\n"
         } else {
             append result\
-                "    $invocation"\
-                "    mth_CmdResponse(mthOkReturn, argv\[0], emptyString) ;\n"
+                "    $invocation"
         }
-
-        append result "\}\n"\
+        append result\
+            "    return true ;\n"\
+            "\}\n"
     }
 
     return $result
@@ -2115,13 +2687,11 @@ proc attrReadFuncDefinitions {} {
         assignAttribute $attrRef {Class className} {Name attrName}\
             {DataType type} {Dimension dim}
         append result\
-            "static int ${className}_${attrName}__RD(\n"\
+            "static bool ${className}_${attrName}__RD(\n"\
             "    MRT_DomainPortal const *portal,\n"\
             "    MRT_ClassId classId,\n"\
             "    MRT_InstId instId,\n"\
-            "    MRT_AttrId attrId,\n"\
-            "    char *buf,\n"\
-            "    size_t bufsize)\n"\
+            "    MRT_AttrId attrId)\n"\
             "\{\n"
 
         try {
@@ -2129,8 +2699,9 @@ proc attrReadFuncDefinitions {} {
         } on error {fmtresult} {
             log::error $fmtresult
             append result\
-                "    // cannot output type, \"$type\"\n"\
-                "    return 0 ;\n"\
+                "    mth_FormatToContext([format\
+                        {"cannot format type, \"%s\""} $type]) ;\n"\
+                "    return false ;\n"\
                 "\}\n"
             continue
         }
@@ -2148,49 +2719,29 @@ proc attrReadFuncDefinitions {} {
             "    int pcode = mrt_PortalReadAttr(portal, classId, instId,\
                     attrId, $vardeclptr, sizeof(attrValue)) ;\n"\
             "    if (pcode < 0) \{\n"\
-            "        return pcode ;\n"\
+            "        mth_PortalErrorResponse(pcode) ;\n"\
+            "        return false ;\n"\
             "    \}\n"
 
         if {$type eq "char" && $dim > 0} {
             # just an ordinary string
-            # Figure out if it needs to be quoted
-            set last [expr {$dim - 1}]
             append result\
-                "    bool doquote = mth_QuoteWord(attrValue) ;\n"\
-                "    return snprintf(buf, bufsize,\
-                    doquote ? \"\{%s\}\" : \"%s\", attrValue) ;\n"
+                "    mth_FormatToContext(\"%s\", attrValue) ;\n"\
+                "    return true ;\n"
         } else {
             if {$dim == 0} {
                 # ordinary scalar value
                 append result\
-                    "    return snprintf(buf, bufsize,\
-                            \"%\" $prifmt, attrValue) ;\n"
+                    "    mth_FormatToContext(\"%\" $prifmt, attrValue) ;\n"\
+                    "    return true ;\n"
             } else {
                 # attribute is an array
                 append result\
-                    "    int outbytes = 0 ;\n"\
-                    "    size_t remain = bufsize ;\n"\
-                    "    int nbytes = snprintf(buf, remain, \"\{\") ;\n"\
-                    "    if (nbytes < 0 || nbytes >= remain) \{\n"\
-                    "        return bufsize ;\n"\
-                    "    \} else \{\n"\
-                    "        remain -= nbytes ;\n"\
-                    "        buf += nbytes ;\n"\
-                    "        outbytes += nbytes ;\n"\
-                    "    \}\n"\
                     "    for (int index = 0 ; index < $dim ; index++) \{\n"\
-                    "        nbytes = snprintf(buf, remain,\
+                    "        mth_FormatToContext(\
                         \"%\" $prifmt \" \", attrValue\[index\]) ;\n"\
-                    "        if (nbytes < 0 || nbytes >= remain) \{\n"\
-                    "            return bufsize ;\n"\
-                    "        \} else \{\n"\
-                    "            remain -= nbytes ;\n"\
-                    "            buf += nbytes ;\n"\
-                    "            outbytes += nbytes ;\n"\
-                    "        \}\n"\
                     "    \}\n"\
-                    "    *(buf - 1) = \'\}\' ;\n"\
-                    "    return outbytes ;\n"\
+                    "    return true ;\n"
             }
         }
         append result "\}\n"
@@ -2218,7 +2769,7 @@ proc attrUpdateFuncDefinitions {} {
 
         set vardecl [typeCheck composeDeclaration $type attrValue]
         append result\
-            "static int ${className}_${attrName}__UP(\n"\
+            "static bool ${className}_${attrName}__UP(\n"\
             "    MRT_DomainPortal const *portal,\n"\
             "    MRT_ClassId classId,\n"\
             "    MRT_InstId instId,\n"\
@@ -2226,45 +2777,63 @@ proc attrUpdateFuncDefinitions {} {
             "    char const *value)\n"\
             "\{\n"
 
+        try {
+            set scnfmt [GetFormat $type Scan]
+        } on error {fmtresult} {
+            log::error $fmtresult
+            append result\
+                "    mth_FormatToContext([format\
+                        {"cannot scan type, \"%s\""} $type]) ;\n"\
+                "    return false ;\n"\
+                "\}\n"
+            continue
+        }
+
         if {$type eq "char" && $dim > 0} {
             # attribute is an ordinary string
             append result\
-                "    return mrt_PortalUpdateAttr(portal, classId, instId,\
-                        attrId, value, strlen(value) + 1) ;\n"
+                "    int pcode = mrt_PortalUpdateAttr(portal, classId, instId,\
+                        attrId, value, strlen(value) + 1) ;\n"\
+                "    if (pcode < 0) \{\n"\
+                "        mth_PortalErrorResponse(pcode) ;\n"\
+                "        return false ;\n"\
+                "    \}\n"\
+                "    return true ;\n"
         } else {
             set vardecl [typeCheck composeDeclaration $type convertedValue]
-            try {
-                set scnfmt [GetFormat $type Scan]
-            } on error {fmtresult} {
-                log::error $fmtresult
-                append result\
-                    "    // cannot input type, \"$type\"\n"\
-                    "    return 0 ;\n"\
-                    "\}\n"
-                continue
-            }
             if {$dim == 0} {
+                set expected 1
+                set convertedRef &convertedValue
                 append result\
                     "    $vardecl ;\n"\
                     "    int nitems = sscanf(value, \"%\" $scnfmt,\
-                        &convertedValue) ;\n"\
-                    "    return nitems == 1 ?\n"\
-                    "        mrt_PortalUpdateAttr(portal, classId, instId,\
-                        attrId, &convertedValue, sizeof(convertedValue)) :\
-                        0 ;\n"
+                            &convertedValue) ;\n"
             } else {
+                set expected $dim
+                set convertedRef convertedValue
                 set format "\" \" [string repeat "\"%\" $scnfmt \" \" " $dim]"
                 for {set index 0} {$index < $dim} {incr index} {
                     append valuerefs ", &convertedValue\[$index\]"
                 }
                 append result\
                     "    $vardecl\[$dim\] ;\n"\
-                    "    int nitems = sscanf(value, $format $valuerefs) ;\n"\
-                    "    return nitems == $dim ?\n"\
-                    "        mrt_PortalUpdateAttr(portal, classId, instId,\
-                        attrId, convertedValue, sizeof(convertedValue)) :\
-                        0 ;\n"
+                    "    int nitems = sscanf(value, $format $valuerefs) ;\n"
             }
+            append result\
+                "    if (nitems == $expected) \{\n"\
+                "        int pcode = mrt_PortalUpdateAttr(portal, classId,\
+                            instId, attrId, $convertedRef,\
+                            sizeof(convertedValue)) ;\n"\
+                "        if (pcode < 0) \{\n"\
+                "            mth_PortalErrorResponse(pcode) ;\n"\
+                "            return false ;\n"\
+                "        \}\n"\
+                "    \} else \{\n"\
+                "        mth_FormatToContext(\"failed to convert,\
+                            \\\"%s\\\"  as \\\"%s\\\"\", value, $scnfmt) ;\n"\
+                "        return false ;\n"\
+                "    \}\n"\
+                "    return true ;\n"
         }
         append result "\}\n"\
     }
@@ -2343,10 +2912,11 @@ proc eventParamFuncDefinitions {} {
                 "static bool\n"\
                 "${className}_${eventName}__EPFUNC(\n"\
                 "    int paramc,\n"\
-                "    char const **paramv,\n"\
+                "    char * const *paramv,\n"\
                 "    MRT_EventParams parambuf)\n"\
                 "\{\n"\
                 "    if (paramc != $nParams) \{\n"\
+                "        mth_FormatToContext(wrongNumParamsMsg, paramc) ;\n"\
                 "        return false ;\n"\
                 "    \}\n"
 
@@ -2364,7 +2934,8 @@ proc eventParamFuncDefinitions {} {
                 } on error {fmtresult} {
                     log::error $fmtresult
                     append result\
-                        "    // cannot input type, \"$type\"\n"\
+                        "    mth_FormatToContext([format {"cannot input\
+                                type, \"%s\""} $type]) ;\n"\
                         "    return false ;\n"\
                         "\}\n"
                     set typeError true
@@ -2390,8 +2961,6 @@ proc eventParamFuncDefinitions {} {
     return $result
 }
 ----
-
-typedef bool MTH_EventParamFunc(int, char const **, MRT_EventParams) ;
 
 [source,tcl]
 ----
@@ -2421,6 +2990,39 @@ proc eventMapDefinitions {} {
                 "        .name = \"$eventName\",\n"\
                 "        .number = $eventNumber,\n"\
                 "        .paramFunc = $funcName\n"\
+                "    \},\n"
+        }
+        append result "\} ;\n"
+    }
+    return $result
+}
+----
+
+[source,tcl]
+----
+<<harness commands>>=
+proc stateMapDefinitions {} {
+    variable domain
+
+    set stateRefs [pipe {
+        Domain findWhere {$Name eq $domain} |
+        findRelated % ~R1 {~R2 Class} ~R51 R50 ~R55 R57 |
+        deRef % |
+        relation group % States Name Number
+    } {} |%]
+
+    set result {}
+    relation foreach stateRef $stateRefs {
+        relation assign $stateRef {Model className} States
+        set nStates [relation cardinality $States]
+        append result "static MTH_StateMap const\
+                ${className}__STATEMAP\[$nStates\] = \{\n"
+        relation foreach state $States -ascending Name {
+            relation assign $state {Name stateName} {Number stateNumber}
+            append result\
+                "    \{\n"\
+                "        .name = \"$stateName\",\n"\
+                "        .number = $stateNumber,\n"\
                 "    \},\n"
         }
         append result "\} ;\n"
@@ -2499,6 +3101,10 @@ proc classMapDefinition {} {
             set eventMap [expr {[isNotEmptyRef $eventRefs] ?\
                 "${className}__EVENTMAP" : "NULL"}]
 
+            set stateRefs [findRelated $classRef ~R51 R50 ~R55 R57]
+            set stateMap [expr {[isNotEmptyRef $stateRefs] ?\
+                "${className}__STATEMAP" : "NULL"}]
+
             append result\
                 "    \{\n"\
                 "        .name = \"$className\",\n"\
@@ -2509,6 +3115,8 @@ proc classMapDefinition {} {
                 "        .instCount = [refMultiplicity $instRefs],\n"\
                 "        .events = $eventMap,\n"\
                 "        .eventCount = [refMultiplicity $eventRefs],\n"\
+                "        .states = $stateMap,\n"\
+                "        .stateCount = [refMultiplicity $stateRefs],\n"\
                 "    \},\n"
         }
 
@@ -2633,7 +3241,7 @@ relvar set FormatMap [relation table {
     {long int}                  {"ld"}               {"li"}             } {
     {unsigned long}             {"lu"}               {"li"}             } {
     {unsigned long int}         {"lu"}               {"li"}             } {
-    size_t                      {"lu"}               {"li"}             } {
+    size_t                      {"z"}                {"z"}              } {
     {long long}                 {"lld"}              {"lli"}            } {
     {long long int}             {"lld"}              {"lli"}            } {
     {unsigned long long}        {"llu"}              {"lli"}            } {
@@ -2665,7 +3273,7 @@ relvar set FormatMap [relation table {
     MRT_AssignerId              {"hu"}               {"hi"}             } {
     MRT_InstId                  {"hu"}               {"hi"}             } {
     MRT_AttrId                  {"hu"}               {"hi"}             } {
-    MRT_AttrSize                {"lu"}               {"li"}             } {
+    MRT_AttrSize                {"z"}                {"z"}              } {
     MRT_AttrOffset              {"lu"}               {"li"}             } {
     MRT_DelayTime               PRIu32               SCNi32             } {
     MRT_EventCode               PRIu8                SCNi8              } {
@@ -2781,10 +3389,10 @@ Place holder.
 #define END_QUOTE       '}'
 #define ESCAPE_CHAR     '\\'
 
-#define OutOfWord   0
-#define InWord      1
-#define InEscape    2
-#define InQuote     3
+#define OUTOFWORD   0
+#define INWORD      1
+#define INESCAPE    2
+#define INQUOTE     3
 
 /*
  * Constants
