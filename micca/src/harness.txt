@@ -220,6 +220,54 @@ typedef bool MTH_AttrUpdateFunc(MRT_DomainPortal const *, MRT_ClassId,
 
 [source,c]
 ----
+<<mth forward references>>=
+static MTH_AttrMap const *const
+mthFindAttr(
+    MTH_ClassMap const *const class,
+    char const *attrName) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static MTH_AttrMap const *const
+mthFindAttr(
+    MTH_ClassMap const *const class,
+    char const *attrName)
+{
+    MTH_AttrMap key = {
+        .name = attrName
+    } ;
+
+    return (MTH_AttrMap const *const)
+            bsearch(&key, class->attrs, class->attrCount,
+            sizeof(key), mthAttrMapCompare) ;
+}
+----
+
+[source,c]
+----
+<<mth forward references>>=
+static int mthAttrMapCompare(void const*, void const*) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static int
+mthAttrMapCompare(
+    void const *m1,
+    void const *m2)
+{
+    MTH_AttrMap const *cm1 = m1 ;
+    MTH_AttrMap const *cm2 = m2 ;
+
+    return strcmp(cm1->name, cm2->name) ;
+}
+----
+
+[source,c]
+----
 <<mth interface aggregate types>>=
 typedef struct mthinstmap {
     char const *name ;
@@ -332,7 +380,7 @@ mthFindEvent(
     // First scan to see if we got a number.
     MTH_EventMap const *eventMap = NULL ;
     char *end ;
-    MRT_EventCode eventNumber = strtoul(eventName, &end, 0) ;
+    int eventNumber = strtoul(eventName, &end, 0) ;
     if (*end == ASCII_NUL) {
         // search for the event number in the map
         MTH_EventMap const *mapIter = class->events ;
@@ -418,7 +466,7 @@ mthFindState(
     // First scan to see if we got a number.
     MTH_StateMap const *stateMap = NULL ;
     char *end ;
-    MRT_StateCode stateNumber = strtoul(stateName, &end, 0) ;
+    int stateNumber = strtoul(stateName, &end, 0) ;
     if (*end == ASCII_NUL) {
         // search for the state number in the map
         MTH_StateMap const *mapIter = class->states ;
@@ -486,7 +534,7 @@ has been invoked.
 [source,c]
 ----
 <<mth external function declarations>>=
-extern int mth_Initialize(void) ;
+extern bool mth_Initialize(void) ;
 ----
 
 [source,c]
@@ -508,13 +556,13 @@ extern int mth_Initialize(void) ;
 [source,c]
 ----
 <<mth external function definitions>>=
-int
+bool
 mth_Initialize(void)
 {
     mthServiceSock = socket(AF_INET, SOCK_STREAM, 0) ;
     if (mthServiceSock == -1) {
         perror("unable to obtain AF_INET stream socket") ;
-        return -1 ;
+        return false ;
     }
 
     struct sockaddr_in hsrvAddr ;
@@ -529,7 +577,7 @@ mth_Initialize(void)
     struct hostent *hostAddr = gethostbyname(host) ;
     if (hostAddr == NULL) {
         perror(host) ;
-        return -1 ;
+        return false ;
     }
     assert(hostAddr->h_addrtype == AF_INET) ;
     memcpy(&hsrvAddr.sin_addr, hostAddr->h_addr_list[0], hostAddr->h_length) ;
@@ -538,23 +586,23 @@ mth_Initialize(void)
             sizeof(hsrvAddr)) ;
     if (err == -1) {
         perror("bind()") ;
-        return -1 ;
+        return false ;
     }
 
     err = listen(mthServiceSock, 1) ;
     if (err == -1) {
         perror("listen()") ;
-        return -1 ;
+        return false ;
     }
 
     mrt_RegisterFDService(mthServiceSock, mthAcceptConnection, NULL, NULL) ;
-    mrt_RegisterSignal(SIGQUIT, mthExit) ;
-    mrt_RegisterSignal(SIGINT, mthExit) ;
-    mrt_RegisterSignal(SIGTERM, mthExit) ;
+    mrt_RegisterSignal(SIGQUIT, mthExitOnSignal) ;
+    mrt_RegisterSignal(SIGINT, mthExitOnSignal) ;
+    mrt_RegisterSignal(SIGTERM, mthExitOnSignal) ;
 
     mrt_RegisterTraceHandler(NULL) ; // start with tracing off
 
-    return mthServiceSock ;
+    return true ;
 }
 ----
 
@@ -576,19 +624,30 @@ int mthServiceSock = -1 ;
 ----
 <<mth static functions>>=
 static void
-mthExit(
-    int signal)
+mthClose(void)
 {
-    dbgprintf("caught signal %d\n", signal) ;
     if (mthServiceSock != -1) {
         shutdown(mthServiceSock, SHUT_RDWR) ;
     }
     if (mthCmdStream != NULL) {
         fclose(mthCmdStream) ;
     }
+}
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static void
+mthExitOnSignal(
+    int signal)
+{
+    dbgprintf("caught signal %d\n", signal) ;
+    mthClose() ;
     exit(EXIT_SUCCESS) ;
 }
 ----
+
 [source,c]
 ----
 <<mth static functions>>=
@@ -629,6 +688,75 @@ mthAcceptConnection(
 FILE *mthCmdStream ;
 ----
 
+==== Running the Harness
+
+[source,c]
+----
+<<mth external function declarations>>=
+extern void mth_Run(void) ;
+----
+
+[source,c]
+----
+<<mth implementation includes>>=
+#include <setjmp.h>
+----
+
+[source,c]
+----
+<<mth static data>>=
+static jmp_buf mthFatalBuf ;
+static enum {
+    mthHalted,
+    mthRunning,
+    mthTerminate,
+} mthHarnessState = mthRunning ;
+----
+
+[source,c]
+----
+<<mth external function definitions>>=
+void
+mth_Run(void)
+{
+    mrt_SetFatalErrorHandler(mthErrorHandler) ;
+
+    while (mthHarnessState != mthTerminate) {
+        if (setjmp(mthFatalBuf) == 0) {
+            mrt_EventLoop() ;
+        }
+
+        while (mthHarnessState == mthHalted) {
+            mthReadAndEvalCommand(0) ;
+        }
+    }
+    mthClose() ;
+}
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static void mthErrorHandler(
+    MRT_ErrorCode errNum,
+    char const *fmt,
+    va_list alist)
+{
+    static char buf[BUFSIZ] ;
+
+    vsnprintf(buf, sizeof(buf), fmt, alist) ;
+    // trim off any whitespace
+    for (char *end = buf + strlen(buf) - 1 ;
+            end > buf && isspace(*end) ; end--) {
+        *end = ASCII_NUL ;
+    }
+    fprintf(mthCmdStream, "fatal {%s}\n" , buf) ;
+
+    mthHarnessState = mthHalted ;
+    longjmp(mthFatalBuf, 1) ;
+}
+----
+
 ==== Command Execution
 
 [source,c]
@@ -653,6 +781,10 @@ mthReadAndEvalCommand(
             fclose(mthCmdStream) ;
             exit(EXIT_SUCCESS) ;
         } else if (ferror(mthCmdStream)) {
+            if (errno == EINTR) {
+                clearerr(mthCmdStream) ;
+                return ;
+            }
             perror("fgets()") ;
             fclose(mthCmdStream) ;
             exit(EXIT_FAILURE) ;
@@ -869,38 +1001,58 @@ typedef bool MTH_CommandFunc(int, char * const*) ;
 ----
 <<mth static data>>=
 static MTH_CommandMap const commands[] = { // must be in ascending "name" order
-{
-    .name = "delaysignal",
-    .commandFunc = mthDelaySignalCommand
-},
-{
-    .name = "delete",
-    .commandFunc = mthDeleteCommand
-},
-{
-    .name = "dop",
-    .commandFunc = mthDopCommand
-},
-{
-    .name = "instr",
-    .commandFunc = mthInstrCommand
-},
-{
-    .name = "null",
-    .commandFunc = mthNullCommand
-},
-{
-    .name = "query",
-    .commandFunc = mthQueryCommand
-},
-{
-    .name = "signal",
-    .commandFunc = mthSignalCommand
-},
-{
-    .name = "trace",
-    .commandFunc = mthTraceCommand
-},
+    {
+        .name = "cancel",
+        .commandFunc = mthCancelCommand
+    },
+    {
+        .name = "delaysignal",
+        .commandFunc = mthDelaySignalCommand
+    },
+    {
+        .name = "delete",
+        .commandFunc = mthDeleteCommand
+    },
+    {
+        .name = "domainop",
+        .commandFunc = mthDopCommand
+    },
+    {
+        .name = "eloop",
+        .commandFunc = mthEloopCommand
+    },
+    {
+        .name = "instr",
+        .commandFunc = mthInstrCommand
+    },
+    {
+        .name = "null",
+        .commandFunc = mthNullCommand
+    },
+    {
+        .name = "query",
+        .commandFunc = mthQueryCommand
+    },
+    {
+        .name = "read",
+        .commandFunc = mthReadCommand
+    },
+    {
+        .name = "remaining",
+        .commandFunc = mthRemainingCommand
+    },
+    {
+        .name = "signal",
+        .commandFunc = mthSignalCommand
+    },
+    {
+        .name = "trace",
+        .commandFunc = mthTraceCommand
+    },
+    {
+        .name = "update",
+        .commandFunc = mthUpdateCommand
+    },
 } ;
 ----
 
@@ -942,7 +1094,7 @@ mthExecCommand(
     }
 
     mthPopContext() ;
-    mthAddWord("return") ;
+    mthAddWord("code") ;
     mthAddWord(success ? "ok" : "error") ;
 }
 ----
@@ -1079,6 +1231,75 @@ mthInsertHarness(
 ----
 
 === Harness Command Functions
+
+==== Cancel Command
+
+[literal]
+--
+cancel <domain> <class> <inst> <event>
+--
+
+[source,c]
+----
+<<mth forward references>>=
+static bool mthCancelCommand(int, char *const *) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static bool
+mthCancelCommand(
+    int argc,
+    char *const *argv)
+{
+    if (argc != 5) {
+        mth_FormatToContext(
+            "wrong # of arguments, %d: expected, "
+            "\"cancel <domain> <class> <inst> <event>\"",
+            argc) ;
+        return false ;
+    }
+
+    char *domainName = argv[1] ;
+    MTH_DomainHarness const *const harness = mthFindHarness(domainName) ;
+    if (harness == NULL) {
+        mth_FormatToContext("unknown domain, \"%s\"", domainName) ;
+        return false ;
+    }
+
+    char *className = argv[2] ;
+    MTH_ClassMap const *const class = mthFindClass(harness, className) ;
+    if (class == NULL) {
+        return false ;
+    }
+    MRT_ClassId classId = class->id ;
+
+    char *instName = argv[3] ;
+    int instId = mthFindInst(class, instName) ;
+    if (instId < 0) {
+        return false ;
+    }
+
+    char *eventName = argv[4] ;
+    MTH_EventParamFunc *epfunc ;
+    int eventNumber = mthFindEvent(class, eventName, &epfunc) ;
+    if (eventNumber < 0) {
+        return false ;
+    }
+
+    MRT_DomainPortal const *portal = harness->portal ;
+    assert(portal != NULL) ;
+
+    int pcode = mrt_PortalCancelDelayedEvent(portal, classId, instId, eventNumber) ;
+    if (pcode < 0) {
+        mth_PortalErrorResponse(pcode) ;
+        return false ;
+    }
+
+    return true ;
+}
+----
 
 ==== Delay Signal Command
 
@@ -1277,6 +1498,80 @@ mthDeleteCommand(
     }
 
     return true ;
+}
+----
+
+==== Eloop Command
+
+[source,c]
+----
+<<mth forward references>>=
+static bool mthEloopCommand(int, char *const *) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static bool
+mthEloopCommand(
+    int argc,
+    char *const *argv)
+{
+    bool status = true ;
+
+    if (argc == 1) {
+        char const *state ;
+        switch (mthHarnessState) {
+        case mthHalted :
+            state = "halted" ;
+            break ;
+
+        case mthRunning:
+            state = "running" ;
+            break ;
+
+        case mthTerminate:
+        default:
+            state = "terminated" ;
+            break ;
+        }
+        mthAddWord(state) ;
+    } else if (argc == 2) {
+        if (strcmp(argv[1], "run") == 0) {
+            mthHarnessState = mthRunning ;
+            mthAddWord("running") ;
+        } else if (strcmp(argv[1], "halt") == 0) {
+            mrt_SyncToEventLoop() ;
+            mthHarnessState = mthHalted ;
+            mthAddWord("halted") ;
+        } else if (strcmp(argv[1], "terminate") == 0) {
+            mrt_SyncToEventLoop() ;
+            mthHarnessState = mthTerminate ;
+            mthAddWord("terminated") ;
+        } else if (strcmp(argv[1], "once") == 0) {
+            if (mthHarnessState != mthRunning) {
+                bool didEvent = mrt_ProcessOneEvent() ;
+                mthAddWord(didEvent ? "true" : "false") ;
+            } else {
+                mthAddWord("event loop is running") ;
+                status = false ;
+            }
+        } else {
+            mth_FormatToContext(
+                "unknown eloop option, \"%s\": expected, "
+                "\"run | halt | once | terminate\"",
+                argv[1]) ;
+            status = false ;
+        }
+    } else {
+        mth_FormatToContext(
+            "wrong # of arguments, %d: expected, "
+            "\"eloop ?run | halt | once | terminate?\"",
+            argc) ;
+        status = false ;
+    }
+
+    return status ;
 }
 ----
 
@@ -1674,6 +1969,172 @@ mthQueryCurrentState(
 }
 ----
 
+==== Read Command
+
+[literal]
+--
+read <domain> <class> <inst> ?<attr1> <attr2> ...?
+--
+
+[source,c]
+----
+<<mth forward references>>=
+static bool mthReadCommand(int, char *const *) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static bool
+mthReadCommand(
+    int argc,
+    char *const *argv)
+{
+    if (argc < 4) {
+        mth_FormatToContext(
+            "wrong # of arguments, %d: expected, "
+            "\"read <domain> <class> <inst> ?<attr1> <attr2> ...?\"",
+            argc) ;
+        return false ;
+    }
+
+    char *domainName = argv[1] ;
+    MTH_DomainHarness const *const harness = mthFindHarness(domainName) ;
+    if (harness == NULL) {
+        mth_FormatToContext("unknown domain, \"%s\"", domainName) ;
+        return false ;
+    }
+
+    MRT_DomainPortal const *portal = harness->portal ;
+    assert(portal != NULL) ;
+
+    char *className = argv[2] ;
+    MTH_ClassMap const *const class = mthFindClass(harness, className) ;
+    if (class == NULL) {
+        return false ;
+    }
+    MRT_ClassId classId = class->id ;
+
+    char *instName = argv[3] ;
+    int instId = mthFindInst(class, instName) ;
+    if (instId < 0) {
+        return false ;
+    }
+
+    bool status = true ;
+    if (argc == 4) {
+        // read all the attributes
+        MTH_AttrMap const *attr = class->attrs ;
+        for (unsigned attrCount = class->attrCount ; attrCount != 0 ;
+                attrCount--, attr++) {
+            mthAddWord(attr->name) ;
+            mthPushContext() ;
+            status = attr->readFunc(portal, classId, instId, attr->id) ;
+            mthPopContext() ;
+
+            if (!status) {
+                break ;
+            }
+        }
+    } else {
+        char *const *attrNames = argv + 4 ;
+        for (int attrCount = argc - 4 ; attrCount != 0 ;
+                attrCount--, attrNames++) {
+            MTH_AttrMap const *const attr = mthFindAttr(class, *attrNames) ;
+            if (attr == NULL) {
+                mthInitBufContext() ;
+                mth_FormatToContext("unknown attribute, \"%s\"", *attrNames) ;
+                break ;
+            }
+
+            mthAddWord(*attrNames) ;
+            mthPushContext() ;
+            status = attr->readFunc(portal, classId, instId, attr->id) ;
+            mthPopContext() ;
+
+            if (!status) {
+                break ;
+            }
+        }
+    }
+
+    return status ;
+}
+----
+
+==== Remaining Command
+
+[literal]
+--
+remaining <domain> <class> <inst> <event>
+--
+
+[source,c]
+----
+<<mth forward references>>=
+static bool mthRemainingCommand(int, char *const *) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static bool
+mthRemainingCommand(
+    int argc,
+    char *const *argv)
+{
+    if (argc != 5) {
+        mth_FormatToContext(
+            "wrong # of arguments, %d: expected, "
+            "\"remaining <domain> <class> <inst> <event>\"",
+            argc) ;
+        return false ;
+    }
+
+    char *domainName = argv[1] ;
+    MTH_DomainHarness const *const harness = mthFindHarness(domainName) ;
+    if (harness == NULL) {
+        mth_FormatToContext("unknown domain, \"%s\"", domainName) ;
+        return false ;
+    }
+
+    char *className = argv[2] ;
+    MTH_ClassMap const *const class = mthFindClass(harness, className) ;
+    if (class == NULL) {
+        return false ;
+    }
+    MRT_ClassId classId = class->id ;
+
+    char *instName = argv[3] ;
+    int instId = mthFindInst(class, instName) ;
+    if (instId < 0) {
+        return false ;
+    }
+
+    char *eventName = argv[4] ;
+    MTH_EventParamFunc *epfunc ;
+    int eventNumber = mthFindEvent(class, eventName, &epfunc) ;
+    if (eventNumber < 0) {
+        return false ;
+    }
+
+    MRT_DomainPortal const *portal = harness->portal ;
+    assert(portal != NULL) ;
+
+    MRT_DelayTime delay ;
+    int pcode = mrt_PortalRemainingDelayTime(portal, classId, instId,
+            eventNumber, &delay) ;
+    if (pcode < 0) {
+        mth_PortalErrorResponse(pcode) ;
+        return false ;
+    } else {
+        mth_FormatToContext("%" PRIu32, delay) ;
+    }
+
+    return true ;
+}
+----
+
 ==== Signal Command
 
 [literal]
@@ -1795,6 +2256,94 @@ mthTraceCommand(
         mth_FormatToContext(
             "wrong # of arguments, %d: expected, \"trace ?on | off?\"", argc) ;
         status = false ;
+    }
+
+    return status ;
+}
+----
+
+==== Update Command
+
+[literal]
+--
+update <domain> <class> <inst> ?<attr1> <value1> <attr2> <value2> ...?
+--
+
+[source,c]
+----
+<<mth forward references>>=
+static bool mthUpdateCommand(int, char *const *) ;
+----
+
+[source,c]
+----
+<<mth static functions>>=
+static bool
+mthUpdateCommand(
+    int argc,
+    char *const *argv)
+{
+    if (argc < 4) {
+        mth_FormatToContext(
+            "wrong # of arguments, %d: expected, "
+            "\"update <domain> <class> <inst> ?<attr1> <value1> ...?\"",
+            argc) ;
+        return false ;
+    }
+
+    char *domainName = argv[1] ;
+    MTH_DomainHarness const *const harness = mthFindHarness(domainName) ;
+    if (harness == NULL) {
+        mth_FormatToContext("unknown domain, \"%s\"", domainName) ;
+        return false ;
+    }
+
+    MRT_DomainPortal const *portal = harness->portal ;
+    assert(portal != NULL) ;
+
+    char *className = argv[2] ;
+    MTH_ClassMap const *const class = mthFindClass(harness, className) ;
+    if (class == NULL) {
+        return false ;
+    }
+    MRT_ClassId classId = class->id ;
+
+    char *instName = argv[3] ;
+    int instId = mthFindInst(class, instName) ;
+    if (instId < 0) {
+        return false ;
+    }
+
+    bool status = true ;
+    int updateCount = argc - 4 ;
+    if (updateCount % 2 != 0) {
+        mth_FormatToContext("updates must be given as name / value pairs") ;
+        return false ;
+    }
+
+    char *const *attrName = argv + 4 ;
+    char *const *valueString = argv + 5 ;
+    for ( ; updateCount != 0 ;
+            updateCount -= 2, attrName += 2, valueString += 2) {
+        MTH_AttrMap const *const attr = mthFindAttr(class, *attrName) ;
+        if (attr == NULL) {
+            mthInitBufContext() ;
+            mth_FormatToContext("unknown attribute, \"%s\"", *attrName) ;
+            break ;
+        }
+
+        mthAddWord(*attrName) ;
+        mthPushContext() ;
+        status = attr->updateFunc(portal, classId, instId, attr->id,
+                *valueString) ;
+        if (status) {
+            status = attr->readFunc(portal, classId, instId, attr->id) ;
+            mthPopContext() ;
+        }
+
+        if (!status) {
+            break ;
+        }
     }
 
     return status ;
@@ -1984,6 +2533,12 @@ mth_InstrResponse(
         strncpy(resultBuf, "error formating response", sizeof(resultBuf)) ;
     } else if (n >= sizeof(resultBuf)) {
         strncpy(resultBuf, "response truncated", sizeof(resultBuf)) ;
+    } else {
+        // trim off any whitespace
+        for (char *end = resultBuf + strlen(resultBuf) - 1 ;
+                end > resultBuf && isspace(*end) ; end--) {
+            *end = ASCII_NUL ;
+        }
     }
 
     static char preamble[] = "instr {" ;
@@ -2578,14 +3133,9 @@ proc opFuncDefinitions {} {
                 "    [typeCheck composeDeclaration $type $paramName] ;\n"
             try {
                 set scnfmt [GetFormat $type Scan]
-            } on error {fmtresult} {
-                log::error $fmtresult
-                append result\
-                    "    // cannot input type, \"$type\"\n"\
-                    "    mth_FormatToContext(badTypeMsg, \"$type\") ;\n"\
-                    "    return false ;\n"\
-                    "\}\n"
-                break
+            } on error {} {
+                set type int
+                set scnfmt "\"i\""
             }
             if {$scnfmt ne {}} {
                 append result\
@@ -2609,13 +3159,8 @@ proc opFuncDefinitions {} {
         try {
             set prifmt [GetFormat $retType Print]
         } on error {fmtresult} {
-            log::error $fmtresult
-            append result\
-                "    // cannot output type, \"$retType\"\n"\
-                "    mth_FormatToContext(badTypeMsg, \"$retType\") ;\n"\
-                "    return false ;\n"\
-                "\}\n"
-            continue
+            set retType int
+            set prifmt "\"d\""
         }
 
         set invocation "${domain}_${opName}($invokeParams) ;\n"
@@ -2697,13 +3242,8 @@ proc attrReadFuncDefinitions {} {
         try {
             set prifmt [GetFormat $type Print]
         } on error {fmtresult} {
-            log::error $fmtresult
-            append result\
-                "    mth_FormatToContext([format\
-                        {"cannot format type, \"%s\""} $type]) ;\n"\
-                "    return false ;\n"\
-                "\}\n"
-            continue
+            set type int
+            set prifmt "\"d\""
         }
 
         set vardecl [typeCheck composeDeclaration $type attrValue]
@@ -2779,14 +3319,9 @@ proc attrUpdateFuncDefinitions {} {
 
         try {
             set scnfmt [GetFormat $type Scan]
-        } on error {fmtresult} {
-            log::error $fmtresult
-            append result\
-                "    mth_FormatToContext([format\
-                        {"cannot scan type, \"%s\""} $type]) ;\n"\
-                "    return false ;\n"\
-                "\}\n"
-            continue
+        } on error {} {
+            set type int
+            set scnfmt "\"i\""
         }
 
         if {$type eq "char" && $dim > 0} {
@@ -2931,15 +3466,9 @@ proc eventParamFuncDefinitions {} {
                 relation assign $param {Name paramName} {DataType type}
                 try {
                     set scnfmt [GetFormat $type Scan]
-                } on error {fmtresult} {
-                    log::error $fmtresult
-                    append result\
-                        "    mth_FormatToContext([format {"cannot input\
-                                type, \"%s\""} $type]) ;\n"\
-                        "    return false ;\n"\
-                        "\}\n"
-                    set typeError true
-                    continue
+                } on error {} {
+                    set type int
+                    set scnfmt "\"i\""
                 }
                 append result\
                     "    nitems = sscanf(paramv\[$pindex\], \"%\" $scnfmt,\
@@ -3295,7 +3824,7 @@ proc GetFormat {implType which} {
         set tdef [readAttribute $alias TypeDefinition]
         set fmt [relvar restrictone FormatMap ImplType $tdef]
         if {[relation isempty $fmt]} {
-            error "unknown data type, $implType aliased to $tdef"
+            error "unknown data type, $tdef"
         }
     }
     return [relation extract $fmt $which]

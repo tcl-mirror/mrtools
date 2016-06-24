@@ -90,7 +90,9 @@ domain wmctrl {
     <<external operation>>
     <<type aliases>>
     epilogue {
+        #ifndef MRT_HARNESS
         <<main program>>
+        #endif /* MRT_HARNESS */
     }
 }
 ----
@@ -623,6 +625,10 @@ All the content between the markers (and the markers themselves) is replaced
 with the ``C'' code that implements the model level execution semantics
 implied by the embedded macro command.
 Otherwise, ordinary ``C'' code is passed along unmodified.
+The `micca` scheme uses directly coded ``C'' for flow of control,
+variables and expression evaluation.
+Access to model level execution actions is provided by the embedded
+macro commands.
 
 In the code below,
 we strive for a clear correspondence between the action language of
@@ -634,7 +640,6 @@ the translation into ``C''.
 In the interest of clarity,
 no attempt has been made to shorten or optimize the ``C'' code.
 There will be cases where some variable assignments will seem superfluous.
-In delivered code, we might be more succinct.
 
 ==== Washing Machine State Activities
 
@@ -753,9 +758,13 @@ state FillingToWash {} {
     %<instance wc findOneRelated self R4>%
     %<instance ct findOneRelated self ~R1>%
     WaterTemp washtemp = %<instance wc attr WashWaterTemp>% ;
-    %<instance ct signal Fill temp washtemp>%
+    %<instance ct signal Fill temp washtemp>%   // <1>
 }
 ----
+<1> Note that embedded macros _cannot_ be nested, so it is necessary
+to assign the wash water temperature to a variable.
+There is no efficiency concern here.
+Optimizations by the compiler will remove any unneeded local variables.
 
 '''
 While in the Washing state, clothes are being agitated in the tub.
@@ -792,6 +801,7 @@ state Washing {} {
 <1> We are implicitly assuming the units of WashDuration are seconds.
 In truth, the units are minutes, but we are not patient enough
 to wait that long for the example to execute.
+
 '''
 
 The delayed signal is accomplished by using the `my delaysignal` macro command.
@@ -932,6 +942,15 @@ It is common to factor out such code as it usually corresponds
 to an action language `where` clause.
 This allows us to create type specific and type safe code
 for the query.
+
+Factoring out the search code also allows us to control the algorithm used.
+Below we just use a simple linear search as the `micca` embedded
+macro commands provide iterators for the class instances.
+This works well for a small number of instances.
+However, if the number of instances was large
+or the frequency of the search was high,
+then you might consider a more sophisticated search technique such
+as binary searching or hash based searching.
 
 [source,tcl]
 ----
@@ -1404,7 +1423,7 @@ a domain operation is useful to localize the construction of a washer.
 [source,tcl]
 ----
 <<wmctrl operations>>=
-domainop MRT_InstId createWasher {washer {char const *}} {
+domainop int createWasher {washer {char const *}} {
     %<WashingMachine instref wm>%
     wm = %<WashingMachine operation findByMachineID id washer>% ;
     if (wm == NULL) {
@@ -1422,8 +1441,10 @@ domainop MRT_InstId createWasher {washer {char const *}} {
         %<Motor create mtr MotorID MTR_Spin R2 ct>%
 
         %<WaterLevelSensor create wls R5 ct>%
+        return %<instance wm instid>% ;
+    } else {
+        return -1 ;
     }
-    return %<instance wm instid>% ;
 }
 ----
 
@@ -1437,7 +1458,8 @@ Here we must be careful to leave the data model referentially consistent.
 [source,tcl]
 ----
 <<wmctrl operations>>=
-domainop void deleteWasher {washer {char const *}} {
+domainop bool deleteWasher {washer {char const *}} {
+    bool status ;
     %<WashingMachine instref wm>%
     wm = %<WashingMachine operation findByMachineID id washer>% ;
     if (wm != NULL) {
@@ -1452,11 +1474,21 @@ domainop void deleteWasher {washer {char const *}} {
         %<end>%
         %<instance ct delete>%
         %<instance wm delete>%
+        status = true ;
     } else {
-        printf("unknown washer, %s\n", washer) ;
+        MRT_INSTRUMENT_DEBUG("unknown washer, %s\n", washer) ; // <1>
+        status = false ;
     }
+
+    return status ;
 }
 ----
+<1> `micca` provides a `printf` style ``C'' preprocessor macro for
+debugging output.
+This macro has the advantage of working properly when the domain
+is placed in a test harness.
+`Micca` has the ability to automatically generate a test harness that
+can be used for domain unit testing and integration.
 
 [float]
 ==== Start Washer
@@ -1478,14 +1510,19 @@ the *Start* event will kick things off.
 [source,tcl]
 ----
 <<wmctrl operations>>=
-domainop void startWasher {washer {char const *}} {
+domainop bool startWasher {washer {char const *}} {
+    bool status ;
     %<WashingMachine instref wm>%
     wm = %<WashingMachine operation findByMachineID id washer>% ;
     if (wm != NULL) {
         %<instance wm signal Start>%
+        status = true ;
     } else {
-        printf("unknown washer, %s\n", washer) ;
+        MRT_INSTRUMENT_DEBUG("unknown washer, %s\n", washer) ;
+        status = false ;
     }
+
+    return status ;
 }
 ----
 
@@ -1507,14 +1544,14 @@ domainop void selectCycle {washer {char const *} cycle {char const *}} {
     %<WashingMachine instref wm>%
     wm = %<WashingMachine operation findByMachineID id washer>% ;
     if (wm == NULL) {
-        printf("unknown washer, %s\n", washer) ;
+        MRT_INSTRUMENT_DEBUG("unknown washer, %s\n", washer) ;
         return ;
     }
 
     %<WashingCycle instref reqCycle>%
     reqCycle = %<WashingCycle operation findByCycleType cycleType cycle>% ;
     if (reqCycle == NULL) {
-        printf("unknown washing cycle, %s\n", cycle) ;
+        MRT_INSTRUMENT_DEBUG("unknown washing cycle, %s\n", cycle) ;
         return ;
     }
 
@@ -1663,16 +1700,16 @@ This leads us to the following implementation.
 ----
 <<external operation>>=
 externalop void motorStart {motorid MRT_InstId} {
-    printf("%s: starting motor %u\n", __func__, motorid) ;
+    MRT_INSTRUMENT_DEBUG("%s: starting motor %u\n", __func__, motorid) ;
 }
 externalop void motorStop {motorid MRT_InstId} {
-    printf("%s: stopping motor %u\n", __func__, motorid) ;
+    MRT_INSTRUMENT_DEBUG("%s: stopping motor %u\n", __func__, motorid) ;
 }
 externalop void valveOpen {valveid MRT_InstId} {
-    printf("%s: opening valve %u\n", __func__, valveid) ;
+    MRT_INSTRUMENT_DEBUG("%s: opening valve %u\n", __func__, valveid) ;
 }
 externalop void valveClose {valveid MRT_InstId} {
-    printf("%s: closing valve %u\n", __func__, valveid) ;
+    MRT_INSTRUMENT_DEBUG("%s: closing valve %u\n", __func__, valveid) ;
 }
 ----
 
@@ -1715,7 +1752,7 @@ which event, Full or Empty, is sent to the Clothes Tub.
 ----
 <<external operation>>=
 externalop void sensorEnable {tubid MRT_InstId} {
-    printf("%s: enable sensor for tub %u\n", __func__, tubid) ;
+    MRT_INSTRUMENT_DEBUG("%s: enable sensor for tub %u\n", __func__, tubid) ;
 
     tubFull[tubid] = !tubFull[tubid] ;
 
@@ -1738,13 +1775,13 @@ no real operation.
 ----
 <<external operation>>=
 externalop void sensorDisable {tubid MRT_InstId} {
-    printf("%s: disable sensor for tub %u\n", __func__, tubid) ;
+    MRT_INSTRUMENT_DEBUG("%s: disable sensor for tub %u\n", __func__, tubid) ;
 
     mrt_PortalCancelDelayedEvent(&wmctrl__PORTAL,
         WMCTRL_CLOTHESTUB_CLASSID,
         tubid,
-        tubFull[tubid] ?    WMCTRL_CLOTHESTUB_TUBFULL_EVENT :
-                            WMCTRL_CLOTHESTUB_TUBEMPTY_EVENT) ;
+        tubFull[tubid] ? WMCTRL_CLOTHESTUB_TUBFULL_EVENT :
+                         WMCTRL_CLOTHESTUB_TUBEMPTY_EVENT) ;
 }
 ----
 
@@ -1774,14 +1811,16 @@ An actual application would most likely run forever or invoke
 ----
 <<external operation>>=
 externalop void cycleComplete {washerid MRT_InstId} {
-    printf("%s: cycle complete for washer %u\n", __func__, washerid) ;
+    MRT_INSTRUMENT_DEBUG("%s: cycle complete for washer %u\n", __func__, washerid) ;
     /*
      * Exit the event loop for the purposes of the example.  This call is used
      * to cause the event loop to exit. This means that we will only run one
      * cycle of the washer before the program exits the event loop and then
      * terminates.
      */
+#       ifndef MRT_HARNESS
     mrt_SyncToEventLoop() ;
+#       endif /* MRT_HARNESS */
 }
 ----
 
@@ -1843,17 +1882,17 @@ include::wmctrl-trace.txt[]
 --
 
 The trace consists of the chronological trace of the state machine event
-dispatch and the logging messages of the external operation stubs.
+dispatch.
 The first column of the event dispatch
 trace is the time of day down to microseconds.
 The remainder of the trace show the details of the event dispatch.
-The first portion of the _Transition_ trace shows the event being
+A _Transition_ trace shows the event being
 dispatched from a source instance to a target instance.
 (The output here is reminiscent of the `transition` statements of
 the state model specification.
-The state machine transition of the target instance,
+The transition of the target instance,
 from current state to new state,
-is shown using the ``==>'' symbol.
+is shown in the second portion of the trace output using the ``==>'' symbol.
 Instances are shown in the form of _class.instance_ if such naming
 information is known.
 For events originating outside of a state activity,

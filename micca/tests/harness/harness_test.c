@@ -8,12 +8,12 @@ main(
     char **arv)
 {
     mrt_Initialize() ;
-    int err = mth_Initialize() ;
-    if (err == -1) {
+    if (!mth_Initialize()) {
         fprintf(stderr, "mth_Initialize() failed\n") ;
         exit(EXIT_FAILURE) ;
     }
+
     mth_RegisterDomain(&wmctrl__HARNESS) ;
 
-    mrt_EventLoop() ;
+    mth_Run() ;
 }
