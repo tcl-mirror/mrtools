@@ -40,6 +40,7 @@
 # the authors grant the U.S. Government and others acting in its behalf
 # permission to use and distribute the software in accordance with the
 # terms specified in this license.
+Micca version: 0.1
 */
 
 #ifndef MICCA_RT_H_
@@ -516,7 +517,7 @@ mrt_CreateAssociatorLinks(
     void *source,
     void *target) ;
 extern void
-mrtUnrelate(
+mrtDeleteLinks(
     struct mrtrelationship const * const *classRels,
     unsigned relCount,
     void *inst) ;
@@ -633,6 +634,16 @@ mrt_PortalSignalEventAssigner(
     MRT_InstId instId,
     MRT_EventCode eventNumber,
     MRT_EventParams eventParameters) ;
+extern int
+mrt_PortalInstanceCurrentState(
+    MRT_DomainPortal const *portal,
+    MRT_ClassId classId,
+    MRT_InstId instId) ;
+extern int
+mrt_PortalAssignerCurrentState(
+    MRT_DomainPortal const *portal,
+    MRT_AssignerId assignerId,
+    MRT_InstId instId) ;
 extern char const *
 mrt_PortalDomainName(
     MRT_DomainPortal const *portal) ;
@@ -709,7 +720,7 @@ mrt_RegisterFDService(
     MRT_FDServiceFunc writeService,
     MRT_FDServiceFunc exceptService) ;
 extern void
-mechUnregisterFDService(
+mrt_UnregisterFDService(
     int fd,
     bool rmRead,
     bool rmWrite,
