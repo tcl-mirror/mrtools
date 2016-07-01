@@ -144,11 +144,11 @@ oo::class create typeparser {
     
     method sym_abstract_declarator {} {
         # /
+        #     (pointer)
         #     x
         #         ?
         #             (pointer)
         #         (direct_abstract_declarator)
-        #     (pointer)
     
         my si:value_symbol_start abstract_declarator
         my choice_24
@@ -158,35 +158,35 @@ oo::class create typeparser {
     
     method choice_24 {} {
         # /
+        #     (pointer)
         #     x
         #         ?
         #             (pointer)
         #         (direct_abstract_declarator)
-        #     (pointer)
     
         my si:value_state_push
-        my sequence_21
-        my si:valuevalue_branch
         my sym_pointer
+        my si:valuevalue_branch
+        my sequence_22
         my si:value_state_merge
         return
     }
     
-    method sequence_21 {} {
+    method sequence_22 {} {
         # x
         #     ?
         #         (pointer)
         #     (direct_abstract_declarator)
     
         my si:value_state_push
-        my optional_18
+        my optional_19
         my si:valuevalue_part
         my sym_direct_abstract_declarator
         my si:value_state_merge
         return
     }
     
-    method optional_18 {} {
+    method optional_19 {} {
         # ?
         #     (pointer)
     
@@ -1509,40 +1509,25 @@ oo::class create typeparser {
     #
     
     method sym_declarator {} {
-        # /
-        #     (direct_declarator)
-        #     x
+        # x
+        #     ?
         #         (pointer)
-        #         (direct_declarator)
+        #     (direct_declarator)
     
         my si:value_symbol_start declarator
-        my choice_267
-        my si:reduce_symbol_end declarator
-        return
-    }
-    
-    method choice_267 {} {
-        # /
-        #     (direct_declarator)
-        #     x
-        #         (pointer)
-        #         (direct_declarator)
-    
-        my si:value_state_push
-        my sym_direct_declarator
-        my si:valuevalue_branch
         my sequence_265
-        my si:value_state_merge
+        my si:reduce_symbol_end declarator
         return
     }
     
     method sequence_265 {} {
         # x
-        #     (pointer)
+        #     ?
+        #         (pointer)
         #     (direct_declarator)
     
         my si:value_state_push
-        my sym_pointer
+        my optional_19
         my si:valuevalue_part
         my sym_direct_declarator
         my si:value_state_merge
@@ -1559,12 +1544,12 @@ oo::class create typeparser {
         #     (EQUAL)
     
         my si:value_symbol_start designation
-        my sequence_272
+        my sequence_270
         my si:reduce_symbol_end designation
         return
     }
     
-    method sequence_272 {} {
+    method sequence_270 {} {
         # x
         #     (designator_list)
         #     (EQUAL)
@@ -1592,12 +1577,12 @@ oo::class create typeparser {
         #         (identifier)
     
         my si:value_symbol_start designator
-        my choice_284
+        my choice_282
         my si:reduce_symbol_end designator
         return
     }
     
-    method choice_284 {} {
+    method choice_282 {} {
         # /
         #     x
         #         (LBRACKET)
@@ -1608,14 +1593,14 @@ oo::class create typeparser {
         #         (identifier)
     
         my si:value_state_push
-        my sequence_278
+        my sequence_276
         my si:valuevalue_branch
-        my sequence_282
+        my sequence_280
         my si:value_state_merge
         return
     }
     
-    method sequence_278 {} {
+    method sequence_276 {} {
         # x
         #     (LBRACKET)
         #     (constant_expression)
@@ -1631,7 +1616,7 @@ oo::class create typeparser {
         return
     }
     
-    method sequence_282 {} {
+    method sequence_280 {} {
         # x
         #     (DOT)
         #     (identifier)
@@ -1653,12 +1638,12 @@ oo::class create typeparser {
         #     (designator)
     
         my si:value_symbol_start designator_list
-        my poskleene_288
+        my poskleene_286
         my si:reduce_symbol_end designator_list
         return
     }
     
-    method poskleene_288 {} {
+    method poskleene_286 {} {
         # +
         #     (designator)
     
@@ -1695,12 +1680,12 @@ oo::class create typeparser {
         #     <digit>
     
         my si:void_symbol_start digit_sequence
-        my poskleene_294
+        my poskleene_292
         my si:void_leaf_symbol_end digit_sequence
         return
     }
     
-    method poskleene_294 {} {
+    method poskleene_292 {} {
         # +
         #     <digit>
     
@@ -1726,12 +1711,12 @@ oo::class create typeparser {
         #         (direct_abstract_declarator_tail)
     
         my si:value_symbol_start direct_abstract_declarator
-        my sequence_301
+        my sequence_299
         my si:reduce_symbol_end direct_abstract_declarator
         return
     }
     
-    method sequence_301 {} {
+    method sequence_299 {} {
         # x
         #     (direct_abstract_declarator_head)
         #     *
@@ -1740,12 +1725,12 @@ oo::class create typeparser {
         my si:value_state_push
         my sym_direct_abstract_declarator_head
         my si:valuevalue_part
-        my kleene_299
+        my kleene_297
         my si:value_state_merge
         return
     }
     
-    method kleene_299 {} {
+    method kleene_297 {} {
         # *
         #     (direct_abstract_declarator_tail)
     
@@ -1770,12 +1755,12 @@ oo::class create typeparser {
         #     (direct_abstract_declarator_tail)
     
         my si:value_symbol_start direct_abstract_declarator_head
-        my choice_310
+        my choice_308
         my si:reduce_symbol_end direct_abstract_declarator_head
         return
     }
     
-    method choice_310 {} {
+    method choice_308 {} {
         # /
         #     x
         #         (LPAREN)
@@ -1784,14 +1769,14 @@ oo::class create typeparser {
         #     (direct_abstract_declarator_tail)
     
         my si:value_state_push
-        my sequence_307
+        my sequence_305
         my si:valuevalue_branch
         my sym_direct_abstract_declarator_tail
         my si:value_state_merge
         return
     }
     
-    method sequence_307 {} {
+    method sequence_305 {} {
         # x
         #     (LPAREN)
         #     (abstract_declarator)
@@ -1815,12 +1800,12 @@ oo::class create typeparser {
         # /
         #     x
         #         (LBRACKET)
-        #         (STAR)
+        #         ?
+        #             (assignment_expression)
         #         (RBRACKET)
         #     x
         #         (LBRACKET)
-        #         ?
-        #             (assignment_expression)
+        #         (STAR)
         #         (RBRACKET)
         #     x
         #         (LPAREN)
@@ -1829,21 +1814,21 @@ oo::class create typeparser {
         #         (RPAREN)
     
         my si:value_symbol_start direct_abstract_declarator_tail
-        my choice_332
+        my choice_330
         my si:reduce_symbol_end direct_abstract_declarator_tail
         return
     }
     
-    method choice_332 {} {
+    method choice_330 {} {
         # /
-        #     x
-        #         (LBRACKET)
-        #         (STAR)
-        #         (RBRACKET)
         #     x
         #         (LBRACKET)
         #         ?
         #             (assignment_expression)
+        #         (RBRACKET)
+        #     x
+        #         (LBRACKET)
+        #         (STAR)
         #         (RBRACKET)
         #     x
         #         (LPAREN)
@@ -1854,14 +1839,41 @@ oo::class create typeparser {
         my si:value_state_push
         my sequence_316
         my si:valuevalue_branch
-        my sequence_323
+        my sequence_321
         my si:valuevalue_branch
-        my sequence_330
+        my sequence_328
         my si:value_state_merge
         return
     }
     
     method sequence_316 {} {
+        # x
+        #     (LBRACKET)
+        #     ?
+        #         (assignment_expression)
+        #     (RBRACKET)
+    
+        my si:void_state_push
+        my sym_LBRACKET
+        my si:voidvalue_part
+        my optional_313
+        my si:valuevalue_part
+        my sym_RBRACKET
+        my si:value_state_merge
+        return
+    }
+    
+    method optional_313 {} {
+        # ?
+        #     (assignment_expression)
+    
+        my si:void2_state_push
+        my sym_assignment_expression
+        my si:void_state_merge_ok
+        return
+    }
+    
+    method sequence_321 {} {
         # x
         #     (LBRACKET)
         #     (STAR)
@@ -1877,34 +1889,7 @@ oo::class create typeparser {
         return
     }
     
-    method sequence_323 {} {
-        # x
-        #     (LBRACKET)
-        #     ?
-        #         (assignment_expression)
-        #     (RBRACKET)
-    
-        my si:void_state_push
-        my sym_LBRACKET
-        my si:voidvalue_part
-        my optional_320
-        my si:valuevalue_part
-        my sym_RBRACKET
-        my si:value_state_merge
-        return
-    }
-    
-    method optional_320 {} {
-        # ?
-        #     (assignment_expression)
-    
-        my si:void2_state_push
-        my sym_assignment_expression
-        my si:void_state_merge_ok
-        return
-    }
-    
-    method sequence_330 {} {
+    method sequence_328 {} {
         # x
         #     (LPAREN)
         #     ?
@@ -1914,14 +1899,14 @@ oo::class create typeparser {
         my si:void_state_push
         my sym_LPAREN
         my si:voidvalue_part
-        my optional_327
+        my optional_325
         my si:valuevalue_part
         my sym_RPAREN
         my si:value_state_merge
         return
     }
     
-    method optional_327 {} {
+    method optional_325 {} {
         # ?
         #     (parameter_type_list)
     
@@ -1942,12 +1927,12 @@ oo::class create typeparser {
         #         (direct_declarator_tail)
     
         my si:value_symbol_start direct_declarator
-        my sequence_339
+        my sequence_337
         my si:reduce_symbol_end direct_declarator
         return
     }
     
-    method sequence_339 {} {
+    method sequence_337 {} {
         # x
         #     (direct_declarator_head)
         #     ?
@@ -1956,12 +1941,12 @@ oo::class create typeparser {
         my si:value_state_push
         my sym_direct_declarator_head
         my si:valuevalue_part
-        my optional_337
+        my optional_335
         my si:value_state_merge
         return
     }
     
-    method optional_337 {} {
+    method optional_335 {} {
         # ?
         #     (direct_declarator_tail)
     
@@ -1984,12 +1969,12 @@ oo::class create typeparser {
         #         (RPAREN)
     
         my si:value_symbol_start direct_declarator_head
-        my choice_348
+        my choice_346
         my si:reduce_symbol_end direct_declarator_head
         return
     }
     
-    method choice_348 {} {
+    method choice_346 {} {
         # /
         #     (identifier)
         #     x
@@ -2000,12 +1985,12 @@ oo::class create typeparser {
         my si:value_state_push
         my sym_identifier
         my si:valuevalue_branch
-        my sequence_346
+        my sequence_344
         my si:value_state_merge
         return
     }
     
-    method sequence_346 {} {
+    method sequence_344 {} {
         # x
         #     (LPAREN)
         #     (declarator)
@@ -2064,12 +2049,12 @@ oo::class create typeparser {
         #         (RPAREN)
     
         my si:value_symbol_start direct_declarator_tail
-        my choice_394
+        my choice_392
         my si:reduce_symbol_end direct_declarator_tail
         return
     }
     
-    method choice_394 {} {
+    method choice_392 {} {
         # /
         #     x
         #         (LBRACKET)
@@ -2108,22 +2093,22 @@ oo::class create typeparser {
         #         (RPAREN)
     
         my si:value_state_push
-        my sequence_358
+        my sequence_356
         my si:valuevalue_branch
-        my sequence_366
+        my sequence_364
         my si:valuevalue_branch
-        my sequence_373
+        my sequence_371
         my si:valuevalue_branch
-        my sequence_380
+        my sequence_378
         my si:valuevalue_branch
-        my sequence_385
+        my sequence_383
         my si:valuevalue_branch
-        my sequence_392
+        my sequence_390
         my si:value_state_merge
         return
     }
     
-    method sequence_358 {} {
+    method sequence_356 {} {
         # x
         #     (LBRACKET)
         #     ?
@@ -2135,16 +2120,16 @@ oo::class create typeparser {
         my si:void_state_push
         my sym_LBRACKET
         my si:voidvalue_part
-        my optional_353
+        my optional_351
         my si:valuevalue_part
-        my optional_320
+        my optional_313
         my si:valuevalue_part
         my sym_RBRACKET
         my si:value_state_merge
         return
     }
     
-    method optional_353 {} {
+    method optional_351 {} {
         # ?
         #     (type_qualifier_list)
     
@@ -2154,7 +2139,7 @@ oo::class create typeparser {
         return
     }
     
-    method sequence_366 {} {
+    method sequence_364 {} {
         # x
         #     (LBRACKET)
         #     (static)
@@ -2168,7 +2153,7 @@ oo::class create typeparser {
         my si:voidvalue_part
         my sym_static
         my si:valuevalue_part
-        my optional_353
+        my optional_351
         my si:valuevalue_part
         my sym_assignment_expression
         my si:valuevalue_part
@@ -2177,7 +2162,7 @@ oo::class create typeparser {
         return
     }
     
-    method sequence_373 {} {
+    method sequence_371 {} {
         # x
         #     (LBRACKET)
         #     (type_qualifier_list)
@@ -2199,7 +2184,7 @@ oo::class create typeparser {
         return
     }
     
-    method sequence_380 {} {
+    method sequence_378 {} {
         # x
         #     (LBRACKET)
         #     ?
@@ -2210,7 +2195,7 @@ oo::class create typeparser {
         my si:void_state_push
         my sym_LBRACKET
         my si:voidvalue_part
-        my optional_353
+        my optional_351
         my si:valuevalue_part
         my sym_STAR
         my si:valuevalue_part
@@ -2219,7 +2204,7 @@ oo::class create typeparser {
         return
     }
     
-    method sequence_385 {} {
+    method sequence_383 {} {
         # x
         #     (LPAREN)
         #     (parameter_type_list)
@@ -2235,7 +2220,7 @@ oo::class create typeparser {
         return
     }
     
-    method sequence_392 {} {
+    method sequence_390 {} {
         # x
         #     (LPAREN)
         #     ?
@@ -2245,14 +2230,14 @@ oo::class create typeparser {
         my si:void_state_push
         my sym_LPAREN
         my si:voidvalue_part
-        my optional_389
+        my optional_387
         my si:valuevalue_part
         my sym_RPAREN
         my si:value_state_merge
         return
     }
     
-    method optional_389 {} {
+    method optional_387 {} {
         # ?
         #     (identifier_list)
     
@@ -2272,12 +2257,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start DOT
-        my sequence_399
+        my sequence_397
         my si:void_leaf_symbol_end DOT
         return
     }
     
-    method sequence_399 {} {
+    method sequence_397 {} {
         # x
         #     '.'
         #     (WHITESPACE)
@@ -2300,12 +2285,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start double
-        my sequence_404
+        my sequence_402
         my si:void_leaf_symbol_end double
         return
     }
     
-    method sequence_404 {} {
+    method sequence_402 {} {
         # x
         #     "double"
         #     (WHITESPACE)
@@ -2328,12 +2313,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start ELLIPSIS
-        my sequence_409
+        my sequence_407
         my si:void_leaf_symbol_end ELLIPSIS
         return
     }
     
-    method sequence_409 {} {
+    method sequence_407 {} {
         # x
         #     "..."
         #     (WHITESPACE)
@@ -2356,12 +2341,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start enum
-        my sequence_414
+        my sequence_412
         my si:void_leaf_symbol_end enum
         return
     }
     
-    method sequence_414 {} {
+    method sequence_412 {} {
         # x
         #     "enum"
         #     (WHITESPACE)
@@ -2400,12 +2385,12 @@ oo::class create typeparser {
         #         (identifier)
     
         my si:value_symbol_start enum_specifier
-        my choice_439
+        my choice_437
         my si:reduce_symbol_end enum_specifier
         return
     }
     
-    method choice_439 {} {
+    method choice_437 {} {
         # /
         #     x
         #         (enum)
@@ -2427,16 +2412,16 @@ oo::class create typeparser {
         #         (identifier)
     
         my si:value_state_push
-        my sequence_424
+        my sequence_422
         my si:valuevalue_branch
-        my sequence_433
+        my sequence_431
         my si:valuevalue_branch
-        my sequence_437
+        my sequence_435
         my si:value_state_merge
         return
     }
     
-    method sequence_424 {} {
+    method sequence_422 {} {
         # x
         #     (enum)
         #     ?
@@ -2448,7 +2433,7 @@ oo::class create typeparser {
         my si:value_state_push
         my sym_enum
         my si:valuevalue_part
-        my optional_419
+        my optional_417
         my si:valuevalue_part
         my sym_LBRACE
         my si:valuevalue_part
@@ -2459,7 +2444,7 @@ oo::class create typeparser {
         return
     }
     
-    method optional_419 {} {
+    method optional_417 {} {
         # ?
         #     (identifier)
     
@@ -2469,7 +2454,7 @@ oo::class create typeparser {
         return
     }
     
-    method sequence_433 {} {
+    method sequence_431 {} {
         # x
         #     (enum)
         #     ?
@@ -2482,7 +2467,7 @@ oo::class create typeparser {
         my si:value_state_push
         my sym_enum
         my si:valuevalue_part
-        my optional_419
+        my optional_417
         my si:valuevalue_part
         my sym_LBRACE
         my si:valuevalue_part
@@ -2495,7 +2480,7 @@ oo::class create typeparser {
         return
     }
     
-    method sequence_437 {} {
+    method sequence_435 {} {
         # x
         #     (enum)
         #     (identifier)
@@ -2534,12 +2519,12 @@ oo::class create typeparser {
         #             (constant_expression)
     
         my si:value_symbol_start enumerator
-        my sequence_451
+        my sequence_449
         my si:reduce_symbol_end enumerator
         return
     }
     
-    method sequence_451 {} {
+    method sequence_449 {} {
         # x
         #     (enumeration_constant)
         #     ?
@@ -2550,24 +2535,24 @@ oo::class create typeparser {
         my si:value_state_push
         my sym_enumeration_constant
         my si:valuevalue_part
-        my optional_449
+        my optional_447
         my si:value_state_merge
         return
     }
     
-    method optional_449 {} {
+    method optional_447 {} {
         # ?
         #     x
         #         (EQUAL)
         #         (constant_expression)
     
         my si:void2_state_push
-        my sequence_447
+        my sequence_445
         my si:void_state_merge_ok
         return
     }
     
-    method sequence_447 {} {
+    method sequence_445 {} {
         # x
         #     (EQUAL)
         #     (constant_expression)
@@ -2593,12 +2578,12 @@ oo::class create typeparser {
         #             (enumerator)
     
         my si:value_symbol_start enumerator_list
-        my sequence_461
+        my sequence_459
         my si:reduce_symbol_end enumerator_list
         return
     }
     
-    method sequence_461 {} {
+    method sequence_459 {} {
         # x
         #     (enumerator)
         #     *
@@ -2609,12 +2594,12 @@ oo::class create typeparser {
         my si:value_state_push
         my sym_enumerator
         my si:valuevalue_part
-        my kleene_459
+        my kleene_457
         my si:value_state_merge
         return
     }
     
-    method kleene_459 {} {
+    method kleene_457 {} {
         # *
         #     x
         #         (COMMA)
@@ -2622,13 +2607,13 @@ oo::class create typeparser {
     
         while {1} {
             my si:void2_state_push
-        my sequence_457
+        my sequence_455
             my si:kleene_close
         }
         return
     }
     
-    method sequence_457 {} {
+    method sequence_455 {} {
         # x
         #     (COMMA)
         #     (enumerator)
@@ -2650,12 +2635,12 @@ oo::class create typeparser {
         #     <dot>
     
         my si:void_void_symbol_start EOF
-        my notahead_465
+        my notahead_463
         my si:void_clear_symbol_end EOF
         return
     }
     
-    method notahead_465 {} {
+    method notahead_463 {} {
         # !
         #     <dot>
     
@@ -2675,12 +2660,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start EQUAL
-        my sequence_470
+        my sequence_468
         my si:void_leaf_symbol_end EQUAL
         return
     }
     
-    method sequence_470 {} {
+    method sequence_468 {} {
         # x
         #     '='
         #     (WHITESPACE)
@@ -2703,12 +2688,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start EQUALEQUAL
-        my sequence_475
+        my sequence_473
         my si:void_leaf_symbol_end EQUALEQUAL
         return
     }
     
-    method sequence_475 {} {
+    method sequence_473 {} {
         # x
         #     "=="
         #     (WHITESPACE)
@@ -2736,12 +2721,12 @@ oo::class create typeparser {
         #             (relational_expression)
     
         my si:value_symbol_start equality_expression
-        my sequence_488
+        my sequence_486
         my si:reduce_symbol_end equality_expression
         return
     }
     
-    method sequence_488 {} {
+    method sequence_486 {} {
         # x
         #     (relational_expression)
         #     *
@@ -2754,12 +2739,12 @@ oo::class create typeparser {
         my si:value_state_push
         my sym_relational_expression
         my si:valuevalue_part
-        my kleene_486
+        my kleene_484
         my si:value_state_merge
         return
     }
     
-    method kleene_486 {} {
+    method kleene_484 {} {
         # *
         #     x
         #         /
@@ -2769,13 +2754,13 @@ oo::class create typeparser {
     
         while {1} {
             my si:void2_state_push
-        my sequence_484
+        my sequence_482
             my si:kleene_close
         }
         return
     }
     
-    method sequence_484 {} {
+    method sequence_482 {} {
         # x
         #     /
         #         (EQUALEQUAL)
@@ -2783,14 +2768,14 @@ oo::class create typeparser {
         #     (relational_expression)
     
         my si:value_state_push
-        my choice_481
+        my choice_479
         my si:valuevalue_part
         my sym_relational_expression
         my si:value_state_merge
         return
     }
     
-    method choice_481 {} {
+    method choice_479 {} {
         # /
         #     (EQUALEQUAL)
         #     (PLINGEQUAL)
@@ -2815,12 +2800,12 @@ oo::class create typeparser {
         #     (universal_character_name)
     
         my si:value_symbol_start escape_sequence
-        my choice_495
+        my choice_493
         my si:reduce_symbol_end escape_sequence
         return
     }
     
-    method choice_495 {} {
+    method choice_493 {} {
         # /
         #     (simple_escape_sequence)
         #     (octal_escape_sequence)
@@ -2852,12 +2837,12 @@ oo::class create typeparser {
         #             (AND_expression)
     
         my si:value_symbol_start exclusive_OR_expression
-        my sequence_505
+        my sequence_503
         my si:reduce_symbol_end exclusive_OR_expression
         return
     }
     
-    method sequence_505 {} {
+    method sequence_503 {} {
         # x
         #     (AND_expression)
         #     *
@@ -2868,12 +2853,12 @@ oo::class create typeparser {
         my si:value_state_push
         my sym_AND_expression
         my si:valuevalue_part
-        my kleene_503
+        my kleene_501
         my si:value_state_merge
         return
     }
     
-    method kleene_503 {} {
+    method kleene_501 {} {
         # *
         #     x
         #         (HAT)
@@ -2881,13 +2866,13 @@ oo::class create typeparser {
     
         while {1} {
             my si:void2_state_push
-        my sequence_501
+        my sequence_499
             my si:kleene_close
         }
         return
     }
     
-    method sequence_501 {} {
+    method sequence_499 {} {
         # x
         #     (HAT)
         #     (AND_expression)
@@ -2912,12 +2897,12 @@ oo::class create typeparser {
         #     (digit_sequence)
     
         my si:value_symbol_start exponent_part
-        my sequence_512
+        my sequence_510
         my si:reduce_symbol_end exponent_part
         return
     }
     
-    method sequence_512 {} {
+    method sequence_510 {} {
         # x
         #     [eE]
         #     ?
@@ -2962,12 +2947,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start extern
-        my sequence_524
+        my sequence_522
         my si:void_leaf_symbol_end extern
         return
     }
     
-    method sequence_524 {} {
+    method sequence_522 {} {
         # x
         #     "extern"
         #     (WHITESPACE)
@@ -2990,12 +2975,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start float
-        my sequence_529
+        my sequence_527
         my si:void_leaf_symbol_end float
         return
     }
     
-    method sequence_529 {} {
+    method sequence_527 {} {
         # x
         #     "float"
         #     (WHITESPACE)
@@ -3018,12 +3003,12 @@ oo::class create typeparser {
         #     (hexadecimal_floating_constant)
     
         my si:value_symbol_start floating_constant
-        my choice_534
+        my choice_532
         my si:reduce_symbol_end floating_constant
         return
     }
     
-    method choice_534 {} {
+    method choice_532 {} {
         # /
         #     (decimal_floating_constant)
         #     (hexadecimal_floating_constant)
@@ -3065,12 +3050,12 @@ oo::class create typeparser {
         #         '.'
     
         my si:value_symbol_start fractional_constant
-        my choice_550
+        my choice_548
         my si:reduce_symbol_end fractional_constant
         return
     }
     
-    method choice_550 {} {
+    method choice_548 {} {
         # /
         #     x
         #         ?
@@ -3082,14 +3067,14 @@ oo::class create typeparser {
         #         '.'
     
         my si:value_state_push
-        my sequence_544
+        my sequence_542
         my si:valuevalue_branch
-        my sequence_548
+        my sequence_546
         my si:value_state_merge
         return
     }
     
-    method sequence_544 {} {
+    method sequence_542 {} {
         # x
         #     ?
         #         (digit_sequence)
@@ -3097,7 +3082,7 @@ oo::class create typeparser {
         #     (digit_sequence)
     
         my si:value_state_push
-        my optional_540
+        my optional_538
         my si:valuevalue_part
         my si:next_char .
         my si:valuevalue_part
@@ -3106,7 +3091,7 @@ oo::class create typeparser {
         return
     }
     
-    method optional_540 {} {
+    method optional_538 {} {
         # ?
         #     (digit_sequence)
     
@@ -3116,7 +3101,7 @@ oo::class create typeparser {
         return
     }
     
-    method sequence_548 {} {
+    method sequence_546 {} {
         # x
         #     (digit_sequence)
         #     '.'
@@ -3152,12 +3137,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start GREATER
-        my sequence_557
+        my sequence_555
         my si:void_leaf_symbol_end GREATER
         return
     }
     
-    method sequence_557 {} {
+    method sequence_555 {} {
         # x
         #     '>'
         #     (WHITESPACE)
@@ -3180,12 +3165,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start GREATEREQUAL
-        my sequence_562
+        my sequence_560
         my si:void_leaf_symbol_end GREATEREQUAL
         return
     }
     
-    method sequence_562 {} {
+    method sequence_560 {} {
         # x
         #     ">="
         #     (WHITESPACE)
@@ -3208,12 +3193,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start GREATERGREATER
-        my sequence_567
+        my sequence_565
         my si:void_leaf_symbol_end GREATERGREATER
         return
     }
     
-    method sequence_567 {} {
+    method sequence_565 {} {
         # x
         #     ">>"
         #     (WHITESPACE)
@@ -3236,12 +3221,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start GREATERGREATEREQUAL
-        my sequence_572
+        my sequence_570
         my si:void_leaf_symbol_end GREATERGREATEREQUAL
         return
     }
     
-    method sequence_572 {} {
+    method sequence_570 {} {
         # x
         #     ">>="
         #     (WHITESPACE)
@@ -3264,12 +3249,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start HAT
-        my sequence_577
+        my sequence_575
         my si:void_leaf_symbol_end HAT
         return
     }
     
-    method sequence_577 {} {
+    method sequence_575 {} {
         # x
         #     '^'
         #     (WHITESPACE)
@@ -3292,12 +3277,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start HATEQUAL
-        my sequence_582
+        my sequence_580
         my si:void_leaf_symbol_end HATEQUAL
         return
     }
     
-    method sequence_582 {} {
+    method sequence_580 {} {
         # x
         #     "^="
         #     (WHITESPACE)
@@ -3321,12 +3306,12 @@ oo::class create typeparser {
         #         (hexadecimal_digit)
     
         my si:value_symbol_start hexadecimal_constant
-        my sequence_589
+        my sequence_587
         my si:reduce_symbol_end hexadecimal_constant
         return
     }
     
-    method sequence_589 {} {
+    method sequence_587 {} {
         # x
         #     (hexadecimal_prefix)
         #     +
@@ -3335,12 +3320,12 @@ oo::class create typeparser {
         my si:value_state_push
         my sym_hexadecimal_prefix
         my si:valuevalue_part
-        my poskleene_587
+        my poskleene_585
         my si:value_state_merge
         return
     }
     
-    method poskleene_587 {} {
+    method poskleene_585 {} {
         # +
         #     (hexadecimal_digit)
     
@@ -3380,12 +3365,12 @@ oo::class create typeparser {
         #         (hexadecimal_digit)
     
         my si:value_symbol_start hexadecimal_digit_sequence
-        my choice_599
+        my choice_597
         my si:reduce_symbol_end hexadecimal_digit_sequence
         return
     }
     
-    method choice_599 {} {
+    method choice_597 {} {
         # /
         #     (hexadecimal_digit)
         #     x
@@ -3395,12 +3380,12 @@ oo::class create typeparser {
         my si:value_state_push
         my sym_hexadecimal_digit
         my si:valuevalue_branch
-        my sequence_597
+        my sequence_595
         my si:value_state_merge
         return
     }
     
-    method sequence_597 {} {
+    method sequence_595 {} {
         # x
         #     (hexadecimal_digit_sequence)
         #     (hexadecimal_digit)
@@ -3424,12 +3409,12 @@ oo::class create typeparser {
         #         (hexadecimal_digit)
     
         my si:value_symbol_start hexadecimal_escape_sequence
-        my sequence_605
+        my sequence_603
         my si:reduce_symbol_end hexadecimal_escape_sequence
         return
     }
     
-    method sequence_605 {} {
+    method sequence_603 {} {
         # x
         #     "\x"
         #     +
@@ -3438,7 +3423,7 @@ oo::class create typeparser {
         my si:void_state_push
         my si:next_str \134x
         my si:voidvalue_part
-        my poskleene_587
+        my poskleene_585
         my si:value_state_merge
         return
     }
@@ -3463,12 +3448,12 @@ oo::class create typeparser {
         #             (floating_suffix)
     
         my si:value_symbol_start hexadecimal_floating_constant
-        my choice_622
+        my choice_620
         my si:reduce_symbol_end hexadecimal_floating_constant
         return
     }
     
-    method choice_622 {} {
+    method choice_620 {} {
         # /
         #     x
         #         (hexadecimal_prefix)
@@ -3484,14 +3469,14 @@ oo::class create typeparser {
         #             (floating_suffix)
     
         my si:value_state_push
-        my sequence_613
+        my sequence_611
         my si:valuevalue_branch
-        my sequence_620
+        my sequence_618
         my si:value_state_merge
         return
     }
     
-    method sequence_613 {} {
+    method sequence_611 {} {
         # x
         #     (hexadecimal_prefix)
         #     (hexadecimal_fractional_constant)
@@ -3511,7 +3496,7 @@ oo::class create typeparser {
         return
     }
     
-    method sequence_620 {} {
+    method sequence_618 {} {
         # x
         #     (hexadecimal_prefix)
         #     (hexadecimal_digit_sequence)
@@ -3547,12 +3532,12 @@ oo::class create typeparser {
         #         '.'
     
         my si:value_symbol_start hexadecimal_fractional_constant
-        my choice_636
+        my choice_634
         my si:reduce_symbol_end hexadecimal_fractional_constant
         return
     }
     
-    method choice_636 {} {
+    method choice_634 {} {
         # /
         #     x
         #         ?
@@ -3564,14 +3549,14 @@ oo::class create typeparser {
         #         '.'
     
         my si:value_state_push
-        my sequence_630
+        my sequence_628
         my si:valuevalue_branch
-        my sequence_634
+        my sequence_632
         my si:value_state_merge
         return
     }
     
-    method sequence_630 {} {
+    method sequence_628 {} {
         # x
         #     ?
         #         (hexadecimal_digit_sequence)
@@ -3579,7 +3564,7 @@ oo::class create typeparser {
         #     (hexadecimal_digit_sequence)
     
         my si:value_state_push
-        my optional_626
+        my optional_624
         my si:valuevalue_part
         my si:next_char .
         my si:valuevalue_part
@@ -3588,7 +3573,7 @@ oo::class create typeparser {
         return
     }
     
-    method optional_626 {} {
+    method optional_624 {} {
         # ?
         #     (hexadecimal_digit_sequence)
     
@@ -3598,7 +3583,7 @@ oo::class create typeparser {
         return
     }
     
-    method sequence_634 {} {
+    method sequence_632 {} {
         # x
         #     (hexadecimal_digit_sequence)
         #     '.'
@@ -3621,12 +3606,12 @@ oo::class create typeparser {
         #     "0X"
     
         my si:void_symbol_start hexadecimal_prefix
-        my choice_641
+        my choice_639
         my si:void_leaf_symbol_end hexadecimal_prefix
         return
     }
     
-    method choice_641 {} {
+    method choice_639 {} {
         # /
         #     "0x"
         #     "0X"
@@ -3653,12 +3638,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start identifier
-        my sequence_652
+        my sequence_650
         my si:void_leaf_symbol_end identifier
         return
     }
     
-    method sequence_652 {} {
+    method sequence_650 {} {
         # x
         #     <alpha>
         #     *
@@ -3670,14 +3655,14 @@ oo::class create typeparser {
         my si:void_state_push
         my si:next_alpha
         my si:voidvoid_part
-        my kleene_649
+        my kleene_647
         my si:voidvoid_part
         my sym_WHITESPACE
         my si:void_state_merge
         return
     }
     
-    method kleene_649 {} {
+    method kleene_647 {} {
         # *
         #     /
         #         <alnum>
@@ -3685,13 +3670,13 @@ oo::class create typeparser {
     
         while {1} {
             my si:void2_state_push
-        my choice_647
+        my choice_645
             my si:kleene_close
         }
         return
     }
     
-    method choice_647 {} {
+    method choice_645 {} {
         # /
         #     <alnum>
         #     '_'
@@ -3717,12 +3702,12 @@ oo::class create typeparser {
         #             (identifier)
     
         my si:value_symbol_start identifier_list
-        my sequence_662
+        my sequence_660
         my si:reduce_symbol_end identifier_list
         return
     }
     
-    method sequence_662 {} {
+    method sequence_660 {} {
         # x
         #     (identifier)
         #     *
@@ -3733,12 +3718,12 @@ oo::class create typeparser {
         my si:value_state_push
         my sym_identifier
         my si:valuevalue_part
-        my kleene_660
+        my kleene_658
         my si:value_state_merge
         return
     }
     
-    method kleene_660 {} {
+    method kleene_658 {} {
         # *
         #     x
         #         (COMMA)
@@ -3746,13 +3731,13 @@ oo::class create typeparser {
     
         while {1} {
             my si:void2_state_push
-        my sequence_658
+        my sequence_656
             my si:kleene_close
         }
         return
     }
     
-    method sequence_658 {} {
+    method sequence_656 {} {
         # x
         #     (COMMA)
         #     (identifier)
@@ -3778,12 +3763,12 @@ oo::class create typeparser {
         #             (exclusive_OR_expression)
     
         my si:value_symbol_start inclusive_OR_expression
-        my sequence_672
+        my sequence_670
         my si:reduce_symbol_end inclusive_OR_expression
         return
     }
     
-    method sequence_672 {} {
+    method sequence_670 {} {
         # x
         #     (exclusive_OR_expression)
         #     *
@@ -3794,12 +3779,12 @@ oo::class create typeparser {
         my si:value_state_push
         my sym_exclusive_OR_expression
         my si:valuevalue_part
-        my kleene_670
+        my kleene_668
         my si:value_state_merge
         return
     }
     
-    method kleene_670 {} {
+    method kleene_668 {} {
         # *
         #     x
         #         (BAR)
@@ -3807,13 +3792,13 @@ oo::class create typeparser {
     
         while {1} {
             my si:void2_state_push
-        my sequence_668
+        my sequence_666
             my si:kleene_close
         }
         return
     }
     
-    method sequence_668 {} {
+    method sequence_666 {} {
         # x
         #     (BAR)
         #     (exclusive_OR_expression)
@@ -3843,12 +3828,12 @@ oo::class create typeparser {
         #             (initializer)
     
         my si:value_symbol_start initializer_list
-        my sequence_687
+        my sequence_685
         my si:reduce_symbol_end initializer_list
         return
     }
     
-    method sequence_687 {} {
+    method sequence_685 {} {
         # x
         #     ?
         #         (designation)
@@ -3861,16 +3846,16 @@ oo::class create typeparser {
         #             (initializer)
     
         my si:value_state_push
-        my optional_676
+        my optional_674
         my si:valuevalue_part
         my i_status_fail ; # Undefined symbol 'initializer'
         my si:valuevalue_part
-        my kleene_685
+        my kleene_683
         my si:value_state_merge
         return
     }
     
-    method optional_676 {} {
+    method optional_674 {} {
         # ?
         #     (designation)
     
@@ -3880,7 +3865,7 @@ oo::class create typeparser {
         return
     }
     
-    method kleene_685 {} {
+    method kleene_683 {} {
         # *
         #     x
         #         (COMMA)
@@ -3890,13 +3875,13 @@ oo::class create typeparser {
     
         while {1} {
             my si:void2_state_push
-        my sequence_683
+        my sequence_681
             my si:kleene_close
         }
         return
     }
     
-    method sequence_683 {} {
+    method sequence_681 {} {
         # x
         #     (COMMA)
         #     ?
@@ -3906,7 +3891,7 @@ oo::class create typeparser {
         my si:void_state_push
         my sym_COMMA
         my si:voidvalue_part
-        my optional_676
+        my optional_674
         my si:valuevalue_part
         my i_status_fail ; # Undefined symbol 'initializer'
         my si:value_state_merge
@@ -3923,12 +3908,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start inline
-        my sequence_692
+        my sequence_690
         my si:void_leaf_symbol_end inline
         return
     }
     
-    method sequence_692 {} {
+    method sequence_690 {} {
         # x
         #     "inline"
         #     (WHITESPACE)
@@ -3951,12 +3936,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start int
-        my sequence_697
+        my sequence_695
         my si:void_leaf_symbol_end int
         return
     }
     
-    method sequence_697 {} {
+    method sequence_695 {} {
         # x
         #     "int"
         #     (WHITESPACE)
@@ -3979,12 +3964,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start int8
-        my sequence_702
+        my sequence_700
         my si:void_leaf_symbol_end int8
         return
     }
     
-    method sequence_702 {} {
+    method sequence_700 {} {
         # x
         #     "int_8"
         #     (WHITESPACE)
@@ -4007,12 +3992,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start int16
-        my sequence_707
+        my sequence_705
         my si:void_leaf_symbol_end int16
         return
     }
     
-    method sequence_707 {} {
+    method sequence_705 {} {
         # x
         #     "int_16"
         #     (WHITESPACE)
@@ -4035,12 +4020,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start int32
-        my sequence_712
+        my sequence_710
         my si:void_leaf_symbol_end int32
         return
     }
     
-    method sequence_712 {} {
+    method sequence_710 {} {
         # x
         #     "int_32"
         #     (WHITESPACE)
@@ -4063,12 +4048,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start int64
-        my sequence_717
+        my sequence_715
         my si:void_leaf_symbol_end int64
         return
     }
     
-    method sequence_717 {} {
+    method sequence_715 {} {
         # x
         #     "int_64"
         #     (WHITESPACE)
@@ -4101,12 +4086,12 @@ oo::class create typeparser {
         #             (integer_suffix)
     
         my si:value_symbol_start integer_constant
-        my choice_736
+        my choice_734
         my si:reduce_symbol_end integer_constant
         return
     }
     
-    method choice_736 {} {
+    method choice_734 {} {
         # /
         #     x
         #         (decimal_constant)
@@ -4122,16 +4107,16 @@ oo::class create typeparser {
         #             (integer_suffix)
     
         my si:value_state_push
-        my sequence_724
+        my sequence_722
         my si:valuevalue_branch
-        my sequence_729
+        my sequence_727
         my si:valuevalue_branch
-        my sequence_734
+        my sequence_732
         my si:value_state_merge
         return
     }
     
-    method sequence_724 {} {
+    method sequence_722 {} {
         # x
         #     (decimal_constant)
         #     ?
@@ -4140,12 +4125,12 @@ oo::class create typeparser {
         my si:value_state_push
         my sym_decimal_constant
         my si:valuevalue_part
-        my optional_722
+        my optional_720
         my si:value_state_merge
         return
     }
     
-    method optional_722 {} {
+    method optional_720 {} {
         # ?
         #     (integer_suffix)
     
@@ -4155,7 +4140,7 @@ oo::class create typeparser {
         return
     }
     
-    method sequence_729 {} {
+    method sequence_727 {} {
         # x
         #     (octal_constant)
         #     ?
@@ -4164,12 +4149,12 @@ oo::class create typeparser {
         my si:value_state_push
         my sym_octal_constant
         my si:valuevalue_part
-        my optional_722
+        my optional_720
         my si:value_state_merge
         return
     }
     
-    method sequence_734 {} {
+    method sequence_732 {} {
         # x
         #     (hexadecimal_constant)
         #     ?
@@ -4178,7 +4163,7 @@ oo::class create typeparser {
         my si:value_state_push
         my sym_hexadecimal_constant
         my si:valuevalue_part
-        my optional_722
+        my optional_720
         my si:value_state_merge
         return
     }
@@ -4206,12 +4191,12 @@ oo::class create typeparser {
         #             (unsigned_suffix)
     
         my si:value_symbol_start integer_suffix
-        my choice_760
+        my choice_758
         my si:reduce_symbol_end integer_suffix
         return
     }
     
-    method choice_760 {} {
+    method choice_758 {} {
         # /
         #     x
         #         (unsigned_suffix)
@@ -4230,18 +4215,18 @@ oo::class create typeparser {
         #             (unsigned_suffix)
     
         my si:value_state_push
-        my sequence_743
+        my sequence_741
         my si:valuevalue_branch
-        my sequence_747
+        my sequence_745
         my si:valuevalue_branch
-        my sequence_753
+        my sequence_751
         my si:valuevalue_branch
-        my sequence_758
+        my sequence_756
         my si:value_state_merge
         return
     }
     
-    method sequence_743 {} {
+    method sequence_741 {} {
         # x
         #     (unsigned_suffix)
         #     ?
@@ -4250,12 +4235,12 @@ oo::class create typeparser {
         my si:value_state_push
         my sym_unsigned_suffix
         my si:valuevalue_part
-        my optional_741
+        my optional_739
         my si:value_state_merge
         return
     }
     
-    method optional_741 {} {
+    method optional_739 {} {
         # ?
         #     (long_suffix)
     
@@ -4265,7 +4250,7 @@ oo::class create typeparser {
         return
     }
     
-    method sequence_747 {} {
+    method sequence_745 {} {
         # x
         #     (unsigned_suffix)
         #     (long_long_suffix)
@@ -4278,7 +4263,7 @@ oo::class create typeparser {
         return
     }
     
-    method sequence_753 {} {
+    method sequence_751 {} {
         # x
         #     (long_suffix)
         #     ?
@@ -4287,12 +4272,12 @@ oo::class create typeparser {
         my si:value_state_push
         my sym_long_suffix
         my si:valuevalue_part
-        my optional_751
+        my optional_749
         my si:value_state_merge
         return
     }
     
-    method optional_751 {} {
+    method optional_749 {} {
         # ?
         #     (unsigned_suffix)
     
@@ -4302,7 +4287,7 @@ oo::class create typeparser {
         return
     }
     
-    method sequence_758 {} {
+    method sequence_756 {} {
         # x
         #     (long_long_suffix)
         #     ?
@@ -4311,7 +4296,7 @@ oo::class create typeparser {
         my si:value_state_push
         my sym_long_long_suffix
         my si:valuevalue_part
-        my optional_751
+        my optional_749
         my si:value_state_merge
         return
     }
@@ -4326,12 +4311,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_void_symbol_start LBRACE
-        my sequence_765
+        my sequence_763
         my si:void_clear_symbol_end LBRACE
         return
     }
     
-    method sequence_765 {} {
+    method sequence_763 {} {
         # x
         #     '\{'
         #     (WHITESPACE)
@@ -4354,12 +4339,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_void_symbol_start LBRACKET
-        my sequence_770
+        my sequence_768
         my si:void_clear_symbol_end LBRACKET
         return
     }
     
-    method sequence_770 {} {
+    method sequence_768 {} {
         # x
         #     '['
         #     (WHITESPACE)
@@ -4382,12 +4367,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start LESS
-        my sequence_775
+        my sequence_773
         my si:void_leaf_symbol_end LESS
         return
     }
     
-    method sequence_775 {} {
+    method sequence_773 {} {
         # x
         #     '<'
         #     (WHITESPACE)
@@ -4410,12 +4395,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start LESSEQUAL
-        my sequence_780
+        my sequence_778
         my si:void_leaf_symbol_end LESSEQUAL
         return
     }
     
-    method sequence_780 {} {
+    method sequence_778 {} {
         # x
         #     "<="
         #     (WHITESPACE)
@@ -4438,12 +4423,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start LESSLESS
-        my sequence_785
+        my sequence_783
         my si:void_leaf_symbol_end LESSLESS
         return
     }
     
-    method sequence_785 {} {
+    method sequence_783 {} {
         # x
         #     "<<"
         #     (WHITESPACE)
@@ -4466,12 +4451,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start LESSLESSEQUAL
-        my sequence_790
+        my sequence_788
         my si:void_leaf_symbol_end LESSLESSEQUAL
         return
     }
     
-    method sequence_790 {} {
+    method sequence_788 {} {
         # x
         #     "<<="
         #     (WHITESPACE)
@@ -4497,12 +4482,12 @@ oo::class create typeparser {
         #             (inclusive_OR_expression)
     
         my si:value_symbol_start logical_AND_expression
-        my sequence_800
+        my sequence_798
         my si:reduce_symbol_end logical_AND_expression
         return
     }
     
-    method sequence_800 {} {
+    method sequence_798 {} {
         # x
         #     (inclusive_OR_expression)
         #     *
@@ -4513,12 +4498,12 @@ oo::class create typeparser {
         my si:value_state_push
         my sym_inclusive_OR_expression
         my si:valuevalue_part
-        my kleene_798
+        my kleene_796
         my si:value_state_merge
         return
     }
     
-    method kleene_798 {} {
+    method kleene_796 {} {
         # *
         #     x
         #         (ANDAND)
@@ -4526,13 +4511,13 @@ oo::class create typeparser {
     
         while {1} {
             my si:void2_state_push
-        my sequence_796
+        my sequence_794
             my si:kleene_close
         }
         return
     }
     
-    method sequence_796 {} {
+    method sequence_794 {} {
         # x
         #     (ANDAND)
         #     (inclusive_OR_expression)
@@ -4558,12 +4543,12 @@ oo::class create typeparser {
         #             (logical_AND_expression)
     
         my si:value_symbol_start logical_OR_expression
-        my sequence_810
+        my sequence_808
         my si:reduce_symbol_end logical_OR_expression
         return
     }
     
-    method sequence_810 {} {
+    method sequence_808 {} {
         # x
         #     (logical_AND_expression)
         #     *
@@ -4574,12 +4559,12 @@ oo::class create typeparser {
         my si:value_state_push
         my sym_logical_AND_expression
         my si:valuevalue_part
-        my kleene_808
+        my kleene_806
         my si:value_state_merge
         return
     }
     
-    method kleene_808 {} {
+    method kleene_806 {} {
         # *
         #     x
         #         (BARBAR)
@@ -4587,13 +4572,13 @@ oo::class create typeparser {
     
         while {1} {
             my si:void2_state_push
-        my sequence_806
+        my sequence_804
             my si:kleene_close
         }
         return
     }
     
-    method sequence_806 {} {
+    method sequence_804 {} {
         # x
         #     (BARBAR)
         #     (logical_AND_expression)
@@ -4616,12 +4601,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start long
-        my sequence_815
+        my sequence_813
         my si:void_leaf_symbol_end long
         return
     }
     
-    method sequence_815 {} {
+    method sequence_813 {} {
         # x
         #     "long"
         #     (WHITESPACE)
@@ -4644,12 +4629,12 @@ oo::class create typeparser {
         #     "LL"
     
         my si:void_symbol_start long_long_suffix
-        my choice_820
+        my choice_818
         my si:void_leaf_symbol_end long_long_suffix
         return
     }
     
-    method choice_820 {} {
+    method choice_818 {} {
         # /
         #     "ll"
         #     "LL"
@@ -4685,12 +4670,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_void_symbol_start LPAREN
-        my sequence_827
+        my sequence_825
         my si:void_clear_symbol_end LPAREN
         return
     }
     
-    method sequence_827 {} {
+    method sequence_825 {} {
         # x
         #     '\('
         #     (WHITESPACE)
@@ -4713,12 +4698,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start MINUS
-        my sequence_832
+        my sequence_830
         my si:void_leaf_symbol_end MINUS
         return
     }
     
-    method sequence_832 {} {
+    method sequence_830 {} {
         # x
         #     '-'
         #     (WHITESPACE)
@@ -4741,12 +4726,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start MINUSEQUAL
-        my sequence_837
+        my sequence_835
         my si:void_leaf_symbol_end MINUSEQUAL
         return
     }
     
-    method sequence_837 {} {
+    method sequence_835 {} {
         # x
         #     "-="
         #     (WHITESPACE)
@@ -4769,12 +4754,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start MINUSMINUS
-        my sequence_842
+        my sequence_840
         my si:void_leaf_symbol_end MINUSMINUS
         return
     }
     
-    method sequence_842 {} {
+    method sequence_840 {} {
         # x
         #     "--"
         #     (WHITESPACE)
@@ -4803,12 +4788,12 @@ oo::class create typeparser {
         #             (cast_expression)
     
         my si:value_symbol_start multiplicative_expression
-        my sequence_856
+        my sequence_854
         my si:reduce_symbol_end multiplicative_expression
         return
     }
     
-    method sequence_856 {} {
+    method sequence_854 {} {
         # x
         #     (cast_expression)
         #     *
@@ -4822,12 +4807,12 @@ oo::class create typeparser {
         my si:value_state_push
         my sym_cast_expression
         my si:valuevalue_part
-        my kleene_854
+        my kleene_852
         my si:value_state_merge
         return
     }
     
-    method kleene_854 {} {
+    method kleene_852 {} {
         # *
         #     x
         #         /
@@ -4838,13 +4823,13 @@ oo::class create typeparser {
     
         while {1} {
             my si:void2_state_push
-        my sequence_852
+        my sequence_850
             my si:kleene_close
         }
         return
     }
     
-    method sequence_852 {} {
+    method sequence_850 {} {
         # x
         #     /
         #         (STAR)
@@ -4853,14 +4838,14 @@ oo::class create typeparser {
         #     (cast_expression)
     
         my si:value_state_push
-        my choice_849
+        my choice_847
         my si:valuevalue_part
         my sym_cast_expression
         my si:value_state_merge
         return
     }
     
-    method choice_849 {} {
+    method choice_847 {} {
         # /
         #     (STAR)
         #     (SLASH)
@@ -4881,10 +4866,10 @@ oo::class create typeparser {
     #
     
     method sym_nonzero_digit {} {
-        # [1_9]
+        # range (1 .. 9)
     
         my si:void_symbol_start nonzero_digit
-        my si:next_class 1_9
+        my si:next_range 1 9
         my si:void_leaf_symbol_end nonzero_digit
         return
     }
@@ -4900,12 +4885,12 @@ oo::class create typeparser {
         #         (octal_digit)
     
         my si:value_symbol_start octal_constant
-        my sequence_865
+        my sequence_863
         my si:reduce_symbol_end octal_constant
         return
     }
     
-    method sequence_865 {} {
+    method sequence_863 {} {
         # x
         #     '0'
         #     *
@@ -4914,12 +4899,12 @@ oo::class create typeparser {
         my si:void_state_push
         my si:next_char 0
         my si:voidvalue_part
-        my kleene_863
+        my kleene_861
         my si:value_state_merge
         return
     }
     
-    method kleene_863 {} {
+    method kleene_861 {} {
         # *
         #     (octal_digit)
     
@@ -4936,10 +4921,10 @@ oo::class create typeparser {
     #
     
     method sym_octal_digit {} {
-        # [0_7]
+        # range (0 .. 7)
     
         my si:void_symbol_start octal_digit
-        my si:next_class 0_7
+        my si:next_range 0 7
         my si:void_leaf_symbol_end octal_digit
         return
     }
@@ -4964,12 +4949,12 @@ oo::class create typeparser {
         #         (octal_digit)
     
         my si:value_symbol_start octal_escape_sequence
-        my choice_885
+        my choice_883
         my si:reduce_symbol_end octal_escape_sequence
         return
     }
     
-    method choice_885 {} {
+    method choice_883 {} {
         # /
         #     x
         #         '\'
@@ -4985,16 +4970,16 @@ oo::class create typeparser {
         #         (octal_digit)
     
         my si:value_state_push
-        my sequence_872
+        my sequence_870
         my si:valuevalue_branch
-        my sequence_877
+        my sequence_875
         my si:valuevalue_branch
-        my sequence_883
+        my sequence_881
         my si:value_state_merge
         return
     }
     
-    method sequence_872 {} {
+    method sequence_870 {} {
         # x
         #     '\'
         #     (octal_digit)
@@ -5007,7 +4992,7 @@ oo::class create typeparser {
         return
     }
     
-    method sequence_877 {} {
+    method sequence_875 {} {
         # x
         #     '\'
         #     (octal_digit)
@@ -5023,7 +5008,7 @@ oo::class create typeparser {
         return
     }
     
-    method sequence_883 {} {
+    method sequence_881 {} {
         # x
         #     '\'
         #     (octal_digit)
@@ -5057,12 +5042,12 @@ oo::class create typeparser {
         #             (abstract_declarator)
     
         my si:value_symbol_start parameter_declaration
-        my choice_898
+        my choice_896
         my si:reduce_symbol_end parameter_declaration
         return
     }
     
-    method choice_898 {} {
+    method choice_896 {} {
         # /
         #     x
         #         (declaration_specifiers)
@@ -5073,14 +5058,14 @@ oo::class create typeparser {
         #             (abstract_declarator)
     
         my si:value_state_push
-        my sequence_890
+        my sequence_888
         my si:valuevalue_branch
-        my sequence_896
+        my sequence_894
         my si:value_state_merge
         return
     }
     
-    method sequence_890 {} {
+    method sequence_888 {} {
         # x
         #     (declaration_specifiers)
         #     (declarator)
@@ -5093,7 +5078,7 @@ oo::class create typeparser {
         return
     }
     
-    method sequence_896 {} {
+    method sequence_894 {} {
         # x
         #     (declaration_specifiers)
         #     ?
@@ -5102,12 +5087,12 @@ oo::class create typeparser {
         my si:value_state_push
         my sym_declaration_specifiers
         my si:valuevalue_part
-        my optional_894
+        my optional_892
         my si:value_state_merge
         return
     }
     
-    method optional_894 {} {
+    method optional_892 {} {
         # ?
         #     (abstract_declarator)
     
@@ -5130,12 +5115,12 @@ oo::class create typeparser {
         #             (parameter_declaration)
     
         my si:value_symbol_start parameter_list
-        my sequence_908
+        my sequence_906
         my si:reduce_symbol_end parameter_list
         return
     }
     
-    method sequence_908 {} {
+    method sequence_906 {} {
         # x
         #     (parameter_declaration)
         #     *
@@ -5146,12 +5131,12 @@ oo::class create typeparser {
         my si:value_state_push
         my sym_parameter_declaration
         my si:valuevalue_part
-        my kleene_906
+        my kleene_904
         my si:value_state_merge
         return
     }
     
-    method kleene_906 {} {
+    method kleene_904 {} {
         # *
         #     x
         #         (COMMA)
@@ -5159,13 +5144,13 @@ oo::class create typeparser {
     
         while {1} {
             my si:void2_state_push
-        my sequence_904
+        my sequence_902
             my si:kleene_close
         }
         return
     }
     
-    method sequence_904 {} {
+    method sequence_902 {} {
         # x
         #     (COMMA)
         #     (parameter_declaration)
@@ -5191,12 +5176,12 @@ oo::class create typeparser {
         #             (ELLIPSIS)
     
         my si:value_symbol_start parameter_type_list
-        my sequence_918
+        my sequence_916
         my si:reduce_symbol_end parameter_type_list
         return
     }
     
-    method sequence_918 {} {
+    method sequence_916 {} {
         # x
         #     (parameter_list)
         #     ?
@@ -5207,24 +5192,24 @@ oo::class create typeparser {
         my si:value_state_push
         my sym_parameter_list
         my si:valuevalue_part
-        my optional_916
+        my optional_914
         my si:value_state_merge
         return
     }
     
-    method optional_916 {} {
+    method optional_914 {} {
         # ?
         #     x
         #         (COMMA)
         #         (ELLIPSIS)
     
         my si:void2_state_push
-        my sequence_914
+        my sequence_912
         my si:void_state_merge_ok
         return
     }
     
-    method sequence_914 {} {
+    method sequence_912 {} {
         # x
         #     (COMMA)
         #     (ELLIPSIS)
@@ -5247,12 +5232,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start PERCEN
-        my sequence_923
+        my sequence_921
         my si:void_leaf_symbol_end PERCEN
         return
     }
     
-    method sequence_923 {} {
+    method sequence_921 {} {
         # x
         #     '%'
         #     (WHITESPACE)
@@ -5275,12 +5260,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start PERCENTEQUAL
-        my sequence_928
+        my sequence_926
         my si:void_leaf_symbol_end PERCENTEQUAL
         return
     }
     
-    method sequence_928 {} {
+    method sequence_926 {} {
         # x
         #     "%="
         #     (WHITESPACE)
@@ -5303,12 +5288,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start PLING
-        my sequence_933
+        my sequence_931
         my si:void_leaf_symbol_end PLING
         return
     }
     
-    method sequence_933 {} {
+    method sequence_931 {} {
         # x
         #     '!'
         #     (WHITESPACE)
@@ -5331,12 +5316,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start PLINGEQUAL
-        my sequence_938
+        my sequence_936
         my si:void_leaf_symbol_end PLINGEQUAL
         return
     }
     
-    method sequence_938 {} {
+    method sequence_936 {} {
         # x
         #     "!="
         #     (WHITESPACE)
@@ -5359,12 +5344,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start PLUS
-        my sequence_943
+        my sequence_941
         my si:void_leaf_symbol_end PLUS
         return
     }
     
-    method sequence_943 {} {
+    method sequence_941 {} {
         # x
         #     '+'
         #     (WHITESPACE)
@@ -5387,12 +5372,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start PLUSEQUAL
-        my sequence_948
+        my sequence_946
         my si:void_leaf_symbol_end PLUSEQUAL
         return
     }
     
-    method sequence_948 {} {
+    method sequence_946 {} {
         # x
         #     "+="
         #     (WHITESPACE)
@@ -5415,12 +5400,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start PLUSPLUS
-        my sequence_953
+        my sequence_951
         my si:void_leaf_symbol_end PLUSPLUS
         return
     }
     
-    method sequence_953 {} {
+    method sequence_951 {} {
         # x
         #     "++"
         #     (WHITESPACE)
@@ -5445,12 +5430,12 @@ oo::class create typeparser {
         #             (type_qualifier_list)
     
         my si:value_symbol_start pointer
-        my poskleene_961
+        my poskleene_959
         my si:reduce_symbol_end pointer
         return
     }
     
-    method poskleene_961 {} {
+    method poskleene_959 {} {
         # +
         #     x
         #         (STAR)
@@ -5458,17 +5443,17 @@ oo::class create typeparser {
         #             (type_qualifier_list)
     
         my i_loc_push
-        my sequence_959
+        my sequence_957
         my si:kleene_abort
         while {1} {
             my si:void2_state_push
-        my sequence_959
+        my sequence_957
             my si:kleene_close
         }
         return
     }
     
-    method sequence_959 {} {
+    method sequence_957 {} {
         # x
         #     (STAR)
         #     ?
@@ -5477,7 +5462,7 @@ oo::class create typeparser {
         my si:value_state_push
         my sym_STAR
         my si:valuevalue_part
-        my optional_353
+        my optional_351
         my si:value_state_merge
         return
     }
@@ -5493,12 +5478,12 @@ oo::class create typeparser {
         #         (postfix_expression_tail)
     
         my si:value_symbol_start postfix_expression
-        my sequence_968
+        my sequence_966
         my si:reduce_symbol_end postfix_expression
         return
     }
     
-    method sequence_968 {} {
+    method sequence_966 {} {
         # x
         #     (postfix_expression_head)
         #     *
@@ -5507,12 +5492,12 @@ oo::class create typeparser {
         my si:value_state_push
         my sym_postfix_expression_head
         my si:valuevalue_part
-        my kleene_966
+        my kleene_964
         my si:value_state_merge
         return
     }
     
-    method kleene_966 {} {
+    method kleene_964 {} {
         # *
         #     (postfix_expression_tail)
     
@@ -5548,12 +5533,12 @@ oo::class create typeparser {
         #         (RBRACE)
     
         my si:value_symbol_start postfix_expression_head
-        my choice_989
+        my choice_987
         my si:reduce_symbol_end postfix_expression_head
         return
     }
     
-    method choice_989 {} {
+    method choice_987 {} {
         # /
         #     (primary_expression)
         #     x
@@ -5575,14 +5560,14 @@ oo::class create typeparser {
         my si:value_state_push
         my sym_primary_expression
         my si:valuevalue_branch
-        my sequence_978
+        my sequence_976
         my si:valuevalue_branch
-        my sequence_987
+        my sequence_985
         my si:value_state_merge
         return
     }
     
-    method sequence_978 {} {
+    method sequence_976 {} {
         # x
         #     (LPAREN)
         #     (type_name)
@@ -5607,7 +5592,7 @@ oo::class create typeparser {
         return
     }
     
-    method sequence_987 {} {
+    method sequence_985 {} {
         # x
         #     (LPAREN)
         #     (type_name)
@@ -5660,12 +5645,12 @@ oo::class create typeparser {
         #     (MINUSMINUS)
     
         my si:value_symbol_start postfix_expression_tail
-        my choice_1013
+        my choice_1011
         my si:reduce_symbol_end postfix_expression_tail
         return
     }
     
-    method choice_1013 {} {
+    method choice_1011 {} {
         # /
         #     x
         #         (LBRACKET)
@@ -5686,13 +5671,13 @@ oo::class create typeparser {
         #     (MINUSMINUS)
     
         my si:value_state_push
-        my sequence_995
+        my sequence_993
         my si:valuevalue_branch
-        my sequence_1002
+        my sequence_1000
         my si:valuevalue_branch
-        my sequence_282
+        my sequence_280
         my si:valuevalue_branch
-        my sequence_1009
+        my sequence_1007
         my si:valuevalue_branch
         my sym_PLUSPLUS
         my si:valuevalue_branch
@@ -5701,7 +5686,7 @@ oo::class create typeparser {
         return
     }
     
-    method sequence_995 {} {
+    method sequence_993 {} {
         # x
         #     (LBRACKET)
         #     (expression)
@@ -5717,7 +5702,7 @@ oo::class create typeparser {
         return
     }
     
-    method sequence_1002 {} {
+    method sequence_1000 {} {
         # x
         #     (LPAREN)
         #     ?
@@ -5727,14 +5712,14 @@ oo::class create typeparser {
         my si:void_state_push
         my sym_LPAREN
         my si:voidvalue_part
-        my optional_999
+        my optional_997
         my si:valuevalue_part
         my sym_RPAREN
         my si:value_state_merge
         return
     }
     
-    method optional_999 {} {
+    method optional_997 {} {
         # ?
         #     (argument_expression_list)
     
@@ -5744,7 +5729,7 @@ oo::class create typeparser {
         return
     }
     
-    method sequence_1009 {} {
+    method sequence_1007 {} {
         # x
         #     (ARROW)
         #     (identifier)
@@ -5772,12 +5757,12 @@ oo::class create typeparser {
         #         (RPAREN)
     
         my si:value_symbol_start primary_expression
-        my choice_1024
+        my choice_1022
         my si:reduce_symbol_end primary_expression
         return
     }
     
-    method choice_1024 {} {
+    method choice_1022 {} {
         # /
         #     (identifier)
         #     (constant)
@@ -5794,12 +5779,12 @@ oo::class create typeparser {
         my si:valuevalue_branch
         my sym_string_literal
         my si:valuevalue_branch
-        my sequence_1022
+        my sequence_1020
         my si:value_state_merge
         return
     }
     
-    method sequence_1022 {} {
+    method sequence_1020 {} {
         # x
         #     (LPAREN)
         #     (expression)
@@ -5825,12 +5810,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start ptrdiff_t
-        my sequence_1029
+        my sequence_1027
         my si:void_leaf_symbol_end ptrdiff_t
         return
     }
     
-    method sequence_1029 {} {
+    method sequence_1027 {} {
         # x
         #     "ptrdiff_t"
         #     (WHITESPACE)
@@ -5853,12 +5838,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start QUERY
-        my sequence_1034
+        my sequence_1032
         my si:void_leaf_symbol_end QUERY
         return
     }
     
-    method sequence_1034 {} {
+    method sequence_1032 {} {
         # x
         #     '?'
         #     (WHITESPACE)
@@ -5881,12 +5866,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_void_symbol_start RBRACE
-        my sequence_1039
+        my sequence_1037
         my si:void_clear_symbol_end RBRACE
         return
     }
     
-    method sequence_1039 {} {
+    method sequence_1037 {} {
         # x
         #     '\}'
         #     (WHITESPACE)
@@ -5909,12 +5894,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_void_symbol_start RBRACKET
-        my sequence_1044
+        my sequence_1042
         my si:void_clear_symbol_end RBRACKET
         return
     }
     
-    method sequence_1044 {} {
+    method sequence_1042 {} {
         # x
         #     ']'
         #     (WHITESPACE)
@@ -5937,12 +5922,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start register
-        my sequence_1049
+        my sequence_1047
         my si:void_leaf_symbol_end register
         return
     }
     
-    method sequence_1049 {} {
+    method sequence_1047 {} {
         # x
         #     "register"
         #     (WHITESPACE)
@@ -5972,12 +5957,12 @@ oo::class create typeparser {
         #             (shift_expression)
     
         my si:value_symbol_start relational_expression
-        my sequence_1064
+        my sequence_1062
         my si:reduce_symbol_end relational_expression
         return
     }
     
-    method sequence_1064 {} {
+    method sequence_1062 {} {
         # x
         #     (shift_expression)
         #     *
@@ -5992,12 +5977,12 @@ oo::class create typeparser {
         my si:value_state_push
         my sym_shift_expression
         my si:valuevalue_part
-        my kleene_1062
+        my kleene_1060
         my si:value_state_merge
         return
     }
     
-    method kleene_1062 {} {
+    method kleene_1060 {} {
         # *
         #     x
         #         /
@@ -6009,13 +5994,13 @@ oo::class create typeparser {
     
         while {1} {
             my si:void2_state_push
-        my sequence_1060
+        my sequence_1058
             my si:kleene_close
         }
         return
     }
     
-    method sequence_1060 {} {
+    method sequence_1058 {} {
         # x
         #     /
         #         (LESSEQUAL)
@@ -6025,14 +6010,14 @@ oo::class create typeparser {
         #     (shift_expression)
     
         my si:value_state_push
-        my choice_1057
+        my choice_1055
         my si:valuevalue_part
         my sym_shift_expression
         my si:value_state_merge
         return
     }
     
-    method choice_1057 {} {
+    method choice_1055 {} {
         # /
         #     (LESSEQUAL)
         #     (GREATEREQUAL)
@@ -6061,12 +6046,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start restrict
-        my sequence_1069
+        my sequence_1067
         my si:void_leaf_symbol_end restrict
         return
     }
     
-    method sequence_1069 {} {
+    method sequence_1067 {} {
         # x
         #     "restrict"
         #     (WHITESPACE)
@@ -6089,12 +6074,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_void_symbol_start RPAREN
-        my sequence_1074
+        my sequence_1072
         my si:void_clear_symbol_end RPAREN
         return
     }
     
-    method sequence_1074 {} {
+    method sequence_1072 {} {
         # x
         #     '\)'
         #     (WHITESPACE)
@@ -6117,12 +6102,12 @@ oo::class create typeparser {
         #     (escape_sequence)
     
         my si:value_symbol_start s_char
-        my choice_1079
+        my choice_1077
         my si:reduce_symbol_end s_char
         return
     }
     
-    method choice_1079 {} {
+    method choice_1077 {} {
         # /
         #     [^\"\\n\r]
         #     (escape_sequence)
@@ -6145,12 +6130,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_void_symbol_start SEMICOLON
-        my sequence_1084
+        my sequence_1082
         my si:void_clear_symbol_end SEMICOLON
         return
     }
     
-    method sequence_1084 {} {
+    method sequence_1082 {} {
         # x
         #     ';'
         #     (WHITESPACE)
@@ -6178,12 +6163,12 @@ oo::class create typeparser {
         #             (additive_expression)
     
         my si:value_symbol_start shift_expression
-        my sequence_1097
+        my sequence_1095
         my si:reduce_symbol_end shift_expression
         return
     }
     
-    method sequence_1097 {} {
+    method sequence_1095 {} {
         # x
         #     (additive_expression)
         #     *
@@ -6196,12 +6181,12 @@ oo::class create typeparser {
         my si:value_state_push
         my sym_additive_expression
         my si:valuevalue_part
-        my kleene_1095
+        my kleene_1093
         my si:value_state_merge
         return
     }
     
-    method kleene_1095 {} {
+    method kleene_1093 {} {
         # *
         #     x
         #         /
@@ -6211,13 +6196,13 @@ oo::class create typeparser {
     
         while {1} {
             my si:void2_state_push
-        my sequence_1093
+        my sequence_1091
             my si:kleene_close
         }
         return
     }
     
-    method sequence_1093 {} {
+    method sequence_1091 {} {
         # x
         #     /
         #         (LESSLESS)
@@ -6225,14 +6210,14 @@ oo::class create typeparser {
         #     (additive_expression)
     
         my si:value_state_push
-        my choice_1090
+        my choice_1088
         my si:valuevalue_part
         my sym_additive_expression
         my si:value_state_merge
         return
     }
     
-    method choice_1090 {} {
+    method choice_1088 {} {
         # /
         #     (LESSLESS)
         #     (GREATERGREATER)
@@ -6255,12 +6240,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start short
-        my sequence_1102
+        my sequence_1100
         my si:void_leaf_symbol_end short
         return
     }
     
-    method sequence_1102 {} {
+    method sequence_1100 {} {
         # x
         #     "short"
         #     (WHITESPACE)
@@ -6296,12 +6281,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start signed
-        my sequence_1109
+        my sequence_1107
         my si:void_leaf_symbol_end signed
         return
     }
     
-    method sequence_1109 {} {
+    method sequence_1107 {} {
         # x
         #     "signed"
         #     (WHITESPACE)
@@ -6324,12 +6309,12 @@ oo::class create typeparser {
         #     ['\"?\abfnrtv]
     
         my si:void_symbol_start simple_escape_sequence
-        my sequence_1114
+        my sequence_1112
         my si:void_leaf_symbol_end simple_escape_sequence
         return
     }
     
-    method sequence_1114 {} {
+    method sequence_1112 {} {
         # x
         #     '\'
         #     ['\"?\abfnrtv]
@@ -6352,12 +6337,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start size_t
-        my sequence_1119
+        my sequence_1117
         my si:void_leaf_symbol_end size_t
         return
     }
     
-    method sequence_1119 {} {
+    method sequence_1117 {} {
         # x
         #     "size_t"
         #     (WHITESPACE)
@@ -6380,12 +6365,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start sizeof
-        my sequence_1124
+        my sequence_1122
         my si:void_leaf_symbol_end sizeof
         return
     }
     
-    method sequence_1124 {} {
+    method sequence_1122 {} {
         # x
         #     "sizeof"
         #     (WHITESPACE)
@@ -6408,12 +6393,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start SLASH
-        my sequence_1129
+        my sequence_1127
         my si:void_leaf_symbol_end SLASH
         return
     }
     
-    method sequence_1129 {} {
+    method sequence_1127 {} {
         # x
         #     '/'
         #     (WHITESPACE)
@@ -6436,12 +6421,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start SLASHEQUAL
-        my sequence_1134
+        my sequence_1132
         my si:void_leaf_symbol_end SLASHEQUAL
         return
     }
     
-    method sequence_1134 {} {
+    method sequence_1132 {} {
         # x
         #     "/="
         #     (WHITESPACE)
@@ -6465,29 +6450,29 @@ oo::class create typeparser {
         #         (type_qualifier)
     
         my si:value_symbol_start specifier_qualifier_list
-        my poskleene_1141
+        my poskleene_1139
         my si:reduce_symbol_end specifier_qualifier_list
         return
     }
     
-    method poskleene_1141 {} {
+    method poskleene_1139 {} {
         # +
         #     /
         #         (type_specifier)
         #         (type_qualifier)
     
         my i_loc_push
-        my choice_1139
+        my choice_1137
         my si:kleene_abort
         while {1} {
             my si:void2_state_push
-        my choice_1139
+        my choice_1137
             my si:kleene_close
         }
         return
     }
     
-    method choice_1139 {} {
+    method choice_1137 {} {
         # /
         #     (type_specifier)
         #     (type_qualifier)
@@ -6510,12 +6495,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start STAR
-        my sequence_1146
+        my sequence_1144
         my si:void_leaf_symbol_end STAR
         return
     }
     
-    method sequence_1146 {} {
+    method sequence_1144 {} {
         # x
         #     '*'
         #     (WHITESPACE)
@@ -6538,12 +6523,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start STAREQUAL
-        my sequence_1151
+        my sequence_1149
         my si:void_leaf_symbol_end STAREQUAL
         return
     }
     
-    method sequence_1151 {} {
+    method sequence_1149 {} {
         # x
         #     "*="
         #     (WHITESPACE)
@@ -6566,12 +6551,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start static
-        my sequence_1156
+        my sequence_1154
         my si:void_leaf_symbol_end static
         return
     }
     
-    method sequence_1156 {} {
+    method sequence_1154 {} {
         # x
         #     "static"
         #     (WHITESPACE)
@@ -6597,12 +6582,12 @@ oo::class create typeparser {
         #     (register)
     
         my si:value_symbol_start storage_class_specifier
-        my choice_1164
+        my choice_1162
         my si:reduce_symbol_end storage_class_specifier
         return
     }
     
-    method choice_1164 {} {
+    method choice_1162 {} {
         # /
         #     (typedef)
         #     (extern)
@@ -6638,12 +6623,12 @@ oo::class create typeparser {
         #     '\"'
     
         my si:value_symbol_start string_literal
-        my sequence_1174
+        my sequence_1172
         my si:reduce_symbol_end string_literal
         return
     }
     
-    method sequence_1174 {} {
+    method sequence_1172 {} {
         # x
         #     ?
         #         'L'
@@ -6657,14 +6642,14 @@ oo::class create typeparser {
         my si:voidvoid_part
         my si:next_char \42
         my si:voidvalue_part
-        my kleene_1171
+        my kleene_1169
         my si:valuevalue_part
         my si:next_char \42
         my si:value_state_merge
         return
     }
     
-    method kleene_1171 {} {
+    method kleene_1169 {} {
         # *
         #     (s_char)
     
@@ -6686,12 +6671,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start struct
-        my sequence_1179
+        my sequence_1177
         my si:void_leaf_symbol_end struct
         return
     }
     
-    method sequence_1179 {} {
+    method sequence_1177 {} {
         # x
         #     "struct"
         #     (WHITESPACE)
@@ -6715,12 +6700,12 @@ oo::class create typeparser {
         #     (SEMICOLON)
     
         my si:value_symbol_start struct_declaration
-        my sequence_1185
+        my sequence_1183
         my si:reduce_symbol_end struct_declaration
         return
     }
     
-    method sequence_1185 {} {
+    method sequence_1183 {} {
         # x
         #     (specifier_qualifier_list)
         #     (struct_declarator_list)
@@ -6745,12 +6730,12 @@ oo::class create typeparser {
         #     (struct_declaration)
     
         my si:value_symbol_start struct_declaration_list
-        my poskleene_1189
+        my poskleene_1187
         my si:reduce_symbol_end struct_declaration_list
         return
     }
     
-    method poskleene_1189 {} {
+    method poskleene_1187 {} {
         # +
         #     (struct_declaration)
     
@@ -6779,12 +6764,12 @@ oo::class create typeparser {
         #     (declarator)
     
         my si:value_symbol_start struct_declarator
-        my choice_1200
+        my choice_1198
         my si:reduce_symbol_end struct_declarator
         return
     }
     
-    method choice_1200 {} {
+    method choice_1198 {} {
         # /
         #     x
         #         ?
@@ -6794,14 +6779,14 @@ oo::class create typeparser {
         #     (declarator)
     
         my si:value_state_push
-        my sequence_1197
+        my sequence_1195
         my si:valuevalue_branch
         my sym_declarator
         my si:value_state_merge
         return
     }
     
-    method sequence_1197 {} {
+    method sequence_1195 {} {
         # x
         #     ?
         #         (declarator)
@@ -6809,7 +6794,7 @@ oo::class create typeparser {
         #     (constant_expression)
     
         my si:value_state_push
-        my optional_1193
+        my optional_1191
         my si:valuevalue_part
         my sym_COLON
         my si:valuevalue_part
@@ -6818,7 +6803,7 @@ oo::class create typeparser {
         return
     }
     
-    method optional_1193 {} {
+    method optional_1191 {} {
         # ?
         #     (declarator)
     
@@ -6841,12 +6826,12 @@ oo::class create typeparser {
         #             (struct_declarator)
     
         my si:value_symbol_start struct_declarator_list
-        my sequence_1210
+        my sequence_1208
         my si:reduce_symbol_end struct_declarator_list
         return
     }
     
-    method sequence_1210 {} {
+    method sequence_1208 {} {
         # x
         #     (struct_declarator)
         #     *
@@ -6857,12 +6842,12 @@ oo::class create typeparser {
         my si:value_state_push
         my sym_struct_declarator
         my si:valuevalue_part
-        my kleene_1208
+        my kleene_1206
         my si:value_state_merge
         return
     }
     
-    method kleene_1208 {} {
+    method kleene_1206 {} {
         # *
         #     x
         #         (COMMA)
@@ -6870,13 +6855,13 @@ oo::class create typeparser {
     
         while {1} {
             my si:void2_state_push
-        my sequence_1206
+        my sequence_1204
             my si:kleene_close
         }
         return
     }
     
-    method sequence_1206 {} {
+    method sequence_1204 {} {
         # x
         #     (COMMA)
         #     (struct_declarator)
@@ -6899,12 +6884,12 @@ oo::class create typeparser {
         #     (union)
     
         my si:value_symbol_start struct_or_union
-        my choice_1215
+        my choice_1213
         my si:reduce_symbol_end struct_or_union
         return
     }
     
-    method choice_1215 {} {
+    method choice_1213 {} {
         # /
         #     (struct)
         #     (union)
@@ -6935,12 +6920,12 @@ oo::class create typeparser {
         #         (identifier)
     
         my si:value_symbol_start struct_or_union_specifier
-        my choice_1230
+        my choice_1228
         my si:reduce_symbol_end struct_or_union_specifier
         return
     }
     
-    method choice_1230 {} {
+    method choice_1228 {} {
         # /
         #     x
         #         (struct_or_union)
@@ -6954,14 +6939,14 @@ oo::class create typeparser {
         #         (identifier)
     
         my si:value_state_push
-        my sequence_1224
+        my sequence_1222
         my si:valuevalue_branch
-        my sequence_1228
+        my sequence_1226
         my si:value_state_merge
         return
     }
     
-    method sequence_1224 {} {
+    method sequence_1222 {} {
         # x
         #     (struct_or_union)
         #     ?
@@ -6973,7 +6958,7 @@ oo::class create typeparser {
         my si:value_state_push
         my sym_struct_or_union
         my si:valuevalue_part
-        my optional_419
+        my optional_417
         my si:valuevalue_part
         my sym_LBRACE
         my si:valuevalue_part
@@ -6984,7 +6969,7 @@ oo::class create typeparser {
         return
     }
     
-    method sequence_1228 {} {
+    method sequence_1226 {} {
         # x
         #     (struct_or_union)
         #     (identifier)
@@ -7007,12 +6992,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start TILDE
-        my sequence_1235
+        my sequence_1233
         my si:void_leaf_symbol_end TILDE
         return
     }
     
-    method sequence_1235 {} {
+    method sequence_1233 {} {
         # x
         #     '~'
         #     (WHITESPACE)
@@ -7037,12 +7022,12 @@ oo::class create typeparser {
         #     (EOF)
     
         my si:value_symbol_start type_name
-        my sequence_1242
+        my sequence_1240
         my si:reduce_symbol_end type_name
         return
     }
     
-    method sequence_1242 {} {
+    method sequence_1240 {} {
         # x
         #     (specifier_qualifier_list)
         #     ?
@@ -7052,7 +7037,7 @@ oo::class create typeparser {
         my si:value_state_push
         my sym_specifier_qualifier_list
         my si:valuevalue_part
-        my optional_894
+        my optional_892
         my si:valuevalue_part
         my sym_EOF
         my si:value_state_merge
@@ -7070,12 +7055,12 @@ oo::class create typeparser {
         #     (volatile)
     
         my si:value_symbol_start type_qualifier
-        my choice_1248
+        my choice_1246
         my si:reduce_symbol_end type_qualifier
         return
     }
     
-    method choice_1248 {} {
+    method choice_1246 {} {
         # /
         #     (const)
         #     (restrict)
@@ -7100,12 +7085,12 @@ oo::class create typeparser {
         #     (type_qualifier)
     
         my si:value_symbol_start type_qualifier_list
-        my poskleene_1252
+        my poskleene_1250
         my si:reduce_symbol_end type_qualifier_list
         return
     }
     
-    method poskleene_1252 {} {
+    method poskleene_1250 {} {
         # +
         #     (type_qualifier)
     
@@ -7174,12 +7159,12 @@ oo::class create typeparser {
         #     (bool)
     
         my si:value_symbol_start type_specifier
-        my choice_1301
+        my choice_1299
         my si:reduce_symbol_end type_specifier
         return
     }
     
-    method choice_1301 {} {
+    method choice_1299 {} {
         # /
         #     (void)
         #     (char)
@@ -7334,12 +7319,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start typedef
-        my sequence_1306
+        my sequence_1304
         my si:void_leaf_symbol_end typedef
         return
     }
     
-    method sequence_1306 {} {
+    method sequence_1304 {} {
         # x
         #     "typedef"
         #     (WHITESPACE)
@@ -7375,12 +7360,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start uint8
-        my sequence_1313
+        my sequence_1311
         my si:void_leaf_symbol_end uint8
         return
     }
     
-    method sequence_1313 {} {
+    method sequence_1311 {} {
         # x
         #     "uint_8"
         #     (WHITESPACE)
@@ -7403,12 +7388,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start uint16
-        my sequence_1318
+        my sequence_1316
         my si:void_leaf_symbol_end uint16
         return
     }
     
-    method sequence_1318 {} {
+    method sequence_1316 {} {
         # x
         #     "uint_16"
         #     (WHITESPACE)
@@ -7431,12 +7416,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start uint32
-        my sequence_1323
+        my sequence_1321
         my si:void_leaf_symbol_end uint32
         return
     }
     
-    method sequence_1323 {} {
+    method sequence_1321 {} {
         # x
         #     "uint_32"
         #     (WHITESPACE)
@@ -7459,12 +7444,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start uint64
-        my sequence_1328
+        my sequence_1326
         my si:void_leaf_symbol_end uint64
         return
     }
     
-    method sequence_1328 {} {
+    method sequence_1326 {} {
         # x
         #     "uint_64"
         #     (WHITESPACE)
@@ -7503,12 +7488,12 @@ oo::class create typeparser {
         #         (RPAREN)
     
         my si:value_symbol_start unary_expression
-        my choice_1354
+        my choice_1352
         my si:reduce_symbol_end unary_expression
         return
     }
     
-    method choice_1354 {} {
+    method choice_1352 {} {
         # /
         #     (postfix_expression)
         #     x
@@ -7532,20 +7517,20 @@ oo::class create typeparser {
         my si:value_state_push
         my sym_postfix_expression
         my si:valuevalue_branch
-        my sequence_1334
+        my sequence_1332
         my si:valuevalue_branch
-        my sequence_1338
+        my sequence_1336
         my si:valuevalue_branch
-        my sequence_1342
+        my sequence_1340
         my si:valuevalue_branch
-        my sequence_1346
+        my sequence_1344
         my si:valuevalue_branch
-        my sequence_1352
+        my sequence_1350
         my si:value_state_merge
         return
     }
     
-    method sequence_1334 {} {
+    method sequence_1332 {} {
         # x
         #     (PLUSPLUS)
         #     (unary_expression)
@@ -7558,7 +7543,7 @@ oo::class create typeparser {
         return
     }
     
-    method sequence_1338 {} {
+    method sequence_1336 {} {
         # x
         #     (MINUSMINUS)
         #     (unary_expression)
@@ -7571,7 +7556,7 @@ oo::class create typeparser {
         return
     }
     
-    method sequence_1342 {} {
+    method sequence_1340 {} {
         # x
         #     (unary_operator)
         #     (cast_expression)
@@ -7584,7 +7569,7 @@ oo::class create typeparser {
         return
     }
     
-    method sequence_1346 {} {
+    method sequence_1344 {} {
         # x
         #     (sizeof)
         #     (unary_expression)
@@ -7597,7 +7582,7 @@ oo::class create typeparser {
         return
     }
     
-    method sequence_1352 {} {
+    method sequence_1350 {} {
         # x
         #     (sizeof)
         #     (LPAREN)
@@ -7630,12 +7615,12 @@ oo::class create typeparser {
         #     (PLING)
     
         my si:value_symbol_start unary_operator
-        my choice_1363
+        my choice_1361
         my si:reduce_symbol_end unary_operator
         return
     }
     
-    method choice_1363 {} {
+    method choice_1361 {} {
         # /
         #     (AMPERSAND)
         #     (STAR)
@@ -7670,12 +7655,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start union
-        my sequence_1368
+        my sequence_1366
         my si:void_leaf_symbol_end union
         return
     }
     
-    method sequence_1368 {} {
+    method sequence_1366 {} {
         # x
         #     "union"
         #     (WHITESPACE)
@@ -7698,12 +7683,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start unsigned
-        my sequence_1373
+        my sequence_1371
         my si:void_leaf_symbol_end unsigned
         return
     }
     
-    method sequence_1373 {} {
+    method sequence_1371 {} {
         # x
         #     "unsigned"
         #     (WHITESPACE)
@@ -7739,12 +7724,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start void
-        my sequence_1380
+        my sequence_1378
         my si:void_leaf_symbol_end void
         return
     }
     
-    method sequence_1380 {} {
+    method sequence_1378 {} {
         # x
         #     "void"
         #     (WHITESPACE)
@@ -7767,12 +7752,12 @@ oo::class create typeparser {
         #     (WHITESPACE)
     
         my si:void_symbol_start volatile
-        my sequence_1385
+        my sequence_1383
         my si:void_leaf_symbol_end volatile
         return
     }
     
-    method sequence_1385 {} {
+    method sequence_1383 {} {
         # x
         #     "volatile"
         #     (WHITESPACE)
@@ -7794,12 +7779,12 @@ oo::class create typeparser {
         #     <space>
     
         my si:void_void_symbol_start WHITESPACE
-        my kleene_1389
+        my kleene_1387
         my si:void_clear_symbol_end WHITESPACE
         return
     }
     
-    method kleene_1389 {} {
+    method kleene_1387 {} {
         # *
         #     <space>
     

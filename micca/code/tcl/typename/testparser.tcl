@@ -19,6 +19,7 @@ set types {
     {enum b {foo = 1, bar, baz}}
     {enum {foo, bar} *}
     {char []}
+    {char [32]}
     {char [*]}
     {char [sizeof(char)]}
     {struct a {int *a ;} *}
