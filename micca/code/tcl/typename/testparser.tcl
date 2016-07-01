@@ -10,10 +10,10 @@ set types {
     {int **}
     {enum a}
     {struct a}
-    {uint8}
+    {uint8_t}
     {const int *}
     {struct foo *}
-    {MyType *}
+    {MyType_t *}
     {void (*)(int, ...)}
     {struct foo * const (*)(void)}
     {enum b {foo = 1, bar, baz}}
