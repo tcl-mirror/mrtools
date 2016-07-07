@@ -57,6 +57,7 @@ LSDIAGRAMS =\
 	platform-relation.uxf\
 	platform-statemodel.uxf\
 	platform-transition.uxf\
+	platform-types.uxf\
 	rel-simp-nr-1-1.uxf\
 	rel-simp-r-1-1.uxf\
 	rel-simp-nr-M-1-dyn.uxf\
@@ -163,9 +164,9 @@ ASCIIDOC_OPTS =\
 TESTOPTS =\
 	-verbose bet\
 	-level debug\
-	-noconfig\
-	-nogenerate\
 	$(NULL)
+
+# -noconfig -nogenerate
 
 .PHONY : all doc code tests runtests package
 
