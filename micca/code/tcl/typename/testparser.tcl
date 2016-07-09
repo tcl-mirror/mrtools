@@ -8,12 +8,13 @@ set types {
     {char *const}
     {char *const*}
     {int **}
+    {long long int}
     {enum a}
     {struct a}
     {uint8_t}
     {const int *}
     {struct foo *}
-    {MyType_t *}
+    {typename(MyType_t) *}
     {void (*)(int, ...)}
     {struct foo * const (*)(void)}
     {enum b {foo = 1, bar, baz}}
