@@ -71,8 +71,12 @@ set iswrapped [expr {[lindex [file system [info script]] 0] ne "native"}]
 if {$iswrapped} {
     set top [file join $::starkit::topdir lib application]
     if {$::tcl_platform(os) eq "Linux"} {
-        lappend ::auto_path [file join $::starkit::topdir lib\
-            P-[::platform::identify]]
+        set libs [glob -nocomplain\
+            -directory [file join $::starkit::topdir lib]\
+            P-linux-*]
+        foreach lib $libs {
+            lappend ::auto_path $lib
+        }
     }
 } else {
     set top [file dirname [info script]]
