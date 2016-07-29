@@ -1,8 +1,18 @@
 source typeparser.tcl
 
+puts "oo rde version = [package require pt::rde::oo]"
+
 typeparser create tp
 
+# puts "debug tags = [debug names]"
+
+# debug on pt/rdengine
+
+
+package require pt::util
+
 set types {
+    {char}
     {int (*)()}
     {char (*)(int, int)}
     {char *const}
@@ -13,7 +23,9 @@ set types {
     {struct a}
     {uint8_t}
     {const int *}
-    {struct foo *}
+    {struct foo_bar *}
+    {MyType_t *}
+    {FintFooBar_t}
     {typename(MyType_t) *}
     {void (*)(int, ...)}
     {struct foo * const (*)(void)}
@@ -33,13 +45,14 @@ foreach type $types {
     try {
         puts [::pt::ast print [tp parset $type]]
     } on error {result} {
-        puts $result
-        set perror [tp error]
-        puts "error = \"$perror\""
-        puts "current = \"[tp current]\""
-        lassign $perror pos expect
-        puts "parse error: expected: \"[lindex $expect 0 1]\" at:"
-        puts [string repeat { } $pos]v
-        puts $type
+        puts [::pt::util error2readable $result $type]
+        # puts $result
+        # set perror [tp error]
+        # puts "error = \"$perror\""
+        # puts "current = \"[tp current]\""
+        # lassign $perror pos expect
+        # puts "parse error: expected: \"[lindex $expect 0 1]\" at:"
+        # puts [string repeat { } $pos]v
+        # puts $type
     }
 }
