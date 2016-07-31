@@ -37,7 +37,6 @@ DOCPARTS=\
 	configure.txt\
 	example.txt\
 	generate.txt\
-	harness.txt\
 	litprog.txt\
 	platform.txt\
 	preface.txt\
@@ -163,8 +162,6 @@ ASCIIDOC_OPTS =\
 TESTOPTS =\
 	-verbose bet\
 	-level debug\
-	-noconfig\
-	-nogenerate\
 	$(NULL)
 
 .PHONY : all doc code tests runtests package
