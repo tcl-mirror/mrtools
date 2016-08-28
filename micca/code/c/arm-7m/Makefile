@@ -46,7 +46,6 @@ micca_rt.c : $(RTSRC) micca_rt.h
 CLEANFILES =\
 	micca_rt.c\
 	micca_rt.h\
-	micca_rt.o\
 	$(NULL)
 
 clean :

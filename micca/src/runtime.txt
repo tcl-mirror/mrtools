@@ -6526,9 +6526,6 @@ are at the end of a thread of control.
 static bool
 mrtDispatchOneEvent(void)
 {
-        #ifdef MRT_ARM_ARCH_7M
-    __set_BASEPRI(MRT_PENDSV_PRIORITY) ; // <1>
-        #endif /* MRT_ARM_ARCH_7M */
 
     MRT_EventQueue *queue ;
     if (mrtEventQueueEmpty(&eventQueue)) {
@@ -6542,17 +6539,21 @@ mrtDispatchOneEvent(void)
     if (queue != NULL) {
         MRT_ecb *ecb = queue->next ;
         mrtEventQueueRemove(ecb) ;
+
+            #ifdef MRT_ARM_ARCH_7M
+        __set_BASEPRI(MRT_PENDSV_PRIORITY) ; // <1>
+            #endif /* MRT_ARM_ARCH_7M */
         mrtDispatchEvent(ecb) ;
+            #ifdef MRT_ARM_ARCH_7M
+        __set_BASEPRI(0) ;
+            #endif /* MRT_ARM_ARCH_7M */
+
         mrtFreeEvent(ecb) ; // Return the ECB to the pool.
 
         dispatched = true ;
     } else {
         dispatched = false ;
     }
-
-        #ifdef MRT_ARM_ARCH_7M
-    __set_BASEPRI(0) ;
-        #endif /* MRT_ARM_ARCH_7M */
 
     return dispatched ;
 }
@@ -8833,7 +8834,7 @@ mrt_PortalClassEventName(
     if (classId < portal->classCount) {
         MRT_Class const *class = portal->classes + classId ;
         if (class->eventCount != 0) {
-            if (eventCode >= 0 && eventCode < class->eventCount) {
+            if (eventCode < class->eventCount) {
 #                   ifndef MRT_NO_NAMES
                 char const *const *eventNames = class->eventNames ;
                 if (eventNames != NULL && nameRef != NULL) {
@@ -9275,15 +9276,15 @@ The process will handle vectoring to this code when necessary.
 
 [source,c]
 ----
-<<ARM 7M components>>=
+<<arm7m external functions>>=
 void
 PendSV_Handler(void)
 {
-    for (MRT_SyncBlock *blk = mrtSyncQueueGet() ; blk != NULL ;
-            blk = mrtSyncQueueGet()) {
-        if (blk->function) {
-            blk->function(&blk->params) ;
-        }
+    /*
+     * Empty the synchronization queue.
+     */
+    while (mrtInvokeOneSyncFunction()) {
+        ; /* empty */
     }
 }
 ----
@@ -10974,29 +10975,16 @@ mrt_Initialize(void)
 [source,c]
 ----
 <<arm7m includes>>=
-#include "core_cm3.h"
-#define__ARM_ARCH_7M__
+#define __ARM_ARCH_7M__
+#define NO_MSP_CLASSIC_DEFINES
 
-/*
- * Use the Energy Micro library functions for low level peripheral access.
- */
-#include "em_chip.h"
-#include "em_cmu.h"
-#include "em_emu.h"
-#include "em_rtc.h"
-#include "em_dbg.h"
+#include "msp.h"
 
-
-#define PENDSV_IRQN (-2)    /* 14 Pend SV */
 #define MRT_PENDSV_PRIORITY     0xff
 
-#define SWO_LOCATION 0
-#ifndef MRT_TIMER_FREQUENCY
-#   define MRT_TIMER_FREQUENCY     4096UL
-#endif /* MRT_TIMER_FREQUENCY */
-#define MRT_MAX_CLOCK_TICKS     (UINT32_MAX - 1)
-#define MRT_MAX_MSEC_DELAY\
-        ((MRT_MAX_CLOCK_TICKS / MRT_TIMER_FREQUENCY) * 1000UL)
+#define TIMER_DIVIDER   256
+
+extern uint32_t SystemCoreClock ;
 ----
 
 === ARM 7M Critical Sections
@@ -11008,7 +10996,7 @@ static inline
 void
 mrtInitCriticalSection(void)
 {
-    NVIC_SetPriority(PENDSV_IRQN, MRT_PENDSV_PRIORITY) ;
+    NVIC_SetPriority(PendSV_IRQn, MRT_PENDSV_PRIORITY) ;
 }
 static inline
 void
@@ -11028,12 +11016,23 @@ endCriticalSection(void)
 
 [source,c]
 ----
-<<arm7m static functions>>=
+<<arm7m includes>>=
+#define MRT_MAX_CLOCK_TICKS     (UINT32_MAX - 1)
+#define MRT_MAX_MSEC_DELAY ((MRT_MAX_CLOCK_TICKS / mrtTimerFrequency) * 1000UL)
+
+<<arm7m static data>>=
+static uint32_t mrtTimerFrequency ;
+
 static inline
 MRT_DelayTime
 mrtMsecToTicks(
     MRT_DelayTime msec)
 {
+    /*
+     * for 3 MHz divided down by 256
+     * max delay is 366,503,875 ms
+     * == 3,665,038 s == 61083 min == 1,018 hr == 42 days
+     */
     if (msec > MRT_MAX_MSEC_DELAY) {
         msec = MRT_MAX_MSEC_DELAY ;
     }
@@ -11041,9 +11040,9 @@ mrtMsecToTicks(
      * We must avoid overflow if the requested number of
      * msecs is large.
      */
-    return msec < MRT_MAX_CLOCK_TICKS / MRT_TIMER_FREQUENCY ?
-            ((msec * MRT_TIMER_FREQUENCY) + 1000UL / 2UL) / 1000UL :
-            ((msec + 1000UL / 2UL) / 1000UL) * MRT_TIMER_FREQUENCY ;
+    return msec < MRT_MAX_CLOCK_TICKS / mrtTimerFrequency ?
+            ((msec * mrtTimerFrequency) + 1000UL / 2UL) / 1000UL :
+            ((msec + 1000UL / 2UL) / 1000UL) * mrtTimerFrequency ;
 }
 ----
 
@@ -11056,8 +11055,8 @@ mrtTicksToMsec(
     MRT_DelayTime ticks)
 {
     return ticks < MRT_MAX_CLOCK_TICKS / 1000UL ?
-        ((ticks * 1000UL) + MRT_TIMER_FREQUENCY / 2UL) / MRT_TIMER_FREQUENCY :
-        ((ticks + MRT_TIMER_FREQUENCY / 2UL) / MRT_TIMER_FREQUENCY) * 1000UL ;
+        ((ticks * 1000UL) + mrtTimerFrequency / 2UL) / mrtTimerFrequency :
+        ((ticks + mrtTimerFrequency / 2UL) / mrtTimerFrequency) * 1000UL ;
 }
 ----
 
@@ -11067,7 +11066,7 @@ mrtTicksToMsec(
 static void
 mrtSysTimerMask(void)
 {
-    RTC_IntDisable(RTC_IFC_COMP0) ;
+    BITBAND_PERI(TIMER32_1->CONTROL, TIMER32_CONTROL_IE_OFS) = 0 ;
 }
 ----
 
@@ -11077,7 +11076,8 @@ mrtSysTimerMask(void)
 static void
 mrtSysTimerUnmask(void)
 {
-    RTC_IntEnable(RTC_IFC_COMP0) ;
+    TIMER32_1->INTCLR = 0 ;
+    BITBAND_PERI(TIMER32_1->CONTROL, TIMER32_CONTROL_IE_OFS) = 1 ;
 }
 ----
 
@@ -11088,10 +11088,9 @@ static void
 mrtSysTimerStart(
     MRT_DelayTime time)
 {
-    RTC_CompareSet(0, ticks) ;
-    RTC_IntClear(RTC_IFC_COMP0) ;
+    TIMER32_1->LOAD = time ;
     mrtSysTimerUnmask() ;
-    RTC_Enable(true) ;
+    BITBAND_PERI(TIMER32_1->CONTROL, TIMER32_CONTROL_ENABLE_OFS) = 1 ;
 }
 ----
 
@@ -11101,35 +11100,9 @@ mrtSysTimerStart(
 static MRT_DelayTime
 mrtSysTimerStop(void)
 {
-    /*
-     * There is a race between when we read the CNT register and when we
-     * actually get the timer stopped where it may expire. If it expires, the
-     * interrupt flag will be set and we can use that as an indication that
-     * the CNT register is not valid (i.e. it was cleared to zero when the
-     * timer expired).  This is different than if we had just been enabled and
-     * requested to stop before one tick went by (in our case that's ~ 244
-     * microsecond) and count would have been zero. So this is a bit tricky in
-     * here.
-     */
-    MRT_DelayTime remain ;
-
     mrtSysTimerMask() ;
-    if (RTC->CTRL & RTC_CTRL_EN) {
-        remain = RTC->COMP0 ;
-        remain -= RTC->CNT ;
-        /*
-         * Check that the timer didn't expire, as is indicated by the
-         * interrupt flag, while we were trying to read the registers.
-         */
-        if (RTC->IF & RTC_IF_COMP0) {
-            remain = 0 ;
-        }
-    } else {
-        remain = 0 ;
-    }
-    RTC_Enable(false) ; // timer disabled
-
-    return remain ;
+    BITBAND_PERI(TIMER32_1->CONTROL, TIMER32_CONTROL_ENABLE_OFS) = 0 ;
+    return TIMER32_1->VALUE ;
 }
 ----
 
@@ -11137,10 +11110,9 @@ mrtSysTimerStop(void)
 ----
 <<arm7m external functions>>=
 void
-RTC_IRQHandler(void)
+T32_INT1_IRQHandler(void)
 {
-    RTC_Enable(false) ; // timer disabled
-    RTC_IntClear(RTC_IFC_COMP0) ;
+    TIMER32_1->INTCLR = 0 ;
     MRT_DelayTime nextTime = mrt_TimerExpireService() ;
     if (nextTime != 0) {
         mrtSysTimerStart(nextTime) ;
@@ -11154,23 +11126,18 @@ RTC_IRQHandler(void)
 static void
 mrtInitSysTimer(void)
 {
-    RTC_Reset() ;
     /*
-     * Set RTC prescaler to divide by 8.
+     * for 3 MHz, dividing down by 256 ==> 11718
      */
-    CMU_ClockDivSet(cmuClock_RTC, cmuClkDiv_8) ;
-    /*
-     * Enable Low Freq A Clock to run the RTC.
-     */
-    CMU_ClockEnable(cmuClock_RTC, true) ;
-    RTC_Init_TypeDef init = RTC_INIT_DEFAULT ;
-    init.enable = false ;
-    RTC_Init(&init) ;
-    /*
-     * Enable interrupt at the NVIC.
-     */
-    NVIC_ClearPendingIRQ(RTC_IRQn) ;
-    NVIC_EnableIRQ(RTC_IRQn) ;
+    mrtTimerFrequency = SystemCoreClock / (uint32_t)256 ;
+
+    TIMER32_1->CONTROL =
+            TIMER32_CONTROL_PRESCALE_2 |
+            TIMER32_CONTROL_SIZE |
+            TIMER32_CONTROL_ONESHOT ;
+    TIMER32_1->INTCLR = 0 ;
+    NVIC_ClearPendingIRQ(T32_INT1_IRQn) ;
+    NVIC_EnableIRQ(T32_INT1_IRQn) ;
 }
 ----
 
@@ -11210,31 +11177,7 @@ mrt_TrySyncRequest(
 }
 ----
 
-[source,c]
-----
-<<arm7m external functions>>=
-void
-PendSV_Handler(void)
-{
-    /*
-     * Empty the foreground / background
-     * synchronization queue.
-     */
-    for (MRT_SyncBlock blk = mrtSyncQueueGet() ; blk ; blk = syncQueueGet()) {
-        if (blk->function) {
-            blk->function(&blk->params) ;
-        }
-    }
-}
-----
-
 === ARM 7M Suspending Execution
-
-[source,c]
-----
-<<arm7m static data>>=
-uint8_t sysEnergyMode = 2 ;
-----
 
 [source,c]
 ----
@@ -11244,38 +11187,20 @@ mrtWait(void)
 {
     beginCriticalSection() ;
     if (mrtSyncQueueEmpty()) {
-        bool systick = (SysTick->CTRL & SysTick_CTRL_ENABLE_Msk) != 0 ;
-        SysTick->CTRL &= ~SysTick_CTRL_ENABLE_Msk ;
-
-        switch (sysEnergyMode) {
-        case 1:
-            EMU_EnterEM1() ;
-            break ;
-
-        case 2:
-        default:
-            EMU_EnterEM2(true) ;
-            break ;
-
-        case 3:
-            EMU_EnterEM3(true) ;
-            break ;
-
-        case 4:
-            /*
-             * Only the reset pin or power cycle wakes us up after this.
-             */
-            EMU_EnterEM4() ;
-            break ;
-        }
-
-        if (systick) {
-            SysTick->CTRL |= SysTick_CTRL_ENABLE_Msk ;
-        }
+        __DSB() ; // <1>
+        __WFI() ;
     }
     endCriticalSection() ;
 }
 ----
+<1> ARM recommends a data synchronization barrier instruction before
+going to sleep to insure any writes have been fully synced to memory
+before going to sleep and having clocks and other things turned off.
+We don't need it in this pariticular case since no write operation has
+been performed.
+However, we will follow the recommendation as it is only a single
+instruction and we don't want some change in the future to create
+a mysterious problem.
 
 === ARM 7M Initialization
 
@@ -11285,70 +11210,6 @@ mrtWait(void)
 static void
 mrtPlatformInit(void)
 {
-    /*
-     * Make sure and set up the vector table in case it has been moved from its
-     * default location.
-     */
-    #pragma section=".intvec"
-    SCB->VTOR = (uint32_t)__section_begin(".intvec") ;
-    /*
-     * Set stack align, so ISR's are truly ordinary "C" functions.
-     */
-    SCB->CCR |= SCB_CCR_STKALIGN_Msk ;
-    /*
-     * Workaround for chip errata.
-     */
-    CHIP_Init() ;
-    /*
-     * Update the global notion of the system clock frequency.  The device
-     * drivers need this to calculate various dividers properly.
-     */
-    SystemCoreClockUpdate() ;
-    /*
-     * Bring the system clock down to 7 MHz.
-     */
-    CMU_HFRCOBandSet(cmuHFRCOBand_7MHz) ;
-    /*
-     * High frequency peripheral clock.
-     */
-    CMU_ClockDivSet(cmuClock_HFPER, cmuClkDiv_1) ;
-    CMU_ClockEnable(cmuClock_HFPER, true) ;
-    /*
-     * Enable the LF Crystal Oscillator.
-     */
-    CMU_OscillatorEnable(cmuOsc_LFXO, true, true) ;
-    /*
-     * Enable the low energy clock bus.
-     */
-    CMU_ClockEnable(cmuClock_CORELE, true) ;
-    /*
-     * Select the external crystal oscillator for the low frequency clocks.
-     */
-    CMU_ClockSelectSet(cmuClock_LFA, cmuSelect_LFXO) ;
-    CMU_ClockSelectSet(cmuClock_LFB, cmuSelect_LFXO) ;
-    /*
-     * Enable clocking the PRS.
-     */
-    CMU_ClockEnable(cmuClock_PRS, true) ;
-
-#ifndef MRT_ARM_7M_SWO
-    /*
-     * We want to set up for SWO here.
-     * Enable the HF Peripheral Clock to the GPIO block.
-     */
-    CMU_ClockEnable(cmuClock_GPIO, true) ;
-    /*
-     * To use Serial Wire Viewer we need to enable the auxiliary clock and
-     * set up the I/O pins. SWO is wired to the location 0 pin out.
-     */
-    if (DBG_Connected()) {
-        DBG_SWOEnable(SWO_LOCATION) ;
-        /*
-         * Keep the aux clock running in EM2 mode.
-         */
-        BITBAND_Peripheral(&EMU->CTRL, _EMU_CTRL_EMVREG_SHIFT, 1) ;
-    }
-#endif /* MRT_ARM_7M_SWO */
 }
 ----
 
@@ -11384,7 +11245,7 @@ mrt_Initialize(void)
 
 [source,c]
 ----
-<<arm7m static functions>>=
+<<msp430 static functions>>=
 static inline
 void
 mrtInitCriticalSection(void)
@@ -11718,10 +11579,23 @@ mrt_Initialize(void)
 #include <stdbool.h>
 #include <stdarg.h>
 #include <stdio.h>
-#include <stdalign.h>
-#include <stdnoreturn.h>
 #include <string.h>
 #include <assert.h>
+#ifdef __TI_ARM__
+#   define alignas(x)
+#   define noreturn
+/*
+ * For some reason __set_BASEPRI() function is missing from the
+ * TI CCS CMSIS file.
+ */
+static void __set_BASEPRI(uint32_t value)
+{
+    __asm("     msr basepri,r0") ;
+}
+#else   /* ! __TI_ARM__ */
+#   include <stdalign.h>
+#   include <stdnoreturn.h>
+#endif /* __TI_ARM__ */
 ----
 
 [source,c]
