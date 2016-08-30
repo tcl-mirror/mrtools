@@ -35,7 +35,6 @@ HARNESS	=\
 RTSRCS=\
         $(patsubst %,%/micca_rt.h,$(PLATFORMS))\
         $(patsubst %,%/micca_rt.c,$(PLATFORMS))\
-	$(patsubst %,libtack/%,$(HARNESS))\
 	$(NULL)
 
 ATANGLEOPTS =\
@@ -58,9 +57,6 @@ arm-7m/micca_rt.h arm-7m/micca_rt.c : $(ASRC)
 
 msp430/micca_rt.h msp430/micca_rt.c : $(ASRC)
 	$(MAKE) --directory msp430 micca_rt.h micca_rt.c
-
-libtack/micca_tack.h libtack/micca_tack.c : $(ASRC)
-	$(MAKE) --directory libtack micca_tack.h micca_tack.c
 
 CLEANFILES =\
 	micca_main.tcl\

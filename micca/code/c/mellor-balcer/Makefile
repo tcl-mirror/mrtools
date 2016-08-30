@@ -108,14 +108,8 @@ bookstore.c : bookstore.h micca_rt.h
 
 micca_rt.o : micca_rt.c micca_rt.h
 
-micca_rt.h : $(RTSRC)
-	cd $(MICCADIR) ; atangle $(ATANGLEOPTS) -root micca_rt_posix.h\
-	    	-output $@ micca.aweb
-	mv $(MICCADIR)/micca_rt.h .
-
-micca_rt.c : $(RTSRC)
-	cd $(MICCADIR) ; atangle $(ATANGLEOPTS) -root micca_rt_posix.c -output $@ micca.aweb
-	mv $(MICCADIR)/micca_rt.c .
+micca_rt.c micca_rt.h :
+	micca -posix
 
 bookstore.c : simplebookstore.micca sbs_population.micca
 	micca -stubexternalops simplebookstore.micca sbs_population.micca

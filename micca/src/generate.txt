@@ -1711,7 +1711,6 @@ forAllRefs attrRef $attrRefs {
 <1> This query finds all the attributes of the class
 that are independent attributes. Those are the ones that will have
 a structure member.
-<2> Check if we need to make this attribute an array.
 
 
 As can be seen from the portion of the platform model that
@@ -5421,9 +5420,33 @@ proc activityDefinitions {} {
                         ParameterSignature findById Domain $domain PSigID $PSigID |
                         FindParamsFromSig ~
                     }]
+                    # HERE ! the assignments must account for
+                    # parameter types being arrays.
                     relation foreach param $params -ascending Position {
-                        relation assign $param {Name pname} Declaration
-                        append result "    $Declaration = pp__PARAMS->$pname ;\n"
+                        relation assign $param {Name pname} Declaration DataType
+                        set asgnType [typeCheck assignmentType\
+                                [UnaliasType $domain $DataType]]
+                        switch -exact -- [dict get $asgnType type] {
+                            scalar {
+                                append result\
+                                    "    $Declaration = pp__PARAMS->$pname ;\n"
+                            }
+                            string {
+                                set dimension [dict get $asgnType dimension]
+                                set maxchars [expr {$dimension - 1}]
+                                append result\
+                                    "    $Declaration ;\n"\
+                                    "    strncpy($pname, pp__PARAMS->$pname,\
+                                            $maxchars) ;\n"\
+                                    "    $pname\[$maxchars\] = '\\0' ;\n"
+                            }
+                            array {
+                                append result\
+                                    "    $Declaration ;\n"\
+                                    "    memcpy($pname, pp__PARAMS->$pname,\
+                                            sizeof($pname)) ;\n"
+                            }
+                        }
                     }
 
                     set syms [pipe {
@@ -6823,7 +6846,7 @@ proc InstanceAttrUpdate {instref args} {
 
         assignAttribute $attrRef DataType
         # HERE !! figure out is we are dealing with an array or a string.
-        set asgnType [typeCheck assignmentType $DataType]
+        set asgnType [typeCheck assignmentType [UnaliasType $domain $DataType]]
         switch -exact -- [dict get $asgnType type] {
             scalar {
                 append result "$instref->$attr = ($value) ;\n"
@@ -6846,6 +6869,16 @@ proc InstanceAttrUpdate {instref args} {
 }
 ----
 
+[source,tcl]
+----
+<<generation helper commands>>=
+proc UnaliasType {domain typename} {
+    set aliasRef [TypeAlias findById Domain $domain TypeName $typename]
+    return [expr {[isEmptyRef $aliasRef] ? $typename :\
+        [readAttribute $aliasRef TypeDefinition]}]
+}
+----
+
 ifdef::showtests[]
 [source,tcl]
 ----
@@ -6855,8 +6888,9 @@ test codegen-55.0 {
 } -setup {
     validateutils genMiccaFile codegen55 {
         domain codegen55 {
+            typealias Name_t {char[32]}
             class X {
-                attribute name {char[32]} -default {"n"}
+                attribute name Name_t -default {"n"}
                 attribute temp {int[2]} -default {{0, 1}}
                 attribute total int -default 0
 
@@ -6957,7 +6991,7 @@ proc InstanceAssign {instref args} {
 
         set indepRef [findRelated $attrRef {~R29 IndependentAttribute}]
         # HERE !! deal with array copy
-        set asgnType [typeCheck assignmentType $attrtype]
+        set asgnType [typeCheck assignmentType [UnaliasType $domain $attrtype]]
         if {[isNotEmptyRef $indepRef]} {
             if {[dict get $asgnType type] ne "scalar"} {
                 append result\
@@ -8592,12 +8626,36 @@ proc InstanceNewECB {instref event arglist} {
             append result\
                 "struct $eparamsname *const $ptrparams =\n"\
                 "    (struct $eparamsname *)$ecbvar->eventParameters ;\n"
-            foreach param $required {
-                if {![dict exists $arglist $param]} {
-                    error "required event parameter, $param,\
+            # HERE -- assignment to event parameters needs to account
+            # arrays.
+            relation foreach param $params -ascending Position {
+                relation assign $param {Name pname} {DataType datatype}
+                if {![dict exists $arglist $pname]} {
+                    error "required event parameter, $pname,\
                             was not supplied a value"
                 }
-                append result "$ptrparams->$param = [dict get $arglist $param] ;\n"
+                set asgnType [typeCheck assignmentType\
+                        [UnaliasType $domain $datatype]]
+                switch -exact -- [dict get $asgnType type] {
+                    scalar {
+                        append result\
+                            "$ptrparams->$pname = [dict get $arglist $pname] ;\n"
+                    }
+                    string {
+                        set dimension [dict get $asgnType dimension]
+                        set maxchars [expr {$dimension - 1}]
+                        append result\
+                            "    strncpy($ptrparams->$pname,\
+                                    [dict get $arglist $pname], $maxchars) ;\n"\
+                            "    $ptrparams->$pname\[$maxchars\] = '\\0' ;\n"
+                    }
+                    array {
+                        append result\
+                            "    memcpy($ptrparams->$pname,\
+                                    [dict get $arglist $pname],\
+                                    sizeof($ptrparams->$pname)) ;\n"
+                    }
+                }
             }
         }
     }
@@ -8616,14 +8674,16 @@ test codegen-50.0 {
         domain codegen50 {
             class X {
                 attribute temp int -default 20
+                attribute name {char[4]}
 
                 statemodel {
                     state Idle {} {
                     }
                     transition Idle - E1 -> Running
 
-                    state Running {incr int} {
+                    state Running {incr int newname {char[4]}} {
                         %<my attr temp>% += incr ;
+                        strcpy(%<my attr name>%, newname) ;
                     }
                     transition Running - E1 -> Running ;
                 }
@@ -8631,12 +8691,12 @@ test codegen-50.0 {
 
             domainop void startx1 {} {
                 %<X findByName x1 xref>%
-                %<instance xref signal E1 incr 30>%
+                %<instance xref signal E1 incr 30 newname {"bar"}>%
             }
         }
         population codegen50 {
             class X {
-                instance x1
+                instance x1 name {"foo"}
             }
         }
     }
@@ -8646,11 +8706,13 @@ test codegen-50.0 {
 } -body {
     validateutils compileFiles codegen50.c
     validateutils matchLines codegen50.c {
-        // instance xref signal E1 {incr 30}
+        // instance xref signal E1 {incr 30 newname {"bar"}}
         MRT_ecb *t__T1 = mrt_NewEvent(0, xref, NULL) ; // E1
         struct codegen50_X_E1__EPARAMS *const t__T2 =
             (struct codegen50_X_E1__EPARAMS *)t__T1->eventParameters ;
-        t__T2->incr = 30 ;
+            t__T2->incr = 30 ;
+            strncpy(t__T2->newname, "bar", 3) ;
+            t__T2->newname[3] = '\0' ;
         mrt_PostEvent(t__T1) ;
     }
 } -result {1}
@@ -9580,7 +9642,7 @@ proc AssignComponentValues {className instref suppliedvalues} {
                     Name $Name]
             assignAttribute $attrref {DataType type}
             # HERE deal with string vs array
-            set asgnType [typeCheck assignmentType $type]
+            set asgnType [typeCheck assignmentType [UnaliasType $Domain $type]]
             switch -exact -- [dict get $asgnType type] {
                 scalar {
                     append result "$instref->$Name = $attrValue ;\n"
