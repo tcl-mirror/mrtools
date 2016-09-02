@@ -1,11 +1,12 @@
 MICCADIR = ../../../src
 
 CC=arm-none-eabi-gcc
-CFLAGS	= -std=c11 -g -L$(HOME)/local/lib -Wall
+CFLAGS	= -c -std=c11 -Os -g -Wall -mcpu=cortex-m4 -march=armv7e-m -mthumb
 CPPFLAGS =\
-	 -D_POSIX_C_SOURCE=200112L\
 	 -D_ISOC11_SOURCE\
-	 -D_XOPEN_SOURCE=600\
+	 -I/home/andrewm/opt/ti/ccsv6/ccs_base/arm/include\
+	 -I/home/andrewm/opt/ti/ccsv6/ccs_base/arm/include/CMSIS\
+	 -D__MSP432P401R__\
 	 $(NULL)
 
 DOCSRC 	=\

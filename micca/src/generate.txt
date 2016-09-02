@@ -108,7 +108,7 @@ Generally,
 one is required to declare symbols before they are defined.
 The ordering has to be quite precise.
 One way to accomplish this is to use a template.
-The template is orgainized in the order required by the compiler
+The template is organized in the order required by the compiler
 and contains embedded commands.
 When expanded,
 the commands embedded in the template query the
@@ -950,13 +950,15 @@ proc eventParamDeclarations {} {
             append result\
                 "static_assert(sizeof($pstructname) <= sizeof(MRT_EventParams), "\
                 "\"Parameters for class or assigner, $Model, event,\
-                    $Event, are too large\") ;\n"
+                    $Event, are too large\") ;\n" ; # <1>
         }
     }
 
     return $result
 }
 ----
+<1> The static assertion about the size of event parameters is an
+important protection to insure there are not memory overruns.
 
 ifdef::showtests[]
 [source,tcl]
@@ -5420,33 +5422,21 @@ proc activityDefinitions {} {
                         ParameterSignature findById Domain $domain PSigID $PSigID |
                         FindParamsFromSig ~
                     }]
-                    # HERE ! the assignments must account for
-                    # parameter types being arrays.
+                    # HERE ! we are unwrapping the event parameters into
+                    # local variables. Parameters passed as arrays, should
+                    # be able to be unwrapped as just a pointer to the
+                    # array contained in the event parameter data.
+                    # This code creates a new array and copies the value
+                    # from the event parameter into the new local array.
+                    # Seems a waste.
                     relation foreach param $params -ascending Position {
                         relation assign $param {Name pname} Declaration DataType
-                        set asgnType [typeCheck assignmentType\
-                                [UnaliasType $domain $DataType]]
-                        switch -exact -- [dict get $asgnType type] {
-                            scalar {
-                                append result\
-                                    "    $Declaration = pp__PARAMS->$pname ;\n"
-                            }
-                            string {
-                                set dimension [dict get $asgnType dimension]
-                                set maxchars [expr {$dimension - 1}]
-                                append result\
-                                    "    $Declaration ;\n"\
-                                    "    strncpy($pname, pp__PARAMS->$pname,\
-                                            $maxchars) ;\n"\
-                                    "    $pname\[$maxchars\] = '\\0' ;\n"
-                            }
-                            array {
-                                append result\
-                                    "    $Declaration ;\n"\
-                                    "    memcpy($pname, pp__PARAMS->$pname,\
-                                            sizeof($pname)) ;\n"
-                            }
-                        }
+                        set asgnment [string cat\
+                            "$Declaration ;\n"\
+                            [GenValueAssignment $domain $pname\
+                                pp__PARAMS->$pname $DataType]\
+                        ]
+                        append result [indentCode $asgnment]
                     }
 
                     set syms [pipe {
@@ -5492,6 +5482,33 @@ proc FindParamsFromSig {psigRef} {
                 [tuple extract $ptup DataType]\
                 [tuple extract $ptup Name]]}
     } {} |%]
+}
+----
+
+[source,tcl]
+----
+<<generation helper commands>>=
+proc GenValueAssignment {domain dest src datatype} {
+    set asgnType [typeCheck assignmentType [UnaliasType $domain $datatype]]
+    switch -exact -- [dict get $asgnType type] {
+        scalar {
+            append result "$dest = $src ;\n"
+        }
+        string {
+            set dimension [dict get $asgnType dimension]
+            set maxchars [expr {$dimension - 1}]
+            append result\
+                "strncpy($dest, $src, $maxchars) ;\n"\
+                "$dest\[$maxchars\] = '\\0' ;\n"
+        }
+        array {
+            append result "memcpy($dest, $src, sizeof($dest)) ;\n"
+        }
+        default {
+            error "unknown assignment type, \"[dict get $asgnType type]\""
+        }
+    }
+    return $result
 }
 ----
 
@@ -6844,25 +6861,8 @@ proc InstanceAttrUpdate {instref args} {
             error "cannot update dependent attribute"
         }
 
-        assignAttribute $attrRef DataType
-        # HERE !! figure out is we are dealing with an array or a string.
-        set asgnType [typeCheck assignmentType [UnaliasType $domain $DataType]]
-        switch -exact -- [dict get $asgnType type] {
-            scalar {
-                append result "$instref->$attr = ($value) ;\n"
-            }
-            string {
-                set dimension [dict get $asgnType dimension]
-                set maxchars [expr {$dimension - 1}]
-                append result\
-                    "strncpy($instref->$attr, $value, $maxchars) ;\n"\
-                    "$instref->$attr\[$maxchars\] = '\\0' ;\n"
-            }
-            array {
-                append result "memcpy($instref->$attr, $value,\
-                    sizeof($instref->$attr)) ;\n"
-            }
-        }
+        append result [GenValueAssignment $domain $instref->$attr\
+                $value [readAttribute $attrRef DataType]]
     }
 
     return [IndentToBlock $result]
@@ -6921,7 +6921,7 @@ test codegen-55.0 {
         strncpy(self->name, name, 31) ;
         self->name[31] = '\0' ;
         memcpy(self->temp, temp, sizeof(self->temp)) ;
-        self->total = (total) ;
+        self->total = total ;
     }
 } -result {1}
 ----
@@ -6990,16 +6990,12 @@ proc InstanceAssign {instref args} {
         }
 
         set indepRef [findRelated $attrRef {~R29 IndependentAttribute}]
-        # HERE !! deal with array copy
-        set asgnType [typeCheck assignmentType [UnaliasType $domain $attrtype]]
         if {[isNotEmptyRef $indepRef]} {
-            if {[dict get $asgnType type] ne "scalar"} {
-                append result\
-                    "memcpy($varname, $instref->$attrname, sizeof($varname)) ;\n"
-            } else {
-                append result "$varname = $instref->$attrname ;\n"
-            }
+            append result [GenValueAssignment $domain $varname\
+                    $instref->$attrname $attrtype]
         } else {
+            set asgnType [typeCheck assignmentType\
+                    [UnaliasType $domain $attrtype]]
             set varref [expr {[dict get $asgnType type] ne "scalar" ?\
                     "$varname" : "&$varname"}]
             append result\
@@ -8626,36 +8622,14 @@ proc InstanceNewECB {instref event arglist} {
             append result\
                 "struct $eparamsname *const $ptrparams =\n"\
                 "    (struct $eparamsname *)$ecbvar->eventParameters ;\n"
-            # HERE -- assignment to event parameters needs to account
-            # arrays.
             relation foreach param $params -ascending Position {
                 relation assign $param {Name pname} {DataType datatype}
                 if {![dict exists $arglist $pname]} {
                     error "required event parameter, $pname,\
                             was not supplied a value"
                 }
-                set asgnType [typeCheck assignmentType\
-                        [UnaliasType $domain $datatype]]
-                switch -exact -- [dict get $asgnType type] {
-                    scalar {
-                        append result\
-                            "$ptrparams->$pname = [dict get $arglist $pname] ;\n"
-                    }
-                    string {
-                        set dimension [dict get $asgnType dimension]
-                        set maxchars [expr {$dimension - 1}]
-                        append result\
-                            "    strncpy($ptrparams->$pname,\
-                                    [dict get $arglist $pname], $maxchars) ;\n"\
-                            "    $ptrparams->$pname\[$maxchars\] = '\\0' ;\n"
-                    }
-                    array {
-                        append result\
-                            "    memcpy($ptrparams->$pname,\
-                                    [dict get $arglist $pname],\
-                                    sizeof($ptrparams->$pname)) ;\n"
-                    }
-                }
+                append result [GenValueAssignment $domain $ptrparams->$pname\
+                        [dict get $arglist $pname] $datatype]
             }
         }
     }
@@ -9526,6 +9500,7 @@ proc ClassCreate {className instref args} {
 ----
 <<generation support commands>>=
 proc AssignComponentValues {className instref suppliedvalues} {
+    variable domain
     set result {}
 
     set popcomps [GetPopComponents $className]
@@ -9640,25 +9615,9 @@ proc AssignComponentValues {className instref suppliedvalues} {
             }
             set attrref [Attribute findById Domain $Domain Class $Class\
                     Name $Name]
-            assignAttribute $attrref {DataType type}
-            # HERE deal with string vs array
-            set asgnType [typeCheck assignmentType [UnaliasType $Domain $type]]
-            switch -exact -- [dict get $asgnType type] {
-                scalar {
-                    append result "$instref->$Name = $attrValue ;\n"
-                }
-                string {
-                    set dimension [dict get $asgnType dimension]
-                    set maxchars [expr {$dimension - 1}]
-                    append result\
-                        "strncpy($instref->$Name, $attrValue, $maxchars) ;\n"\
-                        "$instref->$Name\[$maxchars\] = '\\0' ;\n"
-                }
-                array {
-                    append result "memcpy($instref->$Name, $attrValue,\
-                        sizeof($instref->$Name)) ;\n"
-                }
-            }
+            assignAttribute $attrref {DataType datatype}
+            append result [GenValueAssignment $domain $instref->$Name\
+                    $attrValue $datatype]
         }
         }
         dict unset suppliedvalues $Name
