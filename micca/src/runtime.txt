@@ -9797,8 +9797,7 @@ static noreturn void mrtFatalError(MRT_ErrorCode errNum, ...) ;
 [source,c]
 ----
 <<mrt static functions>>=
-static noreturn
-void
+static void noreturn
 mrtFatalError(
     MRT_ErrorCode errNum,
     ...)
@@ -10974,651 +10973,6 @@ mrt_Initialize(void)
 }
 ----
 
-== ARM 7M Specific Code
-
-[source,c]
-----
-<<arm7m includes>>=
-#define __ARM_ARCH_7M__
-#define NO_MSP_CLASSIC_DEFINES
-
-#include "msp.h"
-
-#define MRT_PENDSV_PRIORITY     0xff
-
-#define TIMER_DIVIDER   256
-
-extern uint32_t SystemCoreClock ;
-----
-
-=== ARM 7M Critical Sections
-
-[source,c]
-----
-<<arm7m static functions>>=
-static inline
-void
-mrtInitCriticalSection(void)
-{
-    NVIC_SetPriority(PendSV_IRQn, MRT_PENDSV_PRIORITY) ;
-}
-static inline
-void
-beginCriticalSection(void)
-{
-    __disable_irq() ;
-}
-static inline
-void
-endCriticalSection(void)
-{
-    __enable_irq() ;
-}
-----
-
-=== ARM 7M Timing Interfaces
-
-[source,c]
-----
-<<arm7m includes>>=
-#define MRT_MAX_CLOCK_TICKS     (UINT32_MAX - 1)
-#define MRT_MAX_MSEC_DELAY ((MRT_MAX_CLOCK_TICKS / mrtTimerFrequency) * 1000UL)
-
-<<arm7m static data>>=
-static uint32_t mrtTimerFrequency ;
-
-static inline
-MRT_DelayTime
-mrtMsecToTicks(
-    MRT_DelayTime msec)
-{
-    /*
-     * for 3 MHz divided down by 256
-     * max delay is 366,503,875 ms
-     * == 3,665,038 s == 61083 min == 1,018 hr == 42 days
-     */
-    if (msec > MRT_MAX_MSEC_DELAY) {
-        msec = MRT_MAX_MSEC_DELAY ;
-    }
-    /*
-     * We must avoid overflow if the requested number of
-     * msecs is large.
-     */
-    return msec < MRT_MAX_CLOCK_TICKS / mrtTimerFrequency ?
-            ((msec * mrtTimerFrequency) + 1000UL / 2UL) / 1000UL :
-            ((msec + 1000UL / 2UL) / 1000UL) * mrtTimerFrequency ;
-}
-----
-
-[source,c]
-----
-<<arm7m static functions>>=
-static inline
-MRT_DelayTime
-mrtTicksToMsec(
-    MRT_DelayTime ticks)
-{
-    return ticks < MRT_MAX_CLOCK_TICKS / 1000UL ?
-        ((ticks * 1000UL) + mrtTimerFrequency / 2UL) / mrtTimerFrequency :
-        ((ticks + mrtTimerFrequency / 2UL) / mrtTimerFrequency) * 1000UL ;
-}
-----
-
-[source,c]
-----
-<<arm7m static functions>>=
-static void
-mrtSysTimerMask(void)
-{
-    BITBAND_PERI(TIMER32_1->CONTROL, TIMER32_CONTROL_IE_OFS) = 0 ;
-}
-----
-
-[source,c]
-----
-<<arm7m static functions>>=
-static void
-mrtSysTimerUnmask(void)
-{
-    TIMER32_1->INTCLR = 0 ;
-    BITBAND_PERI(TIMER32_1->CONTROL, TIMER32_CONTROL_IE_OFS) = 1 ;
-}
-----
-
-[source,c]
-----
-<<arm7m static functions>>=
-static void
-mrtSysTimerStart(
-    MRT_DelayTime time)
-{
-    TIMER32_1->LOAD = time ;
-    mrtSysTimerUnmask() ;
-    BITBAND_PERI(TIMER32_1->CONTROL, TIMER32_CONTROL_ENABLE_OFS) = 1 ;
-}
-----
-
-[source,c]
-----
-<<arm7m static functions>>=
-static MRT_DelayTime
-mrtSysTimerStop(void)
-{
-    mrtSysTimerMask() ;
-    BITBAND_PERI(TIMER32_1->CONTROL, TIMER32_CONTROL_ENABLE_OFS) = 0 ;
-    return TIMER32_1->VALUE ;
-}
-----
-
-[source,c]
-----
-<<arm7m external functions>>=
-void
-T32_INT1_IRQHandler(void)
-{
-    TIMER32_1->INTCLR = 0 ;
-    MRT_DelayTime nextTime = mrt_TimerExpireService() ;
-    if (nextTime != 0) {
-        mrtSysTimerStart(nextTime) ;
-    } else {
-        mrtSysTimerStop() ;
-    }
-}
-----
-
-[source,c]
-----
-<<arm7m static functions>>=
-static void
-mrtInitSysTimer(void)
-{
-    /*
-     * for 3 MHz, dividing down by 256 ==> 11718
-     */
-    mrtTimerFrequency = SystemCoreClock / (uint32_t)256 ;
-
-    TIMER32_1->CONTROL =
-            TIMER32_CONTROL_PRESCALE_2 |
-            TIMER32_CONTROL_SIZE |
-            TIMER32_CONTROL_ONESHOT ;
-    TIMER32_1->INTCLR = 0 ;
-    NVIC_ClearPendingIRQ(T32_INT1_IRQn) ;
-    NVIC_EnableIRQ(T32_INT1_IRQn) ;
-}
-----
-
-=== ARM 7M Async Execution Interface
-
-[source,c]
-----
-<<arm7m external functions>>=
-MRT_SyncParams *
-mrt_SyncRequest(
-    MRT_SyncFunc f)
-{
-    beginCriticalSection() ;
-    MRT_SyncParams *params = mrtSyncQueuePut(f, true) ;
-    endCriticalSection() ;
-    SCB->ICSR = SCB_ICSR_PENDSVSET_Msk ;
-    return params ;
-}
-----
-
-The alternate interface is also easily implemented.
-
-[source,c]
-----
-<<arm7m external functions>>=
-MRT_SyncParams *
-mrt_TrySyncRequest(
-    MRT_SyncFunc f)
-{
-    beginCriticalSection() ;
-    MRT_SyncParams *params = mrtSyncQueuePut(f, false) ;
-    endCriticalSection() ;
-    if (params) {
-        SCB->ICSR = SCB_ICSR_PENDSVSET_Msk ;
-    }
-    return params ;
-}
-----
-
-=== ARM 7M Suspending Execution
-
-[source,c]
-----
-<<arm7m static functions>>=
-static void
-mrtWait(void)
-{
-    beginCriticalSection() ;
-    if (mrtSyncQueueEmpty()) {
-        __DSB() ; // <1>
-        __WFI() ;
-    }
-    endCriticalSection() ;
-}
-----
-<1> ARM recommends a data synchronization barrier instruction before
-going to sleep to insure any writes have been fully synced to memory
-before going to sleep and having clocks and other things turned off.
-We don't need it in this pariticular case since no write operation has
-been performed.
-However, we will follow the recommendation as it is only a single
-instruction and we don't want some change in the future to create
-a mysterious problem.
-
-=== ARM 7M Initialization
-
-[source,c]
-----
-<<arm7m static functions>>=
-static void
-mrtPlatformInit(void)
-{
-}
-----
-
-[source,c]
-----
-<<arm7m external functions>>=
-void
-mrt_Initialize(void)
-{
-    mrtPlatformInit() ;
-    mrtEventPoolInit() ;
-    mrtInitCriticalSection() ;
-    mrtInitSysTimer() ;
-}
-----
-
-== MSP430 Specific Code
-
-[source,c]
-----
-<<msp430 includes>>=
-#include "msp430.h"
-
-#ifndef MRT_TIMER_FREQUENCY
-#   define MRT_TIMER_FREQUENCY     4096UL
-#endif /* MRT_TIMER_FREQUENCY */
-#define MRT_MAX_CLOCK_TICKS     (UINT32_MAX - 1)
-#define MRT_MAX_MSEC_DELAY\
-        ((MRT_MAX_CLOCK_TICKS / MRT_TIMER_FREQUENCY) * 1000UL)
-----
-
-=== MSP430 Critical Sections
-
-[source,c]
-----
-<<msp430 static functions>>=
-static inline
-void
-mrtInitCriticalSection(void)
-{
-}
-static inline
-void
-beginCriticalSection(void)
-{
-    __disable_interrupt() ;
-}
-static inline
-void
-endCriticalSection(void)
-{
-    __enable_interrupt() ;
-}
-----
-
-=== MSP430 Timing Interfaces
-
-[source,c]
-----
-<<msp430 static functions>>=
-static inline
-MRT_DelayTime
-mrtMsecToTicks(
-    MRT_DelayTime msec)
-{
-    if (msec > MRT_MAX_MSEC_DELAY) {
-        msec = MRT_MAX_MSEC_DELAY ;
-    }
-    /*
-     * We must avoid overflow if the requested number of
-     * msecs is large.
-     */
-    return msec < MRT_MAX_CLOCK_TICKS / MRT_TIMER_FREQUENCY ?
-            ((msec * MRT_TIMER_FREQUENCY) + 1000UL / 2UL) / 1000UL :
-            ((msec + 1000UL / 2UL) / 1000UL) * MRT_TIMER_FREQUENCY ;
-}
-----
-
-[source,c]
-----
-<<msp430 static functions>>=
-static inline
-MRT_DelayTime
-mrtTicksToMsec(
-    MRT_DelayTime ticks)
-{
-    return ticks < MRT_MAX_CLOCK_TICKS / 1000UL ?
-        ((ticks * 1000UL) + MRT_TIMER_FREQUENCY / 2UL) / MRT_TIMER_FREQUENCY :
-        ((ticks + MRT_TIMER_FREQUENCY / 2UL) / MRT_TIMER_FREQUENCY) * 1000UL ;
-}
-----
-
-[source,c]
-----
-<<msp430 static functions>>=
-static void
-mrtSysTimerMask(void)
-{
-    TACCTL0 &= ~CCIE ;
-}
-----
-
-[source,c]
-----
-<<msp430 static functions>>=
-static void
-mrtSysTimerUnmask(void)
-{
-    TACCTL0 &= ~CCIFG ;
-    TACCTL0 |= CCIE ;
-}
-----
-
-[source,c]
-----
-<<msp430 static functions>>=
-static void
-mrtSysTimerStart(
-    MRT_DelayTime time)
-{
-    clockCnts = ticks >> 16 ;
-    setNextTime(ticks) ;
-}
-----
-
-[source,c]
-----
-<<msp430 static data>>=
-/*
- * We keep a higher precision time indication by counting Timer A overflows.
- * This variable holds the number of Timer A overflow interrupts that have
- * occurred. When concatenated with the value of the TAR register from
- * Timer A and treated as a 32 bit quantity, the value represented is the
- * time since the system started as a U(20,12) fixed radix point number
- * in units of seconds (this is because we are running timer A off of the
- * 32 KHz clock divided down by 8 ==> 4096 ticks / sec). For 20 integer bits of
- * seconds, the clock time value rolls over after ~1,000,000 seconds or
- * about 12.1 days.
- *
- * Use the function, "sysTimeTicks()" to obtain the time value.
- */
-static uint16_t timerTicks ;
-static uint16_t clockCnts ;
-----
-
-[source,c]
-----
-<<msp430 static functions>>=
-static inline
-uint16_t
-readTimer(void)
-{
-#   define  SUCCESSIVE_MATCHES  3
-
-    uint16_t cmp1Reg ;
-    uint16_t cmp2Reg ;
-    uint8_t cnt ;
-
-    cnt = 1 ;
-    cmp1Reg = TAR ;
-    do {
-        cmp2Reg = TAR ;
-        cnt = cmp1Reg == cmp2Reg ? cnt + 1 : 1 ;
-        cmp1Reg = cmp2Reg ;
-    } while (cnt < SUCCESSIVE_MATCHES) ;
-
-    return cmp2Reg ;
-
-#   undef SUCCESSIVE_MATCHES
-}
-----
-
-[source,c]
-----
-<<msp430 static functions>>=
-/*
- * To get a high resolution time value we combine the in memory counter that
- * counts timer overflows with the current value of the timer register (TAR).
- * However we must be careful here because the counter is shared with an
- * interrupt service routine. So we make this function a "monitor" function and
- * we must check that the interrupt flag is not set right after we read the
- * timer value. If it is, then the memory counter will be off by one since
- * there is a pending interrupt that has not been serviced.
- */
-#pragma type_attribute=__monitor
-uint32_t
-sysTimeTicks(void)
-{
-    uint16_t tvalue = readTimer() ;
-    /*
-     * If the timer rolls over between the time we enter this function and the
-     * time we get here, then the interrupt flag will be set. In that case, the
-     * memory counter will be off by one (since the interrupt service routine
-     * will NOT have been run as we are in a "monitor" function).  Also we can
-     * assume the timer value is simply zero, reflecting the timer value when
-     * the roll over occurs (as it will not take a tick's worth of time to
-     * execute to here.
-     *
-     * If there is no roll over of the timer, then the time is simply the
-     * concatenation of the memory counter value and the timer value.
-     */
-    return (IFG1 & TAIFG) ?
-        (((uint32_t)timerTicks + 1) << 16) :
-        (((uint32_t)timerTicks << 16) | tvalue) ;
-}
-----
-
-[source,c]
-----
-<<msp430 static functions>>=
-#pragma type_attribute=__monitor
-static void
-setNextTime(
-    uint16_t clockTicks)
-{
-    if (clockTicks == 1) {
-        ++clockTicks ;
-    }
-    TACCR0 = readTimer() + clockTicks ;
-    mrtSysTimerUnmask() ;
-}
-----
-
-[source,c]
-----
-<<msp430 static functions>>=
-static MRT_DelayTime
-mrtSysTimerStop(void)
-{
-    MRT_DelayTime remain ;
-
-    mrtSysTimerMask() ;
-    uint16_t timer = readTimer() ;
-    /*
-     * Account that the timer might go off between when we
-     * stop it and when we read it.
-     */
-    if (TACCTL0 & CCIFG) {
-        remain = clockCnts ?
-                (MRT_DelayTime)(clockCnts - 1) << 16 : 0 ;
-    } else {
-        remain = TACCR0 - timer ;
-        remain += (MRT_DelayTime)clockCnts << 16 ;
-    }
-    return remain ;
-}
-----
-
-[source,c]
-----
-<<msp430 static functions>>=
-#pragma vector=TIMERA0_VECTOR
-static __interrupt
-void
-timerA0ISR(void)
-{
-    if (clockCnts == 0) {
-        MRT_DelayTime next = mrt_TimerExpireService() ;
-        if (next) {
-            mrtSysTimerStart(next) ;
-        }
-        __low_power_mode_off_on_exit() ;
-    } else {
-        /*
-         * Loading the compare register with the timer
-         * value causes us to count an entire 16 bits worth
-         * of ticks.
-         */
-        TACCR0 = TAR ;
-        --clockCnts ;
-    }
-}
-----
-
-[source,c]
-----
-<<msp430 static functions>>=
-static void
-mrtInitSysTimer(void)
-{
-    /*
-     * Stop and Clear the timer.
-     */
-    TACTL = TACLR ;
-    /*
-     * Set up clock source to ACLK and Divide down by 8.
-     */
-    TACTL |= TASSEL_1 | ID_3 ;
-    TACCTL0 = 0 ;
-    TACCTL1 = 0 ;
-    TACCTL2 = 0 ;
-    /*
-     * Start the timer in continuous mode. 
-     * Enable the timer overflow interrupt.
-     */
-    TACTL |= MC_2 | TAIE ;
-    /*
-     * Zero out the upper level counter that keeps track of ticks.
-     */
-    timerTicks = 0 ;
-}
-----
-
-=== MSP430 Async Execution Interface
-
-[source,c]
-----
-<<msp430 external functions>>=
-MRT_SyncParams *
-mrt_SyncRequest(
-    MRT_SyncFunc f)
-{
-    return mrtSyncQueuePut(f, true) ;
-}
-----
-
-[source,c]
-----
-<<msp430 external functions>>=
-MRT_SyncParams *
-mrt_TrySyncRequest(
-    MRT_SyncFunc f)
-{
-    return mrtSyncQueuePut(f, false) ;
-}
-----
-
-=== MSP430 Suspending Execution
-
-[source,c]
-----
-<<msp430 static functions>>=
-static void
-mrtWait(void)
-{
-    beginCriticalSection() ;
-    if (mrtSyncQueueEmpty()) {
-        __bis_SR_register(LPM0_bits | GIE) ;
-    } else {
-        endCriticalSection() ;
-    }
-}
-----
-
-=== MSP430 Initialization
-
-[source,c]
-----
-<<msp430 external functions>>=
-void
-mrt_Initialize(void)
-{
-    mrtEventPoolInit() ;
-    mrtInitCriticalSection() ;
-    mrtInitSysTimer() ;
-}
-----
-
-== Code Organization
-
-[source,c]
-----
-<<standard includes>>=
-#include <stdlib.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <stdbool.h>
-#include <stdarg.h>
-#include <stdio.h>
-#include <string.h>
-#include <assert.h>
-#ifdef __TI_ARM__
-#   define alignas(x)
-#   define noreturn
-/*
- * For some reason __set_BASEPRI() function is missing from the
- * TI CCS CMSIS file.
- */
-static void __set_BASEPRI(uint32_t value)
-{
-    __asm("     msr basepri,r0") ;
-}
-#else   /* ! __TI_ARM__ */
-#   include <stdalign.h>
-#   include <stdnoreturn.h>
-#endif /* __TI_ARM__ */
-----
-
-[source,c]
-----
-<<common includes>>=
-#include "micca_rt.h"
-#include <inttypes.h>
-----
-
-[source,c]
-----
-<<common defines>>=
-#ifndef COUNTOF
-#define COUNTOF(a)  (sizeof(a) / sizeof(a[0]))
-#endif /* COUNTOF */
-----
-
 === POSIX Files
 
 [source,c]
@@ -11741,11 +11095,283 @@ static void __set_BASEPRI(uint32_t value)
 <<mrt external functions>>
 ----
 
-=== ARM 7M Files
+== ARM 7M Specific Code
+
+=== ARM 7M Constants
 
 [source,c]
 ----
-<<micca_rt_arm7m.h>>=
+<<arm7m constants>>=
+#define MRT_PENDSV_PRIORITY     0xff
+#define MRT_MAX_CLOCK_TICKS     (UINT32_MAX - 1)
+----
+
+=== ARM 7M Critical Sections
+
+[source,c]
+----
+<<arm7m static functions>>=
+static inline
+void
+mrtInitCriticalSection(void)
+{
+    NVIC_SetPriority(PendSV_IRQn, MRT_PENDSV_PRIORITY) ;
+}
+static inline
+void
+beginCriticalSection(void)
+{
+    __disable_irq() ;
+}
+static inline
+void
+endCriticalSection(void)
+{
+    __enable_irq() ;
+}
+----
+
+=== ARM 7M Async Execution Interface
+
+[source,c]
+----
+<<arm7m external functions>>=
+MRT_SyncParams *
+mrt_SyncRequest(
+    MRT_SyncFunc f)
+{
+    beginCriticalSection() ;
+    MRT_SyncParams *params = mrtSyncQueuePut(f, true) ;
+    endCriticalSection() ;
+    SCB->ICSR = SCB_ICSR_PENDSVSET_Msk ;
+    return params ;
+}
+----
+
+The alternate interface is also easily implemented.
+
+[source,c]
+----
+<<arm7m external functions>>=
+MRT_SyncParams *
+mrt_TrySyncRequest(
+    MRT_SyncFunc f)
+{
+    beginCriticalSection() ;
+    MRT_SyncParams *params = mrtSyncQueuePut(f, false) ;
+    endCriticalSection() ;
+    if (params) {
+        SCB->ICSR = SCB_ICSR_PENDSVSET_Msk ;
+    }
+    return params ;
+}
+----
+
+=== ARM 7M Suspending Execution
+
+[source,c]
+----
+<<arm7m static functions>>=
+static void
+mrtWait(void)
+{
+    beginCriticalSection() ;
+    if (mrtSyncQueueEmpty()) {
+        __DSB() ; // <1>
+        __WFI() ;
+    }
+    endCriticalSection() ;
+}
+----
+<1> ARM recommends a data synchronization barrier instruction before
+going to sleep to insure any writes have been fully synced to memory
+before going to sleep and having clocks and other things turned off.
+We don't need it in this pariticular case since no write operation has
+been performed.
+However, we will follow the recommendation as it is only a single
+instruction and we don't want some change in the future to create
+a mysterious problem.
+
+=== ARM 7M Initialization
+
+[source,c]
+----
+<<arm7m external functions>>=
+void
+mrt_Initialize(void)
+{
+    mrtPlatformInit() ;
+    mrtEventPoolInit() ;
+    mrtInitCriticalSection() ;
+    mrtInitSysTimer() ;
+}
+----
+
+=== MSP432 Includes
+
+[source,c]
+----
+<<msp432 includes>>=
+#define __ARM_ARCH_7M__
+#define NO_MSP_CLASSIC_DEFINES
+
+#include "msp.h"
+
+#define TIMER_DIVIDER   256
+
+extern uint32_t SystemCoreClock ;
+----
+
+=== MSP432 Timing Interfaces
+
+[source,c]
+----
+<<msp432 includes>>=
+#define MRT_MAX_MSEC_DELAY ((MRT_MAX_CLOCK_TICKS / mrtTimerFrequency) * 1000UL)
+
+<<msp432 static data>>=
+static uint32_t mrtTimerFrequency ;
+----
+
+[source,c]
+----
+<<msp432 static functions>>=
+static inline
+MRT_DelayTime
+mrtMsecToTicks(
+    MRT_DelayTime msec)
+{
+    /*
+     * for 3 MHz divided down by 256
+     * max delay is 366,503,875 ms
+     * == 3,665,038 s == 61083 min == 1,018 hr == 42 days
+     */
+    if (msec > MRT_MAX_MSEC_DELAY) {
+        msec = MRT_MAX_MSEC_DELAY ;
+    }
+    /*
+     * We must avoid overflow if the requested number of
+     * msecs is large.
+     */
+    return msec < MRT_MAX_CLOCK_TICKS / mrtTimerFrequency ?
+            ((msec * mrtTimerFrequency) + 1000UL / 2UL) / 1000UL :
+            ((msec + 1000UL / 2UL) / 1000UL) * mrtTimerFrequency ;
+}
+----
+
+[source,c]
+----
+<<msp432 static functions>>=
+static inline
+MRT_DelayTime
+mrtTicksToMsec(
+    MRT_DelayTime ticks)
+{
+    return ticks < MRT_MAX_CLOCK_TICKS / 1000UL ?
+        ((ticks * 1000UL) + mrtTimerFrequency / 2UL) / mrtTimerFrequency :
+        ((ticks + mrtTimerFrequency / 2UL) / mrtTimerFrequency) * 1000UL ;
+}
+----
+
+[source,c]
+----
+<<msp432 static functions>>=
+static void
+mrtInitSysTimer(void)
+{
+    /*
+     * for 3 MHz, dividing down by 256 ==> 11718
+     */
+    mrtTimerFrequency = SystemCoreClock / (uint32_t)256 ;
+
+    TIMER32_1->CONTROL =
+            TIMER32_CONTROL_PRESCALE_2 |
+            TIMER32_CONTROL_SIZE |
+            TIMER32_CONTROL_ONESHOT ;
+    TIMER32_1->INTCLR = 0 ;
+    NVIC_ClearPendingIRQ(T32_INT1_IRQn) ;
+    NVIC_EnableIRQ(T32_INT1_IRQn) ;
+}
+----
+
+[source,c]
+----
+<<msp432 static functions>>=
+static void
+mrtSysTimerMask(void)
+{
+    BITBAND_PERI(TIMER32_1->CONTROL, TIMER32_CONTROL_IE_OFS) = 0 ;
+}
+----
+
+[source,c]
+----
+<<msp432 static functions>>=
+static void
+mrtSysTimerUnmask(void)
+{
+    TIMER32_1->INTCLR = 0 ;
+    BITBAND_PERI(TIMER32_1->CONTROL, TIMER32_CONTROL_IE_OFS) = 1 ;
+}
+----
+
+[source,c]
+----
+<<msp432 static functions>>=
+static void
+mrtSysTimerStart(
+    MRT_DelayTime time)
+{
+    TIMER32_1->LOAD = time ;
+    mrtSysTimerUnmask() ;
+    BITBAND_PERI(TIMER32_1->CONTROL, TIMER32_CONTROL_ENABLE_OFS) = 1 ;
+}
+----
+
+[source,c]
+----
+<<msp432 static functions>>=
+static MRT_DelayTime
+mrtSysTimerStop(void)
+{
+    mrtSysTimerMask() ;
+    BITBAND_PERI(TIMER32_1->CONTROL, TIMER32_CONTROL_ENABLE_OFS) = 0 ;
+    return TIMER32_1->VALUE ;
+}
+----
+
+[source,c]
+----
+<<msp432 external functions>>=
+void
+T32_INT1_IRQHandler(void)
+{
+    TIMER32_1->INTCLR = 0 ;
+    MRT_DelayTime nextTime = mrt_TimerExpireService() ;
+    if (nextTime != 0) {
+        mrtSysTimerStart(nextTime) ;
+    } else {
+        mrtSysTimerStop() ;
+    }
+}
+----
+
+=== MSP432 Initialization
+
+[source,c]
+----
+<<msp432 static functions>>=
+static void
+mrtPlatformInit(void)
+{
+}
+----
+
+=== MSP432 Files
+
+[source,c]
+----
+<<micca_rt_msp432.h>>=
 /*
 <<copyright info>>
 <<version info>>
@@ -11765,6 +11391,7 @@ static void __set_BASEPRI(uint32_t value)
  * Preprocessor Defines
  */
 <<common defines>>
+
 /*
  * Constants
  */
@@ -11799,19 +11426,20 @@ static void __set_BASEPRI(uint32_t value)
 
 [source,c]
 ----
-<<micca_rt_arm7m.c>>=
+<<micca_rt_msp432.c>>=
 /*
 <<copyright info>>
 <<version info>>
 */
 
 <<common includes>>
-<<arm7m includes>>
+<<msp432 includes>>
 
 /*
  * Constants
  */
 <<mrt implementation constants>>
+<<arm7m constants>>
 
 /*
  * Data Types
@@ -11823,7 +11451,6 @@ static void __set_BASEPRI(uint32_t value)
  * Forward References
  */
 <<mrt forward references>>
-<<arm7m forward references>>
 
 /*
  * Static Data
@@ -11833,7 +11460,7 @@ static void __set_BASEPRI(uint32_t value)
 #   endif /* MRT_NO_TRACE */
 
 <<mrt static data>>
-<<arm7m static data>>
+<<msp432 static data>>
 
 /*
  * Static Inline Functions
@@ -11848,6 +11475,7 @@ static void __set_BASEPRI(uint32_t value)
 #   endif /* MRT_NO_TRACE */
 
 <<arm7m static functions>>
+<<msp432 static functions>>
 <<mrt static functions>>
 
 /*
@@ -11858,7 +11486,746 @@ static void __set_BASEPRI(uint32_t value)
 #   endif /* MRT_NO_TRACE */
 
 <<arm7m external functions>>
+<<msp432 external functions>>
 <<mrt external functions>>
+----
+
+=== EFM32GG Includes
+
+[source,c]
+----
+<<efm32gg includes>>=
+
+#include "em_device.h"
+#include "em_chip.h"
+#include "em_cmu.h"
+#include "em_emu.h"
+#include "em_rtc.h"
+#include "bsp_trace.h"
+----
+
+=== EFM32GG Timing Interfaces
+
+[source,c]
+----
+<<efm32gg includes>>=
+#define MRT_TIMER_FREQUENCY     4096UL
+#define MRT_MAX_CLOCK_TICKS     (UINT32_MAX - 1)
+#define MRT_MAX_MSEC_DELAY ((MRT_MAX_CLOCK_TICKS / MRT_TIMER_FREQUENCY) * 1000UL)
+----
+
+[source,c]
+----
+<<efm32gg static functions>>=
+static inline
+MRT_DelayTime
+mrtMsecToTicks(
+    MRT_DelayTime msec)
+{
+    if (msec > MRT_MAX_MSEC_DELAY) {
+        msec = MRT_MAX_MSEC_DELAY ;
+    }
+    /*
+     * We must avoid overflow if the requested number of
+     * msecs is large.
+     */
+    return msec < MRT_MAX_CLOCK_TICKS / MRT_TIMER_FREQUENCY ?
+            ((msec * MRT_TIMER_FREQUENCY) + 1000UL / 2UL) / 1000UL :
+            ((msec + 1000UL / 2UL) / 1000UL) * MRT_TIMER_FREQUENCY ;
+}
+----
+
+[source,c]
+----
+<<efm32gg static functions>>=
+static inline
+MRT_DelayTime
+mrtTicksToMsec(
+    MRT_DelayTime ticks)
+{
+    return ticks < MRT_MAX_CLOCK_TICKS / 1000UL ?
+        ((ticks * 1000UL) + MRT_TIMER_FREQUENCY / 2UL) / MRT_TIMER_FREQUENCY :
+        ((ticks + MRT_TIMER_FREQUENCY / 2UL) / MRT_TIMER_FREQUENCY) * 1000UL ;
+}
+----
+
+[source,c]
+----
+<<efm32gg static functions>>=
+static void
+mrtInitSysTimer(void)
+{
+    RTC_Reset() ;
+    /*
+     * Set RTC prescaler to divide by 8.
+     */
+    CMU_ClockDivSet(cmuClock_RTC, cmuClkDiv_8) ;
+    /*
+     * Enable Low Freq A Clock to run the RTC.
+     */
+    CMU_ClockEnable(cmuClock_RTC, true) ;
+    RTC_Init_TypeDef init = RTC_INIT_DEFAULT ;
+    init.enable = false ;
+    RTC_Init(&init) ;
+    /*
+     * Enable interrupt at the NVIC.
+     */
+    NVIC_ClearPendingIRQ(RTC_IRQn) ;
+    NVIC_EnableIRQ(RTC_IRQn) ;
+}
+----
+
+[source,c]
+----
+<<efm32gg static functions>>=
+static void
+mrtSysTimerMask(void)
+{
+    RTC_IntDisable(RTC_IFC_COMP0) ;
+}
+----
+
+[source,c]
+----
+<<efm32gg static functions>>=
+static void
+mrtSysTimerUnmask(void)
+{
+    RTC_IntEnable(RTC_IFC_COMP0) ;
+}
+----
+
+[source,c]
+----
+<<efm32gg static functions>>=
+static void
+mrtSysTimerStart(
+    MRT_DelayTime time)
+{
+    RTC_CompareSet(0, time) ;
+    RTC_IntClear(RTC_IFC_COMP0) ;
+    mrtSysTimerUnmask() ;
+    RTC_Enable(true) ;
+}
+----
+
+[source,c]
+----
+<<efm32gg static functions>>=
+static MRT_DelayTime
+mrtSysTimerStop(void)
+{
+    /*
+     * There is a race between when we read the CNT register and when we
+     * actually get the timer stopped where it may expire. If it expires, the
+     * interrupt flag will be set and we can use that as an indication that the
+     * CNT register is not valid (i.e. it was cleared to zero when the timer
+     * expired).  This is different than if we had just been enabled and
+     * requested to stop before one tick went by (in our case that's ~ 244
+     * microsecond) and count would have been zero. So this is a bit tricky in
+     * here.
+     */
+    MRT_DelayTime remain ;
+
+    mrtSysTimerMask() ;
+    if (RTC->CTRL & RTC_CTRL_EN) {
+        remain = RTC->COMP0 ;
+        remain -= RTC->CNT ;
+        /*
+         * Check that the timer didn't expire, as is indicated by the interrupt
+         * flag, while we were trying to read the registers.
+         */
+        if (RTC->IF & RTC_IF_COMP0) {
+            remain = 0 ;
+        }
+    } else {
+        remain = 0 ;
+    }
+    RTC_Enable(false) ; // timer disabled
+
+    return remain ;
+}
+----
+
+[source,c]
+----
+<<efm32gg external functions>>=
+void
+RTC_IRQHandler(void)
+{
+    RTC_Enable(false) ; // timer disabled
+    RTC_IntClear(RTC_IFC_COMP0) ;
+    MRT_DelayTime nextTime = mrt_TimerExpireService() ;
+    if (nextTime != 0) {
+        mrtSysTimerStart(nextTime) ;
+    }
+}
+----
+
+=== EFM32GG Initialization
+
+[source,c]
+----
+<<efm32gg static functions>>=
+static void
+mrtPlatformInit(void)
+{
+    /*
+     * Workaround for chip errata.
+     */
+    CHIP_Init() ;
+    BSP_TraceProfilerSetup() ;
+    /*
+     * Set stack align, so ISR's are truly ordinary "C" functions.
+     */
+    SCB->CCR |= SCB_CCR_STKALIGN_Msk ;
+    /*
+     * Update the global notion of the system clock frequency.  The device
+     * drivers need this to calculate various dividers properly.
+     */
+    SystemCoreClockUpdate() ;
+    /*
+     * High frequency peripheral clock.
+     */
+    CMU_ClockDivSet(cmuClock_HFPER, cmuClkDiv_1) ;
+    CMU_ClockEnable(cmuClock_HFPER, true) ;
+    /*
+     * Enable the LF Crystal Oscillator.
+     */
+    CMU_OscillatorEnable(cmuOsc_LFXO, true, true) ;
+    /*
+     * Enable the low energy clock bus.
+     */
+    CMU_ClockEnable(cmuClock_CORELE, true) ;
+    /*
+     * Select the external crystal oscillator for the low frequency clocks.
+     */
+    CMU_ClockSelectSet(cmuClock_LFA, cmuSelect_LFXO) ;
+    CMU_ClockSelectSet(cmuClock_LFB, cmuSelect_LFXO) ;
+    /*
+     * Enable clocking the PRS.
+     */
+    CMU_ClockEnable(cmuClock_PRS, true) ;
+}
+----
+
+=== EFM32GG Files
+
+[source,c]
+----
+<<micca_rt_efm32gg.h>>=
+/*
+<<copyright info>>
+<<version info>>
+*/
+
+#ifndef MICCA_RT_H_
+#define MICCA_RT_H_
+
+#define MRT_ARM_ARCH_7M
+
+/*
+ * Standard Includes
+ */
+<<standard includes>>
+
+/*
+ * Preprocessor Defines
+ */
+<<common defines>>
+
+/*
+ * Constants
+ */
+<<mrt constants>>
+
+/*
+ * Data Types
+ */
+<<mrt interface simple types>>
+<<mrt interface aggregate types>>
+
+#   ifndef MRT_NO_TRACE
+<<mrt trace aggregate types>>
+#   endif /* MRT_NO_TRACE */
+
+/*
+ * Static Inline Functions
+ */
+<<mrt interface static inlines>>
+
+/*
+ * External Functions
+ */
+#   ifndef MRT_NO_TRACE
+<<mrt trace external interfaces>>
+#   endif /* MRT_NO_TRACE */
+
+<<mrt external interfaces>>
+
+#endif /* MICCA_RT_H_ */
+----
+
+[source,c]
+----
+<<micca_rt_efm32gg.c>>=
+/*
+<<copyright info>>
+<<version info>>
+*/
+
+<<common includes>>
+<<efm32gg includes>>
+
+/*
+ * Constants
+ */
+<<mrt implementation constants>>
+<<arm7m constants>>
+
+/*
+ * Data Types
+ */
+<<mrt implementation simple types>>
+<<mrt implementation aggregate types>>
+
+/*
+ * Forward References
+ */
+<<mrt forward references>>
+
+/*
+ * Static Data
+ */
+#   ifndef MRT_NO_TRACE
+<<mrt trace static data>>
+#   endif /* MRT_NO_TRACE */
+
+<<mrt static data>>
+<<efm32gg static data>>
+
+/*
+ * Static Inline Functions
+ */
+<<mrt implementation static inlines>>
+
+/*
+ * Static Functions
+ */
+#   ifndef MRT_NO_TRACE
+<<mrt trace static functions>>
+#   endif /* MRT_NO_TRACE */
+
+<<arm7m static functions>>
+<<efm32gg static functions>>
+<<mrt static functions>>
+
+/*
+ * External Functions
+ */
+#   ifndef MRT_NO_TRACE
+<<mrt trace external functions>>
+#   endif /* MRT_NO_TRACE */
+
+<<arm7m external functions>>
+<<efm32gg external functions>>
+<<mrt external functions>>
+----
+
+== MSP430 Specific Code
+
+[source,c]
+----
+<<msp430 includes>>=
+#include "msp430.h"
+
+#if defined(__TI_ARM__)
+/*
+ * For some reason __set_BASEPRI() function is missing from the
+ * TI CCS CMSIS file.
+ */
+static void __set_BASEPRI(uint32_t value)
+{
+    __asm("     msr basepri,r0") ;
+}
+#endif /* __TI_ARM__ */
+
+#ifndef MRT_TIMER_FREQUENCY
+#   define MRT_TIMER_FREQUENCY     4096UL
+#endif /* MRT_TIMER_FREQUENCY */
+#define MRT_MAX_CLOCK_TICKS     (UINT32_MAX - 1)
+#define MRT_MAX_MSEC_DELAY\
+        ((MRT_MAX_CLOCK_TICKS / MRT_TIMER_FREQUENCY) * 1000UL)
+----
+
+=== MSP430 Critical Sections
+
+[source,c]
+----
+<<msp430 static functions>>=
+static inline
+void
+mrtInitCriticalSection(void)
+{
+}
+static inline
+void
+beginCriticalSection(void)
+{
+    __disable_interrupt() ;
+}
+static inline
+void
+endCriticalSection(void)
+{
+    __enable_interrupt() ;
+}
+----
+
+=== MSP430 Timing Interfaces
+
+[source,c]
+----
+<<msp430 static functions>>=
+static inline
+MRT_DelayTime
+mrtMsecToTicks(
+    MRT_DelayTime msec)
+{
+    if (msec > MRT_MAX_MSEC_DELAY) {
+        msec = MRT_MAX_MSEC_DELAY ;
+    }
+    /*
+     * We must avoid overflow if the requested number of
+     * msecs is large.
+     */
+    return msec < MRT_MAX_CLOCK_TICKS / MRT_TIMER_FREQUENCY ?
+            ((msec * MRT_TIMER_FREQUENCY) + 1000UL / 2UL) / 1000UL :
+            ((msec + 1000UL / 2UL) / 1000UL) * MRT_TIMER_FREQUENCY ;
+}
+----
+
+[source,c]
+----
+<<msp430 static functions>>=
+static inline
+MRT_DelayTime
+mrtTicksToMsec(
+    MRT_DelayTime ticks)
+{
+    return ticks < MRT_MAX_CLOCK_TICKS / 1000UL ?
+        ((ticks * 1000UL) + MRT_TIMER_FREQUENCY / 2UL) / MRT_TIMER_FREQUENCY :
+        ((ticks + MRT_TIMER_FREQUENCY / 2UL) / MRT_TIMER_FREQUENCY) * 1000UL ;
+}
+----
+
+[source,c]
+----
+<<msp430 static functions>>=
+static void
+mrtSysTimerMask(void)
+{
+    TA0CCTL0 &= ~CCIE ;
+}
+----
+
+[source,c]
+----
+<<msp430 static functions>>=
+static void
+mrtSysTimerUnmask(void)
+{
+    TA0CCTL0 &= ~CCIFG ;
+    TA0CCTL0 |= CCIE ;
+}
+----
+
+[source,c]
+----
+<<msp430 static functions>>=
+static inline
+uint16_t
+readTimer(void)
+{
+#   define  SUCCESSIVE_MATCHES  3
+
+    uint16_t cmp1Reg ;
+    uint16_t cmp2Reg ;
+    uint8_t cnt ;
+
+    cnt = 1 ;
+    cmp1Reg = TA0R ;
+    do {
+        cmp2Reg = TA0R ;
+        cnt = cmp1Reg == cmp2Reg ? cnt + 1 : 1 ;
+        cmp1Reg = cmp2Reg ;
+    } while (cnt < SUCCESSIVE_MATCHES) ;
+
+    return cmp2Reg ;
+
+#   undef SUCCESSIVE_MATCHES
+}
+----
+
+[source,c]
+----
+<<msp430 static functions>>=
+static void
+setNextTime(
+    uint16_t clockTicks)
+{
+    _disable_interrupts() ;
+
+    if (clockTicks == 1) {
+        ++clockTicks ;
+    }
+    TA0CCR0 = readTimer() + clockTicks ;
+    mrtSysTimerUnmask() ;
+
+    _enable_interrupts() ;
+}
+----
+
+[source,c]
+----
+<<msp430 static functions>>=
+static void
+mrtSysTimerStart(
+    MRT_DelayTime time)
+{
+    clockCnts = time >> 16 ;
+    setNextTime(time) ;
+}
+----
+
+[source,c]
+----
+<<msp430 static data>>=
+/*
+ * We keep a higher precision time indication by counting Timer A overflows.
+ * This variable holds the number of Timer A overflow interrupts that have
+ * occurred. When concatenated with the value of the TA0R register from
+ * Timer A and treated as a 32 bit quantity, the value represented is the
+ * time since the system started as a U(20,12) fixed radix point number
+ * in units of seconds (this is because we are running timer A off of the
+ * 32 KHz clock divided down by 8 ==> 4096 ticks / sec). For 20 integer bits of
+ * seconds, the clock time value rolls over after ~1,000,000 seconds or
+ * about 12.1 days.
+ *
+ * Use the function, "sysTimeTicks()" to obtain the time value.
+ */
+static uint16_t timerTicks ;
+static uint16_t clockCnts ;
+----
+
+[source,c]
+----
+<<msp430 static functions>>=
+/*
+ * To get a high resolution time value we combine the in memory counter that
+ * counts timer overflows with the current value of the timer register (TA0R).
+ * However we must be careful here because the counter is shared with an
+ * interrupt service routine. So we make this function a "monitor" function and
+ * we must check that the interrupt flag is not set right after we read the
+ * timer value. If it is, then the memory counter will be off by one since
+ * there is a pending interrupt that has not been serviced.
+ */
+uint32_t
+sysTimeTicks(void)
+{
+    _disable_interrupts() ;
+
+    uint16_t tvalue = readTimer() ;
+    /*
+     * If the timer rolls over between the time we enter this function and the
+     * time we get here, then the interrupt flag will be set. In that case, the
+     * memory counter will be off by one (since the interrupt service routine
+     * will NOT have been run as we are in a "monitor" function).  Also we can
+     * assume the timer value is simply zero, reflecting the timer value when
+     * the roll over occurs (as it will not take a tick's worth of time to
+     * execute to here.
+     *
+     * If there is no roll over of the timer, then the time is simply the
+     * concatenation of the memory counter value and the timer value.
+     */
+    bool rollover = (TA0CTL & TAIFG) != 0 ;
+    _enable_interrupts() ;
+
+    return rollover ?
+        (((uint32_t)timerTicks + 1) << 16) :
+        (((uint32_t)timerTicks << 16) | tvalue) ;
+}
+----
+
+[source,c]
+----
+<<msp430 static functions>>=
+static MRT_DelayTime
+mrtSysTimerStop(void)
+{
+    MRT_DelayTime remain ;
+
+    mrtSysTimerMask() ;
+    uint16_t timer = readTimer() ;
+    /*
+     * Account that the timer might go off between when we
+     * stop it and when we read it.
+     */
+    if (TA0CCTL0 & CCIFG) {
+        remain = clockCnts ?
+                (MRT_DelayTime)(clockCnts - 1) << 16 : 0 ;
+    } else {
+        remain = TA0CCR0 - timer ;
+        remain += (MRT_DelayTime)clockCnts << 16 ;
+    }
+    return remain ;
+}
+----
+
+[source,c]
+----
+<<msp430 static functions>>=
+void
+__attribute__((interrupt(TIMER0_A0_VECTOR)))
+timerA0ISR(void)
+{
+    if (clockCnts == 0) {
+        MRT_DelayTime next = mrt_TimerExpireService() ;
+        if (next) {
+            mrtSysTimerStart(next) ;
+        }
+        __low_power_mode_off_on_exit() ;
+    } else {
+        /*
+         * Loading the compare register with the timer
+         * value causes us to count an entire 16 bits worth
+         * of ticks.
+         */
+        TA0CCR0 = TA0R ;
+        --clockCnts ;
+    }
+}
+----
+
+[source,c]
+----
+<<msp430 static functions>>=
+static void
+mrtInitSysTimer(void)
+{
+    /*
+     * Stop and Clear the timer.
+     */
+    TA0CTL = TACLR ;
+    /*
+     * Set up clock source to ACLK and Divide down by 8.
+     */
+    TA0CTL |= TASSEL_1 | ID_3 ;
+    TA0CCTL0 = 0 ;
+    TA0CCTL1 = 0 ;
+    TA0CCTL2 = 0 ;
+    /*
+     * Start the timer in continuous mode. 
+     * Enable the timer overflow interrupt.
+     */
+    TA0CTL |= MC_2 | TAIE ;
+    /*
+     * Zero out the upper level counter that keeps track of ticks.
+     */
+    timerTicks = 0 ;
+}
+----
+
+=== MSP430 Async Execution Interface
+
+[source,c]
+----
+<<msp430 external functions>>=
+MRT_SyncParams *
+mrt_SyncRequest(
+    MRT_SyncFunc f)
+{
+    return mrtSyncQueuePut(f, true) ;
+}
+----
+
+[source,c]
+----
+<<msp430 external functions>>=
+MRT_SyncParams *
+mrt_TrySyncRequest(
+    MRT_SyncFunc f)
+{
+    return mrtSyncQueuePut(f, false) ;
+}
+----
+
+=== MSP430 Suspending Execution
+
+[source,c]
+----
+<<msp430 static functions>>=
+static void
+mrtWait(void)
+{
+    beginCriticalSection() ;
+    if (mrtSyncQueueEmpty()) {
+        __bis_SR_register(LPM0_bits | GIE) ;
+    } else {
+        endCriticalSection() ;
+    }
+}
+----
+
+=== MSP430 Initialization
+
+[source,c]
+----
+<<msp430 external functions>>=
+void
+mrt_Initialize(void)
+{
+    mrtEventPoolInit() ;
+    mrtInitCriticalSection() ;
+    mrtInitSysTimer() ;
+}
+----
+
+== Code Organization
+
+[source,c]
+----
+<<standard includes>>=
+#include <stdlib.h>
+#include <stddef.h>
+#include <inttypes.h>
+#include <stdbool.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+#include <assert.h>
+
+#if __STDC_VERSION__ > 199001L
+#   include <stdalign.h>
+#   include <stdnoreturn.h>
+#else
+#   define alignas(x)
+#   define noreturn
+#endif /* __STDC_VERSION__ > 199001L */
+----
+
+[source,c]
+----
+<<common includes>>=
+#include "micca_rt.h"
+----
+
+[source,c]
+----
+<<common defines>>=
+#ifndef COUNTOF
+#define COUNTOF(a)  (sizeof(a) / sizeof(a[0]))
+#endif /* COUNTOF */
 ----
 
 === MSP430 Files

@@ -23,7 +23,8 @@ RUNTIME	=\
 
 PLATFORMS=\
 	posix\
-	arm-7m\
+	arm-7m/msp432\
+	arm-7m/efm32gg\
 	msp430\
 	$(NULL)
 
@@ -52,8 +53,11 @@ micca_main.tcl : $(ASRC)
 posix/micca_rt.h posix/micca_rt.c : $(ASRC)
 	$(MAKE) --directory posix micca_rt.h micca_rt.c
 
-arm-7m/micca_rt.h arm-7m/micca_rt.c : $(ASRC)
-	$(MAKE) --directory arm-7m micca_rt.h micca_rt.c
+arm-7m/msp432/micca_rt.h arm-7m/msp432/micca_rt.c : $(ASRC)
+	$(MAKE) --directory arm-7m/msp432 micca_rt.h micca_rt.c
+
+arm-7m/efm32gg/micca_rt.h arm-7m/efm32gg/micca_rt.c : $(ASRC)
+	$(MAKE) --directory arm-7m/efm32gg micca_rt.h micca_rt.c
 
 msp430/micca_rt.h msp430/micca_rt.c : $(ASRC)
 	$(MAKE) --directory msp430 micca_rt.h micca_rt.c
