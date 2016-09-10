@@ -2,7 +2,7 @@
 # -- Tcl Module
 
 # @@ Meta Begin
-# Package bridle 1.0
+# Package bridle 1.0.1
 # Meta description This package suppliments the harness package by
 # Meta description providing a way to synchronize to stub output from a
 # Meta description tack generated test harness.
@@ -32,7 +32,7 @@ package require ralutil
 
 # ACTIVESTATE TEAPOT-PKG BEGIN DECLARE
 
-package provide bridle 1.0
+package provide bridle 1.0.1
 
 # ACTIVESTATE TEAPOT-PKG END DECLARE
 # ACTIVESTATE TEAPOT-PKG END TM
@@ -92,7 +92,7 @@ namespace eval ::bridle {
 
     logger::initNamespace [namespace current]
 
-    variable version 1.0
+    variable version 1.0.1
 
     ::ralutil::sysIdsInit
 }
@@ -361,9 +361,7 @@ namespace eval ::bridle {
     }
     method MarkTrace {type content} {
         try {
-            if {[dict get $content eventType] ne "Polymorphic" &&\
-                    [string index [dict get $content dstInst] 0] ne "@"} {
-    
+            if {[dict get $content eventType] eq "Normal"} {
                 lassign [split [dict get $content dstInst] .] dstClass
                 my variable currentCmdId
                 set cmd [relvar restrictone Command CmdId $currentCmdId]
