@@ -1,0 +1,1405 @@
+// vim: set syntax=asciidoc:
+////////
+ *++
+ * PROJECT:
+ *  mrtools
+ * MODULE:
+ *  bridle.tcl -- unit testing using tack generated harnesses
+ * ABSTRACT:
+ *
+ *--
+////////
+= Unit Testing With Tack Generated Harnesses
+
+== Introduction
+
+This document contains a Tcl package to support unit testing
++pycca+ domains that are run in +tack+ generated test harnesses.
++Tack+ is an automatic test harness generator for +pycca+ domains.
+The test harness is an executable program that includes a means
+of requesting access to the harnessed domain.
++Tack+ provides a Tcl package called +harness+.
+This package provides basic communications services to the test harness
+that allow domain operations to be invoked, attributes to be read and
+updated, events to be generated, etc.
+
+These tools enable a +pycca+ domain to be compiled to run in a POSIX
+environment and to interact with the domain by driving its execution
+via operations and events.
+The harnessed domain also produces output containing information about
+state transitions, test harness stub invocations and instrumentation
+information inserted by +pycca+.
+
+The basic unit test workflow is:
+
+* Build the harnessed domain
+(or domains, as test harness programs may contain several domains)
+
+* Use the +harness+ package to communicate to the test application.
+
+* Send commands to the test application and observe the various traces
+and other outputs to verify the application execution.
+
+* Run sufficient test cases to obtain the code and state transition
+coverage desired.
+
+The +bridle+ package is intended to support the running of test cases
+by providing a simpler interface to the harnessed application and
+to provide services to monitor the output of the application and take
+actions when specific traces, stubs, etc. are received as responses from the
+test application.
+
+== Overview
+
+The +bridle+ package is organized as a TclOO class called +rein+.
+The +rein+ class command is also exported as an ensemble command
+from the +bridle+ namespace.
+An object of the +rein+ class will have
+methods to support the workflow discussed above.
+
+----
+<<bridle commands>>=
+::oo::class create ::bridle::rein {
+    <<rein configuration>>
+}
+----
+
+=== Configuration
+There are several pieces of configuration information that must be
+supplied to establish a connection to a harnessed domain.
+These are held as variables that have the same name as the option
+used to set or get them.
+
+----
+<<rein configuration>>=
+variable program map pycca timeout
+----
+
+=== Constructor
+
+(((rein,method,constructor)))
+
+The constructor for +rein+ takes a list of option / value pairs.
+The options are:
+
+* -program => the name of the executable harness file.
+
+* -map => the name of the symbol map file that corresponds to the +-program+
+executable.
+
+* -pycca => the name of a +pycca+ save file that will be used to translate
+the event traces.
+
+* -timeout => the default time out value for synchronization operations.
+
+All options except +-timeout+ must be supplied.
+
+.Implementation
+----
+<<rein configuration>>=
+constructor {args} {
+    set svcname ::bridle[self]
+    ::logger::init $svcname
+    ::logger::import -all -namespace log $svcname
+
+    # Default timeout is 2 seconds
+    set timeout 2000
+    foreach {option value} $args {
+        switch -exact -- $option {
+            -program {
+                set program [auto_execok $value]
+                if {$program eq {}} {
+                    error "unknown program, \"$value\""
+                }
+            }
+            -map {
+                set map $value
+                if {![file exists $map]} {
+                    error "unknown map file, \"$map\""
+                }
+            }
+            -pycca {
+                set pycca $value
+                if {![file exists $pycca]} {
+                    error "unknown pycca save file, \"$pycca\""
+                }
+            }
+            -timeout {
+                set timeout $value
+            }
+            default {
+                error "unknown option, \"$option\""
+            }
+        }
+    }
+
+    if {![info exists program]} {
+        error "-program option not supplied"
+    }
+    if {![info exists map]} {
+        error "-map option not supplied"
+    }
+    if {![info exists pycca]} {
+        error "-pycca option not supplied"
+    }
+
+    log::debug "-program option = \"$program\""
+    log::debug "-map option = \"$map\""
+    log::debug "-pycca option = \"$pycca\""
+    log::debug "-timeout option = \"$timeout\""
+
+    eventTrace setTracePlatform [expr {$::tcl_platform(platform) eq "windows" ?\
+            "PEI" : "ELF"}]
+    eventTrace traceInit $map $pycca
+
+    namespace import ::ral::*
+    namespace import ::ralutil::*
+
+    <<rein data structures>>
+
+    return
+}
+----
+
+.Tests
+----
+<<constructor tests>>=
+test constructor-1.0 {
+    Create rein object
+} -setup {
+} -cleanup {
+} -body {
+    bridle rein create ::piorein -program pio -map pio.map -pycca pio.ral
+} -result {::piorein}
+----
+
+=== Destructor
+
+(((rein,method,destructor)))
+
+The destructor for +rein+ objects closes any connection made to the
+harnessed application.
+
+.Implementation
+----
+<<rein configuration>>=
+destructor {
+    my variable connection
+    if {[info exists connection]} {
+        $connection close
+    }
+}
+----
+
+=== Cget
+
+(((rein,method,cget)))
+
+The +cget+ method may be used to obtain the values of the options
+that were set during construction.
+
+.Implementation
+----
+<<rein configuration>>=
+method cget {option} {
+    switch -exact -- $option {
+        -program -
+        -map -
+        -pycca -
+        -timeout {
+            return [set [string range $option 1 end]]
+        }
+
+        default {
+            error "unknown option, \"$option\""
+        }
+    }
+}
+----
+
+.Tests
+----
+<<constructor tests>>=
+test cget-1.0 {
+    Get timeout value
+} -setup {
+} -cleanup {
+} -body {
+    ::piorein cget -timeout
+} -result {2000}
+----
+
+=== Start
+
+(((rein,method,start)))
+
+The +start+ method is used to begin execution of the test harness program.
+Starting is separated out as a method because certain test situation
+will have the harness program running under a debugger which will be
+reponsible for starting program execution.
+
+The delay time parameter is used to insure that the harness program has
+had enough time to establish its communication interface before allowing
+the test to proceed.
+The return value is the process Id of the harness program, although such
+a number is of little use in the Tcl world.
+
+.Implementation
+----
+<<rein configuration>>=
+method start {{delay 500}} {
+    set pid [exec $program &]
+    after $delay
+    return $pid
+}
+----
+
+.Tests
+----
+<<exported tests>>=
+test start-1.0 {
+    start program
+} -setup {
+} -cleanup {
+} -body {
+    ::piorein start
+} -result {[0-9]+} -match regexp
+----
+
+=== Connect
+
+(((rein,method,connect)))
+
+The +connect+ method forms communcations connections to the test harness.
+Both the +driver+ connection, used to invoke domain operations and access
+domain internals, and the +stub+ connection are formed.
+
+The +stub+ connection only has output from the application and
+can contain output from +tack+ generated stubs for external operations,
+state machine trace information and pycca generated instrumentation output
+from internal functions of the domain.
+
+The +connect+ method also sets up the +stub+ channel to be non-blocking
+and installs an file event handler on it.
+This event handler is the starting point of supporting the tracing
+and synchronization features of the package.
+
+.Implementation
+----
+<<rein configuration>>=
+method connect {} {
+    my variable connection
+    set connection [harness open driver stub]
+    # Turn on state machine tracing
+    $connection trace true
+    # Set the trace/debug output to non-blocking. We will be
+    # waiting on output and synchonizing to the results.
+    set stub [$connection cget stub]
+    chan configure $stub -blocking no
+    chan event $stub readable [mymethod RecvStubInput $stub]
+
+    # Set up a fake command and other variables.  This is in case we receive
+    # input before sending a "command" or attempting a "sync".
+    set cmd [relvar insert Command {
+        Command     connect
+        Response    {result {}}
+    }]
+    my variable currentCmdId
+    set currentCmdId [relation extract $cmd CmdId]
+    my variable syncType
+    set syncType {}
+    my variable syncPattern
+    set syncPattern {}
+    return
+}
+----
+
+.Tests
+----
+<<exported tests>>=
+test connect-1.0 {
+    connect to program
+} -setup {
+} -cleanup {
+} -body {
+    ::piorein connect
+} -result {}
+----
+
+=== Command
+
+(((rein,method,command)))
+
+The +command+ method sends the harness program a +harness+ command
+and waits for the response.
+
+The arguments to +comand+ are the same as those for a *harness method*
+in the +harness+ package.
+Namely,
+
+* +invoke+ _domain opname ?oparg1 ...?_
+* +read+ _domain class inst attr_
+* +update+ _domain class inst attr value_
+* +event+ _domain class inst event ?param1 ...?_
+* +polyevent+ _domain class inst event ?param1 ...?_
+* +delayed+ _domain class inst event ?param1 ...?_
+* +delayedpoly+ _domain class inst event ?param1 ...?_
+
+where
+
+_domain_ =>:: is the name of a domain in the harness
+_opname_ =>:: is the name of a domain operation
+_class_ =>:: is the name of a class
+_inst_ =>:: is the name of an instance
+_attr_ =>:: is the name or number of an attribute
+_event_ =>:: is the name of an event
+
+The return value of the +command+ method is a dictionary of the form:
+
+_code_ =>:: a return code indicating success or failure
+_result_ =>:: the returned result of the operation
+_category_ =>:: indicates the type of operation and is one of
+    - dop
+    - data
+    - event
+    - polyevent
+    - delayed
+    - delayedpoly
+_domain_ =>:: the name of the domain
+
+and other dictionary keys correspond to the argument given in the
+command.
+In essense the response duplicates (and possibly adds additional keys)
+of the original command.
+
+To gain better insight to a harnessed application,
+we want to save the commands and responses that are sent to the
+application as well as any _stub_ channel output from the application
+that is the result of sending a command.
+We need some data structures to accomplish that.
+
+----
+<<rein data structures>>=
+relvar create Command {
+    CmdId       int
+    Command     string
+    Response    string
+} CmdId
+
+sysIdsGenSystemId [self namespace]::Command CmdId
+----
+
+.Implementation
+----
+<<rein configuration>>=
+method command {args} {
+    # Send the command and wait for the response
+    my variable connection
+    set response [$connection {*}$args]
+
+    # Save the command and its response
+    set cmd [relvar insert Command [list\
+        Command     $args\
+        Response    $response\
+    ]]
+    # Set up variable with the current command ID. This is used
+    # when stub output is saved.
+    my variable currentCmdId
+    set currentCmdId [relation extract $cmd CmdId]
+    log::info [my FormatCmdResp $currentCmdId $args $response]
+
+    # Throw an error if the response is an error.
+    set result [dict get $response result]
+    if {[dict get $response code] eq "error"} {
+        log::error $result
+        error $result
+    }
+    return $response
+}
+----
+
+.Tests
+----
+<<exported tests>>=
+test command-1.0 {
+    Send command to program
+} -setup {
+} -cleanup {
+} -body {
+    set response [::piorein command invoke pio init]
+    dict ge $response code
+} -result {success}
+----
+
+=== Trace
+
+(((rein,method,trace)))
+
+After issuing a harnessed application a command via the +command+ method,
+usually there will be output on the +stub+ connection.
+In addition to the +sync+ action described above,
+the test case may wish to have commands executed when certain +stub+
+inputs are received.
+
+The +trace+ method allows the specification of +stub+ output patterns
+that can be matched when it is received by this package and
+have arbitrary Tcl commands executed.
+We pattern this method after the Tcl core +trace+ command.
+The general forms of the method are:
+
+___________
++trace+ +add+ _type_ _match_ _commandPrefix_ +
++trace+ +remove+ _traceId_ +
++trace+ +info+ _traceId_ +
+___________
+
+where
+
++add+ =>:: adds a trace and returns a _traceId_ value that can be used
+    for the +remove+ and +info+ subcommands
++remove+ =>:: deletes a trace
++info+ =>:: inquires about a trace, returning _type_ _match_ and
+    _commandPrefix_ for the trace.
+
+_type_ =>:: is one of
+    - stub
+    - trace
+    - instrument
+
+_match_ =>::
+    is a dictionary.
+    The keys in the dictionary must be from among the set of keys
+    associated to the _type_ of the trace.
+    The values in the dictionary are _glob_ patterns as for the
+    +string match+ core command.
+
+_commandPrefix_ =>::
+    is a command prefix that will be invoked upon a match.
+    A trace matches when its +type+ matches and when all corresponding
+    values of the +match+ dictionary also match.
+    +commandPrefix+ is invoked with two additional arguments.
+    The first additional argument is the value of type and the second
+    is the matching dictionary value.
+    Below is a list of dictionary keys for each value of _type_.
+
+____
+_commandPrefix_ _type_ _content_
+____
+
+
+    * +type+ = "stub"
+      ** domain => the name of the domain
+      ** eop => the external operation name
+      ** parameters => a dictionary of parameters names/values
+      ** time => time stamp
+
+    * +type+ = "trace" +
+        For state machine traces, the keys of the dictionary fall into
+        two categories.
+        Some keys are present regardless of the type of the event.
+        Other keys depend upon the value of the +eventType+ key.
+        Below are listed the dictionary key values for the common keys
+        and those that depend upon the value of the eventType key.
+
+        ** eventType => the type of the event ("Normal", "Polymorphic" or
+            "Creation")
+        ** eventNumber => the event number
+        ** srcInst => the name or address of the instance sending the event
+        ** dstInst => the name or address of the instance receiving the event
+        ** time => trace time stamp
+
+        *** +eventType+ = "Normal"
+           **** currState => the state of the instance before the event
+           is delivered
+           **** newState => the state of the instance after the event is
+           delivered
+
+        *** +eventType+ = "Polymorphic"
+           **** subcode => subtype code number
+           **** hierarch => hierarchy number (for multiple hierarchies)
+           **** mappedNumber => the event number as it was mapped to the subtype
+           **** mappedType => the event type as it was mapped to the subtype
+
+        *** +eventType+ = "Creation"
+           **** dstClass => the address of the class structure for the new
+           created instance
+
+    * +type+ = "instrument"
+      ** func => name of the function
+      ** file => name of the file containing the function
+      ** line => the line number in the file where the instrumentation trace
+            originated
+      ** time => time stamp
+
+[float]
+==== Trace Specification
+To implement the +trace+ command we need some data structures to hold
+the traces.
+We use a +relvar+ with attributes that match the information needed
+to determine a match and invoke the corresponding command.
+
+----
+<<rein data structures>>=
+relvar create Trace {
+    TraceId     int
+    Type        string
+    Match       dict
+    Prefix      list
+} TraceId
+
+sysIdsGenSystemId [self namespace]::Trace TraceId
+----
+
+We add a validation trace on the Trace relvar to make sure that the
++Type+ attribute is properly set.
+
+----
+<<rein data structures>>=
+relvar trace add variable Trace {insert update set} {apply {{op name args} {
+    set allowedTypes [list trace stub instrument]
+    switch -exact -- $op {
+        insert {
+            set tuple [lindex $args 0]
+            set type [::ral::tuple extract $tuple Type]
+            if {$type ni $allowedTypes} {
+                error "bad Type value, \"$type\""
+            }
+            return $tuple
+        }
+        update {
+            set tuple [lindex $args 1]
+            set type [::ral::tuple extract $tuple Type]
+            if {$type ni $allowedTypes} {
+                error "bad Type value, \"$type\""
+            }
+            return $tuple
+        }
+        set {
+            set relvalue [lindex $args 0]
+            foreach type [::ral::relation list $relvalue Type] {
+                if {$type ni $allowedTypes} {
+                    error "bad Type value, \"$type\""
+                }
+            }
+            return $relvalue
+        }
+        default {
+            error "unknown operation, \"$op\""
+        }
+    }
+}}}
+----
+
+The *trace* method itself is a simple interface to unexported methods
+that manage the +relvar+ data.
+
+(((rein,method,trace)))
+
+.Implementation
+----
+<<rein configuration>>=
+method trace {op args} {
+    switch -exact -- $op {
+        add {
+            return [my AddTrace {*}$args]
+        }
+        remove {
+            return [my RmTrace {*}$args]
+        }
+        info {
+            return [my QueryTrace {*}$args]
+        }
+        default {
+            error "unknown trace operation, \"$op\": should be one of\
+                    add, remove or info"
+        }
+    }
+}
+----
+
+We need methods to do the work of adding, removing, retrieving and executing
+traces.
+
+(((rein,method,AddTrace)))
+
+.Implementation
+----
+<<rein configuration>>=
+method AddTrace {type match prefix} {
+    set trace [relvar insert Trace [list\
+        Type        $type\
+        Match       $match\
+        Prefix      $prefix\
+    ]]
+    return [relation extract $trace TraceId]
+}
+----
+
+.Tests
+----
+<<unexported tests>>=
+test AddTrace-1.0 {
+    Add a simple trace
+} -setup {
+} -cleanup {
+    objeval ::piorein my RmTrace $trcid
+} -body {
+    set trcid [objeval ::piorein {
+        my AddTrace stub {domain pio} {puts}
+    }]
+    relation cardinality [relvar set [info object namespace ::piorein]::Trace]
+} -result {1}
+----
+
+----
+<<unexported tests>>=
+test AddTrace-2.0 {
+    Add a trace with the wrong type
+} -setup {
+} -cleanup {
+} -body {
+    objeval ::piorein {
+        my AddTrace foo {} {}
+    }
+} -result {bad Type value, "foo"} -returnCodes error
+----
+
+(((rein,method,RmTrace)))
+
+.Implementation
+----
+<<rein configuration>>=
+method RmTrace {traceid} {
+    relvar deleteone Trace TraceId $traceid
+}
+----
+
+.Tests
+----
+<<unexported tests>>=
+test RmTrace-1.0 {
+    Remove a trace
+} -setup {
+    set tid [objeval ::piorein {my AddTrace stub {domain pio} {puts}}]
+} -cleanup {
+} -body {
+    objeval ::piorein my RmTrace $tid
+} -result {1}
+----
+
+(((rein,method,QueryTrace)))
+
+.Implementation
+----
+<<rein configuration>>=
+method QueryTrace {traceid} {
+    set trace [relvar restrictone Trace TraceId $traceid]
+    return [expr {[relation isnotempty $trace] ?\
+            [tuple get [relation tuple $trace]] : [list]}]
+}
+----
+
+.Tests
+----
+<<unexported tests>>=
+test QueryTrace-1.0 {
+    Fetch trace properties
+} -setup {
+    set tid [objeval ::piorein {my AddTrace stub {domain pio} {puts}}]
+} -cleanup {
+    objeval ::piorein my RmTrace $tid
+} -body {
+    objeval ::piorein my QueryTrace $tid
+} -result {TraceId * Type stub Match {domain pio} Prefix puts} -match glob
+----
+
+[float]
+==== Trace Execution
+
+To execute a trace,
+the command associated with the _stub_ callback from the harnessed
+application will invoke a trace execution method on each input
+received from the harnessed application.
+
+The strategy for trace execution is:
+
+* Lookup all the traces for the given _type_.
+* Iterate through those traces comparing the _match_ directory to the
+values found in the _content_ of the received _stub_ output.
+* Where a match is found, invoke the _commandPrefix_ that was defined
+for the trace with the _content_ value.
+
+(((rein,method,EvalTraces)))
+
+.Implementation
+----
+<<rein configuration>>=
+method EvalTraces {type content} {
+    <<find traces>>
+    <<find matches>>
+    return
+}
+----
+
+Finding the traces is a simple query on the *Trace* relvar finding
+that set of traces with the given _type_.
+
+----
+<<find traces>>=
+set traces [pipe {
+    relvar set Trace |
+    relation restrictwith ~ {$Type eq $type}
+}]
+----
+
+Once we have reduced the total set of *Traces* to the set of the given _type_,
+we can iterate across finding those traces that match.
+We perform the iteration in increasing order of *TraceId* which corresponds
+to processing the oldest trace first.
+
+----
+<<find matches>>=
+relation foreach trace $traces -ascending TraceId {
+    relation assign $trace Match Prefix
+    if {[my MatchTrace $Match $content]} {
+        try {
+            log::debug "matched trace: pattern = \"$Match\",\
+                    content = \"$content\""
+            {*}$Prefix $type $content
+        } on error {result opts} {
+            log::error "tracing error: $result"
+        } on break {} {
+            return -level 0 -code break
+        }
+    }
+}
+----
+
+Note that errors stop all the trace matching and any trace that
+returns a *break* result code will stop subsequent (_i.e._ newer) traces
+from executing.
+
+Matching is successful if :
+
+* all of the keys in the trace _Match_ are present in the _content_ and
+* all the corresponding _content_ values match, in the glob sense,
+the _Match_ values.
+
+If a trace was defined with an empty _match_,
+then it will match everything.
+
+(((rein,method,MatchTrace)))
+
+.Implementation
+----
+<<rein configuration>>=
+method MatchTrace {pattern content} {
+    dict for {pkey pvalue} $pattern {
+        if {!([dict exists $content $pkey] &&\
+                [string match $pvalue [dict get $content $pkey]])} {
+            return false
+        }
+    }
+    return true
+}
+----
+
+.Tests
+----
+<<unexported tests>>=
+test EvalTraces-1.0 {
+    Evaluate a trace that matches
+} -setup {
+    set tid [objeval ::piorein {
+        my AddTrace stub {domain pio} {::bridle::test::matched}}]
+} -cleanup {
+    objeval ::piorein my RmTrace $tid
+} -body {
+    set matches 0
+    objeval ::piorein my EvalTraces {stub {domain pio eop foo parameters {}}}
+    return $matches
+} -result {1}
+----
+
+==== State Machine Traces
+The +trace+ method provides a general mechanism to gain control as +stub+
+output arrives.
+There is a specific use case, that of monitoring state machine transitions,
+that is important enough to warrant providing addition support in this package.
+
+The +smtraces+ method installs a trace handler for all +trace+ type +stub+
+output.
+It then uses the facilities of the +eventTrace+ package
+to accumulate a history and accounting of the state machine transitions.
+
+(((rein,method,smtraces)))
+
+.Implementation
+----
+<<rein configuration>>=
+method smtraces {} {
+    my trace add trace {} [mymethod MarkTrace]
+}
+----
+
+The real work is done by the +MarkTrace+ method.
+It formats the state machine trace from its numeric representation
+to a text one and marks the transition.
+
+(((rein,method,MarkTrace)))
+
+.Implementation
+----
+<<rein configuration>>=
+method MarkTrace {type content} {
+    try {
+        if {[dict get $content eventType] ne "Polymorphic" &&\
+                [string index [dict get $content dstInst] 0] ne "@"} {
+
+            lassign [split [dict get $content dstInst] .] dstClass
+            my variable currentCmdId
+            set cmd [relvar restrictone Command CmdId $currentCmdId]
+            set tname [expr {[relation isnotempty $cmd] ?\
+                [relation extract $cmd Command] : "unknown-$currentCmdId"}]
+            eventTrace markTransition $tname $dstClass\
+                [dict get $content currState]\
+                [dict get $content eventNumber]
+        }
+    }
+}
+----
+
+=== Sync
+
+(((rein,method,sync)))
+
+The usual workflow for a unit test is to send a command to the harnessed
+application and receive the response to that command.
+The command usually triggers output on the +stub+ connection which
+needs to be received by the test system.
+It is convenient to wait to perform the next test until a particular
++stub+ output is received or some timeout has occurred.
+The +sync+ method does just this by waiting until a received +stub+ input
+matches a given pattern or until a timeout has elapsed.
+
+.Implementation
+----
+<<rein configuration>>=
+method sync {type pattern {wait {}}} {
+    my variable syncType
+    set syncType $type
+    my variable syncPattern
+    set syncPattern $pattern
+
+    set to [expr {$wait eq {} ? $timeout : $wait}]
+    my variable timerId
+    set timerId [after $to [mymethod TimeOutSync]]
+
+    my variable syncVar
+    vwait [my varname syncVar]
+    return $syncVar
+}
+----
+
+.Tests
+----
+<<exported tests>>=
+test sync-1.0 {
+    Sync to stub output
+} -setup {
+} -cleanup {
+} -body {
+    set result [::piorein sync instrument {func pio.init}]
+    lindex $result 0
+} -result {instrument}
+----
+
+[float]
+==== Timing Out Synchronization
+Timing out a sync attempt is done by having the timer callback write
+to the variable being used for synchronization.
+
+.Implementation
+----
+<<rein configuration>>=
+method TimeOutSync {} {
+    log::info "sync time out"
+    my variable syncVar
+    set [my varname syncVar] timeout
+}
+----
+
+[float]
+==== Receiving Stub Output
+
+The synchronization discussed above happens while the program is in
+the Tcl event loop.
+Entering the event loop allows the input from the +stub+ channel to be
+received by the file event that was registered on the channel.
+
+One thing we want to do is to record the responses and make sure they are
+associated with the last executed +driver+ command.
+Again, we need some data structures.
+
+----
+<<rein data structures>>=
+relvar create StubOutput {
+    StubId      int
+    CmdId       int
+    Output      string
+} StubId
+
+sysIdsGenSystemId [self namespace]::StubOutput StubId
+
+relvar association R1\
+    StubOutput CmdId *\
+    Command CmdId 1
+----
+
+The file event handler then has the task to insert the +stub+ output
+into the relvar and determine if it matches the
+
+(((rein,method,RecvStubInput)))
+
+.Implementation
+----
+<<rein configuration>>=
+method RecvStubInput {stub} {
+    for {set cnt [chan gets $stub line]} {$cnt >= 0}\
+            {set cnt [chan gets $stub line]} {
+
+        # Skip empty lines
+        if {[string length $line] == 0} {
+            continue
+        }
+
+        # Store away the received message
+        my variable currentCmdId
+        relvar insert StubOutput [list\
+            CmdId       $currentCmdId\
+            Output      $line\
+        ]
+        log::info [my FormatStubOutput $line]
+
+        # We need to format state machine traces so that we are comparing
+        # to human readable strings rather than number. Other types of
+        # stub output comes back as strings already.
+        lassign $line type content
+        if {$type eq "trace"} {
+            set content [eventTrace formatTrace $content]
+            log::debug "sm trace: \"$content\""
+        }
+
+        # Check for tracing
+        my EvalTraces $type $content
+        # Check for synchronization
+        my variable syncType
+        my variable syncPattern
+        if {$type eq $syncType && [my MatchTrace $syncPattern $content]} {
+            log::debug "sync match"
+            my variable syncVar
+            set [my varname syncVar] [list $type $content]
+
+            # Cancel the timeout
+            my variable timerId
+            after cancel $timerId
+
+            break
+        }
+    }
+    if {[chan eof $stub]} {
+        log::error "EOF on stub socket"
+        chan close $stub
+    }
+}
+----
+
+=== Trace View
+
+(((rein,method,prtraces)))
+
+Commands and responses on the +driver+ connection and outputs from the +stub+
+connection are all saved.
+It is convenient to be able to access the data for printing and reporting
+purposes.
+The +prtraces+ method returns a string that contains a human readable
+string with all the command / response / stub information.
+
+.Implementation
+----
+<<rein configuration>>=
+method prtraces {} {
+    set traces [pipe {
+        relvar set Command |
+        relation join ~ [relvar set StubOutput] |
+        relation group ~ StubOutputs StubId Output
+    }]
+    log::debug \n[relformat $traces]
+
+    set result {}
+    relation foreach trace $traces -ascending CmdId {
+        relation assign $trace
+        append result [my FormatCmdResp $CmdId $Command $Response]
+        relation foreach stuboutput $StubOutputs -ascending StubId {
+            append result [my FormatStubOutput\
+                    [relation extract $stuboutput Output]] \n
+        }
+        append result \n
+    }
+    return [string trimright $result]
+}
+----
+
+.Tests
+----
+<<exported tests>>=
+test prtraces-1.0 {
+    Print interaction trace
+} -setup {
+} -cleanup {
+} -body {
+    ::piorein command invoke pio init
+    ::piorein sync instrument {}
+    puts [::piorein prtraces]
+} -result {}
+----
+
+The following utility methods do the work of converting the +driver+ and +stub+
+information dictionaries into a more readable form.
+
+(((rein,method,FormatCmdResp)))
+(((rein,method,FormatStubOutput)))
+(((rein,method,FormatTime)))
+(((rein,method,FormatInstrument)))
+(((rein,method,FormatStub)))
+(((rein,method,FormatTrace)))
+
+.Implementation
+----
+<<rein configuration>>=
+method FormatCmdResp {id cmd resp} {
+    return [format "%5d %s -> \"%s\"\n" $id $cmd [dict get $resp result]]
+}
+
+method FormatStubOutput {so} {
+    lassign $so type content
+    switch -exact -- $type {
+        stub {
+            set fmtd [my FormatStub $content]
+        }
+        instrument {
+            set fmtd [my FormatInstrument $content]
+        }
+        trace {
+            set fmtd [my FormatTrace $content]
+        }
+        default {
+            log::error "unknown response type, \"$type\""
+            set fmtd {}
+        }
+    }
+    return "      $type -> $fmtd"
+}
+
+method FormatTime {time} {
+    lassign [split $time .] secs msecs
+    return "[clock format $secs -format "%Y/%m/%d %T.$msecs"]: "
+}
+
+method FormatInstrument {content} {
+    if {[dict exists $content time]} {
+        append msg [my FormatTime [dict get $content time]]
+    }
+    append msg "[dict get $content func]()\
+            [dict get $content file]:[dict get $content line]"
+}
+
+method FormatStub {content} {
+    if {[dict exists $content time]} {
+        append msg [my FormatTime [dict get $content time]]
+    }
+    append msg "[dict get $content domain].[dict get $content eop]("
+    foreach {name value} [dict get $content parameters] {
+        append msg "$value => $name, "
+    }
+    set msg [string trimright $msg ", "]
+    append msg ")"
+}
+
+method FormatTrace {content} {
+    try {
+        set fmt [eventTrace ptrace [eventTrace formatTrace $content]]
+    } on error {emsg} {
+        log::error $emsg
+        set fmt [eventTrace ptrace $content]
+        return -level 0
+    }
+    return $fmt
+}
+----
+
+== Code Organization
+
+=== Source Code
+----
+<<copyright info>>=
+# This software is copyrighted 2013 - 2016 by G. Andrew Mangogna.
+# The following terms apply to all files associated with the software unless
+# explicitly disclaimed in individual files.
+# 
+# The authors hereby grant permission to use, copy, modify, distribute,
+# and license this software and its documentation for any purpose, provided
+# that existing copyright notices are retained in all copies and that this
+# notice is included verbatim in any distributions. No written agreement,
+# license, or royalty fee is required for any of the authorized uses.
+# Modifications to this software may be copyrighted by their authors and
+# need not follow the licensing terms described here, provided that the
+# new terms are clearly indicated on the first page of each file where
+# they apply.
+# 
+# IN NO EVENT SHALL THE AUTHORS OR DISTRIBUTORS BE LIABLE TO ANY PARTY FOR
+# DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES ARISING
+# OUT OF THE USE OF THIS SOFTWARE, ITS DOCUMENTATION, OR ANY DERIVATIVES
+# THEREOF, EVEN IF THE AUTHORS HAVE BEEN ADVISED OF THE POSSIBILITY OF
+# SUCH DAMAGE.
+# 
+# THE AUTHORS AND DISTRIBUTORS SPECIFICALLY DISCLAIM ANY WARRANTIES,
+# INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.  THIS SOFTWARE
+# IS PROVIDED ON AN "AS IS" BASIS, AND THE AUTHORS AND DISTRIBUTORS HAVE
+# NO OBLIGATION TO PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS,
+# OR MODIFICATIONS.
+# 
+# GOVERNMENT USE: If you are acquiring this software on behalf of the
+# U.S. government, the Government shall have only "Restricted Rights"
+# in the software and related documentation as defined in the Federal
+# Acquisition Regulations (FARs) in Clause 52.227.19 (c) (2).  If you
+# are acquiring the software on behalf of the Department of Defense,
+# the software shall be classified as "Commercial Computer Software"
+# and the Government shall have only "Restricted Rights" as defined in
+# Clause 252.227-7013 (c) (1) of DFARs.  Notwithstanding the foregoing,
+# the authors grant the U.S. Government and others acting in its behalf
+# permission to use and distribute the software in accordance with the
+# terms specified in this license.
+----
+
+----
+<<bridle.tcl>>=
+# DO NOT EDIT THIS FILE!
+# THIS FILE IS AUTOMATICALLY GENERATED FROM A LITERATE PROGRAM SOURCE FILE.
+<<copyright info>>
+#
+
+package require Tcl 8.6
+package require logger
+package require ral
+package require ralutil
+package require harness
+package require eventTrace
+package require oo::util
+
+namespace eval ::bridle {
+    namespace export rein
+    namespace ensemble create
+
+    logger::initNamespace [namespace current]
+
+    variable version 1.0
+
+    ::ralutil::sysIdsInit
+}
+
+<<bridle commands>>
+
+package provide bridle $::bridle::version
+----
+
+=== Bridle Unit Tests
+
+----
+<<bridle.test>>=
+#!/usr/bin/env tclsh
+# DO NOT EDIT THIS FILE!
+# THIS FILE IS AUTOMATICALLY GENERATED FROM A LITERATE PROGRAM SOURCE FILE.
+#
+<<copyright info>>
+#
+
+package require Tcl 8.6
+package require cmdline
+package require logger
+
+source ../src/bridle.tcl
+chan puts "testing bridle version: [package require bridle]"
+
+# Add custom arguments here.
+set optlist {
+    {level.arg warn {Log debug level}}
+    {file.arg {} {PECOFF file to read}}
+}
+array set options [::cmdline::getKnownOptions argv $optlist]
+
+::bridle::log::setlevel $options(level)
+
+package require tcltest
+eval tcltest::configure $argv
+
+namespace eval ::bridle::test {
+    ::logger::initNamespace [namespace current]
+
+    namespace import ::tcltest::*
+    namespace import ::ral::*
+    namespace import ::ralutil::*
+
+    <<test utilities>>
+    <<constructor tests>>
+    <<unexported tests>>
+    <<exported tests>>
+
+    ::piorein destroy
+
+    cleanupTests
+}
+----
+
+----
+<<test utilities>>=
+# Utility proc to execute unexported methods.
+proc objeval {obj args} {
+    namespace eval [info object namespace $obj] {*}$args
+}
+----
+
+----
+<<test utilities>>=
+proc matched {type content} {
+    variable matches
+    incr matches
+}
+----
+
+////
+----
+test X-1.0 {
+} -setup {
+} -cleanup {
+} -body {
+} -result {}
+----
+////
+
+=== Package Index
+
+We also provide a root chunk to extract a package index file.
+
+----
+<<pkgIndex.tcl>>=
+package ifneeded bridle 1.0 [list source [file join $dir bridle.tcl]]
+----
+
+=== Template
+
+The following is a template that can be used to seed a unit test file.
+
+----
+<<template-bridle.test>>=
+# DO NOT EDIT THIS FILE!
+# THIS FILE IS AUTOMATICALLY GENERATED FROM A LITERATE PROGRAM SOURCE FILE.
+#
+<<copyright info>>
+#  *++
+# MODULE:
+#	unit test template
+# ABSTRACT:
+# 
+#  *--
+package require Tcl 8.6
+package require cmdline
+package require logger
+package require tcltest
+package require harness
+package require bridle
+package require eventTrace
+
+set optlist {
+    {level.arg warn {Log debug level}}
+    {program.arg pio {Base name of test program}}
+    {nostart {Don't start test executable}}
+}
+array set options [::cmdline::getKnownOptions argv $optlist]
+
+::logger::setlevel $options(level)
+
+tcltest::configure {*}$argv
+namespace eval ::$options(program)::test {
+    namespace import ::tcltest::*
+    ::logger::initNamespace [namespace current] $::options(level)
+
+    bridle rein create ::apptest\
+        -program ../$options(program)\
+        -map ../$options(program).map\
+        -pycca ../$options(program).ral\
+
+
+    if {!$::options(nostart)} {
+        apptest start
+    }
+
+    apptest smtraces
+    apptest connect
+
+    # Here you can set up any traces that are needed to keep track of the
+    # state of instances or the values of variables.
+
+
+    # Place your text cases here.
+    #
+    # A typical test case uses the "command" method to set up data values and /
+    # or send events or invoke domain operations.  Then the test uses the
+    # "sync" method wait until the expected operations have occurred or for
+    # some timeout. It is sometimes enough to simple know when an operation has
+    # occurred. Other times it will be necessary to query data values and
+    # compare them against expected results.
+    #
+    # For example:
+
+    test init-1.0 {
+        Initialize the domain
+    } -setup {
+    } -cleanup {
+    } -body {
+        apptest command invoke mydomain init
+        set sync [apptest sync instrument {func mydomain.init}]
+        lindex $sync 0
+    } -result {instrument}
+    
+    cleanupTests
+
+    set logchan [open events.log w]
+    try {
+        puts $logchan [apptest prtraces]
+    } finally {
+        chan close $logchan
+    }
+
+    apptest destroy
+
+    set report [open trans_report.txt w]
+    try {
+        chan puts $report [eventTrace reportCoverage]
+    } finally {
+        close $report
+    }
+}
+
+if 0 {
+    # This is just a template for additional tests.
+    # Delete when done
+
+    test X-1.0 {
+    } -setup {
+    } -cleanup {
+    } -body {
+    } -result {}
+}
+----
