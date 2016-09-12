@@ -2,7 +2,7 @@
 # -- Tcl Module
 
 # @@ Meta Begin
-# Package eventTrace 1.3
+# Package eventTrace 1.3.1
 # Meta category    eventTrace
 # Meta description State Machine Event Tracing
 # Meta platform    tcl
@@ -29,7 +29,7 @@ package require ralutil
 
 # ACTIVESTATE TEAPOT-PKG BEGIN DECLARE
 
-package provide eventTrace 1.3
+package provide eventTrace 1.3.1
 
 # ACTIVESTATE TEAPOT-PKG END DECLARE
 # ACTIVESTATE TEAPOT-PKG END TM
@@ -50,7 +50,7 @@ package provide eventTrace 1.3
 #*--
 #
 
-package provide eventTrace 1.3
+package provide eventTrace 1.3.1
 
 package require Tcl 8.6
 package require ral
@@ -956,6 +956,10 @@ proc ::eventTrace::reportCoverage {} {
 
     foreach class [relation list\
             [relation project $TransCoverage ClassName]] {
+        if {[regexp -- {@[[:xdigit:]]+} $class]} {
+            append result \n "*** unable to identify class $class ****" \n
+            continue
+        }
         set banner "======================= $class ======================="
         append result \n $banner
         set cover [relation restrictwith $TransCoverage\
