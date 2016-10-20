@@ -160,6 +160,10 @@ proc ::validateutils::genMiccaFile {domain content args} {
     micca configure $content
     micca generate {*}$args
     indexFiles $domain.c $domain.h
+    if {[dict exists $args harness] && [dict get $args harness]} {
+        micca harness
+        indexFiles ${domain}_harness.c
+    }
 }
 
 proc ::validateutils::compileFiles {args} {

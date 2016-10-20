@@ -40,7 +40,13 @@
 # the authors grant the U.S. Government and others acting in its behalf
 # permission to use and distribute the software in accordance with the
 # terms specified in this license.
+Micca version: 0.1
 */
+
+#if defined(MRT_HARNESS) && (defined(MRT_NO_NAMES) || defined(MRT_NO_TRACE))
+#error "test harness requires both MRT_NO_NAMES and MRT_NO_TRACE to be undefined"
+#endif
+
 #define _POSIX_C_SOURCE 200112L
 
 #include "micca_rt.h"
@@ -94,7 +100,7 @@ mrtNextInstSlot(
     void *ptr) ;
 static inline MRT_AllocStatus mrtIncrAllocCounter(MRT_iab *iab) ;
 static void
-mrtMarkTransaction(
+mrtMarkRelationship(
     MRT_Relationship const *const *rel,
     unsigned relCount) ;
 static bool mrtCheckRelationship(MRT_Relationship const *rel) ;
@@ -132,7 +138,7 @@ static void
 mrtCountGenRefs(
     struct mrtrefgeneralization const *gen) ;
 static void
-mrtSimpUnlinkForw(
+mrtSimpUnlinkForward(
     struct mrtsimpleassociation const *assoc,
     void *source) ;
 static void
@@ -144,10 +150,6 @@ mrtUnlinkBackref(
     struct mrtassociationrole const *targetRole,
     void *source,
     void *target) ;
-static void
-mrtClassUnlinkParticipants(
-    struct mrtclassassociation const *relRole,
-    void *assoc) ;
 static void mrtInsertDelayedEvent(MRT_ecb *ecb) ;
 static void mrtRemoveDelayedEvent(MRT_ecb *ecb) ;
 static MRT_ecb *mrtExpireDelayedEvents(void) ;
@@ -763,7 +765,7 @@ mrtInitializeInstance(
     if (iab->construct) {
         iab->construct(inst) ;
     }
-    mrtMarkTransaction(classDesc->classRels, classDesc->relCount) ; // <5>
+    mrtMarkRelationship(classDesc->classRels, classDesc->relCount) ; // <5>
 }
 static inline 
 MRT_AllocStatus
@@ -777,7 +779,7 @@ mrtIncrAllocCounter(
     return iab->alloc ;
 }
 static void
-mrtMarkTransaction(
+mrtMarkRelationship(
     MRT_Relationship const * const *rel,
     unsigned relCount)
 {
@@ -785,7 +787,7 @@ mrtMarkTransaction(
         bool found = false ;
         MRT_Relationship const **marked = mrtTransaction.relationships ;
         for (unsigned markedCount = mrtTransaction.count ; markedCount != 0 ;
-                --markedCount, ++marked) {
+                --markedCount, ++marked) { // <1>
             if (*marked == *rel) {
                 found = true ;
                 break ;
@@ -793,9 +795,8 @@ mrtMarkTransaction(
         }
 
         if (!found) {
-            if (mrtTransaction.count >=
-                    COUNTOF(mrtTransaction.relationships)) {
-                mrtFatalError(mrtTransOverflow) ; // <1>
+            if (mrtTransaction.count >= COUNTOF(mrtTransaction.relationships)) {
+                mrtFatalError(mrtTransOverflow) ; // <2>
             }
             mrtTransaction.relationships[mrtTransaction.count++] = *rel ;
         }
@@ -993,12 +994,13 @@ mrtCheckAssociatorRefs(
     for (mrt_InstIteratorStart(&iter, associator->classDesc) ;
             mrt_InstIteratorMore(&iter) ; mrt_InstIteratorNext(&iter)) {
         void *inst = mrt_InstIteratorGet(&iter) ;
-        void **ref = (void **)((uintptr_t)inst + associator->forwardOffset) ;
-        if (*ref == NULL) {
+        MRT_Instance *ref = *(MRT_Instance **)
+                ((uintptr_t)inst + associator->forwardOffset) ;
+        if (ref == NULL || ref->alloc == 0) { // <1>
             return false ;
         }
-        ref = (void **)((uintptr_t)inst + associator->backwardOffset) ;
-        if (*ref == NULL) {
+        ref = *(MRT_Instance **)((uintptr_t)inst + associator->backwardOffset) ;
+        if (ref == NULL || ref->alloc == 0) {
             return false ;
         }
     }
@@ -1204,19 +1206,17 @@ mrtLink(
         mrtFatalError(mrtStaticRelationship) ;
         break ;
 
-    case mrtLinkedList: { // <2>
-        // If the target is already on a linked list somewhere, then we unlink
-        // it before placing it on the new list.  We can do this since we do
-        // not need the list head to unlink an item from a list.  Find the link
-        // pointers in the target.
-        MRT_LinkRef *targetLinks = (MRT_LinkRef *)
-                ((uintptr_t)target + sourceRole->linkOffset) ;
+    case mrtLinkedList: {
+        MRT_LinkRef *targetLinks = (MRT_LinkRef *)((uintptr_t)target +
+                sourceRole->linkOffset) ;
         if (targetLinks->next != NULL && targetLinks->prev != NULL) {
-            mrtLinkRefRemove(targetLinks) ;
+            mrtLinkRefRemove(targetLinks) ; // <2>
         }
 
+        // Find the linked list terminus in the source instance and
+        // insert the target on the list.
         MRT_LinkRef *sourceList = (MRT_LinkRef *)((uintptr_t)source +
-                sourceRole->storageOffset) ;
+                sourceRole->storageOffset) ; // <3>
         assert(targetLinks->next == NULL && targetLinks->prev == NULL) ;
         mrtLinkRefInsert(targetLinks, sourceList) ;
     }
@@ -1243,24 +1243,8 @@ mrtFindRefGenSubclassCode(
 
     mrtFatalError(mrtRelationshipLinkage) ;
 }
-static int
-mrtFindUnionGenSubclassCode(
-    MRT_Class const *subclassClass,
-    MRT_Class const * const *subclasses,
-    unsigned count)
-{
-    int subcode ;
-
-    for (subcode = 0 ; subcode < count ; ++subcode, ++subclasses) {
-        if (subclassClass == *subclasses) {
-            return subcode ;
-        }
-    }
-
-    mrtFatalError(mrtRelationshipLinkage) ;
-}
 void
-mrtUnrelate(
+mrtDeleteLinks(
     struct mrtrelationship const * const *classRels,
     unsigned relCount,
     void *inst)
@@ -1269,7 +1253,7 @@ mrtUnrelate(
     /*
      * Mark the transaction since we are updating the reference pointers.
      */
-    mrtMarkTransaction(classRels, relCount) ;
+    mrtMarkRelationship(classRels, relCount) ;
 
     MRT_Instance *instref = inst ;
     MRT_Class const *instclass = instref->classDesc ;
@@ -1281,9 +1265,11 @@ mrtUnrelate(
             struct mrtsimpleassociation const *s_assoc = &rel->relInfo.simpleAssociation ;
             
             if (instclass == s_assoc->source.classDesc) {
-                mrtSimpUnlinkForw(s_assoc, inst) ;
+                mrtSimpUnlinkForward(s_assoc, inst) ;
             } else if (instclass == s_assoc->target.classDesc) {
                 mrtSimpUnlinkBack(s_assoc, inst) ;
+            } else {
+                mrtFatalError(mrtRelationshipLinkage) ;
             }
         }
             break ;
@@ -1292,7 +1278,27 @@ mrtUnrelate(
             struct mrtclassassociation const *c_assoc = &rel->relInfo.classAssociation ;
             
             if (instclass == c_assoc->associator.classDesc) {
-                mrtClassUnlinkParticipants(c_assoc, inst) ;
+                struct mrtassociatorrole const *assocRole = &c_assoc->associator ;
+                struct mrtassociationrole const *sourceRole = &c_assoc->source ;
+                struct mrtassociationrole const *targetRole = &c_assoc->target ;
+            
+                void **p_targetInst = (void **)
+                        ((uintptr_t)inst + assocRole->forwardOffset) ; // <1>
+                MRT_Instance *targetInst = *p_targetInst ;
+                *p_targetInst = NULL ;
+                assert(targetInst != NULL) ;
+                if (targetInst != NULL && targetInst->alloc > 0) {
+                    mrtUnlinkBackref(targetRole, inst, targetInst) ;
+                }
+            
+                void **p_sourceInst = (void **)
+                        ((uintptr_t)inst + assocRole->backwardOffset) ;
+                MRT_Instance *sourceInst = *p_sourceInst ;
+                *p_sourceInst = NULL ;
+                assert(sourceInst != NULL) ;
+                if (sourceInst != NULL && sourceInst->alloc > 0) {
+                    mrtUnlinkBackref(sourceRole, inst, sourceInst) ;
+                }
             }
         }
             break ;
@@ -1305,18 +1311,24 @@ mrtUnrelate(
                 int subclassCode = mrtFindRefGenSubclassCode(instclass, gen->subclasses,
                         gen->subclassCount) ;
                 // Obtain the pointer to the superclass instance.
-                void **p_superinst = (void **)((uintptr_t)inst +
-                        gen->subclasses[subclassCode].storageOffset) ;
-                void *superinst = *p_superinst ;
-                *p_superinst = NULL ;
-                assert(superinst != NULL) ;
+                void **p_superInst = (void **)
+                        ((uintptr_t)inst + gen->subclasses[subclassCode].storageOffset) ;
+                MRT_Instance *superInst = *p_superInst ;
+                *p_superInst = NULL ;
+                assert(superInst != NULL) ;
                 // NULL out the pointer in the superclass instance pointing to the subclass
                 // instance.
-                if (((MRT_Instance *)superinst)->alloc > 0) {
-                    void **p_subinst = (void **)((uintptr_t)superinst +
-                            gen->superclass.storageOffset) ;
-                    *p_subinst = NULL ;
+                if (superInst != NULL && superInst->alloc > 0) {
+                    void **p_subInst = (void **)
+                            ((uintptr_t)superInst + gen->superclass.storageOffset) ;
+                    *p_subInst = NULL ;
                 }
+            } else {
+                // Instance is a superclass instance
+                // NULL out the pointer to the subclass instance only,
+                // i.e. only the back reference.
+                void **p_subInst = (void **)((uintptr_t)inst + gen->superclass.storageOffset) ;
+                *p_subInst = NULL ;
             }
         }
             break ;
@@ -1331,40 +1343,30 @@ mrtUnrelate(
         }
     }
 }
-/*
- * Unlink the target from the source in the forward direction.
- * Null out the pointer in the source and unlink the target back reference
- * if the target is still allocated.
- */
 static void
-mrtSimpUnlinkForw(
+mrtSimpUnlinkForward(
     struct mrtsimpleassociation const *assoc,
     void *source)
 {
     struct mrtassociationrole const *sourceRole = &assoc->source ;
 
     if (sourceRole->storageType == mrtSingular) {
-        // Point to where the target reference is located in the source instance.
-        void **p_targetref = (void **)((uintptr_t)source +
-                sourceRole->storageOffset) ;
-        // Fetch the target reference.
-        MRT_Instance *targetinst = *p_targetref ;
-        assert(targetinst != NULL) ;
-        *p_targetref = NULL ;
+        void **p_targetInst = (void **)
+                ((uintptr_t)source + sourceRole->storageOffset) ;
+        MRT_Instance *targetInst = *p_targetInst ;
+        *p_targetInst = NULL ; // <1>
 
         struct mrtassociationrole const *targetRole = &assoc->target ;
-        if (targetinst->alloc > 0 &&
-                targetinst->classDesc == targetRole->classDesc) {
-            mrtUnlinkBackref(targetRole, source, targetinst) ;
+        assert(targetInst != NULL) ;
+        if (targetInst != NULL && targetInst->alloc > 0 &&
+                targetInst->classDesc == targetRole->classDesc) { // <2>
+            mrtUnlinkBackref(targetRole, source, targetInst) ;
         }
     } else {
         // Simple forward association links are always singular.
         mrtFatalError(mrtRelationshipLinkage) ;
     }
 }
-/*
- * Unlink the source from the target in the backward direction.
- */
 static void
 mrtSimpUnlinkBack(
     struct mrtsimpleassociation const *assoc,
@@ -1373,21 +1375,18 @@ mrtSimpUnlinkBack(
     struct mrtassociationrole const *targetRole = &assoc->target ;
 
     if (targetRole->storageType == mrtSingular) {
-        // Point to where the source reference is located in the target instance.
-        void **p_sourceref = (void **)((uintptr_t)target +
-                targetRole->storageOffset) ;
-        *p_sourceref = NULL ;
-    } else if (targetRole->storageType == mrtLinkedList) {
-        // In this case we are deleting the target and all the
-        // links the target makes need to be deleted.
-        MRT_LinkRef *targetList = (MRT_LinkRef *)
+        void **p_sourceInst = (void **)
                 ((uintptr_t)target + targetRole->storageOffset) ;
-        assert(targetList->next != NULL && targetList->prev != NULL) ;
-        for (MRT_LinkRef *iter = mrtLinkRefBegin(targetList) ;
-                iter != mrtLinkRefEnd(targetList) ; ) {
-            MRT_LinkRef *sourceinst = iter ;
-            iter = iter->next ;
-            mrtLinkRefRemove(sourceinst) ;
+        *p_sourceInst = NULL ; // <1>
+    } else if (targetRole->storageType == mrtLinkedList) { // <2>
+        MRT_LinkRef *sourceList = (MRT_LinkRef *)
+                ((uintptr_t)target + targetRole->storageOffset) ; // <3>
+        assert(sourceList->next != NULL && sourceList->prev != NULL) ;
+        for (MRT_LinkRef *iter = mrtLinkRefBegin(sourceList) ;
+                iter != mrtLinkRefEnd(sourceList) ; ) {
+            MRT_LinkRef *sourceInst = iter ;
+            iter = iter->next ; // <4>
+            mrtLinkRefRemove(sourceInst) ;
         }
     } else {
         // Can't unlink array type linkages.
@@ -1405,60 +1404,36 @@ mrtUnlinkBackref(
     assert(targetRole != NULL) ;
 
     if (targetRole->storageType == mrtSingular) {
-        // The entity at the storageOffset is a simple pointer back to the
-        // source instance.  Point to where the source reference is located
-        // in the target instance.
-        void **p_sourceref = (void **)((uintptr_t)target +
-                targetRole->storageOffset) ;
-        *p_sourceref = NULL ;
+        void **p_sourceInst = (void **)
+                ((uintptr_t)target + targetRole->storageOffset) ; // <1>
+        *p_sourceInst = NULL ;
     } else if (targetRole->storageType == mrtLinkedList) {
-        // The source instance is linked onto a list whose list terminus is
-        // contained in the target instance.  We need to remove the source
-        // instance from that list. We only need a pointer to the links in the
-        // source instance to remove it from the list (it is doubly linked).
-        // The links are offset into the source instance by the offset given in
-        // the "target" role.
-        MRT_LinkRef *sourcelink = (MRT_LinkRef *)
-                ((uintptr_t)source + targetRole->linkOffset) ;
+        MRT_LinkRef *sourcelinks = (MRT_LinkRef *)
+                ((uintptr_t)source + targetRole->linkOffset) ; // <2>
 
-        // Check that the instance is actually linked on the list.
-        if (sourcelink->next != NULL && sourcelink->prev != NULL) {
-            mrtLinkRefRemove(sourcelink) ;
+        if (sourcelinks->next != NULL && sourcelinks->prev != NULL) { // <3>
+            mrtLinkRefRemove(sourcelinks) ;
         }
     } else {
         // Can't unlink array type linkages.
         mrtFatalError(mrtStaticRelationship) ;
     }
 }
-/*
- * Unlink the participants from an associative instance
- */
-static void
-mrtClassUnlinkParticipants(
-    struct mrtclassassociation const *relRole,
-    void *assoc)
+static int
+mrtFindUnionGenSubclassCode(
+    MRT_Class const *subclassClass,
+    MRT_Class const * const *subclasses,
+    unsigned count)
 {
-    struct mrtassociatorrole const *assocRole = &relRole->associator ;
-    struct mrtassociationrole const *sourceRole = &relRole->source ;
-    struct mrtassociationrole const *targetRole = &relRole->target ;
+    int subcode ;
 
-    // Start with the forward direction to the target.  Point to where the
-    // target reference is located in the associator instance.
-    void **p_targetref = (void **)((uintptr_t)assoc + assocRole->forwardOffset) ;
-    void *targetref = *p_targetref ;
-    *p_targetref = NULL ;
-    assert(targetref != NULL) ;
-    if (((MRT_Instance *)targetref)->alloc > 0) {
-        mrtUnlinkBackref(targetRole, assoc, targetref) ;
+    for (subcode = 0 ; subcode < count ; ++subcode, ++subclasses) {
+        if (subclassClass == *subclasses) {
+            return subcode ;
+        }
     }
 
-    void **p_sourceref = (void **)((uintptr_t)assoc + assocRole->backwardOffset) ;
-    void *sourceref = *p_sourceref ;
-    *p_sourceref = NULL ;
-    assert(sourceref != NULL) ;
-    if (((MRT_Instance *)sourceref)->alloc > 0) {
-        mrtUnlinkBackref(sourceRole, assoc, sourceref) ;
-    }
+    mrtFatalError(mrtRelationshipLinkage) ;
 }
 static inline
 MRT_ecb *
@@ -2506,7 +2481,7 @@ mrt_DeleteInstance(
     /*
      * Unlink the instance from its relationships.
      */
-    mrtUnrelate(classDesc->classRels, classDesc->relCount, instref) ;
+    mrtDeleteLinks(classDesc->classRels, classDesc->relCount, instref) ;
     /*
      * Mark the slot as free.
      */
@@ -2837,7 +2812,8 @@ mrt_CreateSimpleLinks(
     assert(source != NULL) ;
     assert(target != NULL) ;
 
-    if (rel->relType == mrtSimpleAssoc) {
+    switch (rel->relType) {
+    case mrtSimpleAssoc: {
         struct mrtsimpleassociation const *assoc = &rel->relInfo.simpleAssociation ;
         
         if (assoc->source.classDesc != ((MRT_Instance *)source)->classDesc ||
@@ -2847,55 +2823,64 @@ mrt_CreateSimpleLinks(
         
         mrtLink(&assoc->source, source, target) ;
         mrtLink(&assoc->target, target, source) ;
-    } else if (rel->relType == mrtClassAssoc) {
+    }
+        break ;
+
+    case mrtClassAssoc: {
         struct mrtclassassociation const *cassoc = &rel->relInfo.classAssociation ;
         struct mrtassociatorrole const *arole = &cassoc->associator ;
         struct mrtassociationrole const *srole = &cassoc->source ;
         struct mrtassociationrole const *trole = &cassoc->target ;
         
-        if (arole->classDesc != ((MRT_Instance *)source)->classDesc) {
+        if (arole->classDesc != ((MRT_Instance *)source)->classDesc) { // <1>
             mrtFatalError(mrtRelationshipLinkage) ;
         }
         
-        if (srole->classDesc == ((MRT_Instance *)target)->classDesc) {
-            // Update associator to source link (backward)
-            void **p_backref = (void **)((uintptr_t)source + arole->backwardOffset) ;
-            *p_backref = target ;
+        if (srole->classDesc == ((MRT_Instance *)target)->classDesc) { // <2>
+            void **p_backRef = (void **)((uintptr_t)source + arole->backwardOffset) ;
+            *p_backRef = target ;
             mrtLink(srole, target, source) ;
-        } else if (trole->classDesc == ((MRT_Instance *)target)->classDesc) {
-            // Update associator to target link (forward)
-            void **p_forwref = (void **)((uintptr_t)source + arole->forwardOffset) ;
-            *p_forwref = target ;
+        } else if (trole->classDesc == ((MRT_Instance *)target)->classDesc) { // <3>
+            void **p_forwRef = (void **)((uintptr_t)source + arole->forwardOffset) ;
+            *p_forwRef = target ;
             mrtLink(trole, target, source) ;
         } else {
             mrtFatalError(mrtRelationshipLinkage) ;
         }
-    } else if (rel->relType == mrtRefGeneralization) {
+    }
+        break ;
+
+    case mrtRefGeneralization: {
         struct mrtrefgeneralization const *gen = &rel->relInfo.refGeneralization ;
         
-        MRT_Class const *superclassClass = ((MRT_Instance *)target)->classDesc ;
+        MRT_Class const *subclassClass = ((MRT_Instance *)source)->classDesc ; // <1>
+        int subclassCode = mrtFindRefGenSubclassCode(subclassClass, gen->subclasses,
+                gen->subclassCount) ;
+        
+        MRT_Class const *superclassClass = ((MRT_Instance *)target)->classDesc ; // <2>
         if (gen->superclass.classDesc != superclassClass) {
             mrtFatalError(mrtRelationshipLinkage) ;
         }
         
-        MRT_Class const *subclassClass = ((MRT_Instance *)source)->classDesc ;
-        int subclassCode = mrtFindRefGenSubclassCode(subclassClass, gen->subclasses,
-                gen->subclassCount) ;
-        
-        void **superref =
-            (void **)((uintptr_t)target + gen->superclass.storageOffset) ;
-        *superref = source ;
-        
-        void **subref = (void **)((uintptr_t)source +
+        void **p_superRef = (void **)((uintptr_t)source +
                 gen->subclasses[subclassCode].storageOffset) ;
-        *subref = target ;
-    } else {
-        // Must use mrt_CreateAssociatorLinks to link an associator.
-        // Cannot link across a union generalization.
+        *p_superRef = target ;
+        
+        void **p_subRef = (void **)((uintptr_t)target + gen->superclass.storageOffset) ;
+        *p_subRef = source ;
+    }
+        break ;
+
+    case mrtUnionGeneralization:
+        // There are no pointer linkages for a union generalization.
+        // N.B. fall through
+
+    default:
         mrtFatalError(mrtRelationshipLinkage) ;
+        break ;
     }
 
-    mrtMarkTransaction(&rel, 1) ;
+    mrtMarkRelationship(&rel, 1) ;
 }
 void
 mrt_CreateAssociatorLinks(
@@ -2909,14 +2894,10 @@ mrt_CreateAssociatorLinks(
     assert(source != NULL) ;
     assert(target != NULL) ;
 
-    if (rel->relType != mrtClassAssoc) {
-        mrtFatalError(mrtRelationshipLinkage) ;
-    }
-
-    mrt_CreateSimpleLinks(rel, assoc, source) ;
+    mrt_CreateSimpleLinks(rel, assoc, source) ; // <1>
     mrt_CreateSimpleLinks(rel, assoc, target) ;
 
-    mrtMarkTransaction(&rel, 1) ;
+    mrtMarkRelationship(&rel, 1) ;
 }
 void *
 mrt_Reclassify(
@@ -2940,14 +2921,14 @@ mrt_Reclassify(
          * Offset into the superclass instance to where the pointer to the
          * subclass instance is located.
          */
-        void **p_subinst = (void **)((uintptr_t)super + gen->superclass.storageOffset) ;
-        void *subinst = *p_subinst ;
-        if (subinst != NULL) {
+        void **p_subInst = (void **)((uintptr_t)super + gen->superclass.storageOffset) ;
+        void *subInst = *p_subInst ;
+        if (subInst != NULL) {
             /*
              * Delete the old subclass instance.  Deleting will cause the subclass
              * instance to be unlinked from the generalization.
              */
-            mrt_DeleteInstance(subinst) ;
+            mrt_DeleteInstance(subInst) ;
         }
         
         /*
@@ -2974,18 +2955,18 @@ mrt_Reclassify(
          * Point to where the subclass instance is stored within the superclass.
          */
         newSubInst = (void *)((uintptr_t)super + gen->superclass.storageOffset) ;
-        MRT_Instance *subinst = newSubInst ;
+        MRT_Instance *subInst = newSubInst ;
         /*
          * Clean up any relationship pointers.
          */
-        if (subinst->alloc > 0) {
-            mrtUnrelate(subinst->classDesc->classRels,
-                    subinst->classDesc->relCount, subinst) ;
+        if (subInst->alloc > 0) {
+            MRT_Class const *newSubClass = subInst->classDesc ;
+            mrtDeleteLinks(newSubClass->classRels, newSubClass->relCount, subInst) ;
         }
         /*
          * Set up the memory for the subclass instance according to the new subclass.
          */
-        mrtInitializeInstance(subinst, newSubclass, MRT_StateCode_IG) ;
+        mrtInitializeInstance(subInst, newSubclass, MRT_StateCode_IG) ;
     } else {
         mrtFatalError(mrtRelationshipLinkage) ;
     }
@@ -3214,7 +3195,7 @@ mrt_PortalGetAttrRef(
     if (result == 0) {
         assert(instref != NULL) ;
         if (instref->alloc != 0) {
-            MRT_Class const *class = portal->classes + classId ;
+            MRT_Class const *class = instref->classDesc ;
             if (attrId < class->attrCount) {
                 MRT_Attribute const *attr = class->classAttrs + attrId ;
                 if (attr->type == mrtIndependentAttr) {
@@ -3255,7 +3236,7 @@ mrt_PortalReadAttr(
     if (result == 0) {
         assert(instref != NULL);
         if (instref->alloc != 0) {
-            MRT_Class const *class = portal->classes + classId ;
+            MRT_Class const *class = instref->classDesc ;
             if (attrId < class->attrCount) {
                 MRT_Attribute const *attr = class->classAttrs + attrId ;
                 MRT_AttrSize srcSize = attr->size ;
@@ -3299,7 +3280,12 @@ mrt_PortalUpdateAttr(
             &dstSize) ;
     if (result == 0) {
         assert(dst != NULL) ;
-        int copied = dstSize < srcSize ? dstSize : srcSize ;
+        int copied ;
+        if (srcSize == 0) {
+            copied = dstSize ;
+        } else {
+            copied = dstSize < srcSize ? dstSize : srcSize ;
+        }
         memcpy(dst, src, copied) ;
         result = copied ;
     }
@@ -3468,13 +3454,12 @@ mrt_PortalSignalEventAssigner(
         if (instId < passigner->instCount) {
             MRT_iab *iab = passigner->iab ;
             assert(iab != NULL) ;
-            MRT_Instance *target =
-                (MRT_Instance *)((uintptr_t)iab->storageStart +
-                    iab->instanceSize * instId) ;
-            if (target->alloc > 0) {
+            MRT_Instance *instref = (MRT_Instance *)
+                    ((uintptr_t)iab->storageStart + iab->instanceSize * instId) ;
+            if (instref->alloc > 0) {
                 MRT_edb const *edb = passigner->edb ;
                 if (eventNumber < edb->eventCount) {
-                    MRT_ecb *ecb = mrt_NewEvent(eventNumber, target, NULL) ;
+                    MRT_ecb *ecb = mrt_NewEvent(eventNumber, instref, NULL) ;
                     if (eventParameters) {
                         memcpy(ecb->eventParameters, eventParameters,
                             sizeof(ecb->eventParameters)) ;
@@ -3484,6 +3469,61 @@ mrt_PortalSignalEventAssigner(
                 } else {
                     result = MICCA_PORTAL_NO_EVENT ;
                 }
+            } else {
+                result = MICCA_PORTAL_UNALLOC ;
+            }
+        } else {
+            result = MICCA_PORTAL_NO_INST ;
+        }
+    } else {
+        result = MICCA_PORTAL_NO_CLASS ;
+    }
+
+    return result ;
+}
+int
+mrt_PortalInstanceCurrentState(
+    MRT_DomainPortal const *portal,
+    MRT_ClassId classId,
+    MRT_InstId instId)
+{
+    MRT_Instance *instref ;
+    int result ;
+
+    result = mrtPortalGetInstRef(portal, classId, instId, &instref) ;
+    if (result == 0) {
+        assert(instref != NULL);
+        if (instref->alloc > 0) {
+            MRT_Class const *class = instref->classDesc ;
+            result = class->edb != NULL ?
+                    instref->currentState : MICCA_PORTAL_NO_STATE_MODEL ;
+            assert(result >= 0) ;
+        } else {
+            result = MICCA_PORTAL_UNALLOC ;
+        }
+    }
+
+    return result ;
+}
+int
+mrt_PortalAssignerCurrentState(
+    MRT_DomainPortal const *portal,
+    MRT_AssignerId assignerId,
+    MRT_InstId instId)
+{
+    assert(portal != NULL) ;
+    int result ;
+
+    if (assignerId < portal->assignerCount) {
+        MRT_Class const *passigner = portal->assigners + assignerId ;
+        if (instId < passigner->instCount) {
+            MRT_iab *iab = passigner->iab ;
+            assert(iab != NULL) ;
+            MRT_Instance *instref = (MRT_Instance *)
+                    ((uintptr_t)iab->storageStart + iab->instanceSize * instId) ;
+            if (instref->alloc > 0) {
+                assert(instref->classDesc->edb != NULL) ;
+                result = instref->currentState ;
             } else {
                 result = MICCA_PORTAL_UNALLOC ;
             }

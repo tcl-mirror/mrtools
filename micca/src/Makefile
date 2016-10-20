@@ -159,6 +159,11 @@ ASCIIDOC_OPTS =\
 	$(patsubst %,--attribute=%,$(ASCIIDOC_ATTRS))\
 	$(NULL)
 
+TESTOPTS =\
+	-verbose bet\
+	-level debug\
+	$(NULL)
+
 .PHONY : all doc code tests runtests package
 
 all : doc code tests package
@@ -170,7 +175,7 @@ code : $(CODEFILE)
 tests : code $(TESTS)
 
 runtests : tests
-	cd $(TESTDIR) ; tclsh $(TESTS) -verbose bet -level debug
+	cd $(TESTDIR) ; tclsh $(TESTS) $(TESTOPTS)
 
 package : $(PKGDIR)/package-micca-$(VERSION)-tcl.zip
 
