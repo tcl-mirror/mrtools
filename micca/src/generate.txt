@@ -325,6 +325,8 @@ proc GatherDomainProperties {domain} {
         relation extend ~ stup\
             Declaration string {"struct [tuple extract $stup Association]"}\
             Reference string {"struct [tuple extract $stup Association] *"}\
+            ConstReference string\
+                    {"struct [tuple extract $stup Association] const *"}\
             StorageVariable string {"[tuple extract $stup Association]__POOL"}
     }]
 
@@ -378,6 +380,7 @@ proc GatherDomainProperties {domain} {
         relation extend ~ stup\
             Declaration string {"struct [tuple extract $stup Name]"}\
             Reference string {"struct [tuple extract $stup Name] *"}\
+            ConstReference string {"struct [tuple extract $stup Name] const *"}\
             StorageVariable string {"[tuple extract $stup Name]__POOL"} |
         ralutil::rvajoin ~ $allocs Allocations |
         relation extend ~ atup Allocation int {
@@ -1549,9 +1552,14 @@ and we need to have its name known to the compiler.
 <<generation code commands>>=
 proc forwardRelationshipDeclaration {} {
     variable domain
+    if {[isNotEmptyRef [Relationship findAll]]} {
+        set fwrd "static MRT_Relationship const ${domain}__RSHIPS\[\] ;\n"
+    } else {
+        set fwrd {}
+    }
     return [string cat\
         [comment "Relationship descriptors forward declaration"]\
-        "static MRT_Relationship const ${domain}__RSHIPS\[\] ;\n"\
+        $fwrd\
     ]
 }
 ----
@@ -2857,7 +2865,7 @@ proc formulaDeclarations {} {
     forAllRefs dep $deps {
         assignAttribute $dep {Class className} {Name attrName}
         append result\
-            "static void ${className}_${attrName}__FORMULA\(void *const,\
+            "static void ${className}_${attrName}__FORMULA\(void const *const,\
                 void *const, MRT_AttrSize) ;\n"
     }
 
@@ -5296,7 +5304,7 @@ proc formulaDefinitions {} {
         assignAttribute $dep
         set type [readAttribute [findRelated $dep R29] DataType]
 
-        set selfdecl [GetClassProperty $Class Reference]const
+        set selfdecl [GetClassProperty $Class ConstReference]const
         set syms [relation create {
             Name string Ctype string Type string Class string
         }\
@@ -5306,7 +5314,7 @@ proc formulaDefinitions {} {
         ]
         append result\
             "static void\n${Class}_${Name}__FORMULA\(\n"\
-            "    void *const s__,\n"\
+            "    void const *const s__,\n"\
             "    void *const v__,\n"\
             "    MRT_AttrSize size\)\n"\
             [blockcomment $Formula]\
@@ -5362,7 +5370,7 @@ test codegen-54.0 {
     validateutils compileFiles codegen54.c
     testConditions\
     {[validateutils matchLines codegen54.c {
-        struct X *const self = s__ ;
+        struct X const *const self = s__ ;
         unsigned *const area = v__ ;
         *area = self->width * self->length ;
     }]}\
@@ -6030,6 +6038,7 @@ relation foreach info $classInfo {
     set cmdmap [dict create\
         foreachInstance [list ${suppns}::ClassForeachInstance $Name]\
         foreachWhere [list ${suppns}::ClassForeachWhere $Name]\
+        findWhere [list ${suppns}::ClassFindWhere $Name]\
         selectWhere [list ${suppns}::ClassSelectWhere $Name]\
         instref [list ${suppns}::ClassInstanceReference $Name]\
         idtoref [list ${suppns}::ClassIdToRef $Name]\
@@ -10435,6 +10444,116 @@ test codegen-53.0 {
 ----
 endif::showtests[]
 
+==== Searching Class Instances
+
+*****
+`%<` _class_ `findWhere` _instref_ _clause_`>%`
+
+_class_::
+    The name of a domain class.
+instref::
+    The name of a variable into which a reference to a class instance is placed.
+where::
+    ``C'' code statements that can be evaluated to yield a boolean value.
+
+The `findWhere` subcommand for a class generates ``C'' statements
+to search the instances of _class_.
+A reference to the first allocated instance of _class_ for which
+_clause_ evaluates to `true` is assigned to the
+_instref_ variable.
+If _clause_ never evaluates to `true` then _instref_ will have the
+value of `NULL`.
+*****
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc ClassFindWhere {className instref where} {
+    variable domain
+
+    set startlevel [GetBlock]
+
+    set classDesc [GetClassDescriptor $domain $className]
+    set iter [CreateTempSymbol Ctype {MRT_InstIterator}\
+            Type InstanceIterator Class $className]
+    set result [IndentToBlock [string cat\
+        [linecomment "$className findWhere $instref [list $where]"]\
+        [CreateInstRefSymbol $className $instref]\
+        "$instref = NULL ;\n"\
+        "MRT_InstIterator $iter ;\n"\
+        "for (mrt_InstIteratorStart(&$iter, &$classDesc) ;\
+            mrt_InstIteratorMore(&$iter) ;\
+            mrt_InstIteratorNext(&$iter)) \{\n"\
+    ]]
+    PushBlock
+    append result [IndentToBlock [string cat\
+        "$instref = mrt_InstIteratorGet(&$iter) ;\n"\
+        "if ($where) \{\n"\
+    ]]
+
+    PushBlock
+    append result [IndentToBlock [string cat\
+        "break ;\n"\
+    ]]
+    PopBlock
+    append result [IndentToBlock "\}\n"]
+    PopBlock
+    append result [IndentToBlock [string cat\
+        "\}\n"\
+        "$instref = mrt_InstIteratorMore(&$iter) ? $instref : NULL ;\n"\
+    ]]
+
+    return $result
+}
+----
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-56.0 {
+    Search class instances
+} -setup {
+    validateutils genMiccaFile codegen56 {
+        domain codegen56 {
+            class X {
+                attribute id unsigned
+                attribute color int -default 20
+
+                classop {struct X *} findById {id unsigned} {
+                    %<X findWhere xref {xref->id == id}>%
+                    return xref ;
+                }
+            }
+        }
+        population codegen56 {
+            class X {
+                instance x1 id 100 color 30
+                instance x2 id 101
+                allocate 4
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen56.c
+    validateutils matchLines codegen56.c {
+        struct X *xref ;
+        MRT_InstIterator t__T1 ;
+        for (mrt_InstIteratorStart(&t__T1, &codegen56__CLASSES[0]) ; mrt_InstIteratorMore(&t__T1) ; mrt_InstIteratorNext(&t__T1)) {
+            xref = mrt_InstIteratorGet(&t__T1) ;
+            if (xref->id == id) {
+                break ;
+            }
+        }
+        xref = mrt_InstIteratorMore(&t__T1) ? xref : NULL ;
+    }
+} -result {1}
+----
+endif::showtests[]
+
 ==== Conditionally Selecting Class Instances
 
 *****
@@ -10756,15 +10875,15 @@ proc RelClassSwap {relName assocref partref} {
 
     set sourceClass [readAttribute [findRelated $relRef ~R34] Class]
     set targetClass [readAttribute [findRelated $relRef ~R35] Class]
-    set partClass [dict get [LookUpSym $partref] Class]
+    set partClass [dict get [LookUpSymbol $partref] Class]
     if {$partClass ne $sourceClass && $partClass ne $targetClass} {
         error "$partref is a reference to an instance of class, $partClass,\
             which does not participate in relationship, $relName"
     }
 
     return [IndentToBlock [string cat\
-        [linecomment "$relName swap $assoc $participant"]\
-        "mrt_CreateSimpleLinks\($rship, $assocref,\ $partref\) ;\n"\
+        [linecomment "$relName swap $assocref $partref"]\
+        "mrt_CreateSimpleLinks\($rship, $assocref, $partref\) ;\n"\
     ]]
 }
 ----

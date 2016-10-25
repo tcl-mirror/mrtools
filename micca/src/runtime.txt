@@ -721,7 +721,7 @@ we can invoke to obtain the attribute value.
 .Attribute Formula Data Type
 ----
 <<mrt interface aggregate types>>=
-typedef void MRT_AttrFormula(void *const self, void *pvalue, MRT_AttrSize vsize) ;
+typedef void MRT_AttrFormula(void const *const self, void *const pvalue, MRT_AttrSize vsize) ;
 ----
 
 Formula functions will be invoked with a pointer to the instance,
@@ -1174,6 +1174,13 @@ mrt_InstanceIndex(
 
     MRT_Instance *instref = instance ;
     MRT_AttrOffset offset ;
+    if (instref->alloc <= 0) {
+#           ifndef MRT_NO_NAMES
+        mrtFatalError(mrtUnallocSlot, instref->name) ;
+#           else
+        mrtFatalError(mrtUnallocSlot, instref) ;
+#           endif /* MRT_NO_NAMES */
+    }
     MRT_iab *iab = mrt_GetStorageProperties(instref->classDesc, &offset) ;
     return (((uintptr_t)instance - offset) - (uintptr_t)iab->storageStart) /
             iab->instanceSize ; // <1>
@@ -1234,6 +1241,14 @@ mrt_InstanceReference(
         mrtFatalError(mrtNoInstSlot, classDesc->name) ;
 #           else
         mrtFatalError(mrtNoInstSlot, classDesc) ;
+#           endif /* MRT_NO_NAMES */
+    }
+    MRT_Instance *instance = instref ;
+    if (instance->alloc <= 0) {
+#           ifndef MRT_NO_NAMES
+        mrtFatalError(mrtUnallocSlot, instance->name) ;
+#           else
+        mrtFatalError(mrtUnallocSlot, instance) ;
 #           endif /* MRT_NO_NAMES */
     }
 
@@ -5211,7 +5226,7 @@ Most of the time each ECB is on exactly one of the queues,
 but there are short times when an ECB is not in any queue and a pointer
 to the ECB is held in a local variable.
 
-The operations that are performed on event queue are associated with
+The operations that are performed on event queues are associated with
 adding and removing elements.
 This code is very conventional and I'm sure you seen it or
 something very much like it many times before.
@@ -5397,7 +5412,7 @@ mrtFindEvent(
 Signaling an event is a very common operation for a state activity.
 In this section,
 we describe the code to accomplish event signaling.
-As we mentioned before,
+As we mentioned previously,
 before an event can be signaled, we must obtain and fill in an ECB.
 We start our description with a function that does just that.
 
@@ -5445,14 +5460,20 @@ mrt_NewEvent(
     MRT_ecb *ecb = mrtAllocEvent() ;
 
     ecb->eventNumber = event ;
-    ecb->alloc = targetInst->alloc ;
+    ecb->alloc = targetInst->alloc ;    // <1>
     ecb->targetInst = targetInst ;
     ecb->sourceInst = sourceInst ;
-    ecb->delay = 0 ;
+    ecb->delay = 0 ;                    // <2>
 
     return ecb ;
 }
 ----
+<1> Note that we initialize the ECB `alloc` member from the
+target instance. This is an essential part of detecting _event in flight_
+errors.
+<2> Delayed event signaling will overwrite the zero with the requested
+delay time.
+Most frequently, we are performing immediate signaling.
 
 === Posting an Event
 
@@ -5543,7 +5564,7 @@ extern void *
 mrt_CreateAsync(
     MRT_Class const *targetClass,
     MRT_EventCode event,
-    void *eventparams,
+    void const *eventparams,
     size_t paramsize,
     void *sourceInst) ;
 ----
@@ -5581,7 +5602,7 @@ void *
 mrt_CreateAsync(
     MRT_Class const *targetClass,
     MRT_EventCode event,
-    void *eventparams,
+    void const *eventparams,
     size_t paramsize,
     void *sourceInst)
 {
@@ -5594,14 +5615,10 @@ mrt_CreateAsync(
             targetClass->edb->creationState) ; // <1>
     targetInst->alloc = -targetInst->alloc ; // <2>
 
-    MRT_ecb *ecb = mrtAllocEvent() ;
-    ecb->eventNumber = event ;
-    ecb->alloc = targetInst->alloc ;
-    ecb->targetInst = targetInst ;
-    ecb->sourceInst = sourceInst ;
-    ecb->delay = 0 ;
+    MRT_ecb *ecb = mrt_NewEvent(event, targetInst, sourceInst) ;
+
     assert(paramsize <= sizeof(ecb->eventParameters)) ;
-    if (paramsize > 0 && eventparams != NULL) {
+    if (eventparams != NULL) {
         size_t copy = paramsize <= sizeof(ecb->eventParameters) ?
             paramsize : sizeof(ecb->eventParameters) ;
         memcpy(ecb->eventParameters, eventparams, copy) ;
@@ -5732,9 +5749,59 @@ mrt_PostDelayedEvent(
 {
     assert(ecb != NULL) ;
 
-    ecb->delay = time ;
     if (time != 0) {
-        mrtQueueDelayedEvent(ecb) ;
+        ecb->delay = mrtMsecToTicks(time) ;
+        /*
+         * Stop the timing queue so we may examine it.
+         */
+        mrtStopDelayedQueueTiming() ;
+        /*
+         * If the event already exists, remove it.
+         */
+        MRT_ecb *dupEvent = mrtFindEvent(&delayedEventQueue,
+                ecb->sourceInst, ecb->targetInst, ecb->eventNumber) ;
+        if (dupEvent) {
+            mrtRemoveDelayedEvent(dupEvent) ;
+        }
+        /*
+         * Insert the new event.
+         * We walk down the queue to find the correct slot.  That slot is the
+         * first place in the queue where our delay value is less than the delay
+         * value at that place in the queue.  As we walk the queue, we subtract
+         * the delay value of each entry we pass since that entry will have
+         * expired before the one being inserted.
+         */
+        MRT_ecb *iter ;
+        for (iter = mrtEventQueueBegin(&delayedEventQueue) ;
+                iter != mrtEventQueueEnd(&delayedEventQueue) ;
+                iter = iter->next) {
+            /*
+             * By keeping this comparison to be strictly less than, we preserve
+             * the order of event dispatch to match that of event generation.
+             */
+            if (ecb->delay < iter->delay) {
+                /*
+                 * We are going to insert before the entry pointed to by "iter".
+                 * Therefore, we need to decrease its delay value by the amount of
+                 * time that will have elapsed after the entry we are about to
+                 * insert expires.
+                 */
+                iter->delay -= ecb->delay ;
+                break ;
+            } else {
+                ecb->delay -= iter->delay ;
+            }
+        }
+        /*
+         * At this point we have found our place in the queue.  Either we are
+         * between entries or this delay was longer than the cumulative delays of
+         * all the ECB's in the queue. Insert the ECB.
+         */
+        mrtEventQueueInsert(ecb, iter) ;
+        /*
+         * Start the timer to expire for the first event on the queue.
+         */
+        mrtStartDelayedQueueTiming() ;
     } else {
         mrtEventQueueInsert(ecb, (MRT_ecb *)&tocEventQueue) ; // <1>
     }
@@ -5755,45 +5822,7 @@ Otherwise, it is placed on the thread of control queue after the
 delay time.
 Delayed events never go to the ordinary event queue.
 
-==== Posting Delayed Events
-
-Posting delayed events involves finding the correct spot in the
-time relative delayed event queue to place the new event.
-
-(((micca,Run Time Function,mrtQueueDelayedEvent)))
-[source,c]
-----
-<<mrt static functions>>=
-static void
-mrtQueueDelayedEvent(
-    MRT_ecb *ecb)
-{
-    ecb->delay = mrtMsecToTicks(ecb->delay) ;
-    /*
-     * Stop the timing queue so we may examine it.
-     */
-    mrtStopDelayedQueueTiming() ;
-    /*
-     * If the event already exists, remove it.
-     */
-    MRT_ecb *prevEvent = mrtFindEvent(&delayedEventQueue,
-            ecb->sourceInst, ecb->targetInst, ecb->eventNumber) ;
-    if (prevEvent) {
-        mrtRemoveDelayedEvent(prevEvent) ;
-    }
-    /*
-     * Insert the new event.
-     */
-    mrtInsertDelayedEvent(ecb) ;
-    /*
-     * Start the timer to expire for the first event
-     * on the queue.
-     */
-    mrtStartDelayedQueueTiming() ;
-}
-----
-
-There are five main actions of this function.
+There are five main actions for inserting a delayed event.
 
 . Convert the delay value from millisecond units to
 units of `ticks`.
@@ -5814,7 +5843,6 @@ If one is found then it is removed.
 . Assured of no duplicates, the new event can be inserted into the timing
 queue.  We will see how that happens below.
 . Finally, the timing of the delayed queue is started.
-
 
 ==== Canceling Delayed Events
 
@@ -6012,68 +6040,11 @@ delayed queue.
 Returning zero does _not_ tell us if the event has already been
 dispatched or might be still in flight on the event queue.
 
-==== Delayed Event Queue Operations
+==== Removing Delayed Events
 
-In this section we will look at the operations on the delayed
-event queue itself.
-As we have seen above,
-the events in the delayed event queue are ordered by relative time.
-Inserting and removing from the queue must keep the ECB's
-in time relative order.
-
-[source,c]
-----
-<<mrt forward references>>=
-static void mrtInsertDelayedEvent(MRT_ecb *ecb) ;
-----
-
-(((micca,Run Time Function,mrtInsertDelayedEvent)))
-[source,c]
-----
-<<mrt static functions>>=
-static void
-mrtInsertDelayedEvent(
-    MRT_ecb *ecb)
-{
-    /*
-     * We walk down the queue to find the correct slot.  That slot is the first
-     * place in the queue where our delay value is less than the delay value at
-     * that place in the queue.  As we walk the queue, we subtract the delay
-     * value of each entry we pass since that entry will have expired before
-     * the one being inserted.
-     */
-    MRT_ecb *iter ;
-    for (iter = mrtEventQueueBegin(&delayedEventQueue) ;
-            iter != mrtEventQueueEnd(&delayedEventQueue) ;
-            iter = iter->next) {
-        /*
-         * By keeping this comparison to be strictly less than, we preserve the
-         * order of event dispatch to match that of event generation.
-         */
-        if (ecb->delay < iter->delay) {
-            /*
-             * We are going to insert before the entry pointed to by "iter".
-             * Therefore, we need to decrease its delay value by the amount of
-             * time that will have elapsed after the entry we are about to
-             * insert expires.
-             */
-            iter->delay -= ecb->delay ;
-            break ;
-        } else {
-            ecb->delay -= iter->delay ;
-        }
-    }
-    /*
-     * At this point we have found our place in the queue.  Either we are
-     * between entries or this delay was longer than the cumulative delays of
-     * all the ECB's in the queue. Insert the ECB.
-     */
-    mrtEventQueueInsert(ecb, iter) ;
-}
-----
-
-Removing an entry from the queue is much simpler.
-The only job here is to account for the time that the entry would
+There are two places where we must remove an event from the delayed
+event queue.
+The job here is to account for the time that the entry would
 have consumed had it been left in the queue.
 That time must be added to its next neighbor (if there is one).
 
@@ -7889,7 +7860,8 @@ mrt_PortalSignalEvent(
     MRT_ClassId classId,
     MRT_InstId instId,
     MRT_EventCode eventNumber,
-    MRT_EventParams eventParameters) ;
+    void const *eventParameters,
+    size_t paramSize) ;
 ----
 
 `portal`::
@@ -7905,6 +7877,8 @@ mrt_PortalSignalEvent(
 `eventParameters`::
     A pointer to the supplemental event parameters. This may be set to `NULL`
     if there are not parameters for the event.
+`paramSize`::
+    The number of bytes pointed to by `eventParameters`.
 
 `mrt_PortalSignalEvent` signals an ordinary or polymorphic event to the given
 instance.
@@ -7923,13 +7897,14 @@ mrt_PortalSignalEvent(
     MRT_ClassId classId,
     MRT_InstId instId,
     MRT_EventCode eventNumber,
-    MRT_EventParams eventParameters)
+    void const *eventParameters,
+    size_t paramSize)
 {
     int result ;
     MRT_ecb *ecb ;
 
     result = mrtPortalNewECB(portal, classId, instId, eventNumber,
-            eventParameters, &ecb) ;
+            eventParameters, paramSize, &ecb) ;
     if (result == 0) {
         mrt_PostEvent(ecb) ;
     }
@@ -7950,7 +7925,8 @@ mrtPortalNewECB(
     MRT_ClassId classId,
     MRT_InstId instId,
     MRT_EventCode eventNumber,
-    MRT_EventParams eventParameters,
+    void const *eventParameters,
+    size_t paramSize,
     MRT_ecb **ecbRef)
 {
     int result ;
@@ -7980,9 +7956,10 @@ mrtPortalNewECB(
 
             if (eventNumber < eventCount) {
                 ecb = mrt_NewEvent(eventNumber, instref, NULL) ;
-                if (eventParameters) {
-                    memcpy(ecb->eventParameters, eventParameters,
-                        sizeof(ecb->eventParameters)) ;
+                if (eventParameters != NULL) {
+                    size_t copy = paramSize <= sizeof(ecb->eventParameters) ?
+                        paramSize : sizeof(ecb->eventParameters) ;
+                    memcpy(ecb->eventParameters, eventParameters, copy) ;
                 }
                 if (ecbRef) {
                     *ecbRef = ecb ;
@@ -8012,7 +7989,8 @@ mrt_PortalSignalDelayedEvent(
     MRT_ClassId classId,
     MRT_InstId instId,
     MRT_EventCode eventNumber,
-    MRT_EventParams eventParameters,
+    void const *eventParameters,
+    size_t paramSize,
     MRT_DelayTime delay) ;
 ----
 
@@ -8029,6 +8007,8 @@ mrt_PortalSignalDelayedEvent(
 `eventParameters`::
     A pointer to the supplemental event parameters. This may be set to `NULL`
     if there are not parameters for the event.
+`paramSize`::
+    The number of bytes pointed to by `eventParameters`.
 `delay`::
     The number of milliseconds to delay before the event is dispatched.
 
@@ -8049,14 +8029,15 @@ mrt_PortalSignalDelayedEvent(
     MRT_ClassId classId,
     MRT_InstId instId,
     MRT_EventCode eventNumber,
-    MRT_EventParams eventParameters,
+    void const *eventParameters,
+    size_t paramSize,
     MRT_DelayTime delay)
 {
     int result ;
     MRT_ecb *ecb ;
 
     result = mrtPortalNewECB(portal, classId, instId, eventNumber,
-            eventParameters, &ecb) ;
+            eventParameters, paramSize, &ecb) ;
     if (result == 0) {
         mrt_PostDelayedEvent(ecb, delay) ;
     }
@@ -8290,12 +8271,13 @@ The portal allows signalling an event to an assigner instance.
 ----
 <<mrt external interfaces>>=
 extern int
-mrt_PortalSignalEventAssigner(
+mrt_PortalSignalEventToAssigner(
     MRT_DomainPortal const *portal,
     MRT_AssignerId assignerId,
     MRT_InstId instId,
     MRT_EventCode eventNumber,
-    MRT_EventParams eventParameters) ;
+    void const *eventParameters,
+    size_t paramSize) ;
 ----
 
 `portal`::
@@ -8314,6 +8296,8 @@ mrt_PortalSignalEventAssigner(
 `eventParameters`::
     A pointer to the supplemental event parameters. This may be set to `NULL`
     if there are not parameters for the event.
+`paramSize`::
+    The number of bytes pointed to by `eventParameters`.
 
 `mrt_PortalSignalEventAssigner` signals a transitioning event to the given
 assigner instance.
@@ -8322,18 +8306,19 @@ The return value is 0 upon success.
 Negative numbers indicate an error occurred.
 *****
 
-(((micca,Run Time Function,mrt_PortalSignalEventAssigner)))
+(((micca,Run Time Function,mrt_PortalSignalEventToAssigner)))
 [source,c]
 .Implementation
 ----
 <<mrt external functions>>=
 int
-mrt_PortalSignalEventAssigner(
+mrt_PortalSignalEventToAssigner(
     MRT_DomainPortal const *portal,
     MRT_AssignerId assignerId,
     MRT_InstId instId,
     MRT_EventCode eventNumber,
-    MRT_EventParams eventParameters)
+    void const *eventParameters,
+    size_t paramSize)
 {
     assert(portal != NULL) ;
     int result ;
@@ -8349,9 +8334,10 @@ mrt_PortalSignalEventAssigner(
                 MRT_edb const *edb = passigner->edb ;
                 if (eventNumber < edb->eventCount) {
                     MRT_ecb *ecb = mrt_NewEvent(eventNumber, instref, NULL) ;
-                    if (eventParameters) {
-                        memcpy(ecb->eventParameters, eventParameters,
-                            sizeof(ecb->eventParameters)) ;
+                    if (eventParameters != NULL) {
+                        size_t copy = paramSize <= sizeof(ecb->eventParameters) ?
+                            paramSize : sizeof(ecb->eventParameters) ;
+                        memcpy(ecb->eventParameters, eventParameters, copy) ;
                     }
                     mrt_PostEvent(ecb) ;
                     result = 0 ;
@@ -9651,6 +9637,7 @@ typedef enum {
     mrtEventInFlight,
     mrtNoECB,
     mrtNoInstSlot,
+    mrtUnallocSlot,
     mrtSyncOverflow,
     mrtRefIntegrity,
     mrtTransOverflow,
@@ -9683,11 +9670,13 @@ static char const * const errMsgs[] = {
     [mrtCantHappen] = "can't happen transition: %s.%s: %s - %s -> CH\n",
     [mrtEventInFlight] = "event-in-flight error: %s.%s - %s -> %s.%s\n",
     [mrtNoInstSlot] = "no available instance slots: %s\n",
+    [mrtUnallocSlot] = "unallocated instance slot: %s\n",
     [mrtRefIntegrity] = "referential integrity check failed: %s\n",
 #       else
     [mrtCantHappen] = "can't happen transition: %p: %u - %u -> CH\n",
     [mrtEventInFlight] = "event-in-flight error: %p - %u -> %p\n",
     [mrtNoInstSlot] = "no available instance slots: %p\n",
+    [mrtUnallocSlot] = "unallocated instance slot: %p\n",
     [mrtRefIntegrity] = "referential integrity check failed: %p\n",
 #       endif /* MRT_NO_NAMES */
 
@@ -11501,7 +11490,9 @@ a mysterious problem.
 #include "em_cmu.h"
 #include "em_emu.h"
 #include "em_rtc.h"
-#include "bsp_trace.h"
+#ifndef RELEASE
+#   include "bsp_trace.h"
+#endif /* RELEASE */
 ----
 
 === EFM32GG Timing Interfaces
@@ -11509,9 +11500,14 @@ a mysterious problem.
 [source,c]
 ----
 <<efm32gg includes>>=
-#define MRT_TIMER_FREQUENCY     4096UL
+#define MRT_TIMER_FREQUENCY     4096
 #define MRT_MAX_CLOCK_TICKS     (UINT32_MAX - 1)
-#define MRT_MAX_MSEC_DELAY ((MRT_MAX_CLOCK_TICKS / MRT_TIMER_FREQUENCY) * 1000UL)
+/*
+ * for a timer frequency of 4096 ticks / sec,
+ * max delay is 1,048,576 s == 17,476 min == 291 hr == 12.1 days
+ */
+#define MRT_MAX_MSEC_DELAY\
+        ((MRT_MAX_CLOCK_TICKS / UINT32_C(MRT_TIMER_FREQUENCY)) * UINT32_C(1000))
 ----
 
 [source,c]
@@ -11526,12 +11522,10 @@ mrtMsecToTicks(
         msec = MRT_MAX_MSEC_DELAY ;
     }
     /*
-     * We must avoid overflow if the requested number of
-     * msecs is large.
+     * Use 64 bit arithmetic to avoid overflow.
      */
-    return msec < MRT_MAX_CLOCK_TICKS / MRT_TIMER_FREQUENCY ?
-            ((msec * MRT_TIMER_FREQUENCY) + 1000UL / 2UL) / 1000UL :
-            ((msec + 1000UL / 2UL) / 1000UL) * MRT_TIMER_FREQUENCY ;
+    return ((uint64_t)msec * UINT64_C(MRT_TIMER_FREQUENCY)
+            + UINT64_C(1000 / 2)) / UINT64_C(1000) ;
 }
 ----
 
@@ -11543,9 +11537,8 @@ MRT_DelayTime
 mrtTicksToMsec(
     MRT_DelayTime ticks)
 {
-    return ticks < MRT_MAX_CLOCK_TICKS / 1000UL ?
-        ((ticks * 1000UL) + MRT_TIMER_FREQUENCY / 2UL) / MRT_TIMER_FREQUENCY :
-        ((ticks + MRT_TIMER_FREQUENCY / 2UL) / MRT_TIMER_FREQUENCY) * 1000UL ;
+    return (((uint64_t)ticks + UINT64_C(MRT_TIMER_FREQUENCY / 2)) /
+            UINT64_C(MRT_TIMER_FREQUENCY)) * UINT64_C(1000) ;
 }
 ----
 
@@ -11674,7 +11667,6 @@ mrtPlatformInit(void)
      * Workaround for chip errata.
      */
     CHIP_Init() ;
-    BSP_TraceProfilerSetup() ;
     /*
      * Set stack align, so ISR's are truly ordinary "C" functions.
      */
@@ -11702,10 +11694,10 @@ mrtPlatformInit(void)
      */
     CMU_ClockSelectSet(cmuClock_LFA, cmuSelect_LFXO) ;
     CMU_ClockSelectSet(cmuClock_LFB, cmuSelect_LFXO) ;
-    /*
-     * Enable clocking the PRS.
-     */
-    CMU_ClockEnable(cmuClock_PRS, true) ;
+
+#       ifndef RELEASE
+    BSP_TraceProfilerSetup() ;
+#       endif /* RELEASE */
 }
 ----
 
