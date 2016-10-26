@@ -11,7 +11,7 @@
 #
 
 LDFLAGS = -g
-CFLAGS	= -std=c11 -g -Og -Wall\
+CFLAGS	= -std=c11 -g -O0 -Wall\
 	-Wno-unused-variable\
 	-Wno-unused-function\
 	-Wno-unused-but-set-variable\
@@ -52,6 +52,9 @@ SCENARIOS =\
 CLEANFILES =\
 	$(PDF)\
 	$(ROOTS)\
+	bookstore\
+	bookstore.c\
+	bookstore.h\
 	micca_rt.c\
 	micca_rt.h\
 	*.o\
@@ -111,7 +114,7 @@ micca_rt.o : micca_rt.c micca_rt.h
 micca_rt.c micca_rt.h :
 	micca -posix
 
-bookstore.c : simplebookstore.micca sbs_population.micca
+bookstore.c bookstore.h : simplebookstore.micca sbs_population.micca
 	micca -stubexternalops simplebookstore.micca sbs_population.micca
 
 clean :

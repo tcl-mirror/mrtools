@@ -3214,126 +3214,151 @@ proc edbDefinitions {} {
 The transition table is key to event dispatch.
 The data structure is a matrix of _state_ rows and _events_ columns.
 However, the matrix is held as a one-dimensional array
-since that is a consistent single type that can be declared
+since that is a consistent single data type that can be declared
 for the EDB.
 The dispatch code deals with finding the correct state row and
-event column by performing the correct address arithmetic.
+event column by performing the required scaling of row access by the
+number of event columns.
 
-The strategy for computing the transition matrix is to
-compute the Cartesian product of the states and events and then
-determine the proper value for each cell.
-The platform model does not store the entire matrix explicitly.
-Rather it just contains the transitions specified by `transition` statements
-and holds defaults for the other cells.
-Here, the code must explicitly set a value for each cell.
+In the platform model,
+the *Transition Place* only holds those transitions that are
+explicitly mentioned in `transition` statements.
+To compute the whole transition matrix,
+we have to combine the explicit transition with the default ones.
+
+We compute the transition matrix in three steps:
+
+. Compute the entries for the explicitly mentioned transitions.
+. Compute the default transitions not explicitly given.
+. Combine the two groups into the transition matrix.
 
 [source,tcl]
 ----
 <<generation code commands>>=
-proc GenerateTransitionTable {smodel} {
+proc GenerateTransitionTable {smodelref} {
     variable domain
-    assignAttribute $smodel {Model className}
+    assignAttribute $smodelref {Model className}
 
-    set states [pipe {
-        findRelated $smodel ~R55 |
-        deRef % |
-        relation rename % Name State |
-        relation eliminate % Activity IsFinal PSigID
-    } {} |%]
-    set cstate [pipe {
-        findRelated $smodel ~R56 |
-        deRef % |
-        relation rename % Name State
-    } {} |%]
-    set states [relation union $states $cstate] ; # <1>
-    # puts [relformat $states states]
-
-    set events [pipe {
-        findRelated $smodel ~R87 R80 |
-        deRef % |
-        relation eliminate % PSigID
-    } {} |%]
-    # puts [relformat $events events]
-
-    set alltrans [pipe {
-        relation eliminate $events Number |
-        relation join $states ~
-    }] ; # <2>
-    # puts [relformat $alltrans alltrans]
-
-    set statetrans [pipe {
-        StateTransition findWhere {$Domain eq $domain && $Model eq $className} |
-        deRef ~ |
-        relation eliminate ~ ASigID
-    }]
-    # puts [relformat $statetrans statetrans]
-    set nontrans [pipe {
-        NonStateTransition findWhere {$Domain eq $domain && $Model eq $className} |
-        deRef ~ |
-        relation rename ~ TransRule NewState
-    }]
-    # puts [relformat $nontrans nontrans]
-
-    set deftrans [pipe {
-        TransitionPlace findAll |
-        deRef ~ |
-        relation minus $alltrans ~ |
-        relation join ~ [deRef [StateModel findAll]] |
-        relation eliminate ~ InitialState |
-        relation rename ~ DefaultTrans NewState |
-        relation update ~ dttup {[tuple extract $dttup State] eq "@"} {
-                tuple update $dttup NewState CH}
-    }] ; # <3>
-    # puts [relformat $deftrans deftrans]
-
-    set ntstates [pipe {
-        TransitionRule findAll |
-        deRef ~ |
-        relation rename ~ Name State |
-        relation extend ~ nttup\
-            Domain string {$domain}\
-            Model string {$className}\
-            StateNumber string {"MRT_StateCode_[tuple extract $nttup State]"}
-    }]
-    # puts [relformat $ntstates ntstates]
-
-    set places [pipe {
-        StatePlace findWhere {$Domain eq $domain && $Model eq $className} |
-        deRef ~ |
-        relation rename ~ Name State Number StateNumber |
-        relation union ~ $ntstates
-    }]
-    # puts [relformat $places places]
-    set transitions [pipe {
-        relation union $statetrans $nontrans $deftrans |
-        relation join ~ $places\
-            -using {Domain Domain Model Model NewState State} |
-        relation rename ~ StateNumber NewStateNumber |
-        relation join ~ $places $events |
-        relation eliminate ~ Domain Model
-    }]
-    # puts [relformat $transitions transitions]
+    <<GenerateTransitionTable: compute specified transitions>>
+    <<GenerateTransitionTable: compute default transitions>>
+    <<GenerateTransitionTable: compute transition matrix>>
 
     set result "static MRT_StateCode const ${className}__TTAB\[\] = \{\n"
-    relation foreach transition $transitions -ascending {StateNumber Number} {
+    relation foreach transition $transmatrix -ascending {StateNumber EventNumber} {
         relation assign $transition
         append result "    $NewStateNumber, // $State - $Event -> $NewState\n"
-    } ; # <4>
+    } ; # <1>
     append result "\} ;\n"
 
     return $result
 }
 ----
-<1> The set of all states includes the creation state, if any.
+<1> Order here is first by state number and then by event number.
+This is the order that the run-time code requires.
+
+Transitions specified in a `transition` statement are one of two types.
+Either a transition to a state or one of the non-transitioning
+destinations of ``IG'' or ``CH''.
+
+[source,c]
+----
+<<GenerateTransitionTable: compute specified transitions>>=
+set tplaces [pipe {
+    TransitionPlace findWhere {$Domain eq $domain && $Model eq $className} |
+    deRef ~
+}]
+# puts [relformat $tplaces tplaces]
+
+set statetrans [pipe {
+    relation join $tplaces $::micca::StateTransition |
+    relation eliminate ~ ASigID |
+    relation join ~ $::micca::StatePlace\
+        -using {Domain Domain Model Model NewState Name} |
+    relation extend ~ stup\
+        NewStateNumber string {[tuple extract $stup Number]} |
+    relation eliminate ~ Number
+}] ; # <1>
+# puts [relformat $statetrans statetrans]
+
+set nontrans [pipe {
+    relation join $tplaces $::micca::NonStateTransition |
+    relation extend ~ ntup\
+        NewState string {[tuple extract $ntup TransRule]}\
+        NewStateNumber string {"MRT_StateCode_[tuple extract $ntup TransRule]"} |
+    relation eliminate ~ TransRule
+}] ; # <2>
+# puts [relformat $nontrans nontrans]
+----
+<1> The transitions to an actual state need to pick up the
+number for the new state.
+The numerical encoding is what the run-time code actually uses.
+<2> For non-transitioning destinations,
+the new state number is actually a symbolic constant.
+This is the reason that the *NewStateNumber* attribute is a string.
+
+The default transitions are computed by difference.
+First we compute all possible transitions and then subtract off
+the ones that were specified as a *TransitionPlace* instance.
+All possible transitions is just the Cartesian product of the states
+and events.
+
+[source,c]
+----
+<<GenerateTransitionTable: compute default transitions>>=
+set smodel [deRef $smodelref]
+set srcstates [pipe {
+    relation semijoin $smodel $::micca::StatePlace |
+    relation eliminate ~ Number |
+    relation rename ~ Name State
+}] ; # <1>
+# puts [relformat $srcstates srcstates]
+
+set events [pipe {
+    findRelated $smodelref ~R87 |
+    deRef %
+} {} |%]
+# puts [relformat $events events]
+
+set defrule [readAttribute $smodelref DefaultTrans]
+# puts "defrule = \"$defrule\""
+
+set deftrans [pipe {
+    relation join $srcstates $events |
+    relation minus ~ $tplaces |
+    relation extend ~ dtup NewState string {$defrule} |
+    relation update ~ ftup {[tuple extract $ftup State] eq "@"}\
+        {tuple update $ftup NewState CH} |
+    relation extend ~ ttup\
+        NewStateNumber string {"MRT_StateCode_[tuple extract $ttup NewState]"}
+}] ; # <2>
+# puts [relformat $deftrans deftrans]
+----
+<1> We need to clean up some attributes here.
 <2> The `join` here effectively computes the Cartesian product since
 the only attributes in common are `Domain` and `Model`.
-<3> We compute a default transition for all the transitions not
-specified as a TransitionPlace.
-Note that the default transition coming out of the creation state
-is always `CH` since we do not want an outgoing transition from the
-creation state to be ignored.
-<4> Order here is first by state number and then by event number.
-This is the order that the run-time code requires.
+
+The final transition matrix is just a union of the three types
+of transitions, namely, explicitly specified transitions,
+explicitly specified non-state transitions and
+default transitions.
+We also need to join on the state and event numbers since they are
+used to order the transition matrix during output.
+
+[source,c]
+----
+<<GenerateTransitionTable: compute transition matrix>>=
+set transmatrix [pipe {
+    relation union $statetrans $nontrans $deftrans |
+    relation join ~ $::micca::StatePlace\
+        -using {Domain Domain Model Model State Name} |
+    relation rename ~ Number StateNumber |
+    relation join ~ $::micca::Event |
+    relation eliminate ~ PSigID |
+    relation rename ~ Number EventNumber |
+    relation eliminate ~ Domain Model
+}]
+# puts [relformat $transmatrix transmatrix]
+----
 
 ifdef::showtests[]
 [source,tcl]
@@ -10541,6 +10566,7 @@ test codegen-56.0 {
     validateutils compileFiles codegen56.c
     validateutils matchLines codegen56.c {
         struct X *xref ;
+        xref = NULL ;
         MRT_InstIterator t__T1 ;
         for (mrt_InstIteratorStart(&t__T1, &codegen56__CLASSES[0]) ; mrt_InstIteratorMore(&t__T1) ; mrt_InstIteratorNext(&t__T1)) {
             xref = mrt_InstIteratorGet(&t__T1) ;
