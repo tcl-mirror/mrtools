@@ -627,7 +627,8 @@ mrt_PortalCreateAsync(
     MRT_DomainPortal const *portal,
     MRT_ClassId classId,
     MRT_EventCode eventNumber,
-    MRT_EventParams eventParameters) ;
+    void const *eventParameters,
+    size_t paramSize) ;
 extern int
 mrt_PortalDeleteInstance(
     MRT_DomainPortal const *portal,

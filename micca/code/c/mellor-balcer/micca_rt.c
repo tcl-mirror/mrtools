@@ -3389,7 +3389,8 @@ mrt_PortalCreateAsync(
     MRT_DomainPortal const *portal,
     MRT_ClassId classId,
     MRT_EventCode eventNumber,
-    MRT_EventParams eventParameters)
+    void const *eventParameters,
+    size_t paramSize)
 {
     int result ;
 
@@ -3397,9 +3398,7 @@ mrt_PortalCreateAsync(
         MRT_Class const *class = portal->classes + classId ;
         if (class->containment == NULL) { // <1>
             MRT_Instance *inst = mrt_CreateAsync(class, eventNumber,
-                eventParameters,
-                eventParameters == NULL ? 0 : sizeof(MRT_EventParams),
-                NULL) ;
+                eventParameters, paramSize, NULL) ;
             result = mrt_InstanceIndex(inst) ;
         } else {
             result = MICCA_PORTAL_NO_DYNAMIC ;
