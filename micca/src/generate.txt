@@ -327,7 +327,8 @@ proc GatherDomainProperties {domain} {
             Reference string {"struct [tuple extract $stup Association] *"}\
             ConstReference string\
                     {"struct [tuple extract $stup Association] const *"}\
-            StorageVariable string {"[tuple extract $stup Association]__POOL"}
+            StorageVariable string {"[tuple extract $stup Association]__POOL"}\
+            ClassVariable string {"${domain}__ASSIGNERS"}
     }]
 
     set sassigners [pipe {
@@ -381,7 +382,8 @@ proc GatherDomainProperties {domain} {
             Declaration string {"struct [tuple extract $stup Name]"}\
             Reference string {"struct [tuple extract $stup Name] *"}\
             ConstReference string {"struct [tuple extract $stup Name] const *"}\
-            StorageVariable string {"[tuple extract $stup Name]__POOL"} |
+            StorageVariable string {"[tuple extract $stup Name]__POOL"}\
+            ClassVariable string {"${domain}__CLASSES"} |
         ralutil::rvajoin ~ $allocs Allocations |
         relation extend ~ atup Allocation int {
             [relation isempty [tuple extract $atup Allocations]] ?\
@@ -429,7 +431,11 @@ The class descriptor array element for a given class is commonly needed.
 ----
 <<generation helper commands>>=
 proc GetClassDescriptor {domain className} {
-    return ${domain}__CLASSES\[[GetClassProperty $className Number]\]
+    return [string cat\
+        [GetClassProperty $className ClassVariable]\
+        \[ [GetClassProperty $className Number] \]
+
+    ]
 }
 ----
 
@@ -6136,7 +6142,7 @@ forAllRefs simpassoc $simpassocs {
             dict set cmdmap signal\
                 [list ${suppns}::SingleAssignerSignal $simpname]
         } else {
-            dict set cmdmap signal [list ${suppns}::InstanceSignal $simpname]
+            dict set cmdmap findWhere [list ${suppns}::ClassFindWhere $simpname]
             dict set cmdmap create [list ${suppns}::MultiAssignerCreate $simpname]
         }
     }
@@ -6161,7 +6167,7 @@ forAllRefs classassoc $classassocs {
             dict set cmdmap signal\
                 [list ${suppns}::SingleAssignerSignal $cbname]
         } else {
-            dict set cmdmap signal [list ${suppns}::InstanceSignal $cbname]
+            dict set cmdmap findWhere [list ${suppns}::ClassFindWhere $cbname]
             dict set cmdmap create [list ${suppns}::MultiAssignerCreate $cbname]
         }
     }
@@ -6828,20 +6834,25 @@ proc InstanceAttrRead {instref attr} {
     variable domain
 
     set sym [CheckInstRefSymbol $instref]
-    set attrRef [Attribute findById Domain $domain Class [dict get $sym Class]\
-            Name $attr]
-    if {[isEmptyRef $attrRef]} {
+    set className [dict get $sym Class]
+    set attrRef [Attribute findById Domain $domain Class $className Name $attr]
+    if {[isNotEmptyRef $attrRef]} {
+        set depRef [findRelated $attrRef {~R29 DependentAttribute}]
+        if {[isNotEmptyRef $depRef]} {
+            error "cannot use \"attr\" command for dependent attribute:\
+                use \"assign\" command instead"
+        }
+        return "$instref->$attr"
+    } else {
+        set massRef [MultipleAssigner findById Domain $domain\
+            Association $className]
+        if {[isNotEmptyRef $massRef] && $attr eq "idinstance"} {
+            return "$instref->$attr"
+        }
         error "instance reference, $instref, refers to an instance of\
-            class, [dict get $sym Class], which does not have an attribute\
+            class, $className, which does not have an attribute\
             named, $attr"
     }
-
-    set depRef [findRelated $attrRef {~R29 DependentAttribute}]
-    if {[isNotEmptyRef $depRef]} {
-        error "cannot use \"attr\" command for dependent attribute:\
-            use \"assign\" command instead"
-    }
-    return "$instref->$attr"
 }
 ----
 
@@ -8350,7 +8361,7 @@ if {$dir eq "forw"} {
             destination specifier when traversing to the superclass"
     } elseif {$startclass ni $subnames} {
         error "relationship, $relname, is from\
-            \"[join $subnames {, }]\", to $targetclass,\
+            \"[join $subnames {, }]\", to $super,\
             got, $startclass, as the traversal start"
     }
     set reftype [expr {$isRefGen ? "reftosuper" : "uniontosuper"}]
@@ -8476,7 +8487,6 @@ proc InstanceFindOneRelated {instref startref args} {
     foreach relspec $args {
         set relinfo [LookUpRelationship $startClass $relspec]
         while {[llength $relinfo] != 0} {
-            # puts "relinfo = \"$relinfo\""
             set relinfo [lassign $relinfo sourceclass targetclass reftype cond\
                 comp]
             switch -exact -- $reftype {
