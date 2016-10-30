@@ -6007,6 +6007,8 @@ proc CreateActivityCommands {domain} {
 
     interp alias {} ${actns}::externalop {} ${suppns}::InvokeExternalOp
     interp alias {} ${actns}::end {} ${suppns}::End
+    interp alias {} ${actns}::subclass {} ${suppns}::SubclassCase
+    interp alias {} ${actns}::default {} ${suppns}::DefaultSubclass
 }
 ----
 
@@ -6201,6 +6203,7 @@ set gens [findRelated $relRefs {~R30 Generalization}]
 set refgens [findRelated $gens {~R43 ReferenceGeneralization}]
 foreach rgname [relation list [deRef $refgens] Name] {
     set cmdmap [dict create\
+        subclassof [list ${suppns}::GenSubclassOf $rgname]\
         reclassify [list ${suppns}::RelRefGenReclassify $rgname]\
     ]
     namespace ensemble create\
@@ -6214,11 +6217,13 @@ foreach rgname [relation list [deRef $refgens] Name] {
 <<CreateActivityCommands: union generalizations>>=
 set uniongens [findRelated $gens {~R43 UnionGeneralization}]
 foreach ugname [relation list [deRef $uniongens] Name] {
+    set cmdmap [dict create\
+        subclassof [list ${suppns}::GenSubclassOf $ugname]\
+        reclassify [list ${suppns}::RelUnionGenReclassify $ugname]\
+    ]
     namespace ensemble create\
         -command ${actns}::$ugname\
-        -map [dict create\
-            reclassify [list ${suppns}::RelUnionGenReclassify $ugname]\
-        ]
+        -map $cmdmap
 }
 ----
 
@@ -6664,6 +6669,7 @@ proc End {} {
     set result {}
 
     set context [actexpand cname]
+    # <2>
     switch -exact -- $context {
         InstanceSetForeachSelected -
         InstanceForeachRelated -
@@ -6676,7 +6682,32 @@ proc End {} {
                 PopBlock
                 append result [IndentToBlock "\}\n"]
             }
-        } # <2>
+        }
+        GenSubclassOf {
+            set subclasses [actexpand cget subclasses]
+            set foundsubs [actexpand cget foundsubs]
+            set gotdefault [actexpand cget gotdefault]
+
+            set unused [::struct::set difference $subclasses $foundsubs]
+            if {!([::struct::set empty $unused] || $gotdefault)} {
+                set relname [actexpand cget relname]
+                log::warn "subclass(es), \"[join $unused {, }]\", were\
+                    not present in the \"$relname subclassof\" statement\
+                    and no default case was given"
+            }
+
+            set result [actexpand cpop $context]
+            PopBlock
+            append result [IndentToBlock "\}\n"]
+        }
+        Subclass {
+            set result [actexpand cpop $context]
+            PopBlock
+            append result [IndentToBlock [string cat\
+                "\}\n"\
+                "break ;\n"\
+            ]]
+        }
         default {
             error "unknown context, \"$context\""
         }
@@ -8824,7 +8855,12 @@ proc InstanceCancelSignal {instref event {sourceref {}}} {
         CheckInstRefSymbol $sourceref
         set sourceinst $sourceref
     } else {
-        set sourceinst NULL
+        try {
+            CheckInstRefSymbol self
+            set sourceinst self
+        } on error {} {
+            set sourceinst NULL
+        }
     }
     append result\
         "mrt_CancelDelayedEvent($eventNum, $instref, $sourceinst) ;\n"
@@ -11121,17 +11157,6 @@ endif::showtests[]
 [source,tcl]
 ----
 <<generation support commands>>=
-proc RelUnionGenReclassify {relName superref newClassName subref} {
-    return [string cat [IndentToBlock\
-        [linecomment "$relName reclassify $superref $newClassName $subref"]]\
-        [ReclassifyUnionGen $relName $superref $newClassName $subref]\
-    ]
-}
-----
-
-[source,tcl]
-----
-<<generation support commands>>=
 proc RelUnionGenReclassify {relName superref subclass subref args} {
     set result [linecomment "$relName reclassify $superref $subclass $subref"]
 
@@ -11194,6 +11219,333 @@ test codegen-34.0 {
         struct Y *y1 ;
         y1 = mrt_Reclassify(&codegen34__RSHIPS[0], s1, &codegen34__CLASSES[2]) ;
         y1->color = 30 ;
+    }
+} -result {1}
+----
+endif::showtests[]
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc GenSubclassOf {relName superref subref} {
+    set startblock [GetBlock]
+
+    set result [linecomment "$relName subclassof $superref $subref"]
+
+    variable domain
+    set relRef [Generalization findById Domain $domain Name $relName]
+    set relNum [readAttribute [findRelated $relRef R30] Number]
+
+    set superclassref [Superclass findWhere {$Domain eq $domain &&\
+            $Relationship eq $relName && $Role eq "target"}]
+    set supername [readAttribute $superclassref Class]
+    CheckInstRefSymbol $superref Class $supername
+
+    set subclassref [Subclass findWhere {$Domain eq $domain &&\
+            $Relationship eq $relName && $Role eq "source"}]
+    set subclasses [pipe {
+        deRef $subclassref |
+        relation project ~ Class |
+        relation list ~
+    }]
+
+    # calculate the address to the subclass,
+    # calculation depends upon whether we are reference generalization
+    # or union generalization
+    set tinst [CreateTempSymbol Ctype {MRT_Instance *} Type Reference Class {}]
+    append result "MRT_Instance *$tinst = "
+
+    set rgref [findRelated $relRef {~R43 ReferenceGeneralization}]
+    if {[isNotEmptyRef $rgref]} {
+        set gentype reference
+        append result "$superref->$relName ;\n"
+    } else {
+        set gentype union
+        append result "(MRT_Instance *)&$superref->$relName ;\n"
+    }
+    set cindex [CreateTempSymbol Ctype ptrdiff_t Type Index Class {}]
+    append result\
+        "ptrdiff_t $cindex = $tinst->classDesc - ${domain}__CLASSES ;\n"\
+        "switch ($cindex) \{\n"
+
+    set result [IndentToBlock $result]
+
+    PushBlock
+
+    PushContext GenSubclassOf $startblock
+    actexpand cset subclasses $subclasses
+    actexpand cset foundsubs [list]
+    actexpand cset superref $superref
+    actexpand cset subref $subref
+    actexpand cset relname $relName
+    actexpand cset gentype $gentype
+    actexpand cset gotdefault false
+
+    return $result
+}
+----
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc SubclassCase {subclassname} {
+    variable domain
+    set startblock [GetBlock]
+
+    set context [actexpand cname]
+    if {$context ne "GenSubclassOf"} {
+        error "invoked subclass command outside of a subclassof context"
+    }
+    set subclasses [actexpand cget subclasses]
+    if {![::struct::set contains $subclasses $subclassname]} {
+        error "unknown subclass, \"$subclassname\""
+    }
+
+    set foundsubs [actexpand cget foundsubs]
+    if {[::struct::set contains $foundsubs $subclassname]} {
+        error "duplicate subclass, \"$subclassname\""
+    }
+    ::struct::set include foundsubs $subclassname
+    actexpand cset foundsubs $foundsubs
+
+    set classnum [GetClassProperty $subclassname Number]
+
+    set result [IndentToBlock [string cat\
+        [linecomment "subclass $subclassname"]\
+        "case ${classnum}: \{\n"\
+    ]]
+
+    PushBlock
+
+    set superref [actexpand cget superref]
+    set subref [actexpand cget subref]
+    set gentype [actexpand cget gentype]
+    set relname [actexpand cget relname]
+    set refResult [CreateInstRefSymbol $subclassname $subref]
+    if {$gentype eq "reference"} {
+        append refResult "$subref = $superref->$relname ;\n"
+    } else {
+        append refResult "$subref = &$superref->$relname.$subclassname ;\n"
+    }
+
+    append result [IndentToBlock $refResult]
+
+    PushContext Subclass $startblock
+
+    return $result
+}
+----
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc DefaultSubclass {} {
+    set startblock [GetBlock]
+
+    set context [actexpand cname]
+    if {$context ne "GenSubclassOf"} {
+        error "invoked default command outside of a subclassof context"
+    }
+
+    append result "default: \{\n"
+    set result [IndentToBlock $result]
+
+    PushBlock
+
+    actexpand cset gotdefault true
+    PushContext Subclass $startblock
+
+    return $result
+}
+----
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-57.0 {
+    Switch on reference subclasses
+} -setup {
+    validateutils genMiccaFile codegen57 {
+        domain codegen57 {
+            class S {}
+            class X {
+                attribute color int -default 10
+
+                instop int readColor {} {
+                    return %<my attr color>% + 10 ;
+                }
+            }
+            class Y {
+                attribute color int -default 20
+
+                instop int readColor {} {
+                    return %<my attr color>% + 20 ;
+                }
+            }
+
+            generalization R1 -reference S X Y
+
+            domainop int readColor {sid MRT_InstId} {
+                %<S idtoref sid sref>%
+                int color ;
+                %<R1 subclassof sref subref>%
+                    %<subclass X>%
+                        color = %<instance subref operation readColor>% ;
+                    %<end>%
+                    %<subclass Y>%
+                        color = %<instance subref operation readColor>% ;
+                    %<end>%
+                    %<default>%
+                        color = 0 ;
+                    %<end>%
+                %<end>%
+
+                return color ;
+            }
+        }
+        population codegen57 {
+            class S {
+                instance s1
+                instance s2
+            }
+            class X {
+                instance x1 R1 s1
+            }
+            class Y {
+                instance y1 R1 s2
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen57.c
+    validateutils matchLines codegen57.c {
+        // R1 subclassof sref subref
+        MRT_Instance *t__T1 = sref->R1 ;
+        ptrdiff_t t__T2 = t__T1->classDesc - codegen57__CLASSES ;
+        switch (t__T2) {
+            // subclass X
+            case 1: {
+                struct X *subref ;
+                subref = sref->R1 ;
+                color = X_readColor(subref) ;
+            }
+            break ;
+            // end
+            // subclass Y
+            case 2: {
+                struct Y *subref ;
+                subref = sref->R1 ;
+                color = Y_readColor(subref) ;
+            }
+            break ;
+            // end
+            default: {
+                color = 0 ;
+            }
+            break ;
+            // end
+        }
+        // end
+    }
+} -result {1}
+----
+endif::showtests[]
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-58.0 {
+    Switch on union subclasses
+} -setup {
+    validateutils genMiccaFile codegen58 {
+        domain codegen58 {
+            class S {}
+            class X {
+                attribute color int -default 10
+
+                instop int readColor {} {
+                    return %<my attr color>% + 10 ;
+                }
+            }
+            class Y {
+                attribute color int -default 20
+
+                instop int readColor {} {
+                    return %<my attr color>% + 20 ;
+                }
+            }
+
+            generalization R1 -union S X Y
+
+            domainop int readColor {sid MRT_InstId} {
+                %<S idtoref sid sref>%
+                int color ;
+                %<R1 subclassof sref subref>%
+                    %<subclass X>%
+                        color = %<instance subref operation readColor>% ;
+                    %<end>%
+                    %<subclass Y>%
+                        color = %<instance subref operation readColor>% ;
+                    %<end>%
+                    %<default>%
+                        color = 0 ;
+                    %<end>%
+                %<end>%
+
+                return color ;
+            }
+        }
+        population codegen58 {
+            class S {
+                instance s1
+                instance s2
+            }
+            class X {
+                instance x1 R1 s1
+            }
+            class Y {
+                instance y1 R1 s2
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen58.c
+    validateutils matchLines codegen58.c {
+        // R1 subclassof sref subref
+        MRT_Instance *t__T1 = (MRT_Instance *)&sref->R1 ;
+        ptrdiff_t t__T2 = t__T1->classDesc - codegen58__CLASSES ;
+        switch (t__T2) {
+            // subclass X
+            case 1: {
+                struct X *subref ;
+                subref = &sref->R1.X ;
+                color = X_readColor(subref) ;
+            }
+            break ;
+            // end
+            // subclass Y
+            case 2: {
+                struct Y *subref ;
+                subref = &sref->R1.Y ;
+                color = Y_readColor(subref) ;
+            }
+            break ;
+            // end
+            default: {
+                color = 0 ;
+            }
+            break ;
+            // end
+        }
+        // end
     }
 } -result {1}
 ----
