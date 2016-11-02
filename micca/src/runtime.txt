@@ -1856,7 +1856,7 @@ mrt_InstSetAddInstance(
     MRT_Instance *instref = instance ;
 
     assert(instref != NULL) ;
-    assert(instref->classDesc = set->classDesc) ;
+    assert(instref->classDesc == set->classDesc) ;
     if (instref->classDesc != set->classDesc) { // <1>
         return ;
     }
@@ -1913,7 +1913,7 @@ mrt_InstSetRemoveInstance(
     MRT_Instance *instref = instance ;
 
     assert(instref != NULL) ;
-    assert(instref->classDesc = set->classDesc) ;
+    assert(instref->classDesc == set->classDesc) ;
     if (instref->classDesc != set->classDesc) {
         return ;
     }
@@ -1963,7 +1963,7 @@ mrt_InstSetMember(
     MRT_Instance *instref = instance ;
 
     assert(instref != NULL) ;
-    assert(instref->classDesc = set->classDesc) ;
+    assert(instref->classDesc == set->classDesc) ;
 
     if (instref->classDesc != set->classDesc) {
         return false ;
@@ -9460,8 +9460,10 @@ mrtTraceTransitionEvent(
             .eventNumber = event,
             .sourceInst = source,
             .targetInst = target,
-            .info.transitionTrace.currentState = currentState,
-            .info.transitionTrace.newState = newState,
+            .info.transitionTrace = {
+                .currentState = currentState,
+                .newState = newState
+            }
         } ;
         mrtTraceHandler(&trace) ;
     }
@@ -9487,9 +9489,11 @@ mrtTracePolyEvent(
             .eventNumber = event,
             .sourceInst = source,
             .targetInst = target,
-            .info.polyTrace.subcode = subclass,
-            .info.polyTrace.genNumber = genNumber,
-            .info.polyTrace.mappedEvent = newEvent,
+            .info.polyTrace = {
+                .subcode = subclass,
+                .genNumber = genNumber,
+                .mappedEvent = newEvent
+            }
         } ;
         mrtTraceHandler(&trace) ;
     }
@@ -9513,11 +9517,160 @@ mrtTraceCreationEvent(
             .eventNumber = event,
             .sourceInst = source,
             .targetInst = target,
-            .info.creationTrace.targetClass = class,
+            .info.creationTrace = {
+                .targetClass = class
+            }
         } ;
         mrtTraceHandler(&trace) ;
     }
 }
+----
+
+=== Obtaining Tracing Output
+
+[source,c]
+----
+<<mrt trace static functions>>=
+#ifndef MRT_NO_NAMES
+static void
+mrtPrintTraceInfo(
+    MRT_TraceInfo const *traceInfo)
+{
+    char const *sourceName ;
+    char const *sourceClassName ;
+    char sourceIdNum[32] ;
+
+    if (traceInfo->sourceInst == NULL) {
+        sourceName = "?" ;
+        sourceClassName = "?" ;
+    } else {
+        sourceClassName = traceInfo->sourceInst->classDesc->name ;
+        sourceName = traceInfo->sourceInst->name ;
+        if (sourceName == NULL) {
+            unsigned instid = mrt_InstanceIndex(traceInfo->sourceInst) ;
+            snprintf(sourceIdNum, sizeof(sourceIdNum), "%u", instid) ;
+            sourceName = sourceIdNum ;
+        }
+    }
+    
+    char const *targetName = traceInfo->targetInst->name ;
+    char targetIdNum[32] ;
+    if (targetName == NULL) {
+        unsigned instid = mrt_InstanceIndex(traceInfo->targetInst) ;
+        snprintf(targetIdNum, sizeof(targetIdNum), "%u", instid) ;
+        targetName = targetIdNum ;
+    }
+
+    switch (traceInfo->eventType) {
+    case mrtTransitionEvent: {
+        MRT_StateCode newState = traceInfo->info.transitionTrace.newState ;
+        char const *newStateName ;
+        if (newState == MRT_StateCode_IG) {
+            newStateName = "IG" ;
+        } else if (newState == MRT_StateCode_CH) {
+            newStateName = "CH" ;
+        } else {
+            newStateName = traceInfo->targetInst->classDesc->edb->stateNames[
+                traceInfo->info.transitionTrace.newState] ;
+        }
+
+        printf("%s: Transition: %s.%s - %s -> %s.%s: %s ==> %s\n",
+            mrtTimestamp(), sourceClassName, sourceName,
+            traceInfo->targetInst->classDesc->eventNames[traceInfo->eventNumber],
+            traceInfo->targetInst->classDesc->name, targetName,
+            traceInfo->targetInst->classDesc->edb->stateNames[
+                traceInfo->info.transitionTrace.currentState],
+            newStateName) ;
+    }
+        break ;
+
+    case mrtPolymorphicEvent: {
+        MRT_Relationship const *rel = traceInfo->targetInst->classDesc->pdb->
+                genDispatch[traceInfo->info.polyTrace.genNumber].relship ;
+        MRT_Class const *subclass ;
+        char const *subname = NULL ;
+        if (rel->relType == mrtRefGeneralization) {
+            subclass = rel->relInfo.refGeneralization.
+                subclasses[traceInfo->info.polyTrace.subcode].classDesc ;
+            subname = subclass->name ;
+        } else if (rel->relType == mrtUnionGeneralization) {
+            subclass = rel->relInfo.unionGeneralization.
+                subclasses[traceInfo->info.polyTrace.subcode] ;
+            subname = subclass->name ;
+        } else {
+            printf("%s: bad relationship type in polymorphic event, %d\n",
+                mrtTimestamp(), rel->relType) ;
+            break ;
+        }
+        printf("%s: Polymorphic: %s.%s - %s -> %s.%s: %s - %s -> %s\n",
+            mrtTimestamp(), sourceClassName, sourceName,
+            traceInfo->targetInst->classDesc->eventNames[traceInfo->eventNumber],
+            traceInfo->targetInst->classDesc->name, targetName,
+            traceInfo->targetInst->classDesc->pdb->genNames[
+                traceInfo->info.polyTrace.genNumber],
+            subclass->eventNames[traceInfo->info.polyTrace.mappedEvent],
+            subname) ;
+    }
+        break ;
+
+    case mrtCreationEvent:
+        printf("%s: Creation: %s.%s - %s -> %s ==> %s\n",
+            mrtTimestamp(), sourceClassName, sourceName,
+            traceInfo->targetInst->classDesc->eventNames[traceInfo->eventNumber],
+            traceInfo->info.creationTrace.targetClass->name,
+            targetName) ;
+        break ;
+
+    default:
+        printf("%s: Unknown trace event type, \"%u\"",
+                mrtTimestamp(), traceInfo->eventType) ;
+        break ;
+    }
+}
+#   else  /* MRT_NO_NAMES is defined */
+static void
+mrtPrintTraceInfo(
+    MRT_TraceInfo const *traceInfo)
+{
+    switch (traceInfo->eventType) {
+    case mrtTransitionEvent:
+        printf("%s: Transition: %p - %u -> %p: %u ==> %u\n",
+                mrtTimestamp(), traceInfo->sourceInst, traceInfo->eventNumber,
+                traceInfo->targetInst,
+                traceInfo->info.transitionTrace.currentState,
+                traceInfo->info.transitionTrace.newState) ;
+        break ;
+
+    case mrtPolymorphicEvent:
+        printf("%s: Polymorphic: %p - %u -> %p: %u - %u -> %d\n",
+                mrtTimestamp(), traceInfo->sourceInst, traceInfo->eventNumber,
+                traceInfo->targetInst,traceInfo->info.polyTrace.genNumber,
+                traceInfo->info.polyTrace.mappedEvent,
+                traceInfo->info.polyTrace.subcode) ;
+        break ;
+
+    case mrtCreationEvent:
+        printf("%s: Creation: %p - %u -> %p ==> %p\n",
+                mrtTimestamp(), traceInfo->sourceInst, traceInfo->eventNumber,
+                traceInfo->info.creationTrace.targetClass,
+                traceInfo->targetInst) ;
+        break ;
+
+    default:
+        printf("%s: Unknown trace event type, \"%u\"",
+                mrtTimestamp(), traceInfo->eventType) ;
+        break ;
+    }
+}
+#endif /* MRT_NO_NAMES */
+----
+
+[source,c]
+----
+<<mrt forward references>>=
+#ifndef MRT_NO_TRACE
+static char const *mrtTimestamp(void) ;
+#endif /* MRT_NO_TRACE */
 ----
 
 === Tracing Strategies
@@ -9779,7 +9932,7 @@ static noreturn void mrtFatalError(MRT_ErrorCode errNum, ...) ;
 [source,c]
 ----
 <<mrt static functions>>=
-static void noreturn
+static noreturn void
 mrtFatalError(
     MRT_ErrorCode errNum,
     ...)
@@ -9892,22 +10045,22 @@ routines can fill the queue.
 
 === Checking for Available Instance Space
 
-The `mrt_InstanceAvailable()` function provides a means determine if there
+The `mrt_CanCreateInstance()` function provides a means determine if there
 is space available to create a new instance of a class.
 
-(((micca,Run Time Function,mrt_InstanceAvailable)))
+(((micca,Run Time Function,mrt_CanCreateInstance)))
 [source,c]
 ----
 <<mrt external interfaces>>=
 extern bool
-mrt_InstanceAvailable(
+mrt_CanCreateInstance(
     MRT_Class const *classDesc) ;
 ----
 
 `classDesc`::
     A pointer to the class data for which the space check is made.
 
-`mrt_InstanceAvailable` returns `true` if there at least one instance
+`mrt_CanCreateInstance` returns `true` if there at least one instance
 of `classDesc` may be created without exhausting the memory pool
 of instances for the class.
 
@@ -9916,7 +10069,7 @@ of instances for the class.
 ----
 <<mrt external functions>>=
 bool
-mrt_InstanceAvailable(
+mrt_CanCreateInstance(
     MRT_Class const *classDesc)
 {
     assert(classDesc != NULL) ;
@@ -9934,7 +10087,7 @@ mrt_InstanceAvailable(
 ----
 <<mrt external interfaces>>=
 extern bool
-mrt_EventAvailable(void) ;
+mrt_CanSignalEvent(void) ;
 ----
 
 [source,c]
@@ -9942,7 +10095,7 @@ mrt_EventAvailable(void) ;
 ----
 <<mrt external functions>>=
 bool
-mrt_EventAvailable(void)
+mrt_CanSignalEvent(void)
 {
     return !mrtEventQueueEmpty(&freeEventQueue) ;
 }
@@ -10752,155 +10905,7 @@ All timing is done via delayed events, and they are signalled via
 
 [source,c]
 ----
-<<posix static functions>>=
-#   ifndef MRT_NO_TRACE
-#   ifndef MRT_NO_NAMES
-static void
-mrtPrintTraceInfo(
-    MRT_TraceInfo const *traceInfo)
-{
-    char const *sourceName ;
-    char const *sourceClassName ;
-    char sourceIdNum[32] ;
-
-    if (traceInfo->sourceInst == NULL) {
-        sourceName = "?" ;
-        sourceClassName = "?" ;
-    } else {
-        sourceClassName = traceInfo->sourceInst->classDesc->name ;
-        sourceName = traceInfo->sourceInst->name ;
-        if (sourceName == NULL) {
-            unsigned instid = mrt_InstanceIndex(traceInfo->sourceInst) ;
-            snprintf(sourceIdNum, sizeof(sourceIdNum), "%u", instid) ;
-            sourceName = sourceIdNum ;
-        }
-    }
-    
-    char const *targetName = traceInfo->targetInst->name ;
-    char targetIdNum[32] ;
-    if (targetName == NULL) {
-        unsigned instid = mrt_InstanceIndex(traceInfo->targetInst) ;
-        snprintf(targetIdNum, sizeof(targetIdNum), "%u", instid) ;
-        targetName = targetIdNum ;
-    }
-
-    switch (traceInfo->eventType) {
-    case mrtTransitionEvent: {
-        MRT_StateCode newState = traceInfo->info.transitionTrace.newState ;
-        char const *newStateName ;
-        if (newState == MRT_StateCode_IG) {
-            newStateName = "IG" ;
-        } else if (newState == MRT_StateCode_CH) {
-            newStateName = "CH" ;
-        } else {
-            newStateName = traceInfo->targetInst->classDesc->edb->stateNames[
-                traceInfo->info.transitionTrace.newState] ;
-        }
-
-        printf("%s: Transition: %s.%s - %s -> %s.%s: %s ==> %s\n",
-            mrtTimestamp(), sourceClassName, sourceName,
-            traceInfo->targetInst->classDesc->eventNames[traceInfo->eventNumber],
-            traceInfo->targetInst->classDesc->name, targetName,
-            traceInfo->targetInst->classDesc->edb->stateNames[
-                traceInfo->info.transitionTrace.currentState],
-            newStateName) ;
-    }
-        break ;
-
-    case mrtPolymorphicEvent: {
-        MRT_Relationship const *rel = traceInfo->targetInst->classDesc->pdb->
-                genDispatch[traceInfo->info.polyTrace.genNumber].relship ;
-        MRT_Class const *subclass ;
-        char const *subname = NULL ;
-        if (rel->relType == mrtRefGeneralization) {
-            subclass = rel->relInfo.refGeneralization.
-                subclasses[traceInfo->info.polyTrace.subcode].classDesc ;
-            subname = subclass->name ;
-        } else if (rel->relType == mrtUnionGeneralization) {
-            subclass = rel->relInfo.unionGeneralization.
-                subclasses[traceInfo->info.polyTrace.subcode] ;
-            subname = subclass->name ;
-        } else {
-            printf("%s: bad relationship type in polymorphic event, %d\n",
-                mrtTimestamp(), rel->relType) ;
-            break ;
-        }
-        printf("%s: Polymorphic: %s.%s - %s -> %s.%s: %s - %s -> %s\n",
-            mrtTimestamp(), sourceClassName, sourceName,
-            traceInfo->targetInst->classDesc->eventNames[traceInfo->eventNumber],
-            traceInfo->targetInst->classDesc->name, targetName,
-            traceInfo->targetInst->classDesc->pdb->genNames[
-                traceInfo->info.polyTrace.genNumber],
-            subclass->eventNames[traceInfo->info.polyTrace.mappedEvent],
-            subname) ;
-    }
-        break ;
-
-    case mrtCreationEvent:
-        printf("%s: Creation: %s.%s - %s -> %s ==> %s\n",
-            mrtTimestamp(), sourceClassName, sourceName,
-            traceInfo->targetInst->classDesc->eventNames[traceInfo->eventNumber],
-            traceInfo->info.creationTrace.targetClass->name,
-            targetName) ;
-        break ;
-
-    default:
-        printf("%s: Unknown trace event type, \"%u\"",
-                mrtTimestamp(), traceInfo->eventType) ;
-        break ;
-    }
-}
-#   else  /* MRT_NO_NAMES is defined */
-static void
-mrtPrintTraceInfo(
-    MRT_TraceInfo const *traceInfo)
-{
-    switch (traceInfo->eventType) {
-    case mrtTransitionEvent:
-        printf("%s: Transition: %p - %u -> %p: %u ==> %u\n",
-                mrtTimestamp(), traceInfo->sourceInst, traceInfo->eventNumber,
-                traceInfo->targetInst,
-                traceInfo->info.transitionTrace.currentState,
-                traceInfo->info.transitionTrace.newState) ;
-        break ;
-
-    case mrtPolymorphicEvent:
-        printf("%s: Polymorphic: %p - %u -> %p: %u - %u -> %d\n",
-                mrtTimestamp(), traceInfo->sourceInst, traceInfo->eventNumber,
-                traceInfo->targetInst,traceInfo->info.polyTrace.genNumber,
-                traceInfo->info.polyTrace.mappedEvent,
-                traceInfo->info.polyTrace.subcode) ;
-        break ;
-
-    case mrtCreationEvent:
-        printf("%s: Creation: %p - %u -> %p ==> %p\n",
-                mrtTimestamp(), traceInfo->sourceInst, traceInfo->eventNumber,
-                traceInfo->info.creationTrace.targetClass,
-                traceInfo->targetInst) ;
-        break ;
-
-    default:
-        printf("%s: Unknown trace event type, \"%u\"",
-                mrtTimestamp(), traceInfo->eventType) ;
-        break ;
-    }
-}
-#   endif /* MRT_NO_NAMES */
-#   endif /* MRT_NO_TRACE */
-----
-
-[source,c]
-----
-<<posix forward references>>=
-#   ifndef MRT_NO_TRACE
-static char const *mrtTimestamp(void) ;
-#   endif /* MRT_NO_TRACE */
-----
-
-[source,c]
-----
-<<posix static functions>>=
-#   ifndef MRT_NO_TRACE
+<<posix trace static functions>>=
 static char const *
 mrtTimestamp(void)
 {
@@ -10931,7 +10936,6 @@ mrtTimestamp(void)
 
     return timestamp ;
 }
-#   endif /* MRT_NO_TRACE */
 ----
 
 === POSIX Initialization
@@ -11061,6 +11065,7 @@ mrt_Initialize(void)
  */
 #   ifndef MRT_NO_TRACE
 <<mrt trace static functions>>
+<<posix trace static functions>>
 #   endif /* MRT_NO_TRACE */
 
 <<posix static functions>>
@@ -11161,6 +11166,9 @@ mrt_Initialize(void)
     mrtEventPoolInit() ;
     mrtInitCriticalSection() ;
     mrtInitSysTimer() ;
+#       ifndef MRT_NO_TRACE
+    mrt_RegisterTraceHandler(mrtPrintTraceInfo) ;
+#       endif /* MRT_NO_TRACE */
 }
 ----
 
@@ -11349,6 +11357,18 @@ However, we will follow the recommendation as it is only a single
 instruction and we don't want some change in the future to create
 a mysterious problem.
 
+=== MSP432 Tracing
+
+[source,c]
+----
+<<msp432 trace static functions>>=
+static char const *
+mrtTimestamp(void)
+{
+    return "0" ;
+}
+----
+
 === MSP432 Files
 
 [source,c]
@@ -11454,6 +11474,7 @@ a mysterious problem.
  */
 #   ifndef MRT_NO_TRACE
 <<mrt trace static functions>>
+<<msp432 trace static functions>>
 #   endif /* MRT_NO_TRACE */
 
 <<arm7m static functions>>
@@ -11483,10 +11504,13 @@ a mysterious problem.
 #include "em_cmu.h"
 #include "em_emu.h"
 #include "em_rtc.h"
-#ifndef RELEASE
-#   include "em_burtc.h"
+#include "em_rmu.h"
+#include "em_burtc.h"
+
+#ifdef MRT_INSTRUMENT
+#   include "em_dbg.h"
 #   include "retargetswo.h"
-#endif /* RELEASE */
+#endif /* MRT_INSTRUMENT */
 ----
 
 === EFM32GG Timing Interfaces
@@ -11494,11 +11518,11 @@ a mysterious problem.
 [source,c]
 ----
 <<efm32gg includes>>=
-#define MRT_TIMER_FREQUENCY     4096
+#define MRT_TIMER_FREQUENCY     1024
 #define MRT_MAX_CLOCK_TICKS     (UINT32_MAX - 1)
 /*
- * for a timer frequency of 4096 ticks / sec,
- * max delay is 1,048,576 s == 17,476 min == 291 hr == 12.1 days
+ * for a timer frequency of 1024 ticks / sec,
+ * max delay is 4,194,303 s == 69,905 min == 1,165 hr == 48.5 days
  */
 #define MRT_MAX_MSEC_DELAY\
         ((MRT_MAX_CLOCK_TICKS / UINT32_C(MRT_TIMER_FREQUENCY)) * UINT32_C(1000))
@@ -11545,9 +11569,11 @@ mrtInitSysTimer(void)
 {
     RTC_Reset() ;
     /*
-     * Set RTC prescaler to divide by 8.
+     * The Low Frequency Crystal is driving the RTC.
+     * It's frequency is 32,768 Hz.
+     * Set RTC prescaler to divide by 32 to get a 1024 Hz timer frequency.
      */
-    CMU_ClockDivSet(cmuClock_RTC, cmuClkDiv_8) ;
+    CMU_ClockDivSet(cmuClock_RTC, cmuClkDiv_32) ;
     /*
      * Enable Low Freq A Clock to run the RTC.
      */
@@ -11560,16 +11586,6 @@ mrtInitSysTimer(void)
      */
     NVIC_ClearPendingIRQ(RTC_IRQn) ;
     NVIC_EnableIRQ(RTC_IRQn) ;
-
-#   ifndef RELEASE
-    /*
-     * Enable the Backup Realtime Clock as a timestamp.
-     */
-     BURTC_Reset() ;
-     BURTC_Init_TypeDef buinit = BURTC_INIT_DEFAULT ;
-     buinit.clkDiv = burtcClkDiv_2 ; // set to 1 kHz frequency, default is 2
-     BURTC_Init(&buinit) ;
-#   endif /* RELEASE */
 }
 ----
 
@@ -11691,6 +11707,11 @@ mrtPlatformInit(void)
      */
     CMU_OscillatorEnable(cmuOsc_LFXO, true, true) ;
     /*
+     * Enable the Ultra-Low Frequency Oscillator for use by the Backup
+     * Real Time clock.
+     */
+    CMU_OscillatorEnable(cmuOsc_ULFRCO, true, true) ;
+    /*
      * Enable the low energy clock bus.
      */
     CMU_ClockEnable(cmuClock_CORELE, true) ;
@@ -11699,10 +11720,29 @@ mrtPlatformInit(void)
      */
     CMU_ClockSelectSet(cmuClock_LFA, cmuSelect_LFXO) ;
     CMU_ClockSelectSet(cmuClock_LFB, cmuSelect_LFXO) ;
+    /*
+     * Enable the Backup Realtime Clock as a timestamp.
+     * N.B. we must enable the Backup Unit itself before the clock
+     * is programmable.
+     */
+     RMU_ResetControl(rmuResetBU, rmuResetModeClear) ;
+     BURTC_Init_TypeDef buinit = BURTC_INIT_DEFAULT ;
+     buinit.clkDiv = burtcClkDiv_2 ;
+     /*
+      * set to 1 kHz frequency, default is 2.
+      * This will give us a 1 msec free running clock.
+      */
+     BURTC_Init(&buinit) ;
 
-#       ifndef RELEASE
-    setupSWOForPrint() ;
-#       endif /* RELEASE */
+#       ifdef MRT_INSTRUMENT
+    /*
+     * Retarget instrumentation I/O to the SWO output so it will
+     * show up in the debugger output console.
+     */
+    if (DBG_Connected()) {
+        setupSWOForPrint() ;
+    }
+#       endif /* MRT_INSTRUMENT */
 }
 ----
 
@@ -11719,6 +11759,23 @@ mrtWait(void)
         EMU_EnterEM2(true) ;
     }
     endCriticalSection() ;
+}
+----
+
+=== EFM32GG Tracing
+
+[source,c]
+----
+<<efm32gg trace static functions>>=
+static char const *
+mrtTimestamp(void)
+{
+    static char tsbuf[16] ;
+
+    uint32_t ts = BURTC_CounterGet() ;
+
+    snprintf(tsbuf, sizeof(tsbuf), "%03lu.%03lu", ts / 1000, ts % 1000) ;
+    return tsbuf ;
 }
 ----
 
@@ -11827,6 +11884,7 @@ mrtWait(void)
  */
 #   ifndef MRT_NO_TRACE
 <<mrt trace static functions>>
+<<efm32gg trace static functions>>
 #   endif /* MRT_NO_TRACE */
 
 <<arm7m static functions>>
@@ -11838,6 +11896,7 @@ mrtWait(void)
  */
 #   ifndef MRT_NO_TRACE
 <<mrt trace external functions>>
+<<efm32gg trace external functions>>
 #   endif /* MRT_NO_TRACE */
 
 <<arm7m external functions>>
@@ -12204,6 +12263,18 @@ mrt_Initialize(void)
 }
 ----
 
+=== MSP430 Tracing
+
+[source,c]
+----
+<<msp430 trace static functions>>=
+static char const *
+mrtTimestamp(void)
+{
+    return "0" ;
+}
+----
+
 == Code Organization
 
 [source,c]
@@ -12343,6 +12414,7 @@ mrt_Initialize(void)
  */
 #   ifndef MRT_NO_TRACE
 <<mrt trace static functions>>
+<<msp430 trace static functions>>
 #   endif /* MRT_NO_TRACE */
 
 <<msp430 static functions>>
