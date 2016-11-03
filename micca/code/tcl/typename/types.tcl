@@ -7,6 +7,9 @@ set types {
     {enum a}
     {struct a}
     {uint8_t}
+    {uint64_t}
+    {int32_t}
+    {int_least64_t}
     {const int *}
     {struct foo *}
     {MyType_t *}

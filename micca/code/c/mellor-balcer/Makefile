@@ -12,9 +12,6 @@
 
 LDFLAGS = -g
 CFLAGS	= -std=c11 -g -O0 -Wall\
-	-Wno-unused-variable\
-	-Wno-unused-function\
-	-Wno-unused-but-set-variable\
 	$(NULL)
 CPPFLAGS =\
 	 -D_POSIX_C_SOURCE=200112L\
@@ -55,8 +52,6 @@ CLEANFILES =\
 	bookstore\
 	bookstore.c\
 	bookstore.h\
-	micca_rt.c\
-	micca_rt.h\
 	*.o\
 	$(NULL)
 
@@ -110,9 +105,6 @@ bookstore : bookstore.o micca_rt.o
 bookstore.c : bookstore.h micca_rt.h
 
 micca_rt.o : micca_rt.c micca_rt.h
-
-micca_rt.c micca_rt.h :
-	micca -posix
 
 bookstore.c bookstore.h : simplebookstore.micca sbs_population.micca
 	micca -stubexternalops simplebookstore.micca sbs_population.micca

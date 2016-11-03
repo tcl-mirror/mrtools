@@ -47,8 +47,7 @@ micca_rt_test.c : micca_rt.c micca_rt.h testdomain.c testdomain.h
 micca_rt_test.c : $(DOCSRC)
 	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
 
-micca_rt_posixtest : CPPFLAGS += -I$(HOME)/local/include \
-    	-fprofile-arcs -ftest-coverage
+micca_rt_posixtest : CPPFLAGS += -I$(HOME)/local/include  --coverage
 
 micca_rt_posixtest : LOADLIBES = $(HOME)/local/lib/libcunit.a
 
@@ -58,6 +57,8 @@ micca_rt_posixtest.c : micca_rt.c micca_rt.h posixtestdomain.c posixtestdomain.h
 
 micca_rt_posixtest.c : $(POSIXDOCSRC)
 	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
+
+micca_rt.o : CFLAGS+=--coverage
 
 testdomain.c testdomain.h : testdomain.micca
 	micca $<
@@ -70,9 +71,6 @@ posixtestdomain.c posixtestdomain.h : posixtestdomain.micca
 
 posixtestdomain.micca : $(POSIXDOCSRC)
 	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
-
-micca_rt.c micca_rt.h :
-	micca -posix
 
 CLEANFILES =\
 	micca_rt_test\
@@ -87,8 +85,6 @@ CLEANFILES =\
 	posixtestdomain.c\
 	posixtestdomain.h\
 	posixtestdomain.o\
-	micca_rt.c\
-	micca_rt.h\
 	micca_rt.o\
 	$(PDF)\
 	*.gcov\
