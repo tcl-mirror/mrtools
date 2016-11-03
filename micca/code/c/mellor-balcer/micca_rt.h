@@ -418,12 +418,11 @@ extern MRT_TraceHandler mrt_RegisterTraceHandler(MRT_TraceHandler) ;
 #   endif /* MRT_NO_TRACE */
 
 extern void mrt_Initialize(void) ;
-extern void
-mrt_EventLoop(void) ;
+extern void mrt_EventLoop(void) ;
 extern bool
 mrt_SyncToEventLoop() ;
-extern bool
-mrt_ProcessOneEvent(void) ;
+extern bool mrt_DispatchThreadOfControl(void) ;
+extern bool mrt_DispatchSingleEvent(void) ;
 extern MRT_iab *
 mrt_GetStorageProperties(
     MRT_Class const *classDesc,
@@ -707,10 +706,10 @@ extern MRT_FatalErrorHandler
 mrt_SetFatalErrorHandler(
     MRT_FatalErrorHandler newHandler) ;
 extern bool
-mrt_InstanceAvailable(
+mrt_CanCreateInstance(
     MRT_Class const *classDesc) ;
 extern bool
-mrt_EventAvailable(void) ;
+mrt_CanSignalEvent(void) ;
 MRT_SyncParams *
 mrt_TrySyncRequest(
     MRT_SyncFunc f) ;

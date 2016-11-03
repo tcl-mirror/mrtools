@@ -83,6 +83,7 @@ typedef struct mrtfdservicemap {
 /*
  * Forward References
  */
+static bool mrtProcessOneEvent(MRT_EventQueue *queue) ;
 static MRT_Instance *
 mrtFindInstSlot(
     MRT_iab *iab) ;
@@ -95,6 +96,8 @@ static void
 mrtMarkRelationship(
     MRT_Relationship const *const *rel,
     unsigned relCount) ;
+static void mrtEndTransaction(void) ;
+
 static bool mrtCheckRelationship(MRT_Relationship const *rel) ;
 static void mrtZeroRefCounts(MRT_Class const *classDesc) ;
 static bool
@@ -146,6 +149,8 @@ static void mrtRemoveDelayedEvent(MRT_ecb *ecb) ;
 static MRT_ecb *mrtExpireDelayedEvents(void) ;
 static void mrtStartDelayedQueueTiming(void) ;
 static void mrtStopDelayedQueueTiming(void) ;
+static bool mrtDispatchEventFromQueue(MRT_EventQueue *queue) ;
+
 static void mrtDispatchTransitionEvent(MRT_ecb *ecb) ;
 static void mrtDispatchPolymorphicEvent(MRT_ecb *ecb) ;
 static void mrtDispatchCreationEvent(MRT_ecb *ecb) ;
@@ -154,15 +159,15 @@ static inline bool mrtSyncQueueEmpty(void) ;
 static inline MRT_SyncParams *mrtSyncQueuePut(MRT_SyncFunc f, bool fatal) ;
 static inline MRT_SyncBlock *mrtSyncQueueGet(void) ;
 static inline bool mrtInvokeOneSyncFunction(void) ;
+#ifndef MRT_NO_TRACE
+static char const *mrtTimestamp(void) ;
+#endif /* MRT_NO_TRACE */
 static void
 mrtDefaultFatalErrorHandler(
     MRT_ErrorCode errNum,
     char const *fmt,
     va_list ap) ;
 static noreturn void mrtFatalError(MRT_ErrorCode errNum, ...) ;
-#   ifndef MRT_NO_TRACE
-static char const *mrtTimestamp(void) ;
-#   endif /* MRT_NO_TRACE */
 
 /*
  * Static Data
@@ -252,6 +257,47 @@ mrtLinkRefInsert(
     at->prev->next = item ;
     at->prev = item ;
 }
+static inline
+MRT_ecb *
+mrtEventQueueBegin(
+    MRT_EventQueue *queue)
+{
+    return queue->next ;
+}
+static inline
+MRT_ecb *
+mrtEventQueueEnd(
+    MRT_EventQueue *queue)
+{
+    return (MRT_ecb *)queue ;
+}
+static inline
+bool
+mrtEventQueueEmpty(
+    MRT_EventQueue *queue)
+{
+    return queue->next == (MRT_ecb *)queue ;
+}
+static inline
+void
+mrtEventQueueInsert(
+    MRT_ecb *item,
+    MRT_ecb *at)
+{
+    item->prev = at->prev ;
+    item->next = at ;
+    at->prev->next = item ;
+    at->prev = item ;
+}
+static inline
+void
+mrtEventQueueRemove(
+    MRT_ecb *item)
+{
+    item->prev->next = item->next ;
+    item->next->prev = item->prev ;
+    item->prev = item->next = NULL ; // <1>
+}
 
 /*
  * Static Functions
@@ -267,15 +313,16 @@ mrtTraceTransitionEvent(
     MRT_StateCode newState)
 {
     if (mrtTraceHandler) {
-        MRT_TraceInfo trace ;
-
-        trace.eventType = mrtTransitionEvent ;
-        trace.eventNumber = event ;
-        trace.sourceInst = source ;
-        trace.targetInst = target ;
-        trace.info.transitionTrace.currentState = currentState ;
-        trace.info.transitionTrace.newState = newState ;
-
+        MRT_TraceInfo trace = {
+            .eventType = mrtTransitionEvent,
+            .eventNumber = event,
+            .sourceInst = source,
+            .targetInst = target,
+            .info.transitionTrace = {
+                .currentState = currentState,
+                .newState = newState
+            }
+        } ;
         mrtTraceHandler(&trace) ;
     }
 }
@@ -290,16 +337,17 @@ mrtTracePolyEvent(
     MRT_EventCode newEvent)
 {
     if (mrtTraceHandler) {
-        MRT_TraceInfo trace ;
-
-        trace.eventType = mrtPolymorphicEvent ;
-        trace.eventNumber = event ;
-        trace.sourceInst = source ;
-        trace.targetInst = target ;
-        trace.info.polyTrace.subcode = subclass ;
-        trace.info.polyTrace.genNumber = genNumber ;
-        trace.info.polyTrace.mappedEvent = newEvent ;
-
+        MRT_TraceInfo trace = {
+            .eventType = mrtPolymorphicEvent,
+            .eventNumber = event,
+            .sourceInst = source,
+            .targetInst = target,
+            .info.polyTrace = {
+                .subcode = subclass,
+                .genNumber = genNumber,
+                .mappedEvent = newEvent
+            }
+        } ;
         mrtTraceHandler(&trace) ;
     }
 }
@@ -312,16 +360,179 @@ mrtTraceCreationEvent(
     MRT_Class const *class)
 {
     if (mrtTraceHandler) {
-        MRT_TraceInfo trace ;
-
-        trace.eventType = mrtCreationEvent ;
-        trace.eventNumber = event ;
-        trace.sourceInst = source ;
-        trace.targetInst = target ;
-        trace.info.creationTrace.targetClass = class ;
-
+        MRT_TraceInfo trace = {
+            .eventType = mrtCreationEvent,
+            .eventNumber = event,
+            .sourceInst = source,
+            .targetInst = target,
+            .info.creationTrace = {
+                .targetClass = class
+            }
+        } ;
         mrtTraceHandler(&trace) ;
     }
+}
+#ifndef MRT_NO_NAMES
+static void
+mrtPrintTraceInfo(
+    MRT_TraceInfo const *traceInfo)
+{
+    char const *sourceName ;
+    char const *sourceClassName ;
+    char sourceIdNum[32] ;
+
+    if (traceInfo->sourceInst == NULL) {
+        sourceName = "?" ;
+        sourceClassName = "?" ;
+    } else {
+        sourceClassName = traceInfo->sourceInst->classDesc->name ;
+        sourceName = traceInfo->sourceInst->name ;
+        if (sourceName == NULL) {
+            unsigned instid = mrt_InstanceIndex(traceInfo->sourceInst) ;
+            snprintf(sourceIdNum, sizeof(sourceIdNum), "%u", instid) ;
+            sourceName = sourceIdNum ;
+        }
+    }
+    
+    char const *targetName = traceInfo->targetInst->name ;
+    char targetIdNum[32] ;
+    if (targetName == NULL) {
+        unsigned instid = mrt_InstanceIndex(traceInfo->targetInst) ;
+        snprintf(targetIdNum, sizeof(targetIdNum), "%u", instid) ;
+        targetName = targetIdNum ;
+    }
+
+    switch (traceInfo->eventType) {
+    case mrtTransitionEvent: {
+        MRT_StateCode newState = traceInfo->info.transitionTrace.newState ;
+        char const *newStateName ;
+        if (newState == MRT_StateCode_IG) {
+            newStateName = "IG" ;
+        } else if (newState == MRT_StateCode_CH) {
+            newStateName = "CH" ;
+        } else {
+            newStateName = traceInfo->targetInst->classDesc->edb->stateNames[
+                traceInfo->info.transitionTrace.newState] ;
+        }
+
+        printf("%s: Transition: %s.%s - %s -> %s.%s: %s ==> %s\n",
+            mrtTimestamp(), sourceClassName, sourceName,
+            traceInfo->targetInst->classDesc->eventNames[traceInfo->eventNumber],
+            traceInfo->targetInst->classDesc->name, targetName,
+            traceInfo->targetInst->classDesc->edb->stateNames[
+                traceInfo->info.transitionTrace.currentState],
+            newStateName) ;
+    }
+        break ;
+
+    case mrtPolymorphicEvent: {
+        MRT_Relationship const *rel = traceInfo->targetInst->classDesc->pdb->
+                genDispatch[traceInfo->info.polyTrace.genNumber].relship ;
+        MRT_Class const *subclass ;
+        char const *subname = NULL ;
+        if (rel->relType == mrtRefGeneralization) {
+            subclass = rel->relInfo.refGeneralization.
+                subclasses[traceInfo->info.polyTrace.subcode].classDesc ;
+            subname = subclass->name ;
+        } else if (rel->relType == mrtUnionGeneralization) {
+            subclass = rel->relInfo.unionGeneralization.
+                subclasses[traceInfo->info.polyTrace.subcode] ;
+            subname = subclass->name ;
+        } else {
+            printf("%s: bad relationship type in polymorphic event, %d\n",
+                mrtTimestamp(), rel->relType) ;
+            break ;
+        }
+        printf("%s: Polymorphic: %s.%s - %s -> %s.%s: %s - %s -> %s\n",
+            mrtTimestamp(), sourceClassName, sourceName,
+            traceInfo->targetInst->classDesc->eventNames[traceInfo->eventNumber],
+            traceInfo->targetInst->classDesc->name, targetName,
+            traceInfo->targetInst->classDesc->pdb->genNames[
+                traceInfo->info.polyTrace.genNumber],
+            subclass->eventNames[traceInfo->info.polyTrace.mappedEvent],
+            subname) ;
+    }
+        break ;
+
+    case mrtCreationEvent:
+        printf("%s: Creation: %s.%s - %s -> %s ==> %s\n",
+            mrtTimestamp(), sourceClassName, sourceName,
+            traceInfo->targetInst->classDesc->eventNames[traceInfo->eventNumber],
+            traceInfo->info.creationTrace.targetClass->name,
+            targetName) ;
+        break ;
+
+    default:
+        printf("%s: Unknown trace event type, \"%u\"",
+                mrtTimestamp(), traceInfo->eventType) ;
+        break ;
+    }
+}
+#   else  /* MRT_NO_NAMES is defined */
+static void
+mrtPrintTraceInfo(
+    MRT_TraceInfo const *traceInfo)
+{
+    switch (traceInfo->eventType) {
+    case mrtTransitionEvent:
+        printf("%s: Transition: %p - %u -> %p: %u ==> %u\n",
+                mrtTimestamp(), traceInfo->sourceInst, traceInfo->eventNumber,
+                traceInfo->targetInst,
+                traceInfo->info.transitionTrace.currentState,
+                traceInfo->info.transitionTrace.newState) ;
+        break ;
+
+    case mrtPolymorphicEvent:
+        printf("%s: Polymorphic: %p - %u -> %p: %u - %u -> %d\n",
+                mrtTimestamp(), traceInfo->sourceInst, traceInfo->eventNumber,
+                traceInfo->targetInst,traceInfo->info.polyTrace.genNumber,
+                traceInfo->info.polyTrace.mappedEvent,
+                traceInfo->info.polyTrace.subcode) ;
+        break ;
+
+    case mrtCreationEvent:
+        printf("%s: Creation: %p - %u -> %p ==> %p\n",
+                mrtTimestamp(), traceInfo->sourceInst, traceInfo->eventNumber,
+                traceInfo->info.creationTrace.targetClass,
+                traceInfo->targetInst) ;
+        break ;
+
+    default:
+        printf("%s: Unknown trace event type, \"%u\"",
+                mrtTimestamp(), traceInfo->eventType) ;
+        break ;
+    }
+}
+#endif /* MRT_NO_NAMES */
+static char const *
+mrtTimestamp(void)
+{
+    static char timestamp[128] ;
+
+    struct timeval now ;
+    if (gettimeofday(&now, NULL) != 0) {
+        return "unknown" ;
+    }
+
+    struct tm *ltime ;
+    ltime = localtime(&now.tv_sec) ;
+    if (ltime == NULL) {
+        return strerror(errno) ;
+    }
+
+    int tlen = strftime(timestamp, sizeof(timestamp), "%FT%T", ltime) ;
+    if (tlen == 0) {
+        return strerror(errno) ;
+    }
+
+    int flen = snprintf(timestamp + tlen, sizeof(timestamp) - tlen,
+            ".%03u.%03u", (unsigned)(now.tv_usec / 1000),
+            (unsigned)(now.tv_usec % 1000)) ;
+    if (flen > (sizeof(timestamp) - tlen)) {
+        return "too big" ;
+    }
+
+    return timestamp ;
 }
 #   endif /* MRT_NO_TRACE */
 
@@ -517,172 +728,39 @@ mrtWait(void)
     }
     endCriticalSection() ;
 }
-#   ifndef MRT_NO_TRACE
-#   ifndef MRT_NO_NAMES
 static void
-mrtPrintTraceInfo(
-    MRT_TraceInfo const *traceInfo)
+mrtFinishThreadOfControl(void)
 {
-    char const *sourceName ;
-    char const *sourceClassName ;
-    char sourceIdNum[32] ;
-
-    if (traceInfo->sourceInst == NULL) {
-        sourceName = "?" ;
-        sourceClassName = "?" ;
-    } else {
-        sourceClassName = traceInfo->sourceInst->classDesc->name ;
-        sourceName = traceInfo->sourceInst->name ;
-        if (sourceName == NULL) {
-            unsigned instid = mrt_InstanceIndex(traceInfo->sourceInst) ;
-            snprintf(sourceIdNum, sizeof(sourceIdNum), "%u", instid) ;
-            sourceName = sourceIdNum ;
-        }
+    while (mrtProcessOneEvent(&eventQueue)) {
+        // N.B. empty loop body
     }
-    
-    char const *targetName = traceInfo->targetInst->name ;
-    char targetIdNum[32] ;
-    if (targetName == NULL) {
-        unsigned instid = mrt_InstanceIndex(traceInfo->targetInst) ;
-        snprintf(targetIdNum, sizeof(targetIdNum), "%u", instid) ;
-        targetName = targetIdNum ;
-    }
-
-    switch (traceInfo->eventType) {
-    case mrtTransitionEvent: {
-        MRT_StateCode newState = traceInfo->info.transitionTrace.newState ;
-        char const *newStateName ;
-        if (newState == MRT_StateCode_IG) {
-            newStateName = "IG" ;
-        } else if (newState == MRT_StateCode_CH) {
-            newStateName = "CH" ;
-        } else {
-            newStateName = traceInfo->targetInst->classDesc->edb->stateNames[
-                traceInfo->info.transitionTrace.newState] ;
-        }
-
-        printf("%s: Transition: %s.%s - %s -> %s.%s: %s ==> %s\n",
-            mrtTimestamp(), sourceClassName, sourceName,
-            traceInfo->targetInst->classDesc->eventNames[traceInfo->eventNumber],
-            traceInfo->targetInst->classDesc->name, targetName,
-            traceInfo->targetInst->classDesc->edb->stateNames[
-                traceInfo->info.transitionTrace.currentState],
-            newStateName) ;
-    }
-        break ;
-
-    case mrtPolymorphicEvent: {
-        MRT_Relationship const *rel = traceInfo->targetInst->classDesc->pdb->
-                genDispatch[traceInfo->info.polyTrace.genNumber].relship ;
-        MRT_Class const *subclass ;
-        char const *subname = NULL ;
-        if (rel->relType == mrtRefGeneralization) {
-            subclass = rel->relInfo.refGeneralization.
-                subclasses[traceInfo->info.polyTrace.subcode].classDesc ;
-            subname = subclass->name ;
-        } else if (rel->relType == mrtUnionGeneralization) {
-            subclass = rel->relInfo.unionGeneralization.
-                subclasses[traceInfo->info.polyTrace.subcode] ;
-            subname = subclass->name ;
-        } else {
-            printf("%s: bad relationship type in polymorphic event, %d\n",
-                mrtTimestamp(), rel->relType) ;
-            break ;
-        }
-        printf("%s: Polymorphic: %s.%s - %s -> %s.%s: %s - %s -> %s\n",
-            mrtTimestamp(), sourceClassName, sourceName,
-            traceInfo->targetInst->classDesc->eventNames[traceInfo->eventNumber],
-            traceInfo->targetInst->classDesc->name, targetName,
-            traceInfo->targetInst->classDesc->pdb->genNames[
-                traceInfo->info.polyTrace.genNumber],
-            subclass->eventNames[traceInfo->info.polyTrace.mappedEvent],
-            subname) ;
-    }
-        break ;
-
-    case mrtCreationEvent:
-        printf("%s: Creation: %s.%s - %s -> %s ==> %s\n",
-            mrtTimestamp(), sourceClassName, sourceName,
-            traceInfo->targetInst->classDesc->eventNames[traceInfo->eventNumber],
-            traceInfo->info.creationTrace.targetClass->name,
-            targetName) ;
-        break ;
-
-    default:
-        printf("%s: Unknown trace event type, \"%u\"",
-                mrtTimestamp(), traceInfo->eventType) ;
-        break ;
-    }
+    mrtEndTransaction() ;
 }
-#   else  /* MRT_NO_NAMES is defined */
-static void
-mrtPrintTraceInfo(
-    MRT_TraceInfo const *traceInfo)
+static bool
+mrtRunThreadOfControl(void)
 {
-    switch (traceInfo->eventType) {
-    case mrtTransitionEvent:
-        printf("%s: Transition: %p - %u -> %p: %u ==> %u\n",
-                mrtTimestamp(), traceInfo->sourceInst, traceInfo->eventNumber,
-                traceInfo->targetInst,
-                traceInfo->info.transitionTrace.currentState,
-                traceInfo->info.transitionTrace.newState) ;
-        break ;
+    assert(mrtEventQueueEmpty(&eventQueue)) ;
 
-    case mrtPolymorphicEvent:
-        printf("%s: Polymorphic: %p - %u -> %p: %u - %u -> %d\n",
-                mrtTimestamp(), traceInfo->sourceInst, traceInfo->eventNumber,
-                traceInfo->targetInst,traceInfo->info.polyTrace.genNumber,
-                traceInfo->info.polyTrace.mappedEvent,
-                traceInfo->info.polyTrace.subcode) ;
-        break ;
-
-    case mrtCreationEvent:
-        printf("%s: Creation: %p - %u -> %p ==> %p\n",
-                mrtTimestamp(), traceInfo->sourceInst, traceInfo->eventNumber,
-                traceInfo->info.creationTrace.targetClass,
-                traceInfo->targetInst) ;
-        break ;
-
-    default:
-        printf("%s: Unknown trace event type, \"%u\"",
-                mrtTimestamp(), traceInfo->eventType) ;
-        break ;
+    bool rantoc = false ;
+    if (mrtProcessOneEvent(&tocEventQueue)) {
+        mrtFinishThreadOfControl() ;
+        rantoc = true ;
     }
+
+    return rantoc ;
 }
-#   endif /* MRT_NO_NAMES */
-#   endif /* MRT_NO_TRACE */
-#   ifndef MRT_NO_TRACE
-static char const *
-mrtTimestamp(void)
+static bool
+mrtProcessOneEvent(
+    MRT_EventQueue *queue)
 {
-    static char timestamp[128] ;
-
-    struct timeval now ;
-    if (gettimeofday(&now, NULL) != 0) {
-        return "unknown" ;
+#       ifndef MRT_ARM_ARCH_7M
+    while (mrtInvokeOneSyncFunction()) {
+        ; /* empty */
     }
+#       endif
 
-    struct tm *ltime ;
-    ltime = localtime(&now.tv_sec) ;
-    if (ltime == NULL) {
-        return strerror(errno) ;
-    }
-
-    int tlen = strftime(timestamp, sizeof(timestamp), "%FT%T", ltime) ;
-    if (tlen == 0) {
-        return strerror(errno) ;
-    }
-
-    int flen = snprintf(timestamp + tlen, sizeof(timestamp) - tlen,
-            ".%03u.%03u", (unsigned)(now.tv_usec / 1000),
-            (unsigned)(now.tv_usec % 1000)) ;
-    if (flen > (sizeof(timestamp) - tlen)) {
-        return "too big" ;
-    }
-
-    return timestamp ;
+    return mrtDispatchEventFromQueue(queue) ;
 }
-#   endif /* MRT_NO_TRACE */
 static MRT_Instance *
 mrtFindInstSlot(
     MRT_iab *iab)
@@ -795,7 +873,7 @@ mrtMarkRelationship(
         }
     }
 }
-void
+static void
 mrtEndTransaction(void)
 {
     MRT_Relationship const **rships = mrtTransaction.relationships ;
@@ -1428,47 +1506,6 @@ mrtFindUnionGenSubclassCode(
 
     mrtFatalError(mrtRelationshipLinkage) ;
 }
-static inline
-MRT_ecb *
-mrtEventQueueBegin(
-    MRT_EventQueue *queue)
-{
-    return queue->next ;
-}
-static inline
-MRT_ecb *
-mrtEventQueueEnd(
-    MRT_EventQueue *queue)
-{
-    return (MRT_ecb *)queue ;
-}
-static inline
-bool
-mrtEventQueueEmpty(
-    MRT_EventQueue *queue)
-{
-    return queue->next == (MRT_ecb *)queue ;
-}
-static inline
-void
-mrtEventQueueInsert(
-    MRT_ecb *item,
-    MRT_ecb *at)
-{
-    item->prev = at->prev ;
-    item->next = at ;
-    at->prev->next = item ;
-    at->prev = item ;
-}
-static inline
-void
-mrtEventQueueRemove(
-    MRT_ecb *item)
-{
-    item->prev->next = item->next ;
-    item->next->prev = item->prev ;
-    item->prev = item->next = NULL ; // <1>
-}
 static void
 mrtEventPoolInit(void)
 {
@@ -1682,35 +1719,37 @@ mrtExpiredEventService(
     mrtSysTimerUnmask() ;
 }
 static bool
-mrtDispatchOneEvent(void)
+mrtDispatchEventFromQueue(
+    MRT_EventQueue *queue)
 {
+    static MRT_ecb *ecb = NULL ;            // <1>
 
-    MRT_EventQueue *queue ;
-    if (mrtEventQueueEmpty(&eventQueue)) {
-        mrtEndTransaction() ; // <2>
-        queue = mrtEventQueueEmpty(&tocEventQueue) ? NULL : &tocEventQueue ;
-    } else {
-        queue = &eventQueue ;
+    if (ecb != NULL) {                      // <2>
+        mrtFreeEvent(ecb) ;
+        ecb = NULL ;
+            #ifdef MRT_ARM_ARCH_7M
+        __set_BASEPRI(0) ;
+            #endif /* MRT_ARM_ARCH_7M */
     }
 
-    bool dispatched ;
-    if (queue != NULL) {
-        MRT_ecb *ecb = queue->next ;
+    bool dispatched = false ;
+
+    if (!mrtEventQueueEmpty(queue)) {
+        ecb = queue->next ;
         mrtEventQueueRemove(ecb) ;
 
             #ifdef MRT_ARM_ARCH_7M
-        __set_BASEPRI(MRT_PENDSV_PRIORITY) ; // <1>
+        __set_BASEPRI(MRT_PENDSV_PRIORITY) ;// <3>
             #endif /* MRT_ARM_ARCH_7M */
-        mrtDispatchEvent(ecb) ;
+        mrtDispatchEvent(ecb) ;             // <4>
             #ifdef MRT_ARM_ARCH_7M
         __set_BASEPRI(0) ;
             #endif /* MRT_ARM_ARCH_7M */
 
-        mrtFreeEvent(ecb) ; // Return the ECB to the pool.
+        mrtFreeEvent(ecb) ;
+        ecb = NULL ;
 
         dispatched = true ;
-    } else {
-        dispatched = false ;
     }
 
     return dispatched ;
@@ -2116,7 +2155,7 @@ mrtDefaultFatalErrorHandler(
 {
     vfprintf(stderr, errMsgs[errNum], ap) ;
 }
-static void noreturn
+static noreturn void
 mrtFatalError(
     MRT_ErrorCode errNum,
     ...)
@@ -2278,13 +2317,23 @@ void
 mrt_EventLoop(void)
 {
     mrtExitEventLoop = false ;
+
+    mrtFinishThreadOfControl() ;                // <1>
+    if (mrtExitEventLoop) {
+        return ;
+    }
+
     for (;;) {
-        if (!mrt_ProcessOneEvent()) {
-            if (mrtExitEventLoop) {
-                break ;
-            }
-            mrtWait() ;
+        bool didtoc = mrtRunThreadOfControl() ; // <2>
+        if (!didtoc) {
+            mrtWait() ;                         // <3>
+        } else if (mrtExitEventLoop) {          // <4>
+            break ;
         }
+        /*
+         * Else we ran a thread of control and weren't requested to exit
+         * the event loop.
+         */
     }
 }
 bool
@@ -2295,15 +2344,27 @@ mrt_SyncToEventLoop(void)
     return exitControl ;
 }
 bool
-mrt_ProcessOneEvent(void)
+mrt_DispatchThreadOfControl(void)
 {
-#       ifndef MRT_ARM_ARCH_7M
-    while (mrtInvokeOneSyncFunction()) {
-        ; /* empty */
+    mrtFinishThreadOfControl() ;
+    if (mrtEventQueueEmpty(&tocEventQueue)) {
+        mrtWait() ;
     }
-#       endif
+    return mrtRunThreadOfControl() ;
+}
+bool
+mrt_DispatchSingleEvent(void)
+{
+    bool didOne = mrtProcessOneEvent(&eventQueue) ;
 
-    return mrtDispatchOneEvent() ;
+    if (!didOne) {
+        didOne = mrtProcessOneEvent(&tocEventQueue) ;
+    }
+    if (mrtEventQueueEmpty(&eventQueue)) {
+        mrtEndTransaction() ;
+    }
+
+    return didOne ;
 }
 MRT_iab *
 mrt_GetStorageProperties(
@@ -2492,7 +2553,7 @@ mrt_InstSetAddInstance(
     MRT_Instance *instref = instance ;
 
     assert(instref != NULL) ;
-    assert(instref->classDesc = set->classDesc) ;
+    assert(instref->classDesc == set->classDesc) ;
     if (instref->classDesc != set->classDesc) { // <1>
         return ;
     }
@@ -2509,7 +2570,7 @@ mrt_InstSetRemoveInstance(
     MRT_Instance *instref = instance ;
 
     assert(instref != NULL) ;
-    assert(instref->classDesc = set->classDesc) ;
+    assert(instref->classDesc == set->classDesc) ;
     if (instref->classDesc != set->classDesc) {
         return ;
     }
@@ -2526,7 +2587,7 @@ mrt_InstSetMember(
     MRT_Instance *instref = instance ;
 
     assert(instref != NULL) ;
-    assert(instref->classDesc = set->classDesc) ;
+    assert(instref->classDesc == set->classDesc) ;
 
     if (instref->classDesc != set->classDesc) {
         return false ;
@@ -3775,7 +3836,7 @@ mrt_SetFatalErrorHandler(
     return prevHandler ;
 }
 bool
-mrt_InstanceAvailable(
+mrt_CanCreateInstance(
     MRT_Class const *classDesc)
 {
     assert(classDesc != NULL) ;
@@ -3786,7 +3847,7 @@ mrt_InstanceAvailable(
     return mrtFindInstSlot(classDesc->iab) != NULL ;
 }
 bool
-mrt_EventAvailable(void)
+mrt_CanSignalEvent(void)
 {
     return !mrtEventQueueEmpty(&freeEventQueue) ;
 }

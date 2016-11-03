@@ -334,9 +334,9 @@ The implementation of `mrt_Initialize` is target platform specific.
 So we postpone showing its code until later when we discuss how the
 run-time is tailored to the supported target computing platforms.
 
-=== Event Loop
+=== Event Loop [[event-loop]]
 
-The figure below shows a diagram of
+The figure below shows a simplified diagram of
 the flow of control in the event loop.
 
 image::main-loop.pdf[title="Micca Run Time Event Loop"]
@@ -356,35 +356,58 @@ is processor architecture dependent.
 * Only one event is dispatched after synchronizing with interrupts.
 Because we deal with all the interrupts before dispatching a single event,
 interrupt synchronization has an effective higher priority than event dispatch.
-* After dispatching one event, we check if any activity has requested
-that the event loop terminate.
+* If the event queue becomes empty,
+we check if any activity has requested that the event loop terminate.
 If so, then flow continues to the remainder of the `main` program.
-* If there is no work to be done, _i.e._ both the sync queue and the event
-queue are empty, then the run-time determines if there has been a
-request to exit the event loop.
-If so, the the event loop is terminated and control returns to the
-caller of the `mrt_EventLoop` function.
 * If the event loop is not exited, the run-time
 waits until there is further work to be done.
 Note that any further work must arise from interrupt service and its
 synchronization to the background.
 Waiting is platform specific, but usually, for embedded systems,
-involves going into a low power mode.
+involves going into a sleep or low power mode.
 For the POSIX version of the run-time, the `pselect(2)` system call is used
 to suspend the process awaiting either a signal or a change in status
 of a file descriptor.
+
+As we shall see below,
+the above description of the event loop flow is somewhat simplified.
+There is one additional concept for which we must account.
+Events that originate outside of a state model activity
+start a new _thread of control_.
+This includes events that originate from a domain operation,
+a portal operation or are delayed events.
+Delayed events (even if self directed) are considered to be delivered
+by the run-time and outside of a state activity.
+
+The thread of control terminates when the event that started it and
+all the other events that arose from the starting event have been dispatched.
+The event that starts a thread of control causes transitions that
+run other state activities.
+Those activities may signal other events, and so on.
+When the entire set of events is dispatched, the thread of control ends.
+When a thread of control ends,
+the referential integrity of the data is check.
+There is a close association between a transaction on the domain
+data and the bounds of the thread of control.
+At the boundary of threads of control,
+run-time evaluates requests to exit the event loop.
+The event loop will not normally be exited until the end of
+any ongoing thread of control
+
+To keep the event dispatches that starts a thread of control
+separate from those that run during a thread of control,
+the run-time keeps two queues.
 
 *****
 (((micca,Run Time Function,mrt_EventLoop)))
 [source,c]
 ----
 <<mrt external interfaces>>=
-extern void
-mrt_EventLoop(void) ;
+extern void mrt_EventLoop(void) ;
 ----
 
 The `mrt_EventLoop` function enters the micca run-time event loop
-and dispatches event to cause the system to run.
+and dispatches events to cause the system to run.
 Control remains in the event loop unless specifically requested to
 exit via the `mrt_SyncToEventLoop` function.
 
@@ -409,21 +432,39 @@ void
 mrt_EventLoop(void)
 {
     mrtExitEventLoop = false ;
+
+    mrtFinishThreadOfControl() ;                // <1>
+    if (mrtExitEventLoop) {
+        return ;
+    }
+
     for (;;) {
-        if (!mrt_ProcessOneEvent()) {
-            if (mrtExitEventLoop) {
-                break ;
-            }
-            mrtWait() ;
+        bool didtoc = mrtRunThreadOfControl() ; // <2>
+        if (!didtoc) {
+            mrtWait() ;                         // <3>
+        } else if (mrtExitEventLoop) {          // <4>
+            break ;
         }
+        /*
+         * Else we ran a thread of control and weren't requested to exit
+         * the event loop.
+         */
     }
 }
 ----
+<1> We must finish up any ongoing thread of control.
+This can happen since we provide an interface to allow event by event
+dispatch.
+Events can be dispatched singly and then the event loop can be entered
+which would leave us in the middle of a thread of control.
+<2> Run one thread of control, recording whether there was any work done.
+<3> If no thread of control actually ran, then wait for the next
+synchronization.
+<4> Check if we have been requested to exit the event loop.
 
 As we see,
-the flow of control loops,
-processing one event at a time as long as it has not been requested to exit the
-loop.
+the flow of control loops, processing one thread of control at a time as long
+as it has not been requested to exit the loop.
 
 Testing and other considerations mean that we may want to exit the
 event loop to gain control of the program.
@@ -438,6 +479,22 @@ static bool mrtExitEventLoop ;
 
 Rather than expose the variable directly,
 we provide a function to set it.
+
+*****
+[source,c]
+----
+<<mrt external interfaces>>=
+extern bool
+mrt_SyncToEventLoop() ;
+----
+
+The `mrt_SyncToEventLoop` function will cause the event loop to exit
+after completing any ongoing thread of control.
+Note the event loop is exited only if the system is about to wait,
+_i.e._ we exit the event loop rather than wait for more work to come along.
+The previous value of the event loop exit status is returned.
+*****
+
 One use case for this function is in test code where the main
 test application will enter the event loop and some state activity
 will execute `mrt_SyncToEventLoop()` to return control back to the test
@@ -449,21 +506,6 @@ gracefully bring down the system or force the system to reset.
 The exact details are system specific,
 but this provides the means to gain control of the run-time execution
 for exceptional situations.
-
-*****
-[source,c]
-----
-<<mrt external interfaces>>=
-extern bool
-mrt_SyncToEventLoop() ;
-----
-
-The `mrt_SyncToEventLoop` function will cause the event loop to exit
-after completing any ongoing processing.
-Note the event loop is exited only if the system is about to wait,
-_i.e._ we exit the event loop rather than wait for more work to come along.
-The previous value of the exit status is returned.
-*****
 
 (((micca,Run Time Function,mrt_SyncToEventLoop)))
 [source,c]
@@ -479,33 +521,79 @@ mrt_SyncToEventLoop(void)
 }
 ----
 
-=== Process a Single Event
+Again,
+testing and some other situations are most easily handled
+if we can dispatch all the events in a single thread of control,
+waiting for the starting event to come along.
 
-An external interface is also provided to process a single event.
+*****
+(((micca,Run Time Function,mrt_DispatchThreadOfControl)))
+[source,c]
+----
+<<mrt external interfaces>>=
+extern bool mrt_DispatchThreadOfControl(void) ;
+----
+
+The `mrt_DispatchThreadOfControl` function runs a single thread of
+control and then returns to the caller.
+Any ongoing thread of control is finished.
+If there are no queued events that would start a thread of control,
+then the function waits until there is one and then
+runs the thread of control that results.
+Since this function will wait for a thread of control event to arrive,
+it can be useful to wait for a delayed event or an event
+that arises from the external environment.
+It returns a boolean to indicate whether a thread of control actually ran.
+It is possible that a foreground / background synchronization could
+occur that wakes up the processor but
+did not start a thread of control.
+In that case the function would return `false`.
+
+[IMPORTANT]
+The `mrt_DispatchThreadOfControl` function must not be called recursively,
+_i.e._ `mrt_DispatchThreadOfControl` is not to be invoked as part of an
+activity.
+The system must remain in the event loop until properly exited.
+Only after the event loop has been exited may it be re-entered.
+*****
+
+.Implementation
+[source,c]
+----
+<<mrt external functions>>=
+bool
+mrt_DispatchThreadOfControl(void)
+{
+    mrtFinishThreadOfControl() ;
+    if (mrtEventQueueEmpty(&tocEventQueue)) {
+        mrtWait() ;
+    }
+    return mrtRunThreadOfControl() ;
+}
+----
 
 *****
 [source,c]
 ----
 <<mrt external interfaces>>=
-extern bool
-mrt_ProcessOneEvent(void) ;
+extern bool mrt_DispatchSingleEvent(void) ;
 ----
 
-The `mrt_ProcessOneEvent` function may be invoked to process a single
+The `mrt_DispatchSingleEvent` function may be invoked to process a single
 event and then return to the caller.
-The return value for `mrt_ProcessOneEvent` indicates if an event
+The return value for `mrt_DispatchSingleEvent` indicates if an event
 was actually dispatched.
 A return value of `false` indicates that the event queue is empty.
 
 [IMPORTANT]
-The function `mrt_ProcessOneEvent` is not to be invoked while in the
-event loop, _i.e._ `mrt_ProcessOneEvent` is not to be invoked by
+The function `mrt_DispatchSingleEvent` is not to be invoked while in the
+event loop, _i.e._ `mrt_DispatchSingleEvent` is not to be invoked by
 domain activities.
 It is only valid to invoke this function if the program is not currently
 running under the control of the event loop.
 *****
 
-This function is used by the event loop but can also be invoked on it own.
+This function can be used to control the dispatch of each event.
 This is _not_ the recommended mechanism of running a `micca` based
 application, but sometimes it is necessary.
 Again,
@@ -522,19 +610,81 @@ a transition period is unavoidable.
 We provide the ability to micro-manage the event dispatch with the full
 realization that the capablity will be abused by some projects.
 
-(((micca,Run Time Function,mtr_ProcessOneEvent)))
-[source,c]
 .Implementation
+[source,c]
 ----
 <<mrt external functions>>=
 bool
-mrt_ProcessOneEvent(void)
+mrt_DispatchSingleEvent(void)
+{
+    bool didOne = mrtProcessOneEvent(&eventQueue) ;
+
+    if (!didOne) {
+        didOne = mrtProcessOneEvent(&tocEventQueue) ;
+    }
+    if (mrtEventQueueEmpty(&eventQueue)) {
+        mrtEndTransaction() ;
+    }
+
+    return didOne ;
+}
+----
+
+=== Processing a Thread of Control
+
+[source,c]
+----
+<<mrt static functions>>=
+static void
+mrtFinishThreadOfControl(void)
+{
+    while (mrtProcessOneEvent(&eventQueue)) {
+        // N.B. empty loop body
+    }
+    mrtEndTransaction() ;
+}
+----
+
+[source,c]
+----
+<<mrt static functions>>=
+static bool
+mrtRunThreadOfControl(void)
+{
+    assert(mrtEventQueueEmpty(&eventQueue)) ;
+
+    bool rantoc = false ;
+    if (mrtProcessOneEvent(&tocEventQueue)) {
+        mrtFinishThreadOfControl() ;
+        rantoc = true ;
+    }
+
+    return rantoc ;
+}
+----
+
+=== Processing a Single Event
+
+[source,c]
+----
+<<mrt forward references>>=
+static bool mrtProcessOneEvent(MRT_EventQueue *queue) ;
+----
+
+(((micca,Run Time Function,mtrProcessOneEvent)))
+[source,c]
+.Implementation
+----
+<<mrt static functions>>=
+static bool
+mrtProcessOneEvent(
+    MRT_EventQueue *queue)
 {
 #       ifndef MRT_ARM_ARCH_7M
     <<execute sync functions>>
 #       endif
 
-    return mrtDispatchOneEvent() ;
+    return mrtDispatchEventFromQueue(queue) ;
 }
 ----
 
@@ -543,7 +693,7 @@ functions are executed is dependent upon the processor architecture.
 We will discuss this later, but for now,
 it is only important to remember that all requests for background
 synchronization are executed before dispatching at most one event.
-The code for `mrtDispatchOneEvent` is shown later when we discuss event
+The code for `mrtDispatchEventFromQueue` is shown later when we discuss event
 dispatch.
 
 == Managing Data
@@ -3050,8 +3200,11 @@ of the stored pointers.
 (((micca,Run Time Function,mrtEndTransaction)))
 [source,c]
 ----
+<<mrt forward references>>=
+static void mrtEndTransaction(void) ;
+
 <<mrt static functions>>=
-void
+static void
 mrtEndTransaction(void)
 {
     MRT_Relationship const **rships = mrtTransaction.relationships ;
@@ -5230,7 +5383,7 @@ something very much like it many times before.
 (((micca,Run Time Function,mrtEventQueueBegin)))
 [source,c]
 ----
-<<mrt static functions>>=
+<<mrt implementation static inlines>>=
 static inline
 MRT_ecb *
 mrtEventQueueBegin(
@@ -5243,7 +5396,7 @@ mrtEventQueueBegin(
 (((micca,Run Time Function,mrtEventQueueEnd)))
 [source,c]
 ----
-<<mrt static functions>>=
+<<mrt implementation static inlines>>=
 static inline
 MRT_ecb *
 mrtEventQueueEnd(
@@ -5256,7 +5409,7 @@ mrtEventQueueEnd(
 (((micca,Run Time Function,mrtEventQueueEmpty)))
 [source,c]
 ----
-<<mrt static functions>>=
+<<mrt implementation static inlines>>=
 static inline
 bool
 mrtEventQueueEmpty(
@@ -5269,7 +5422,7 @@ mrtEventQueueEmpty(
 (((micca,Run Time Function,mrtEventQueueInsert)))
 [source,c]
 ----
-<<mrt static functions>>=
+<<mrt implementation static inlines>>=
 static inline
 void
 mrtEventQueueInsert(
@@ -5286,7 +5439,7 @@ mrtEventQueueInsert(
 (((micca,Run Time Function,mrtEventQueueRemove)))
 [source,c]
 ----
-<<mrt static functions>>=
+<<mrt implementation static inlines>>=
 static inline
 void
 mrtEventQueueRemove(
@@ -6490,56 +6643,77 @@ When both queues are empty,
 there is no work to be done and we must wait for subsequent
 interactions of the system with the outside world.
 
-==== Dispatching One Event
+==== Dispatching An Event From a Queue
 
 When the run-time needs to dispatch an event it invokes the
-`mrtDispatchOneEvent` function.
+`mrtDispatchEventFromQueue` function.
 This function deals with the two event queues and determines if we
 are at the end of a thread of control.
 
-(((micca,Run Time Function,mrtDispatchOneEvent)))
+(((micca,Run Time Function,mrtDispatchEventFromQueue)))
 [source,c]
 ----
+<<mrt forward references>>=
+static bool mrtDispatchEventFromQueue(MRT_EventQueue *queue) ;
+
 <<mrt static functions>>=
 static bool
-mrtDispatchOneEvent(void)
+mrtDispatchEventFromQueue(
+    MRT_EventQueue *queue)
 {
+    static MRT_ecb *ecb = NULL ;            // <1>
 
-    MRT_EventQueue *queue ;
-    if (mrtEventQueueEmpty(&eventQueue)) {
-        mrtEndTransaction() ; // <2>
-        queue = mrtEventQueueEmpty(&tocEventQueue) ? NULL : &tocEventQueue ;
-    } else {
-        queue = &eventQueue ;
+    if (ecb != NULL) {                      // <2>
+        mrtFreeEvent(ecb) ;
+        ecb = NULL ;
+            #ifdef MRT_ARM_ARCH_7M
+        __set_BASEPRI(0) ;
+            #endif /* MRT_ARM_ARCH_7M */
     }
 
-    bool dispatched ;
-    if (queue != NULL) {
-        MRT_ecb *ecb = queue->next ;
+    bool dispatched = false ;
+
+    if (!mrtEventQueueEmpty(queue)) {
+        ecb = queue->next ;
         mrtEventQueueRemove(ecb) ;
 
             #ifdef MRT_ARM_ARCH_7M
-        __set_BASEPRI(MRT_PENDSV_PRIORITY) ; // <1>
+        __set_BASEPRI(MRT_PENDSV_PRIORITY) ;// <3>
             #endif /* MRT_ARM_ARCH_7M */
-        mrtDispatchEvent(ecb) ;
+        mrtDispatchEvent(ecb) ;             // <4>
             #ifdef MRT_ARM_ARCH_7M
         __set_BASEPRI(0) ;
             #endif /* MRT_ARM_ARCH_7M */
 
-        mrtFreeEvent(ecb) ; // Return the ECB to the pool.
+        mrtFreeEvent(ecb) ;
+        ecb = NULL ;
 
         dispatched = true ;
-    } else {
-        dispatched = false ;
     }
 
     return dispatched ;
 }
 ----
-<1> This is part of the exception processing that is used in the ARM 7M
+<1> There is a tricky complication in dispatching an event.
+It is possible for the event dispatch to cause a fatal error.
+It is also possible to override the fatal error handler to deal
+with system specific issues.
+The overriden fatal error handler can `longjmp` out of the run-time code.
+Indeed this is the preferred way for testing code.
+However, if this happens,
+we could loose the ECB that caused the fatal error.
+So, while we are dispatching the event,
+the ECB is stored in a static variable and that static variable
+is used to indicate the state of completion of the event dispatch.
+<2> If the ECB is still around, we presume that we did _not_ complete
+the function after the invocation of `mrtDispatchEvent`.
+In that case we free our dangling ECB pointer.
+All event dispatch comes through this function,
+so a single pointer suffices to save the state of the last dispatch.
+<3> This is part of the exception processing that is used in the ARM 7M
 platform and is explained below.
-<2> Here we discover that the thread of control is over and we examine
-the data model to insure referential integrity.
+<4> Invoking `mrtDispatchEvent` causes transitions in the state maching
+and can potentially generate a fatal system error.
 
 There are two distinct types of events: transitioning events and
 polymorphic events.

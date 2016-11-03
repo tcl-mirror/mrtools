@@ -12,9 +12,6 @@
 
 LDFLAGS = -g
 CFLAGS	= -std=c11 -g -O0 -Wall\
-	-Wno-unused-variable\
-	-Wno-unused-function\
-	-Wno-unused-but-set-variable\
 	$(NULL)
 CPPFLAGS =\
 	 -D_POSIX_C_SOURCE=200112L\

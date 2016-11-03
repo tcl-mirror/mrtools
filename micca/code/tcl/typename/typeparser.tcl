@@ -7802,6 +7802,18 @@ oo::class create typeparser {
     
     method sym_type_specifier {} {
         # /
+        #     (int8_t)
+        #     (int16_t)
+        #     (int32_t)
+        #     (int64_t)
+        #     (int_least8_t)
+        #     (int_least16_t)
+        #     (int_least32_t)
+        #     (int_least64_t)
+        #     (int_fast8_t)
+        #     (int_fast16_t)
+        #     (int_fast32_t)
+        #     (int_fast64_t)
         #     (void)
         #     (char)
         #     (short)
@@ -7823,22 +7835,10 @@ oo::class create typeparser {
         #     (uint16_t)
         #     (uint32_t)
         #     (uint64_t)
-        #     (int8_t)
-        #     (int16_t)
-        #     (int32_t)
-        #     (int64_t)
-        #     (int_least8_t)
-        #     (int_least16_t)
-        #     (int_least32_t)
-        #     (int_least64_t)
         #     (uint_least8_t)
         #     (uint_least16_t)
         #     (uint_least32_t)
         #     (uint_least64_t)
-        #     (int_fast8_t)
-        #     (int_fast16_t)
-        #     (int_fast32_t)
-        #     (int_fast64_t)
         #     (uint_fast8_t)
         #     (uint_fast16_t)
         #     (uint_fast32_t)
@@ -7859,6 +7859,18 @@ oo::class create typeparser {
     
     method choice_1435 {} {
         # /
+        #     (int8_t)
+        #     (int16_t)
+        #     (int32_t)
+        #     (int64_t)
+        #     (int_least8_t)
+        #     (int_least16_t)
+        #     (int_least32_t)
+        #     (int_least64_t)
+        #     (int_fast8_t)
+        #     (int_fast16_t)
+        #     (int_fast32_t)
+        #     (int_fast64_t)
         #     (void)
         #     (char)
         #     (short)
@@ -7880,22 +7892,10 @@ oo::class create typeparser {
         #     (uint16_t)
         #     (uint32_t)
         #     (uint64_t)
-        #     (int8_t)
-        #     (int16_t)
-        #     (int32_t)
-        #     (int64_t)
-        #     (int_least8_t)
-        #     (int_least16_t)
-        #     (int_least32_t)
-        #     (int_least64_t)
         #     (uint_least8_t)
         #     (uint_least16_t)
         #     (uint_least32_t)
         #     (uint_least64_t)
-        #     (int_fast8_t)
-        #     (int_fast16_t)
-        #     (int_fast32_t)
-        #     (int_fast64_t)
         #     (uint_fast8_t)
         #     (uint_fast16_t)
         #     (uint_fast32_t)
@@ -7909,6 +7909,30 @@ oo::class create typeparser {
         #     (typedef_name)
     
         my si:value_state_push
+        my sym_int8_t
+        my si:valuevalue_branch
+        my sym_int16_t
+        my si:valuevalue_branch
+        my sym_int32_t
+        my si:valuevalue_branch
+        my sym_int64_t
+        my si:valuevalue_branch
+        my sym_int_least8_t
+        my si:valuevalue_branch
+        my sym_int_least16_t
+        my si:valuevalue_branch
+        my sym_int_least32_t
+        my si:valuevalue_branch
+        my sym_int_least64_t
+        my si:valuevalue_branch
+        my sym_int_fast8_t
+        my si:valuevalue_branch
+        my sym_int_fast16_t
+        my si:valuevalue_branch
+        my sym_int_fast32_t
+        my si:valuevalue_branch
+        my sym_int_fast64_t
+        my si:valuevalue_branch
         my sym_void
         my si:valuevalue_branch
         my sym_char
@@ -7951,22 +7975,6 @@ oo::class create typeparser {
         my si:valuevalue_branch
         my sym_uint64_t
         my si:valuevalue_branch
-        my sym_int8_t
-        my si:valuevalue_branch
-        my sym_int16_t
-        my si:valuevalue_branch
-        my sym_int32_t
-        my si:valuevalue_branch
-        my sym_int64_t
-        my si:valuevalue_branch
-        my sym_int_least8_t
-        my si:valuevalue_branch
-        my sym_int_least16_t
-        my si:valuevalue_branch
-        my sym_int_least32_t
-        my si:valuevalue_branch
-        my sym_int_least64_t
-        my si:valuevalue_branch
         my sym_uint_least8_t
         my si:valuevalue_branch
         my sym_uint_least16_t
@@ -7974,14 +7982,6 @@ oo::class create typeparser {
         my sym_uint_least32_t
         my si:valuevalue_branch
         my sym_uint_least64_t
-        my si:valuevalue_branch
-        my sym_int_fast8_t
-        my si:valuevalue_branch
-        my sym_int_fast16_t
-        my si:valuevalue_branch
-        my sym_int_fast32_t
-        my si:valuevalue_branch
-        my sym_int_fast64_t
         my si:valuevalue_branch
         my sym_uint_fast8_t
         my si:valuevalue_branch
