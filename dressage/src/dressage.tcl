@@ -39,17 +39,19 @@
 
 set iswrapped [expr {[lindex [file system [info script]] 0] ne "native"}]
 if {$iswrapped} {
-    set top [file join $::starkit::topdir lib application]
+    set libdir [file join $::starkit::topdir lib]
+    set appdir [file join $libdir application]
+    set libs [list]
     if {$::tcl_platform(os) eq "Linux"} {
-        set libs [glob -nocomplain\
-            -directory [file join $::starkit::topdir lib]\
-            P-linux-*]
-        foreach lib $libs {
-            lappend ::auto_path $lib
-        }
+        set libs [glob -nocomplain -directory $libdir P-linux*]
+    } elseif {$::tcl_platform(os) eq "Darwin"} {
+        set libs [glob -nocomplain -directory $libdir P-macosx*]
+    }
+    foreach lib $libs {
+        lappend ::auto_path $lib
     }
 } else {
-    set top [file dirname [info script]]
+    set appdir [file dirname [info script]]
 }
 
 package require Tcl 8.6
@@ -69,7 +71,7 @@ namespace eval ::dressage {
     namespace import ::ral::*
     namespace import ::ralutil::*
 
-    variable revision 1.0
+    variable revision 1.0.1
     variable title "Dressage - $revision"
     variable debugLevel warn
     variable browseDir [pwd]
