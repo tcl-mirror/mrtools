@@ -2,7 +2,7 @@
 # -- Tcl Module
 
 # @@ Meta Begin
-# Package bridle 1.0.1
+# Package bridle 1.0.2
 # Meta description This package suppliments the harness package by
 # Meta description providing a way to synchronize to stub output from a
 # Meta description tack generated test harness.
@@ -32,7 +32,7 @@ package require ralutil
 
 # ACTIVESTATE TEAPOT-PKG BEGIN DECLARE
 
-package provide bridle 1.0.1
+package provide bridle 1.0.2
 
 # ACTIVESTATE TEAPOT-PKG END DECLARE
 # ACTIVESTATE TEAPOT-PKG END TM
@@ -92,7 +92,7 @@ namespace eval ::bridle {
 
     logger::initNamespace [namespace current]
 
-    variable version 1.0.1
+    variable version 1.0.2
 
     ::ralutil::sysIdsInit
 }
@@ -150,8 +150,19 @@ namespace eval ::bridle {
         log::debug "-pycca option = \"$pycca\""
         log::debug "-timeout option = \"$timeout\""
     
-        eventTrace setTracePlatform [expr {$::tcl_platform(platform) eq "windows" ?\
-                "PEI" : "ELF"}]
+        switch -exact -- $::tcl_platform(os) {
+            Linux {
+                set maptype ELF
+            }
+            Windows -
+            Darwin {
+                set maptype PEI
+            }
+            default {
+                error "unsupported os, \"$::tcl_platform(os)\""
+            }
+        }
+        eventTrace setTracePlatform $maptype
         eventTrace traceInit $map $pycca
     
         namespace import ::ral::*
