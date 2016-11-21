@@ -10367,42 +10367,106 @@ With I/O and disk storage, testing and tracing logic is often much easier.
 It is also perfectly reasonable to implement an application using `micca` and
 targeting a POSIX platform.
 
-=== POSIX Include Files
-
-We will need a number of POSIX specific include files.
-
-[source,c]
-----
-<<posix includes>>=
-#include <signal.h>
-#include <errno.h>
-#include <sys/select.h>
-#include <sys/time.h>
-#include <time.h>
-----
-
 === POSIX Critical Sections
 
 We start with a discussion of how to implement a critical section
 in POSIX.
 In POSIX,
-the `signal` is the means of asynchronous execution.
+a _signal_ is the means provided for asynchronous execution.
+Signals function in much the same way as interrupts do on a micro-controller.
+Signals can interrupt the running process and then return to it after
+they complete.
 There are times when we must insure that execution is _not_
 interrupted by asynchronous signal execution.
 The functions in this section accomplish that.
 
-The technique here is to maintain a signal mask of all the signals
+The technique used is to maintain a signal mask of all the signals
 that are under control of the run-time.
-This signal mask can then be used to control signal execution as necessary.
-Note that an application can call low level signal handling primitives
-and manage subsets of signals outside of the run-time.
-This is definitely discouraged.
 
 [source,c]
 ----
 <<posix static data>>=
 static sigset_t mrtSigMask ;
 ----
+
+This signal mask can then be used to control signal execution as necessary.
+Note that an application can call low level signal handling primitives
+and manage subsets of signals outside of the run-time.
+This is definitely discouraged as it is likely to introduce race
+conditions in the run-time.
+The proper behavior of the run-time depends upon it having knowledge
+of the signals that are used by the application.
+Many programs just use the default behavior for a signal, _e.g._
+exiting the program on `SIGHUP`.
+The run-time need not know about such default behavior, especially
+if the behavior terminates the process.
+
+To keep the run-time informed as to the signals an application uses,
+they can register a signal function that will be
+called when the signal is received.
+
+(((micca,Run Time Data,MRT_SignalFunc)))
+
+*****
+[source,c]
+----
+<<posix external interfaces>>=
+typedef void (*MRT_SignalFunc)(int) ;
+
+extern void
+mrt_RegisterSignal(
+    int sigNum,
+    MRT_SignalFunc func) ;
+----
+
+`sigNum`::
+    The number of the signal being registered.
+`func`::
+    A pointer to the function that is to be executed when the signal happens.
+
+The function `mrt_RegisterSignal` registers the `func` function to
+be called when `sigNum` is signaled to the process.
+If `func` is `NULL`, then the signal's behavior is reset
+to its default behavior.
+*****
+
+The implementation of `mrt_RegisterSignal` accounts for both registering
+the signal action with the operating system and maintaining our
+signal mask that is used in foreground / background synchronization.
+
+[source,c]
+.Implementation
+----
+<<posix external functions>>=
+void
+mrt_RegisterSignal(
+    int sigNum,
+    MRT_SignalFunc func)
+{
+    assert(sigNum > 0) ;
+
+    struct sigaction action ;
+    if (func) {
+        action.sa_handler = func ;
+        sigaddset(&mrtSigMask, sigNum) ;
+    } else {
+        action.sa_handler = SIG_DFL ;
+        sigdelset(&mrtSigMask, sigNum) ;
+    }
+    sigfillset(&action.sa_mask) ;
+    action.sa_flags = 0 ;
+
+    int sigresult = sigaction(sigNum, &action, NULL) ;
+    if (sigresult != 0) {
+        mrtFatalError(mrtSignalOpFailed, strerror(errno)) ;
+    }
+}
+----
+
+We set up signal handlers to run uninterrupted by other signals.
+This is accomplished by filling the `sa_mask` member of the
+`sigaction` structure.
+This is simplifies keeping track of what is going on.
 
 It is necessary to initialize our managed signal mask to be empty.
 
@@ -10500,6 +10564,10 @@ mrtTicksToMsec(
 }
 ----
 
+For the POSIX run-time,
+masking the timer used for delayed events means that we must
+block `SIGALRM`.
+
 [source,c]
 ----
 <<posix static functions>>=
@@ -10517,6 +10585,8 @@ mrtSysTimerMask(void)
     }
 }
 ----
+
+The corresponding unmasking operation follows the same pattern.
 
 [source,c]
 ----
@@ -10610,8 +10680,9 @@ mrtSysTimerStop(void)
 Stopping the timer must make sure that SIGALRM
 does not expire during the process of getting things stopped.
 
-Since the timing services use SIGALRM, the signal registration function
-is used to insure that SIGALRM is serviced.
+We need a function to execute when `SIGALRM` goes off.
+It must service the delayed event queue and then restart the
+timer, if necessary.
 
 [source,c]
 ----
@@ -10627,6 +10698,8 @@ mrtSysTimerExpire(
 }
 ----
 
+Since the timing services use `SIGALRM`, the signal registration function
+is used to insure that `SIGALRM` is serviced.
 
 [source,c]
 ----
@@ -10682,60 +10755,6 @@ mrt_TrySyncRequest(
 }
 ----
 
-Applications can register a signal function that will be
-called ultimately be called after the signal triggers.
-
-(((micca,Run Time Data,MRT_SignalFunc)))
-[source,c]
-----
-<<posix external interfaces>>=
-typedef void (*MRT_SignalFunc)(int) ;
-
-extern void
-mrt_RegisterSignal(
-    int sigNum,
-    MRT_SignalFunc func) ;
-----
-
-The arguments are simply, `sigNum`, the number of the signal
-being registered and `func`, a pointer to a sync function that will
-be called.
-If `func` is `NULL`, then the signal's behavior is reset
-to its default behavior.
-
-[source,c]
-----
-<<posix external functions>>=
-void
-mrt_RegisterSignal(
-    int sigNum,
-    MRT_SignalFunc func)
-{
-    assert(sigNum > 0) ;
-
-    struct sigaction action ;
-    if (func) {
-        action.sa_handler = func ;
-        sigaddset(&mrtSigMask, sigNum) ;
-    } else {
-        action.sa_handler = SIG_DFL ;
-        sigdelset(&mrtSigMask, sigNum) ;
-    }
-    sigfillset(&action.sa_mask) ;
-    action.sa_flags = 0 ;
-
-    int sigresult = sigaction(sigNum, &action, NULL) ;
-    if (sigresult != 0) {
-        mrtFatalError(mrtSignalOpFailed, strerror(errno)) ;
-    }
-}
-----
-
-We set up signal handlers to run uninterrupted by other signals.
-This is accomplished by filling the `sa_mask` member of the
-`sigaction` structure.
-This is simplifies keeping track of what is going on.
-
 === POSIX I/O Interface
 
 On POSIX platforms,
@@ -10745,7 +10764,7 @@ process, receiving a signal and servicing a I/O file
 descriptor.footnote:[ There are other ways to integrate signals and I/O in
 POSIX systems.  The use of a `pselect` based approach is a design decision.]
 On bare metal systems,
-I/O is frequently accomplished on an `ad hoc` basis
+I/O is frequently accomplished on an _ad hoc_ basis
 and the single mechanism of the sync queue is usually sufficient.
 However, POSIX makes a distinction between signals and I/O operations on
 file descriptors and an interface needs to be provided to deal with
@@ -10771,6 +10790,7 @@ The run-time provide two functions for I/O.
 One registers the callbacks for a file descriptor and the other removes 
 a file descriptor from consideration.
 
+*****
 [source,c]
 ----
 <<posix external interfaces>>=
@@ -10799,9 +10819,11 @@ mrt_RegisterFDService(
     condition or `NULL` if no callback is registered.
     In practice, exception conditions are used only for reading
     OOB (out of bands) data on a TCP socket.
+*****
 
 The corresponding remove function has the following interface.
 
+*****
 [source,c]
 ----
 <<posix external interfaces>>=
@@ -10825,6 +10847,7 @@ mrt_UnregisterFDService(
 `rmExcept`::
     A boolean indicated whether or not the file descriptor should
     have its exception callback unregistered.
+*****
 
 The implementation of these two functions requires some internal
 data structures to track the file descriptor sets.
@@ -11032,12 +11055,12 @@ run-time.
 
 This design is based on using `pselect` to suspend a process until
 either a signal occurs or a file descriptor requires service.
-The `mechWait` function is called by the main loop when there is no
+The `mrtWait` function is called by the main loop when there is no
 work currently to be done.
 It is invoked inside of a critical section.
-This is an important entry condition for `mechWait`.
+This is an important entry condition for `mrtWait`.
 In the POSIX case,
-this means that `mechWait` must be invoked with all the registered
+this means that `mrtWait` must be invoked with all the registered
 signals blocked.
 We then use `pselect` to atomically enable all signals and block the process.
 
@@ -11084,8 +11107,7 @@ mrtWait(void)
              * Dispatch the service functions for the file descriptors.
              */
             MRT_FDServiceMap *s = mrtFDServicePool ;
-            for (int fd = 0 ; r > 0 && fd <= mrtMaxFD ;
-                    ++fd, ++s) {
+            for (int fd = 0 ; r > 0 && fd <= mrtMaxFD ; fd++, s++) {
                 /*
                  * Do exceptions first. This is only important for sockets, but
                  * without going first the OOB data processing won't work.
@@ -11112,7 +11134,7 @@ mrtWait(void)
 }
 ----
 
-By far, most of the work in `mechWait` is to deal with the
+By far, most of the work in `mrtWait` is to deal with the
 file descriptor status changes.
 The file descriptor sets
 must be copied before being handed to `pselect` since it modifies
@@ -11124,7 +11146,7 @@ change and invoke the callback function.
 
 The way that we are using `pselect` in this circumstance may seem
 a bit backwards.
-Upon entry to `mechWait`,
+Upon entry to `mrtWait`,
 we start a critical section where
 the registered signals are blocked.
 The signal mask given to `pselect` is empty, meaning that `pselect`
@@ -11143,6 +11165,12 @@ All timing is done via delayed events, and they are signalled via
 `SIGALRM` and managed on the delayed event queue as discussed before.
 
 === POSIX Tracing
+
+Since we have ready access to time information on POSIX,
+we can put together a convenience function to format the current
+time of day into a timestamp.
+The format of the timestamp makes it easy to sort based on the
+string representation.
 
 [source,c]
 ----
@@ -11193,14 +11221,39 @@ mrt_Initialize(void)
     mrtInitCriticalSection() ;
     mrtInitSysTimer() ;
     mrtInitFDService() ;
-    setvbuf(stdout, NULL, _IOLBF, 0) ; // set up line buffering on stdout
+    setvbuf(stdout, NULL, _IOLBF, 0) ; // <1>
 #       ifndef MRT_NO_TRACE
-    mrt_RegisterTraceHandler(mrtPrintTraceInfo) ;
+    mrt_RegisterTraceHandler(mrtPrintTraceInfo) ; // <2>
 #       endif /* MRT_NO_TRACE */
 }
 ----
+<1> Set up line buffering on stdout. This make sure we see output
+even if we are piping the output to some other command.
+<2> We always register a tracing function unless it is specifically
+compiled out.
+
+=== POSIX Include Files
+
+We will need a number of POSIX specific include files.
+
+[source,c]
+----
+<<posix includes>>=
+#include <signal.h>
+#include <errno.h>
+#include <sys/select.h>
+#include <sys/time.h>
+#include <time.h>
+----
 
 === POSIX Files
+
+Here we present the two literate program roots for the run-time.
+We adopt a naming convention for the chunk names with the understanding
+that they will be renamed to ``micca_rt.h'' and ``micca_rt.c'' when
+the files are created by tangling.
+
+==== Run Time Header Header for POSIX
 
 [source,c]
 ----
@@ -11254,6 +11307,8 @@ mrt_Initialize(void)
 
 #endif /* MICCA_RT_H_ */
 ----
+
+==== Run Time Code File for POSIX
 
 [source,c]
 ----
@@ -11324,6 +11379,39 @@ mrt_Initialize(void)
 ----
 
 == ARM 7M Specific Code
+
+A version of the run-time code is also given for the ARMv7-M
+architecture.
+This is the processor architecture for the ARM (R) Cortex-M series
+of processors.
+
+ARM processors are always a bit different from those provided by
+a single manufacturer.
+ARM only specifies the processor core and instruction set.
+The chip delivered by a particular company usually consist of a
+a system on a chip (SOC) that includes both the ARM core and a
+set of SOC specific peripherals, such as timers and ADC's.
+This means that some of the support for the ARMv7-M architecture is
+generic and some is SOC specific.
+
+We show run-time adaptations for two different ARM SOC's:
+
+* The EFM32 Giant Gecko is available from
+  http://www.silabs.com[Silicon Labs] and features an
+  ARM Cortex-M3 core.
+* The MSP432 is available from http://www.ti.com[Texas Instruments] and
+  features an ARM Cortex-M4 core.
+
+Controlling basic functions in the processor is generic and we present
+generic code that is common to both chips.
+
+The code to control vendor specific peripherals might be clumsy were it
+not for the CMSIS initiative by ARMfootnote:[CMSIS involves many different
+parts. Here we deal only with the core aspects of the CMSIS standard.].
+Vendors supply ``C'' header files with the preferred naming conventions
+for use on their chips.
+This greatly simplifies being able to provide common core related code
+and vendor specific code.
 
 === ARM 7M Constants
 
@@ -11411,327 +11499,6 @@ mrt_Initialize(void)
     mrt_RegisterTraceHandler(mrtPrintTraceInfo) ;
 #       endif /* MRT_NO_TRACE */
 }
-----
-
-=== MSP432 Includes
-
-[source,c]
-----
-<<msp432 includes>>=
-#define __ARM_ARCH_7M__
-#define NO_MSP_CLASSIC_DEFINES
-
-#include "msp.h"
-
-#define TIMER_DIVIDER   256
-
-extern uint32_t SystemCoreClock ;
-----
-
-=== MSP432 Timing Interfaces
-
-[source,c]
-----
-<<msp432 includes>>=
-#define MRT_MAX_MSEC_DELAY ((MRT_MAX_CLOCK_TICKS / mrtTimerFrequency) * 1000UL)
-
-<<msp432 static data>>=
-static uint32_t mrtTimerFrequency ;
-----
-
-[source,c]
-----
-<<msp432 static functions>>=
-static inline
-MRT_DelayTime
-mrtMsecToTicks(
-    MRT_DelayTime msec)
-{
-    /*
-     * for 3 MHz divided down by 256
-     * max delay is 366,503,875 ms
-     * == 3,665,038 s == 61083 min == 1,018 hr == 42 days
-     */
-    if (msec > MRT_MAX_MSEC_DELAY) {
-        msec = MRT_MAX_MSEC_DELAY ;
-    }
-    /*
-     * We must avoid overflow if the requested number of
-     * msecs is large.
-     */
-    return msec < MRT_MAX_CLOCK_TICKS / mrtTimerFrequency ?
-            ((msec * mrtTimerFrequency) + 1000UL / 2UL) / 1000UL :
-            ((msec + 1000UL / 2UL) / 1000UL) * mrtTimerFrequency ;
-}
-----
-
-[source,c]
-----
-<<msp432 static functions>>=
-static inline
-MRT_DelayTime
-mrtTicksToMsec(
-    MRT_DelayTime ticks)
-{
-    return ticks < MRT_MAX_CLOCK_TICKS / 1000UL ?
-        ((ticks * 1000UL) + mrtTimerFrequency / 2UL) / mrtTimerFrequency :
-        ((ticks + mrtTimerFrequency / 2UL) / mrtTimerFrequency) * 1000UL ;
-}
-----
-
-[source,c]
-----
-<<msp432 static functions>>=
-static void
-mrtInitSysTimer(void)
-{
-    /*
-     * for 3 MHz, dividing down by 256 ==> 11718
-     */
-    mrtTimerFrequency = SystemCoreClock / (uint32_t)256 ;
-
-    TIMER32_1->CONTROL =
-            TIMER32_CONTROL_PRESCALE_2 |
-            TIMER32_CONTROL_SIZE |
-            TIMER32_CONTROL_ONESHOT ;
-    TIMER32_1->INTCLR = 0 ;
-    NVIC_ClearPendingIRQ(T32_INT1_IRQn) ;
-    NVIC_EnableIRQ(T32_INT1_IRQn) ;
-}
-----
-
-[source,c]
-----
-<<msp432 static functions>>=
-static void
-mrtSysTimerMask(void)
-{
-    BITBAND_PERI(TIMER32_1->CONTROL, TIMER32_CONTROL_IE_OFS) = 0 ;
-}
-----
-
-[source,c]
-----
-<<msp432 static functions>>=
-static void
-mrtSysTimerUnmask(void)
-{
-    TIMER32_1->INTCLR = 0 ;
-    BITBAND_PERI(TIMER32_1->CONTROL, TIMER32_CONTROL_IE_OFS) = 1 ;
-}
-----
-
-[source,c]
-----
-<<msp432 static functions>>=
-static void
-mrtSysTimerStart(
-    MRT_DelayTime time)
-{
-    TIMER32_1->LOAD = time ;
-    mrtSysTimerUnmask() ;
-    BITBAND_PERI(TIMER32_1->CONTROL, TIMER32_CONTROL_ENABLE_OFS) = 1 ;
-}
-----
-
-[source,c]
-----
-<<msp432 static functions>>=
-static MRT_DelayTime
-mrtSysTimerStop(void)
-{
-    mrtSysTimerMask() ;
-    BITBAND_PERI(TIMER32_1->CONTROL, TIMER32_CONTROL_ENABLE_OFS) = 0 ;
-    return TIMER32_1->VALUE ;
-}
-----
-
-[source,c]
-----
-<<msp432 external functions>>=
-void
-T32_INT1_IRQHandler(void)
-{
-    TIMER32_1->INTCLR = 0 ;
-    MRT_DelayTime nextTime = mrt_TimerExpireService() ;
-    if (nextTime != 0) {
-        mrtSysTimerStart(nextTime) ;
-    } else {
-        mrtSysTimerStop() ;
-    }
-}
-----
-
-=== MSP432 Initialization
-
-[source,c]
-----
-<<msp432 static functions>>=
-static void
-mrtPlatformInit(void)
-{
-}
-----
-
-=== MSP432 Suspending Execution
-
-[source,c]
-----
-<<msp432 static functions>>=
-static void
-mrtWait(void)
-{
-    beginCriticalSection() ;
-    if (mrtSyncQueueEmpty()) {
-        __DSB() ; // <1>
-        __WFI() ;
-    }
-    endCriticalSection() ;
-}
-----
-<1> ARM recommends a data synchronization barrier instruction before
-going to sleep to insure any writes have been fully synced to memory
-before going to sleep and having clocks and other things turned off.
-We don't need it in this pariticular case since no write operation has
-been performed.
-However, we will follow the recommendation as it is only a single
-instruction and we don't want some change in the future to create
-a mysterious problem.
-
-=== MSP432 Tracing
-
-[source,c]
-----
-<<msp432 trace static functions>>=
-static char const *
-mrtTimestamp(void)
-{
-    return "0" ;
-}
-----
-
-=== MSP432 Files
-
-[source,c]
-----
-<<micca_rt_msp432.h>>=
-/*
-<<copyright info>>
-<<version info>>
-*/
-
-#ifndef MICCA_RT_H_
-#define MICCA_RT_H_
-
-#define MRT_ARM_ARCH_7M
-
-/*
- * Standard Includes
- */
-<<standard includes>>
-
-/*
- * Preprocessor Defines
- */
-<<common defines>>
-
-/*
- * Constants
- */
-<<mrt constants>>
-
-/*
- * Data Types
- */
-<<mrt interface simple types>>
-<<mrt interface aggregate types>>
-
-#   ifndef MRT_NO_TRACE
-<<mrt trace aggregate types>>
-#   endif /* MRT_NO_TRACE */
-
-/*
- * Static Inline Functions
- */
-<<mrt interface static inlines>>
-
-/*
- * External Functions
- */
-#   ifndef MRT_NO_TRACE
-<<mrt trace external interfaces>>
-#   endif /* MRT_NO_TRACE */
-
-<<mrt external interfaces>>
-
-#endif /* MICCA_RT_H_ */
-----
-
-[source,c]
-----
-<<micca_rt_msp432.c>>=
-/*
-<<copyright info>>
-<<version info>>
-*/
-
-<<common includes>>
-<<msp432 includes>>
-
-/*
- * Constants
- */
-<<mrt implementation constants>>
-<<arm7m constants>>
-
-/*
- * Data Types
- */
-<<mrt implementation simple types>>
-<<mrt implementation aggregate types>>
-
-/*
- * Forward References
- */
-<<mrt forward references>>
-
-/*
- * Static Data
- */
-#   ifndef MRT_NO_TRACE
-<<mrt trace static data>>
-#   endif /* MRT_NO_TRACE */
-
-<<mrt static data>>
-<<msp432 static data>>
-
-/*
- * Static Inline Functions
- */
-<<mrt implementation static inlines>>
-
-/*
- * Static Functions
- */
-#   ifndef MRT_NO_TRACE
-<<mrt trace static functions>>
-<<msp432 trace static functions>>
-#   endif /* MRT_NO_TRACE */
-
-<<arm7m static functions>>
-<<msp432 static functions>>
-<<mrt static functions>>
-
-/*
- * External Functions
- */
-#   ifndef MRT_NO_TRACE
-<<mrt trace external functions>>
-#   endif /* MRT_NO_TRACE */
-
-<<arm7m external functions>>
-<<msp432 external functions>>
-<<mrt external functions>>
 ----
 
 === EFM32GG Includes
@@ -12142,6 +11909,327 @@ mrtTimestamp(void)
 
 <<arm7m external functions>>
 <<efm32gg external functions>>
+<<mrt external functions>>
+----
+
+=== MSP432 Includes
+
+[source,c]
+----
+<<msp432 includes>>=
+#define __ARM_ARCH_7M__
+#define NO_MSP_CLASSIC_DEFINES
+
+#include "msp.h"
+
+#define TIMER_DIVIDER   256
+
+extern uint32_t SystemCoreClock ;
+----
+
+=== MSP432 Timing Interfaces
+
+[source,c]
+----
+<<msp432 includes>>=
+#define MRT_MAX_MSEC_DELAY ((MRT_MAX_CLOCK_TICKS / mrtTimerFrequency) * 1000UL)
+
+<<msp432 static data>>=
+static uint32_t mrtTimerFrequency ;
+----
+
+[source,c]
+----
+<<msp432 static functions>>=
+static inline
+MRT_DelayTime
+mrtMsecToTicks(
+    MRT_DelayTime msec)
+{
+    /*
+     * for 3 MHz divided down by 256
+     * max delay is 366,503,875 ms
+     * == 3,665,038 s == 61083 min == 1,018 hr == 42 days
+     */
+    if (msec > MRT_MAX_MSEC_DELAY) {
+        msec = MRT_MAX_MSEC_DELAY ;
+    }
+    /*
+     * We must avoid overflow if the requested number of
+     * msecs is large.
+     */
+    return msec < MRT_MAX_CLOCK_TICKS / mrtTimerFrequency ?
+            ((msec * mrtTimerFrequency) + 1000UL / 2UL) / 1000UL :
+            ((msec + 1000UL / 2UL) / 1000UL) * mrtTimerFrequency ;
+}
+----
+
+[source,c]
+----
+<<msp432 static functions>>=
+static inline
+MRT_DelayTime
+mrtTicksToMsec(
+    MRT_DelayTime ticks)
+{
+    return ticks < MRT_MAX_CLOCK_TICKS / 1000UL ?
+        ((ticks * 1000UL) + mrtTimerFrequency / 2UL) / mrtTimerFrequency :
+        ((ticks + mrtTimerFrequency / 2UL) / mrtTimerFrequency) * 1000UL ;
+}
+----
+
+[source,c]
+----
+<<msp432 static functions>>=
+static void
+mrtInitSysTimer(void)
+{
+    /*
+     * for 3 MHz, dividing down by 256 ==> 11718
+     */
+    mrtTimerFrequency = SystemCoreClock / (uint32_t)256 ;
+
+    TIMER32_1->CONTROL =
+            TIMER32_CONTROL_PRESCALE_2 |
+            TIMER32_CONTROL_SIZE |
+            TIMER32_CONTROL_ONESHOT ;
+    TIMER32_1->INTCLR = 0 ;
+    NVIC_ClearPendingIRQ(T32_INT1_IRQn) ;
+    NVIC_EnableIRQ(T32_INT1_IRQn) ;
+}
+----
+
+[source,c]
+----
+<<msp432 static functions>>=
+static void
+mrtSysTimerMask(void)
+{
+    BITBAND_PERI(TIMER32_1->CONTROL, TIMER32_CONTROL_IE_OFS) = 0 ;
+}
+----
+
+[source,c]
+----
+<<msp432 static functions>>=
+static void
+mrtSysTimerUnmask(void)
+{
+    TIMER32_1->INTCLR = 0 ;
+    BITBAND_PERI(TIMER32_1->CONTROL, TIMER32_CONTROL_IE_OFS) = 1 ;
+}
+----
+
+[source,c]
+----
+<<msp432 static functions>>=
+static void
+mrtSysTimerStart(
+    MRT_DelayTime time)
+{
+    TIMER32_1->LOAD = time ;
+    mrtSysTimerUnmask() ;
+    BITBAND_PERI(TIMER32_1->CONTROL, TIMER32_CONTROL_ENABLE_OFS) = 1 ;
+}
+----
+
+[source,c]
+----
+<<msp432 static functions>>=
+static MRT_DelayTime
+mrtSysTimerStop(void)
+{
+    mrtSysTimerMask() ;
+    BITBAND_PERI(TIMER32_1->CONTROL, TIMER32_CONTROL_ENABLE_OFS) = 0 ;
+    return TIMER32_1->VALUE ;
+}
+----
+
+[source,c]
+----
+<<msp432 external functions>>=
+void
+T32_INT1_IRQHandler(void)
+{
+    TIMER32_1->INTCLR = 0 ;
+    MRT_DelayTime nextTime = mrt_TimerExpireService() ;
+    if (nextTime != 0) {
+        mrtSysTimerStart(nextTime) ;
+    } else {
+        mrtSysTimerStop() ;
+    }
+}
+----
+
+=== MSP432 Initialization
+
+[source,c]
+----
+<<msp432 static functions>>=
+static void
+mrtPlatformInit(void)
+{
+}
+----
+
+=== MSP432 Suspending Execution
+
+[source,c]
+----
+<<msp432 static functions>>=
+static void
+mrtWait(void)
+{
+    beginCriticalSection() ;
+    if (mrtSyncQueueEmpty()) {
+        __DSB() ; // <1>
+        __WFI() ;
+    }
+    endCriticalSection() ;
+}
+----
+<1> ARM recommends a data synchronization barrier instruction before
+going to sleep to insure any writes have been fully synced to memory
+before going to sleep and having clocks and other things turned off.
+We don't need it in this pariticular case since no write operation has
+been performed.
+However, we will follow the recommendation as it is only a single
+instruction and we don't want some change in the future to create
+a mysterious problem.
+
+=== MSP432 Tracing
+
+[source,c]
+----
+<<msp432 trace static functions>>=
+static char const *
+mrtTimestamp(void)
+{
+    return "0" ;
+}
+----
+
+=== MSP432 Files
+
+[source,c]
+----
+<<micca_rt_msp432.h>>=
+/*
+<<copyright info>>
+<<version info>>
+*/
+
+#ifndef MICCA_RT_H_
+#define MICCA_RT_H_
+
+#define MRT_ARM_ARCH_7M
+
+/*
+ * Standard Includes
+ */
+<<standard includes>>
+
+/*
+ * Preprocessor Defines
+ */
+<<common defines>>
+
+/*
+ * Constants
+ */
+<<mrt constants>>
+
+/*
+ * Data Types
+ */
+<<mrt interface simple types>>
+<<mrt interface aggregate types>>
+
+#   ifndef MRT_NO_TRACE
+<<mrt trace aggregate types>>
+#   endif /* MRT_NO_TRACE */
+
+/*
+ * Static Inline Functions
+ */
+<<mrt interface static inlines>>
+
+/*
+ * External Functions
+ */
+#   ifndef MRT_NO_TRACE
+<<mrt trace external interfaces>>
+#   endif /* MRT_NO_TRACE */
+
+<<mrt external interfaces>>
+
+#endif /* MICCA_RT_H_ */
+----
+
+[source,c]
+----
+<<micca_rt_msp432.c>>=
+/*
+<<copyright info>>
+<<version info>>
+*/
+
+<<common includes>>
+<<msp432 includes>>
+
+/*
+ * Constants
+ */
+<<mrt implementation constants>>
+<<arm7m constants>>
+
+/*
+ * Data Types
+ */
+<<mrt implementation simple types>>
+<<mrt implementation aggregate types>>
+
+/*
+ * Forward References
+ */
+<<mrt forward references>>
+
+/*
+ * Static Data
+ */
+#   ifndef MRT_NO_TRACE
+<<mrt trace static data>>
+#   endif /* MRT_NO_TRACE */
+
+<<mrt static data>>
+<<msp432 static data>>
+
+/*
+ * Static Inline Functions
+ */
+<<mrt implementation static inlines>>
+
+/*
+ * Static Functions
+ */
+#   ifndef MRT_NO_TRACE
+<<mrt trace static functions>>
+<<msp432 trace static functions>>
+#   endif /* MRT_NO_TRACE */
+
+<<arm7m static functions>>
+<<msp432 static functions>>
+<<mrt static functions>>
+
+/*
+ * External Functions
+ */
+#   ifndef MRT_NO_TRACE
+<<mrt trace external functions>>
+#   endif /* MRT_NO_TRACE */
+
+<<arm7m external functions>>
+<<msp432 external functions>>
 <<mrt external functions>>
 ----
 
