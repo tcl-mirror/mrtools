@@ -10,9 +10,19 @@
 #*--
 #
 
-LDFLAGS = -g
-CFLAGS	= -std=c11 -g -O0 -Wall\
+LDFLAGS =\
+	 -g\
+	 -no-pie\
+	 $(NULL)
+
+CFLAGS	=\
+	 -std=c11\
+	 -g\
+	 -O0\
+	 -Wall\
+	 -fno-pie\
 	$(NULL)
+
 CPPFLAGS =\
 	 -D_POSIX_C_SOURCE=200112L\
 	 -D_ISOC11_SOURCE\
@@ -22,12 +32,6 @@ CPPFLAGS =\
 
 DOCSRC 	=\
 	simplebookstore.aweb\
-	$(NULL)
-
-MICCADIR = ../../../src
-
-RTSRC	=\
-	$(MICCADIR)/runtime.txt\
 	$(NULL)
 
 PDF 	=\

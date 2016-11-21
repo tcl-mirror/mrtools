@@ -604,8 +604,6 @@ proc FindInterfaceTypeAliases {domain} {
     <<FindInterfaceTypeAliases:: find aliases in external operations>>
     <<FindInterfaceTypeAliases:: find aliases in events>>
     <<FindInterfaceTypeAliases:: union the combination>>
-
-    return $aliasRefs
 }
 ----
 
@@ -617,11 +615,11 @@ type aliases.
 [source,tcl]
 ----
 <<FindInterfaceTypeAliases:: find type alias names>>=
-set aliasNames [pipe {
+set aliases [pipe {
     findRelated $domRef ~R7 |
-    deRef % |
-    relation list % TypeName
+    deRef %
 } {} |%]
+# puts [relformat $aliases aliases]
 ----
 
 Query the return types and parameters of the domain operations.
@@ -630,13 +628,19 @@ Query the return types and parameters of the domain operations.
 ----
 <<FindInterfaceTypeAliases:: find aliases in domain operations>>=
 set doRefs [pipe {
-    findRelatedWhere $domRef ~R5 {$ReturnDataType in $aliasNames} |
-    findRelated % R5 ~R7
+    findRelated $domRef ~R5 |
+    deRef % |
+    relation semijoin % $aliases\
+            -using {Domain Domain ReturnDataType TypeName}
 } {} |%]
+# puts [relformat $doRefs doRefs]
 set dopRefs [pipe {
-    findRelatedWhere $domRef {~R5 ~R6} {$DataType in $aliasNames} |
-    findRelated % R6 R5 ~R7
+    findRelated $domRef ~R5 ~R6 |
+    deRef % |
+    relation semijoin % $aliases\
+            -using {Domain Domain DataType TypeName}
 } {} |%]
+# puts [relformat $dopRefs dopRefs]
 ----
 
 The same type of query is needed for the external operations.
@@ -645,13 +649,19 @@ The same type of query is needed for the external operations.
 ----
 <<FindInterfaceTypeAliases:: find aliases in external operations>>=
 set eoRefs [pipe {
-    findRelatedWhere $domRef ~R10 {$ReturnDataType in $aliasNames} |
-    findRelated % R10 ~R7
+    findRelated $domRef ~R10 |
+    deRef % |
+    relation semijoin % $aliases\
+            -using {Domain Domain ReturnDataType TypeName}
 } {} |%]
+# puts [relformat $eoRefs eoRefs]
 set eopRefs [pipe {
-    findRelatedWhere $domRef {~R10 ~R11} {$DataType in $aliasNames} |
-    findRelated % R11 R10 ~R7
+    findRelated $domRef ~R10 ~R11 |
+    deRef % |
+    relation semijoin % $aliases\
+            -using {Domain Domain DataType TypeName}
 } {} |%]
+# puts [relformat $eopRefs eopRefs]
 ----
 
 And finally, we examine the event parameters.
@@ -660,12 +670,12 @@ And finally, we examine the event parameters.
 ----
 <<FindInterfaceTypeAliases:: find aliases in events>>=
 set argRefs [pipe {
-    Argument findWhere {$Domain eq $domain && $DataType in $aliasNames} |
+    Argument findWhere {$Domain eq $domain} |
     deRef ~ |
-    relation semijoin ~ $::micca::TypeAlias\
-            -using {Domain Domain DataType TypeName} |
-    ::rosea::Helpers::ToRef ::micca::TypeAlias ~
+    relation semijoin ~ $aliases\
+            -using {Domain Domain DataType TypeName}
 }]
+# puts [relformat $argRefs argRefs]
 ----
 
 The union of these sets is then the set of type aliases that will need
@@ -674,10 +684,7 @@ to be made available outside of the domain.
 [source,tcl]
 ----
 <<FindInterfaceTypeAliases:: union the combination>>=
-set aliasRefs [refUnion $doRefs $dopRefs]
-set aliasRefs [refUnion $aliasRefs $eoRefs]
-set aliasRefs [refUnion $aliasRefs $eopRefs]
-set aliasRefs [refUnion $aliasRefs $argRefs]
+return [relation union $doRefs $dopRefs $eoRefs $eopRefs $argRefs]
 ----
 
 The implementation of the `interfaceTypeAliases` iterates over the
@@ -691,8 +698,8 @@ corresponding ``C'' `typedef` statement.
 proc interfaceTypeAliases {} {
     variable domain
     append result [comment "Type Aliases"]
-    forAllRefs taRef [FindInterfaceTypeAliases $domain] {
-        assignAttribute $taRef TypeName TypeDefinition
+    relation foreach taRef [FindInterfaceTypeAliases $domain] {
+        relation assign $taRef TypeName TypeDefinition
         append result "typedef "\
             [typeCheck composeDeclaration $TypeDefinition $TypeName] " ;\n"
     }
@@ -713,6 +720,7 @@ test headergen-2.0 {
         domain header2 {
             typealias Gcount_t uint64_t
             typealias Pcount_t uint32_t
+            typealias Rcount_t uint32_t
 
             domainop Gcount_t countAll {a int} {
                 return 27 ;
@@ -723,6 +731,7 @@ test headergen-2.0 {
             }
             class c1 {
                 attribute color int -default 20
+                attribute temp Rcount_t -default 30
             }
         }
         population header2 {
@@ -741,6 +750,9 @@ test headergen-2.0 {
         }]}\
         {[validateutils matchLines header2.h {
             typedef uint64_t Gcount_t ;
+        }]}\
+        {[validateutils matchLines header2.c {
+            typedef uint32_t Rcount_t ;
         }]}
 } -result {1}
 ----
@@ -1490,12 +1502,16 @@ code file.
 <<generation code commands>>=
 proc implementationTypeAliases {} {
     variable domain
-    set domRef [Domain findWhere {$Name eq $domain}]
-    set aliasRefs [refMinus [findRelated $domRef ~R7]\
-            [FindInterfaceTypeAliases $domain]] ; # <1>
+    set aliases [pipe {
+        Domain findWhere {$Name eq $domain} |
+        findRelated % ~R7 |
+        deRef %
+    } {} |%]
+
+    set impaliases [relation minus $aliases [FindInterfaceTypeAliases $domain]] ; # <1>
     append result [comment "Type Aliases"]
-    forAllRefs taRef $aliasRefs {
-        assignAttribute $taRef TypeName TypeDefinition
+    relation foreach taRef $impaliases {
+        relation assign $taRef TypeName TypeDefinition
         append result\
             "typedef "\
             [typeCheck composeDeclaration $TypeDefinition $TypeName]\
