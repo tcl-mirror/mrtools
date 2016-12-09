@@ -6308,7 +6308,7 @@ Instance sets also have a fixed set of subcommand operations.
 ----
 <<CreateActivityCommands: instance sets>>=
 set cmdmap [dict create\
-    foreachSelected ${suppns}::InstanceSetForeachSelected\
+    foreachInstance ${suppns}::InstanceSetForeachInstance\
     empty ${suppns}::InstanceSetEmpty\
     cardinality ${suppns}::InstanceSetCardinality\
     notempty ${suppns}::InstanceSetNotEmpty\
@@ -6695,7 +6695,7 @@ proc End {} {
 
     set context [actexpand cname] ; # <1>
     switch -exact -- $context {
-        InstanceSetForeachSelected -
+        InstanceSetForeachInstance -
         InstanceForeachRelated -
         InstanceForeachRelatedWhere -
         ClassForeachInstance -
@@ -8438,7 +8438,7 @@ if {$dir eq "forw"} {
 }
 ----
 
-==== Iterating Across Selected Related Instances
+==== Conditional Iteration Across Related Instances
 
 *****
 `%<instance` _start_ `foreachRelatedWhere` _instvar clause rel1 ?rel2? ..._ `>%` +
@@ -8689,6 +8689,244 @@ proc InstanceFindOneRelated {startref instref args} {
     return [string cat $heading $result]
 }
 ----
+
+==== Selecting Related Instances
+
+*****
+`%<instance` _start_ `selectRelated` _instsetvar rel1 ?rel2? ..._ `>%`
+
+start::
+    The name of a ``C'' variable containing the instance reference where
+    the relationship navigation will begin.
+instsetvar::
+    The name of a ``C'' variable which holds an instance set.
+relN::
+    A set of relationship navigation specifications.
+
+The `selectRelated` subccommand generates ``C'' statements
+to iterate across the set of instances obtained by navigating
+the relationship chain which starts at the _start_ instance
+and is given by the _relN_ arguments.
+Each instance found in the navigation is added to the instance set
+contained in the _instsetvar_ variable.
+The _instsetvar_ variable is declared if necessary.
+*****
+
+[source,tcl]
+.Implementation
+----
+<<generation support commands>>=
+proc InstanceSetSelectRelated {startref set args} {
+    variable domain
+
+    set startlevel [GetBlock]
+
+    set endref [CreateTempSymbolName]
+    set chaincode [TraverseRelChain $startref $endref $args]
+    set targetclass [dict get [LookUpSymbol $endref] Class]
+    set targetclassDesc [GetClassDescriptor $domain $targetclass]
+
+    append chaincode\
+        [IndentToBlock "mrt_InstSetAddInstance(&$set, $endref) ;\n"]
+
+    set depth [expr {[GetBlock] - $startlevel}]
+    for {set i 0} {$i < $depth} {incr i} {
+        PopBlock
+        append chaincode [IndentToBlock "\}\n"]
+    }
+
+    set result [IndentToBlock [string cat\
+        [linecomment "instance $startref selectedRelated $set $args"]\
+        [CreateInstSetSymbol $targetclass $set]\
+        "mrt_InstSetInitialize(&$set, &$targetclassDesc) ;\n"]]
+
+    return [append result $chaincode]
+}
+----
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-48.0 {
+    Generated code file to select related instances
+} -setup {
+    validateutils genMiccaFile codegen48 {
+        domain codegen48 {
+            class X {
+                attribute color int -default 20
+            }
+            class Y {
+                attribute temp int -default 30
+            }
+            association R1 Y 1..*--1 X
+            class Z {
+                attribute pressure int -default 40
+            }
+            association R2 Z 0..1--1 Y
+            domainop void find {} {
+                %<X findByName x1 xref>%
+                %<instance xref selectRelated zset ~R1 ~R2>%
+            }
+        }
+        population codegen48 {
+            class X {
+                instance x1
+            }
+            class Y {
+                instance y1 R1 x1 temp 31
+                instance y2 R1 x1 temp 32
+                instance y3 R1 x1 temp 33
+                instance y4 R1 x1 temp 34
+            }
+            class Z {
+                instance z1 R2 y1 pressure 41
+                instance z2 R2 y2 pressure 42
+                instance z3 R2 y3 pressure 43
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen48.c
+    testConditions\
+        {[validateutils matchLines codegen48.c {
+            MRT_InstSet zset ;
+            mrt_InstSetInitialize(&zset, &codegen48__CLASSES[2]) ;
+            for (MRT_LinkRef *t__T2 = mrtLinkRefBegin(&xref->R1__BACK) ; t__T2 != mrtLinkRefEnd(&xref->R1__BACK) ;) {
+                struct Y *t__T3 = (struct Y *)((uintptr_t)t__T2 - offsetof(struct Y, R1__BLINKS)) ;
+                t__T2 = t__T2->next ;
+                struct Z *t__T4 = t__T3->R2__BACK ; // ~R2
+                if (t__T4 != NULL) {
+                    struct Z *t__T1 ;
+                    t__T1 = t__T4 ;
+                    mrt_InstSetAddInstance(&zset, t__T1) ;
+                }
+            }
+        }]}
+} -result {1}
+----
+endif::showtests[]
+
+==== Conditionally Selecting Related Instances
+
+*****
+`%<instance` _start_ `selectRelatedWhere` _instsetvar_ _instref_ _clause_ _rel1 ?rel2? ..._ `>%`
+
+start::
+    The name of a ``C'' variable containing the instance reference where
+    the relationship navigation will begin.
+instsetvar::
+    The name of a ``C'' variable which holds an instance set.
+instref::
+    The name of a variable into which a reference to a class instance is placed.
+clause::
+    A ``C'' expression that evaluates to a value that can be interpreted
+    as a boolean.
+relN::
+    A set of relationship navigation specifications.
+
+The `selectRelatedWhere` subccommand generates ``C'' statements
+to iterate across the set of instances obtained by navigating
+the relationship chain which starts at the _start_ instance
+and is given by the _relN_ arguments.
+A reference to each instance found in the navigation is assigned to the
+_instvar_ variable and _clause_ is evaluated.
+If _clause_ evaluates to non-zero, then
+the instance is added to the instance set
+contained in the _instsetvar_ variable.
+The _instsetvar_ and _instvar_ variables are declared if necessary.
+*****
+
+[source,tcl]
+.Implementation
+----
+<<generation support commands>>=
+proc InstanceSetSelectRelatedWhere {startref set instref where args} {
+    variable domain
+
+    set startlevel [GetBlock]
+
+    set chaincode [TraverseRelChain $startref $instref $args]
+    set targetclass [dict get [LookUpSymbol $instref] Class]
+    set targetclassDesc [GetClassDescriptor $domain $targetclass]
+    append chaincode [IndentToBlock "if ($where) \{\n"]
+    PushBlock
+    append chaincode [IndentToBlock\
+        "mrt_InstSetAddInstance(&$set, $instref) ;\n"]
+
+    set depth [expr {[GetBlock] - $startlevel}]
+    for {set i 0} {$i < $depth} {incr i} {
+        PopBlock
+        append chaincode [IndentToBlock "\}\n"]
+    }
+
+    set result [IndentToBlock [string cat\
+        [linecomment "instance $startref selectRelatedWhere $set $instref\
+                [list $where] $args"]\
+        [CreateInstSetSymbol $targetclass $set]\
+        "mrt_InstSetInitialize(&$set, &$targetclassDesc) ;\n"]]
+
+    return [append result $chaincode]
+}
+----
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-60.0 {
+    Conditional navigation of singular association
+} -setup {
+    validateutils genMiccaFile codegen60 {
+        domain codegen60 {
+            class X {
+                attribute Value int
+            }
+            class Y {}
+            association R1 X 1..*--1 Y
+
+            domainop void findys {} {
+                %<Y findByName y1 ys>%
+                %<instance ys selectRelatedWhere xset xs {xs->Value > 2} ~R1>%
+            }
+        }
+        population codegen60 {
+            class X {
+                instance x1 Value 1 R1 y1
+                instance x2 Value 2 R1 y1
+                instance x3 Value 3 R1 y1
+                instance x4 Value 4 R1 y1
+            }
+            class Y {
+                instance y1
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen60.c
+    testConditions\
+        {[validateutils matchLines codegen60.c {
+            MRT_InstSet xset ;
+            mrt_InstSetInitialize(&xset, &codegen60__CLASSES[0]) ;
+            for (MRT_LinkRef *t__T1 = mrtLinkRefBegin(&ys->R1__BACK) ; t__T1 != mrtLinkRefEnd(&ys->R1__BACK) ;) {
+                struct X *t__T2 = (struct X *)((uintptr_t)t__T1 - offsetof(struct X, R1__BLINKS)) ;
+                t__T1 = t__T1->next ;
+                struct X *xs ;
+                xs = t__T2 ;
+                if (xs->Value > 2) {
+                    mrt_InstSetAddInstance(&xset, xs) ;
+                }
+            }
+        }]}
+} -result {1}
+----
+endif::showtests[]
 
 ==== Signaling an Event
 
@@ -9043,7 +9281,7 @@ All instance set operations are accessed via the `instset` command
 ==== Iterating Over an Instance Set
 
 *****
-`%<instset` _instsetvar_ `foreachSelected` _instvar_ `>%` +
+`%<instset` _instsetvar_ `foreachInstance` _instvar_ `>%` +
 _Loop Body_ +
 `%<end>%`
 
@@ -9053,17 +9291,19 @@ instvar::
     The name of a ``C'' variable into which a reference to a class
     instance is assigned.
 
-The `foreachSelected` subcommand generates ``C'' statements to
-iterate over the instances contain in the variable named, _instsetvar_.
-For each instance in the set,
-_instvar_ is assigned a reference to it and _Loop Body_ is executed.
+The `foreachInstance` subcommand generates ``C'' statements to
+iterate over the instances contained in the instance reference
+set held in the variable named, _instsetvar_.
+For each instance reference in the set,
+_instvar_ is assigned the value of the instance reference and _Loop Body_ is
+executed.
 *****
 
 [source,tcl]
 .Implementation
 ----
 <<generation support commands>>=
-proc InstanceSetForeachSelected {set inst} {
+proc InstanceSetForeachInstance {set inst} {
     set setsym [CheckInstSetSymbol $set]
 
     set startlevel [GetBlock]
@@ -9081,7 +9321,7 @@ proc InstanceSetForeachSelected {set inst} {
         "$inst = mrt_InstSetIterGet(&$iter) ;\n"\
     ]]
 
-    PushContext InstanceSetForeachSelected $startlevel
+    PushContext InstanceSetForeachInstance $startlevel
 
     return $result
 }
@@ -9289,244 +9529,6 @@ proc InstanceSetContains {set inst} {
     return "mrt_InstSetMember(&$set, $inst)"
 }
 ----
-
-==== Selecting Into an Instance Set
-
-*****
-`%<instset` _start_ `selectRelated` _instsetvar rel1 ?rel2? ..._ `>%`
-
-start::
-    The name of a ``C'' variable containing the instance reference where
-    the relationship navigation will begin.
-instsetvar::
-    The name of a ``C'' variable which holds an instance set.
-relN::
-    A set of relationship navigation specifications.
-
-The `selectRelated` subccommand generates ``C'' statements
-to iterate across the set of instances obtained by navigating
-the relationship chain which starts at the _start_ instance
-and is given by the _relN_ arguments.
-Each instance found in the navigation is added to the instance set
-contained in the _instsetvar_ variable.
-The _instsetvar_ variable is declared if necessary.
-*****
-
-[source,tcl]
-.Implementation
-----
-<<generation support commands>>=
-proc InstanceSetSelectRelated {startref set args} {
-    variable domain
-
-    set startlevel [GetBlock]
-
-    set endref [CreateTempSymbolName]
-    set chaincode [TraverseRelChain $startref $endref $args]
-    set targetclass [dict get [LookUpSymbol $endref] Class]
-    set targetclassDesc [GetClassDescriptor $domain $targetclass]
-
-    append chaincode\
-        [IndentToBlock "mrt_InstSetAddInstance(&$set, $endref) ;\n"]
-
-    set depth [expr {[GetBlock] - $startlevel}]
-    for {set i 0} {$i < $depth} {incr i} {
-        PopBlock
-        append chaincode [IndentToBlock "\}\n"]
-    }
-
-    set result [IndentToBlock [string cat\
-        [linecomment "instance $startref selectedRelated $set $args"]\
-        [CreateInstSetSymbol $targetclass $set]\
-        "mrt_InstSetInitialize(&$set, &$targetclassDesc) ;\n"]]
-
-    return [append result $chaincode]
-}
-----
-
-ifdef::showtests[]
-[source,tcl]
-----
-<<generate command tests>>=
-test codegen-48.0 {
-    Generated code file to select related instances
-} -setup {
-    validateutils genMiccaFile codegen48 {
-        domain codegen48 {
-            class X {
-                attribute color int -default 20
-            }
-            class Y {
-                attribute temp int -default 30
-            }
-            association R1 Y 1..*--1 X
-            class Z {
-                attribute pressure int -default 40
-            }
-            association R2 Z 0..1--1 Y
-            domainop void find {} {
-                %<X findByName x1 xref>%
-                %<instance xref selectRelated zset ~R1 ~R2>%
-            }
-        }
-        population codegen48 {
-            class X {
-                instance x1
-            }
-            class Y {
-                instance y1 R1 x1 temp 31
-                instance y2 R1 x1 temp 32
-                instance y3 R1 x1 temp 33
-                instance y4 R1 x1 temp 34
-            }
-            class Z {
-                instance z1 R2 y1 pressure 41
-                instance z2 R2 y2 pressure 42
-                instance z3 R2 y3 pressure 43
-            }
-        }
-    }
-} -cleanup {
-    cleanupDomain
-    validateutils forgetFiles
-} -body {
-    validateutils compileFiles codegen48.c
-    testConditions\
-        {[validateutils matchLines codegen48.c {
-            MRT_InstSet zset ;
-            mrt_InstSetInitialize(&zset, &codegen48__CLASSES[2]) ;
-            for (MRT_LinkRef *t__T2 = mrtLinkRefBegin(&xref->R1__BACK) ; t__T2 != mrtLinkRefEnd(&xref->R1__BACK) ;) {
-                struct Y *t__T3 = (struct Y *)((uintptr_t)t__T2 - offsetof(struct Y, R1__BLINKS)) ;
-                t__T2 = t__T2->next ;
-                struct Z *t__T4 = t__T3->R2__BACK ; // ~R2
-                if (t__T4 != NULL) {
-                    struct Z *t__T1 ;
-                    t__T1 = t__T4 ;
-                    mrt_InstSetAddInstance(&zset, t__T1) ;
-                }
-            }
-        }]}
-} -result {1}
-----
-endif::showtests[]
-
-==== Conditionally Selecting Into an Instance Set
-
-*****
-`%<instset` _start_ `selectRelatedWhere` _instsetvar_ _instref_ _clause_ _rel1 ?rel2? ..._ `>%`
-
-start::
-    The name of a ``C'' variable containing the instance reference where
-    the relationship navigation will begin.
-instsetvar::
-    The name of a ``C'' variable which holds an instance set.
-instref::
-    The name of a variable into which a reference to a class instance is placed.
-clause::
-    A ``C'' expression that evaluates to a value that can be interpreted
-    as a boolean.
-relN::
-    A set of relationship navigation specifications.
-
-The `selectRelatedWhere` subccommand generates ``C'' statements
-to iterate across the set of instances obtained by navigating
-the relationship chain which starts at the _start_ instance
-and is given by the _relN_ arguments.
-A reference to each instance found in the navigation is assigned to the
-_instvar_ variable and _clause_ is evaluated.
-If _clause_ evaluates to non-zero, then
-the instance is added to the instance set
-contained in the _instsetvar_ variable.
-The _instsetvar_ and _instvar_ variables are declared if necessary.
-*****
-
-[source,tcl]
-.Implementation
-----
-<<generation support commands>>=
-proc InstanceSetSelectRelatedWhere {startref set instref where args} {
-    variable domain
-
-    set startlevel [GetBlock]
-
-    set chaincode [TraverseRelChain $startref $instref $args]
-    set targetclass [dict get [LookUpSymbol $instref] Class]
-    set targetclassDesc [GetClassDescriptor $domain $targetclass]
-    append chaincode [IndentToBlock "if ($where) \{\n"]
-    PushBlock
-    append chaincode [IndentToBlock\
-        "mrt_InstSetAddInstance(&$set, $instref) ;\n"]
-
-    set depth [expr {[GetBlock] - $startlevel}]
-    for {set i 0} {$i < $depth} {incr i} {
-        PopBlock
-        append chaincode [IndentToBlock "\}\n"]
-    }
-
-    set result [IndentToBlock [string cat\
-        [linecomment "instance $startref selectRelatedWhere $set $instref\
-                [list $where] $args"]\
-        [CreateInstSetSymbol $targetclass $set]\
-        "mrt_InstSetInitialize(&$set, &$targetclassDesc) ;\n"]]
-
-    return [append result $chaincode]
-}
-----
-
-ifdef::showtests[]
-[source,tcl]
-----
-<<generate command tests>>=
-test codegen-60.0 {
-    Conditional navigation of singular association
-} -setup {
-    validateutils genMiccaFile codegen60 {
-        domain codegen60 {
-            class X {
-                attribute Value int
-            }
-            class Y {}
-            association R1 X 1..*--1 Y
-
-            domainop void findys {} {
-                %<Y findByName y1 ys>%
-                %<instance ys selectRelatedWhere xset xs {xs->Value > 2} ~R1>%
-            }
-        }
-        population codegen60 {
-            class X {
-                instance x1 Value 1 R1 y1
-                instance x2 Value 2 R1 y1
-                instance x3 Value 3 R1 y1
-                instance x4 Value 4 R1 y1
-            }
-            class Y {
-                instance y1
-            }
-        }
-    }
-} -cleanup {
-    cleanupDomain
-    validateutils forgetFiles
-} -body {
-    validateutils compileFiles codegen60.c
-    testConditions\
-        {[validateutils matchLines codegen60.c {
-            MRT_InstSet xset ;
-            mrt_InstSetInitialize(&xset, &codegen60__CLASSES[0]) ;
-            for (MRT_LinkRef *t__T1 = mrtLinkRefBegin(&ys->R1__BACK) ; t__T1 != mrtLinkRefEnd(&ys->R1__BACK) ;) {
-                struct X *t__T2 = (struct X *)((uintptr_t)t__T1 - offsetof(struct X, R1__BLINKS)) ;
-                t__T1 = t__T1->next ;
-                struct X *xs ;
-                xs = t__T2 ;
-                if (xs->Value > 2) {
-                    mrt_InstSetAddInstance(&xset, xs) ;
-                }
-            }
-        }]}
-} -result {1}
-----
-endif::showtests[]
 
 ==== Instance Set Union
 
@@ -10915,10 +10917,12 @@ proc ClassIdToRef {className instid instref} {
     variable domain
 
     set classDesc [GetClassDescriptor $domain $className]
-    append result\
+
+    return [IndentToBlock [string cat\
+        [linecomment "$className idtoref $instref"]\
         [CreateInstRefSymbol $className $instref]\
-        "$instref = mrt_InstanceReference(&$classDesc, $instid) ;\n"
-    return [IndentToBlock $result] ;
+        "$instref = mrt_InstanceReference(&$classDesc, $instid) ;\n"\
+    ]]
 }
 ----
 
@@ -10935,11 +10939,12 @@ proc ClassFindByName {className instName instref} {
     }
     set classDesc [GetClassDescriptor $domain $className]
     set instNum [readAttribute $instRef Number]
-    append result\
+
+    return [IndentToBlock [string cat\
         [linecomment "$className findByName $instName $instref"]\
         [CreateInstRefSymbol $className $instref]\
-        "$instref = mrt_InstanceReference(&$classDesc, $instNum) ;\n"
-    return [IndentToBlock $result]
+        "$instref = mrt_InstanceReference(&$classDesc, $instNum) ;\n"\
+    ]]
 }
 ----
 
