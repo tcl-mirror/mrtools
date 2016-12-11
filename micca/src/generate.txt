@@ -7066,6 +7066,9 @@ proc InstanceAssign {instref args} {
             set varname $attrname
         } elseif {[llength $attrspec] == 2} {
             lassign $attrspec attrname varname
+            if {![isIdentifier $varname]} {
+                error "\"$varname\" is not a valid \"C\" identifier"
+            }
         } else {
             error "bad attribute specification, \"$attrspec\":\
                 expected 1 or 2 element list"
@@ -7106,6 +7109,53 @@ proc InstanceAssign {instref args} {
 }
 ----
 
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-61.0 {
+    Assign attributes
+} -setup {
+    validateutils genMiccaFile codegen61 {
+        domain codegen61 {
+            typealias Name_t {char[32]}
+            class X {
+                attribute name Name_t -default {"n"}
+                attribute temp {int[2]} -default {{0, 1}}
+                attribute total int -default 0
+
+                instop void assignAttrs {} {
+                    %<my assign {name n} temp total>%
+                    if (strlen(n) > 0) {
+                        printf("non-empty string\n") ;
+                    }
+                }
+            }
+        }
+        population codegen61 {
+            class X {
+                instance x1
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen61.c
+    validateutils matchLines codegen61.c {
+        Name_t n ;
+        strncpy(n, self->name, 31) ;
+        n[31] = '\0' ;
+        int temp[2] ;
+        memcpy(temp, self->temp, sizeof(temp)) ;
+        int total ;
+        total = self->total ;
+    }
+} -result {1}
+----
+endif::showtests[]
+
 ==== Deleting Instances
 
 *****
@@ -7128,7 +7178,6 @@ proc InstanceDelete {instref} {
         [linecomment "instance $instref delete"]\
         "mrt_DeleteInstance($instref) ;\n"\
     ]]
-    return [IndentToBlock $result]
 }
 ----
 
@@ -9140,12 +9189,13 @@ sourceinst::
     instance which originally signaled the delayed event.
 
 The `canceldelay` subccommand generates ``C'' statements
-to arrange the delayed evetn, _event_, not be delivered to the
+to arrange the delayed event, _event_, not be delivered to the
 instance referenced by _instvar_.
-If the delayed event was signaled from outside of a state activity,
-then the _sourceinst_ argument is omitted.
-Otherwise, _sourceinst_ is the name of a variable containing a reference
-to the instance that signaled the event.
+The _sourceinst_ argument is the name of a variable containing
+a reference to the instance that signaled the event.
+If _sourceinst_ is not supplied,
+then the signaling instance is taken as `self` if invoked within
+as state activity and `NULL` otherwise.
 After it is canceled, _event_ will not be dispatched.
 It is not an error to cancel an event that does not exist or has
 already been dispatched.
@@ -9211,12 +9261,13 @@ sourceinst::
 The `delayremaining` subccommand generates a ``C'' expression
 containing the number of milliseconds that remain before _event_ is
 signaled to the instance referenced by _instvar_.
-If the delayed event was signaled from outside of a state activity,
-then the _sourceinst_ argument is omitted.
-Otherwise, _sourceinst_ is the name of a variable containing a reference
-to the instance that signaled the event.
+The _sourceinst_ argument is the name of a variable containing
+a reference to the instance that signaled the event.
+If _sourceinst_ is not supplied,
+then the signaling instance is taken as `self` if invoked within
+as state activity and `NULL` otherwise.
 A return value of zero implies that the event has already been dispatched
-or does not exist.
+or was never signaled.
 *****
 
 [source,tcl]
@@ -9232,7 +9283,12 @@ proc InstanceRemainingTime {instref event {sourceref {}}} {
         CheckInstRefSymbol $sourceref
         set sourceinst $sourceref
     } else {
-        set sourceinst NULL
+        try {
+            CheckInstRefSymbol self
+            set sourceinst self
+        } on error {} {
+            set sourceinst NULL
+        }
     }
     return "mrt_RemainingDelayTime($eventNum, $instref, $sourceinst)"
 }
@@ -9590,6 +9646,11 @@ proc InstanceSetOperation {label op opset set1 set2 args} {
     set className [dict get $sym1 Class]
     CheckInstSetSymbol $set2 Class $className
 
+    if {$opset in [concat [list $set1 $set2] $args]} {
+        error "result set, \"$opset\", may not be one of the operation\
+            arguments"
+    }
+
     set classDesc [GetClassDescriptor $domain $className]
     append result\
         [linecomment "instset $opset $label $set1 [list $args]"]\
@@ -9624,6 +9685,11 @@ The _instsetvarN_ instance sets must contain instances of the same class.
 <<generation support commands>>=
 proc InstanceSetMinus {diffset set1 set2} {
     variable domain
+
+    if {$diffset in [list $set1 $set2]} {
+        error "result set, \"$diffset\", may not be one of the minus\
+            operation arguments"
+    }
 
     set sym1 [CheckInstSetSymbol $set1]
     set className [dict get $sym1 Class]
