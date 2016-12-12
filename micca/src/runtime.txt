@@ -3397,25 +3397,42 @@ mrtCheckRelationship(
 ----
 
 For simple associations,
-we zero out the `refCount` member in both participants.
-The references between the class instances is tracked
+we zero out the `refCount` member.
+The references between the class instances are tracked
 and then the values of the `refCount` members are compared against
 what the relationship requires.
+We do this in two steps, first tracking from source to target and
+then tracking from target to source.
+The reason for dividing it this way is to avoid stomping on the
+`refCount` in the case of a reflexive association.
+Since there is only one `refCount` member, we have to zero it,
+count the references and check the counts completely for one side
+before doing the same for the other.
+In a reflexive association, each side is the same class and so
+the `refCount` member is actually the same memory location
+for both sides.
 
 [source,c]
 ----
 <<mrtCheckRelationship: simple associations>>=
 struct mrtsimpleassociation const *assoc = &rel->relInfo.simpleAssociation ;
 
-mrtZeroRefCounts(assoc->source.classDesc) ;
-mrtZeroRefCounts(assoc->target.classDesc) ;
+MRT_Class const *targetClass = assoc->target.classDesc ;
+mrtZeroRefCounts(targetClass) ;                                     // <1>
+mrtCountAssocRefs(&assoc->source, targetClass) ;                    // <2>
+result = mrtCheckRefCounts(targetClass, assoc->target.cardinality) ;
 
-mrtCountAssocRefs(&assoc->source, &assoc->target) ;
-
-result =
-    mrtCheckRefCounts(assoc->source.classDesc, assoc->source.cardinality) &&
-    mrtCheckRefCounts(assoc->target.classDesc, assoc->target.cardinality) ;
+if (result) {
+    MRT_Class const *sourceClass = assoc->source.classDesc ;        // <3>
+    mrtZeroRefCounts(sourceClass) ;
+    mrtCountAssocRefs(&assoc->target, sourceClass) ;
+    result = mrtCheckRefCounts(sourceClass, assoc->source.cardinality) ;
+}
 ----
+<1> Start with the class that is the target of the association
+navigation.
+<2> Count in the target side for each source side that references it.
+<3> Now flip it around and do the target to source traversal.
 
 Class based associations are more complicated.
 Recall that class based associations are treated in a decomposed manner
@@ -3434,26 +3451,36 @@ if (result) {
      * On the first side, we evaluate the references from the source class
      * to the associator class.
      */
-    mrtZeroRefCounts(assoc->source.classDesc) ;
-    mrtZeroRefCounts(assoc->associator.classDesc) ;
-    mrtCountClassAssocRefs(&assoc->source, assoc->associator.classDesc,
-            assoc->associator.backwardOffset) ;
-    result = mrtCheckRefCounts(assoc->source.classDesc,
-                assoc->source.cardinality) &&
-            mrtCheckRefCounts(assoc->associator.classDesc, mrtExactlyOne) ;
+    MRT_Class const *assocClass = assoc->associator.classDesc ;
+    MRT_Class const *sourceClass = assoc->source.classDesc ;
 
-    /*
-     * If the first side is okay, then we can evaluate the references from the
-     * target class to the associator class.
-     */
+    mrtZeroRefCounts(sourceClass) ;
+    mrtCountSingularRefs(assocClass, assoc->associator.backwardOffset,
+            sourceClass) ;
+    result = mrtCheckRefCounts(sourceClass, assoc->source.cardinality) ;
+
     if (result) {
-        mrtZeroRefCounts(assoc->target.classDesc) ;
-        mrtZeroRefCounts(assoc->associator.classDesc) ;
-        mrtCountClassAssocRefs(&assoc->target, assoc->associator.classDesc,
-                assoc->associator.forwardOffset) ;
-        result = mrtCheckRefCounts(assoc->target.classDesc,
-                assoc->target.cardinality) &&
-            mrtCheckRefCounts(assoc->associator.classDesc, mrtExactlyOne) ;
+        mrtZeroRefCounts(assocClass) ;
+        mrtCountClassAssocRefs(&assoc->source, assocClass) ;
+        result = mrtCheckRefCounts(assocClass, mrtExactlyOne) ;
+        /*
+         * If the first side is okay, then we can evaluate the references from
+         * the target class to the associator class.
+         */
+        if (result) {
+            MRT_Class const *targetClass = assoc->target.classDesc ;
+
+            mrtZeroRefCounts(targetClass) ;
+            mrtCountSingularRefs(assocClass, assoc->associator.forwardOffset,
+                    targetClass) ;
+            result = mrtCheckRefCounts(targetClass, assoc->target.cardinality) ;
+
+            if (result) {
+                mrtZeroRefCounts(assocClass) ;
+                mrtCountClassAssocRefs(&assoc->target, assocClass) ;
+                result = mrtCheckRefCounts(assocClass, mrtExactlyOne) ;
+            }
+        }
     }
 }
 ----
@@ -3700,14 +3727,13 @@ First we consider counting the references in a simple association.
 static void
 mrtCountAssocRefs(
     struct mrtassociationrole const *source,
-    struct mrtassociationrole const *target) ;
+    MRT_Class const *targetClass) ;
 ----
 
 The `mrtCountAssocRefs` function counts the number of times each
-active instance of `source` refers to active instances of `target` and
-_vice versa_.
+active instance of `source` refers to active instances of `targetClass`.
 
-Counting references mean understanding how the reference pointers are
+Counting references implies understanding how the reference pointers are
 stored.
 There are three ways that reference pointer are stored:
 single pointer, counted arrays and linked lists.
@@ -3721,40 +3747,22 @@ where the pointer values are stored to access target instances.
 static void
 mrtCountAssocRefs(
     struct mrtassociationrole const *source,
-    struct mrtassociationrole const *target)
+    MRT_Class const *targetClass)
 {
     switch (source->storageType) {
     case mrtSingular:
         mrtCountSingularRefs(source->classDesc, source->storageOffset,
-            target->classDesc) ;
-        break ;
-
-    case mrtLinkedList:
-    case mrtArray:
-    default:
-        /*
-         * For simple associations, the reference from the referring class to
-         * the referenced class is always singular.  If we get here, there is a
-         * serious linkage problem.
-         */
-        mrtFatalError(mrtRelationshipLinkage) ;
-        break ;
-    }
-
-    switch (target->storageType) {
-    case mrtSingular:
-        mrtCountSingularRefs(target->classDesc, target->storageOffset,
-            source->classDesc) ;
+            targetClass) ;
         break ;
 
     case mrtArray:
-        mrtCountArrayRefs(target->classDesc, target->storageOffset,
-            source->classDesc) ;
+        mrtCountArrayRefs(source->classDesc, source->storageOffset,
+            targetClass) ;
         break ;
 
     case mrtLinkedList:
-        mrtCountLinkedListRefs(target->classDesc, target->storageOffset,
-                source->classDesc, target->linkOffset) ;
+        mrtCountLinkedListRefs(source->classDesc, source->storageOffset,
+                targetClass, source->linkOffset) ;
         break ;
 
     default:
@@ -3977,8 +3985,7 @@ we have already seen.
 static void
 mrtCountClassAssocRefs(
     struct mrtassociationrole const *participant,
-    MRT_Class const *assocClass,
-    MRT_AttrOffset assocOffset) ;
+    MRT_Class const *assocClass) ;
 ----
 
 To count class based associations,
@@ -3995,8 +4002,7 @@ singular.
 static void
 mrtCountClassAssocRefs(
     struct mrtassociationrole const *participant,
-    MRT_Class const *assocClass,
-    MRT_AttrOffset assocOffset)
+    MRT_Class const *assocClass)
 {
     switch (participant->storageType) {
     case mrtSingular:
@@ -4019,7 +4025,6 @@ mrtCountClassAssocRefs(
         mrtFatalError(mrtRelationshipLinkage) ;
         break ;
     }
-    mrtCountSingularRefs(assocClass, assocOffset, participant->classDesc) ;
 }
 ----
 
@@ -4181,7 +4186,7 @@ mrt_CreateSimpleLinks(
     relationship.
 *****
 
-This function is used to establish pointer links when instances are create
+This function is used to establish pointer links when instances are created
 as well as when they are "swapped".
 
 (((micca,Run Time Function,mrt_CreateSimpleLinks)))
@@ -4425,6 +4430,100 @@ mrtFindRefGenSubclassCode(
     }
 
     mrtFatalError(mrtRelationshipLinkage) ;
+}
+----
+
+=== Create Reflexive Links
+
+*****
+[source,c]
+----
+<<mrt external interfaces>>=
+extern void
+mrt_CreateReflexiveLinks(
+    MRT_Relationship const *rel,
+    void *assoc,
+    void *participant,
+    bool isForward) ;
+----
+
+`rel`::
+    A pointer to a relationship description for the relationship
+    across which the relate operation is to happen.
+`assoc`::
+    An instance reference to the associator class.
+`participant`::
+    An instance reference to a participant of the relationship.
+`isForward`::
+    A boolean value to indicate the direction of the participant reference.
+*****
+
+Create links between associator and participant for an associative
+relationship.
+
+(((micca,Run Time Function,mrt_CreateReflexiveLinks)))
+[source,c]
+.Implementation
+----
+<<mrt external functions>>=
+void
+mrt_CreateReflexiveLinks(
+    MRT_Relationship const *rel,
+    void *assoc,
+    void *participant,
+    bool isForward)
+{
+    assert(rel != NULL) ;
+    assert(assoc != NULL) ;
+    assert(participant != NULL) ;
+
+    assert(rel->relType == mrtClassAssoc) ;
+    if (rel->relType != mrtClassAssoc) {
+        mrtFatalError(mrtRelationshipLinkage) ;
+    }
+
+    struct mrtclassassociation const *cassoc =
+            &rel->relInfo.classAssociation ;
+    struct mrtassociatorrole const *arole = &cassoc->associator ;
+
+    assert(arole->classDesc == ((MRT_Instance *)assoc)->classDesc) ;
+    if (arole->classDesc != ((MRT_Instance *)assoc)->classDesc) {
+        mrtFatalError(mrtRelationshipLinkage) ;
+    }
+
+    struct mrtassociationrole const *srole = &cassoc->source ;
+    struct mrtassociationrole const *trole = &cassoc->target ;
+
+    assert(srole->classDesc == trole->classDesc) ;
+    if (srole->classDesc != trole->classDesc) {
+        mrtFatalError(mrtRelationshipLinkage) ;
+    }
+
+    struct mrtclass const *partClass =
+            ((MRT_Instance *)participant)->classDesc ;
+    if (isForward) {
+        assert(trole->classDesc == partClass) ;
+        if (trole->classDesc != partClass) {
+            mrtFatalError(mrtRelationshipLinkage) ;
+        }
+
+        void **p_forwRef =
+                (void **)((uintptr_t)assoc + arole->forwardOffset) ;
+        *p_forwRef = participant ;
+        mrtLink(trole, participant, assoc) ;
+    } else {
+        assert(srole->classDesc == partClass) ;
+        if (srole->classDesc != partClass) {
+            mrtFatalError(mrtRelationshipLinkage) ;
+        }
+
+        void **p_backRef =
+            (void **)((uintptr_t)assoc + arole->backwardOffset) ;
+        *p_backRef = participant ;
+        mrtLink(srole, participant, assoc) ;
+    }
+
+    mrtMarkRelationship(&rel, 1) ;
 }
 ----
 
