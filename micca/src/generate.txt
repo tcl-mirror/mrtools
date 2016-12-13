@@ -351,7 +351,9 @@ proc GatherDomainProperties {domain} {
         relation extend ~ stup\
             InitialInstance int\
                 {[relation cardinality [tuple extract $stup Instances]]}\
-            TotalInstance int {[tuple extract $stup Allocation]} |
+            TotalInstance int {
+                [relation cardinality [tuple extract $stup Instances]] +
+                [tuple extract $stup Allocation]} |
         relation eliminate ~ Domain Single Class Instances |
         relation rename ~ Association Name AssignerNumber Number
     }]
@@ -3971,7 +3973,7 @@ test codegen-16.0 {
     }]}\
     {[validateutils matchLines codegen16.c {
         static struct A A__POOL[3] = {
-            [0] = { // a1
+            { // a1
                 .base__INST = {
                     .classDesc = &codegen16__CLASSES[0],
                     .alloc = 1,
@@ -3990,7 +3992,7 @@ test codegen-16.0 {
                     .prev = &Y__POOL[0].R1__BACK
                 },
             },
-            [1] = { // a2
+            { // a2
                 .base__INST = {
                     .classDesc = &codegen16__CLASSES[0],
                     .alloc = 2,
@@ -4009,7 +4011,7 @@ test codegen-16.0 {
                     .prev = &Y__POOL[1].R1__BACK
                 },
             },
-            [2] = { // a3
+            { // a3
                 .base__INST = {
                     .classDesc = &codegen16__CLASSES[0],
                     .alloc = 3,
@@ -4157,7 +4159,7 @@ proc classDefinitions {} {
     set relrefs {}
     set attrrefs {}
     set namerefs "#ifndef MRT_NO_NAMES\n"
-    relation foreach class $classes {
+    relation foreach class $classes -ascending Number {
         relation assign $class
 
         if {[relation isnotempty $Relationships]} {
@@ -4222,7 +4224,7 @@ proc classDefinitions {} {
         }
 
         append result\
-            "    \[$Number\] = \{ // $Name\n"\
+            "    \{ // $Name\n"\
             "        .iab = $IAB,\n"\
             "        .eventCount = [relation cardinality $AEvents],\n"\
             "        .edb = $EDB,\n"\
@@ -4719,9 +4721,7 @@ proc classInstanceDefinitions {} {
             "\[[GetClassProperty $Class TotalInstance]\] = \{\n"
 
         relation foreach inst $Instances -ascending InstNumber {
-            append result\
-                "    \[[relation extract $inst InstNumber]\] = "\
-                [string trimleft [GenInstanceInitializers $Class $ClassNumber $inst]]
+            append result [GenInstanceInitializers $Class $ClassNumber $inst]
         }
 
         append result "\} ;\n"
@@ -5923,7 +5923,7 @@ each instance.
 
 In the descriptions below we state the expansion type of each macro.
 
-=== Expanding the Activities Macros
+=== Expanding the Embedded Activity Commands
 
 Just as we have been using the `textutil::expander` command to perform
 macro expansion for generating the header and code files,
@@ -5971,7 +5971,7 @@ the conventional Tcl brackets ([ ]).
 Those characters are inconvenient in ``C'' so we use bracket strings
 that create less interference.
 
-=== Creating the Macro Commands
+=== Creating the Embedded Commands
 
 The commands available for embedding into ``C'' activity code
 are organized into groups.
@@ -6160,7 +6160,8 @@ forAllRefs simpassoc $simpassocs {
             dict set cmdmap signal\
                 [list ${suppns}::SingleAssignerSignal $simpname]
         } else {
-            dict set cmdmap findWhere [list ${suppns}::ClassFindWhere $simpname]
+            dict set cmdmap findByIdInstance\
+                    [list ${suppns}::MultiAssignerFindIdInstance $simpname]
             dict set cmdmap create [list ${suppns}::MultiAssignerCreate $simpname]
         }
     }
@@ -6185,7 +6186,8 @@ forAllRefs classassoc $classassocs {
             dict set cmdmap signal\
                 [list ${suppns}::SingleAssignerSignal $cbname]
         } else {
-            dict set cmdmap findWhere [list ${suppns}::ClassFindWhere $cbname]
+            dict set cmdmap findByIdInstance\
+                    [list ${suppns}::MultiAssignerFindIdInstance $cbname]
             dict set cmdmap create [list ${suppns}::MultiAssignerCreate $cbname]
         }
     }
@@ -10768,9 +10770,7 @@ proc ClassFindWhere {className instref where} {
     ]]
 
     PushBlock
-    append result [IndentToBlock [string cat\
-        "break ;\n"\
-    ]]
+    append result [IndentToBlock "break ;\n"]
     PopBlock
     append result [IndentToBlock "\}\n"]
     PopBlock
@@ -11908,6 +11908,131 @@ endif::showtests[]
 [source,tcl]
 ----
 <<generation support commands>>=
+proc MultiAssignerFindIdInstance {relName idinst instref} {
+    variable domain
+
+    set maRef [MultipleAssigner findWhere {$Domain eq $domain &&\
+            $Association eq $relName}]
+    set idClass [readAttribute $maRef Class]
+    CheckInstRefSymbol $idinst Class $idClass
+
+    set startlevel [GetBlock]
+
+    set classDesc [GetClassDescriptor $domain $relName]
+    set iter [CreateTempSymbol Ctype {MRT_InstIterator}\
+            Type InstanceIterator Class $relName]
+    set result [IndentToBlock [string cat\
+        [linecomment "$relName findByIdInstance $idinst"]\
+        [CreateInstRefSymbol $relName $instref]\
+        "$instref = NULL ;\n"\
+        "MRT_InstIterator $iter ;\n"\
+        "for (mrt_InstIteratorStart(&$iter, &$classDesc) ;\
+            mrt_InstIteratorMore(&$iter) ;\
+            mrt_InstIteratorNext(&$iter)) \{\n"\
+    ]]
+    PushBlock
+    append result [IndentToBlock [string cat\
+        "$instref = mrt_InstIteratorGet(&$iter) ;\n"\
+        "if ($instref->idinstance == $idinst) \{\n"\
+    ]]
+
+    PushBlock
+    append result [IndentToBlock "break ;\n"]
+    PopBlock
+    append result [IndentToBlock "\}\n"]
+    PopBlock
+    append result [IndentToBlock [string cat\
+        "\}\n"\
+        "$instref = mrt_InstIteratorMore(&$iter) ? $instref : NULL ;\n"\
+    ]]
+
+    return $result
+}
+----
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-62.0 {
+    Find a multi assigner
+} -setup {
+    validateutils genMiccaFile codegen62 {
+        micca configure {
+            domain codegen62 {
+                class clerk {}
+                class client {}
+                class service {}
+                class department {
+                    attribute name {char[32]}
+                }
+
+                association R1 -associator service clerk 0..1--0..1 client {
+                    identifyby department
+                    statemodel {
+                        defaulttrans IG
+
+                        state waitingForClerk {} {
+                        }
+                        transition waitingForClerk - clerkReady -> waitingForClient
+
+                        state waitingForClient {} {
+                        }
+                        transition waitingForClient - clientReady -> assigningClerk
+
+                        state assigningClerk {} {
+                        }
+                        transition assigningClerk - clerkAssigned -> waitingForClerk
+                    }
+                }
+                domainop void findService {name {char const *}} {
+                    %<department findWhere dept {strcmp(name, dept->name) == 0}>%
+                    %<R1 findByIdInstance dept r1assgn>%
+                }
+            }
+            population codegen62 {
+                class department {
+                    instance shoes name {"shoes"}
+                }
+                class clerk {
+                    instance fred
+                }
+                class service {
+                    instance shoes R1 {clerk fred client martha}
+                }
+                class client {
+                    instance martha
+                }
+                assigner R1 {
+                    instance shoes shoes
+                }
+            }
+        }
+    }
+} -cleanup {
+    cleanupDomain
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen62.c
+    validateutils matchLines codegen62.c {
+        struct R1 *r1assgn ;
+        r1assgn = NULL ;
+        MRT_InstIterator t__T2 ;
+        for (mrt_InstIteratorStart(&t__T2, &codegen62__ASSIGNERS[0]) ; mrt_InstIteratorMore(&t__T2) ; mrt_InstIteratorNext(&t__T2)) {
+            r1assgn = mrt_InstIteratorGet(&t__T2) ;
+            if (r1assgn->idinstance == dept) {
+                break ;
+            }
+        }
+        r1assgn = mrt_InstIteratorMore(&t__T2) ? r1assgn : NULL ;
+    }
+} -result {1}
+----
+endif::showtests[]
+
+[source,tcl]
+----
+<<generation support commands>>=
 proc MultiAssignerCreate {relName instref idinst} {
     variable domain
 
@@ -11916,7 +12041,7 @@ proc MultiAssignerCreate {relName instref idinst} {
     set idClass [readAttribute $maRef Class]
     CheckInstRefSymbol $idinst Class $idClass
 
-    set assignerClass ${domain}__ASSIGNERS\[[GetClassProperty $relName Number]\]
+    set assignerClass [GetClassDescriptor $domain $relName]
     append result\
         [linecomment "$relName create $instref $idinst"]\
         [CreateInstRefSymbol $relName $instref]\
@@ -11934,61 +12059,65 @@ ifdef::showtests[]
 test codegen-47.0 {
     Create a multi assigner
 } -setup {
-    # makeFile {} codegen47.h
-    # makeFile {} codegen47.c
-    micca configure {
-        domain codegen47 {
-            class clerk {}
-            class client {}
-            class service {}
-            class department {
-                attribute name {char[32]}
-            }
+    validateutils genMiccaFile codegen47 {
+        micca configure {
+            domain codegen47 {
+                class clerk {}
+                class client {}
+                class service {}
+                class department {
+                    attribute name {char[32]}
+                }
 
-            association R1 -associator service clerk 0..1--0..1 client {
-                identifyby department
-                statemodel {
-                    defaulttrans IG
+                association R1 -associator service clerk 0..1--0..1 client {
+                    identifyby department
+                    statemodel {
+                        defaulttrans IG
 
-                    state waitingForClerk {} {
+                        state waitingForClerk {} {
+                        }
+                        transition waitingForClerk - clerkReady -> waitingForClient
+
+                        state waitingForClient {} {
+                        }
+                        transition waitingForClient - clientReady -> assigningClerk
+
+                        state assigningClerk {} {
+                        }
+                        transition assigningClerk - clerkAssigned -> waitingForClerk
                     }
-                    transition waitingForClerk - clerkReady -> waitingForClient
-
-                    state waitingForClient {} {
-                    }
-                    transition waitingForClient - clientReady -> assigningClerk
-
-                    state assigningClerk {} {
-                    }
-                    transition assigningClerk - clerkAssigned -> waitingForClerk
+                }
+                domainop void newDept {name {char const *}} {
+                    %<department create deptref name name>%
+                    %<R1 create r1ref deptref>%
                 }
             }
-            domainop void newDept {name {char const *}} {
-                %<department create deptref name name>%
-                %<R1 create r1ref deptref>%
-            }
-        }
-        population codegen47 {
-            class department {
-                allocate 4
-            }
-            class clerk {
-                allocate 3
-            }
-            class service {
-                allocate 9
-            }
-            class client {
-                allocate 3
+            population codegen47 {
+                class department {
+                    allocate 4
+                }
+                class clerk {
+                    allocate 3
+                }
+                class service {
+                    allocate 9
+                }
+                class client {
+                    allocate 3
+                }
             }
         }
     }
 } -cleanup {
     cleanupDomain
+    validateutils forgetFiles
 } -body {
-    micca generate
-    testConditions\
-        {[llength [fileutil::grep {R1__POOL} codegen47.c]] == 4}
+    validateutils compileFiles codegen47.c
+    validateutils matchLines codegen47.c {
+        struct R1 *r1ref ;
+        r1ref = mrt_CreateInstance(&codegen47__ASSIGNERS[0], MRT_StateCode_IG) ;
+        r1ref->idinstance = deptref ;
+    }
 } -result {1}
 ----
 endif::showtests[]
