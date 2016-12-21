@@ -3926,6 +3926,54 @@ proc statemodel {body} {
     if {[llength $finalouts] != 0} {
         tailcall DeclError FINAL_OUTTRANS [join $finalouts {, }]
     }
+
+    # Check for isolated states. These are states with no inbound or
+    # outbound transitions and which are not the default initial state.
+    # Such states are unreachable unless the instance is explicitly
+    # created in the state.
+    set states [pipe {
+        State findWhere {$Domain eq $DomainName && $Model eq $ClassName} |
+        deRef ~
+    }]
+    # puts [relformat $states states]
+    set trans [pipe {
+        StateTransition findWhere\
+                {$Domain eq $DomainName && $Model eq $ClassName} |
+        deRef ~
+    }]
+    # puts [relformat $trans trans]
+    set initialState [pipe {
+        StateModel findWhere {$Domain eq $DomainName && $Model eq $ClassName} |
+        deRef ~ |
+        relation project ~ InitialState |
+        relation rename ~ InitialState Name
+    }]
+    # puts [relformat $initialState initialState]
+
+    set noins [pipe {
+        relation semiminus $trans $states\
+            -using {Domain Domain Model Model NewState Name} |
+        relation project ~ Name
+    }]
+    # puts [relformat $noins noins]
+    set noouts [pipe {
+        relation semiminus $trans $states\
+            -using {Domain Domain Model Model State Name} |
+        relation project ~ Name
+    }]
+    # puts [relformat $noouts noouts]
+    set isolated [pipe {
+        relation intersect $noins $noouts |
+        relation minus ~ $initialState |
+        relation list ~
+    }]
+    if {[llength $isolated] != 0} {
+        log::warn "In domain, \"$DomainName\", class, \"$ClassName\",\
+            state(s), \"[join $isolated {, }]\", have no inbound or outbound\
+            transitions and is(are) not the default initial state; the state(s)\
+            are unreachable unless an instance is explicitly created in\
+            the state"
+    }
 }
 ----
 
@@ -3933,7 +3981,7 @@ proc statemodel {body} {
 [source,tcl]
 ----
 <<error code formats>>=
-FINAL_OUTTRANS      {states, "%s", are final states, but have outgoing\
+FINAL_OUTTRANS      {state(s), "%s", is(are) final states, but have outgoing\
                     transitions defined for them}
 ----
 
@@ -5262,9 +5310,20 @@ proc class {name script} {
 
     ConfigEvaluate [namespace current]::ClassInstDef $script
 
-    # HERE !!! check for duplicates. Not sure what to do if found.
-    ElementPopulation create Domain $DomainName Element $name
-    ClassPopulation create Domain $DomainName Class $name Allocation $Allocation
+    set epRef [ElementPopulation findById Domain $DomainName Element $name]
+    if {[isEmptyRef $epRef]} {
+        ElementPopulation create Domain $DomainName Element $name
+    }
+
+    set cpRef [ClassPopulation findById Domain $DomainName Class $name]
+    if {[isEmptyRef $cpRef]} {
+        ClassPopulation create Domain $DomainName Class $name\
+                Allocation $Allocation
+    } else {
+        assignAttribute $cpRef {Allocation prevAllocation}
+        updateAttribute $cpRef Allocation\
+                [expr {max($Allocation, $prevAllocation)}]
+    }
 
     return
 }
@@ -5471,6 +5530,7 @@ proc instance {name args} {
         Class $ClassName\
         Instance $name\
     ]
+    CheckDuplicate ClassInstance {*}$insttuple
     ClassInstance create {*}$insttuple\
         Number [GenNumber $DomainName ClassInstance [list $DomainName $ClassName]]
 
@@ -5871,6 +5931,7 @@ Class Component Values that match the arguments.
 [source,tcl]
 ----
 <<table: set values from arguments>>=
+CheckDuplicate ClassInstance {*}$insttuple
 ClassInstance create {*}$insttuple\
     Number [GenNumber $DomainName ClassInstance [list $DomainName $ClassName]]
 foreach compname $heading compvalue $compvalues {
