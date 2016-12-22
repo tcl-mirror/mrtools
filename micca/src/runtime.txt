@@ -1362,7 +1362,7 @@ Again we must allow that the instance may be a union subclass instance.
 [source,c]
 ----
 <<mrt external interfaces>>=
-extern unsigned
+extern MRT_InstId
 mrt_InstanceIndex(
     void *instance) ;
 ----
@@ -1379,7 +1379,7 @@ in its storage pool.
 .Implemenation
 ----
 <<mrt external functions>>=
-unsigned
+MRT_InstId
 mrt_InstanceIndex(
     void *instance)
 {
@@ -1389,9 +1389,9 @@ mrt_InstanceIndex(
 
     MRT_AttrOffset offset ;
     MRT_iab *iab = mrt_GetStorageProperties(instref->classDesc, &offset) ;
+    assert(instance >= iab->storageStart && instance < iab->storageFinish) ;
     unsigned index = (((uintptr_t)instance - offset) -
             (uintptr_t)iab->storageStart) / iab->instanceSize ;     // <1>
-    assert(index < instref->classDesc->instCount) ;
     return index ;
 }
 ----
@@ -1906,6 +1906,8 @@ mrt_InstIteratorNext(
     assert(iter != NULL) ;
 
     MRT_iab *iab = iter->iab ;
+    assert(iab != NULL) ;
+
     while (iter->instance < iab->storageFinish) { // <1>
         iter->instance = (void *)((uintptr_t)iter->instance + iab->instanceSize) ;
         if (((MRT_Instance *)iter->instance)->alloc > 0) {
@@ -3395,25 +3397,42 @@ mrtCheckRelationship(
 ----
 
 For simple associations,
-we zero out the `refCount` member in both participants.
-The references between the class instances is tracked
+we zero out the `refCount` member.
+The references between the class instances are tracked
 and then the values of the `refCount` members are compared against
 what the relationship requires.
+We do this in two steps, first tracking from source to target and
+then tracking from target to source.
+The reason for dividing it this way is to avoid stomping on the
+`refCount` in the case of a reflexive association.
+Since there is only one `refCount` member, we have to zero it,
+count the references and check the counts completely for one side
+before doing the same for the other.
+In a reflexive association, each side is the same class and so
+the `refCount` member is actually the same memory location
+for both sides.
 
 [source,c]
 ----
 <<mrtCheckRelationship: simple associations>>=
 struct mrtsimpleassociation const *assoc = &rel->relInfo.simpleAssociation ;
 
-mrtZeroRefCounts(assoc->source.classDesc) ;
-mrtZeroRefCounts(assoc->target.classDesc) ;
+MRT_Class const *targetClass = assoc->target.classDesc ;
+mrtZeroRefCounts(targetClass) ;                                     // <1>
+mrtCountAssocRefs(&assoc->source, targetClass) ;                    // <2>
+result = mrtCheckRefCounts(targetClass, assoc->target.cardinality) ;
 
-mrtCountAssocRefs(&assoc->source, &assoc->target) ;
-
-result =
-    mrtCheckRefCounts(assoc->source.classDesc, assoc->source.cardinality) &&
-    mrtCheckRefCounts(assoc->target.classDesc, assoc->target.cardinality) ;
+if (result) {
+    MRT_Class const *sourceClass = assoc->source.classDesc ;        // <3>
+    mrtZeroRefCounts(sourceClass) ;
+    mrtCountAssocRefs(&assoc->target, sourceClass) ;
+    result = mrtCheckRefCounts(sourceClass, assoc->source.cardinality) ;
+}
 ----
+<1> Start with the class that is the target of the association
+navigation.
+<2> Count in the target side for each source side that references it.
+<3> Now flip it around and do the target to source traversal.
 
 Class based associations are more complicated.
 Recall that class based associations are treated in a decomposed manner
@@ -3432,26 +3451,36 @@ if (result) {
      * On the first side, we evaluate the references from the source class
      * to the associator class.
      */
-    mrtZeroRefCounts(assoc->source.classDesc) ;
-    mrtZeroRefCounts(assoc->associator.classDesc) ;
-    mrtCountClassAssocRefs(&assoc->source, assoc->associator.classDesc,
-            assoc->associator.backwardOffset) ;
-    result = mrtCheckRefCounts(assoc->source.classDesc,
-                assoc->source.cardinality) &&
-            mrtCheckRefCounts(assoc->associator.classDesc, mrtExactlyOne) ;
+    MRT_Class const *assocClass = assoc->associator.classDesc ;
+    MRT_Class const *sourceClass = assoc->source.classDesc ;
 
-    /*
-     * If the first side is okay, then we can evaluate the references from the
-     * target class to the associator class.
-     */
+    mrtZeroRefCounts(sourceClass) ;
+    mrtCountSingularRefs(assocClass, assoc->associator.backwardOffset,
+            sourceClass) ;
+    result = mrtCheckRefCounts(sourceClass, assoc->source.cardinality) ;
+
     if (result) {
-        mrtZeroRefCounts(assoc->target.classDesc) ;
-        mrtZeroRefCounts(assoc->associator.classDesc) ;
-        mrtCountClassAssocRefs(&assoc->target, assoc->associator.classDesc,
-                assoc->associator.forwardOffset) ;
-        result = mrtCheckRefCounts(assoc->target.classDesc,
-                assoc->target.cardinality) &&
-            mrtCheckRefCounts(assoc->associator.classDesc, mrtExactlyOne) ;
+        mrtZeroRefCounts(assocClass) ;
+        mrtCountClassAssocRefs(&assoc->source, assocClass) ;
+        result = mrtCheckRefCounts(assocClass, mrtExactlyOne) ;
+        /*
+         * If the first side is okay, then we can evaluate the references from
+         * the target class to the associator class.
+         */
+        if (result) {
+            MRT_Class const *targetClass = assoc->target.classDesc ;
+
+            mrtZeroRefCounts(targetClass) ;
+            mrtCountSingularRefs(assocClass, assoc->associator.forwardOffset,
+                    targetClass) ;
+            result = mrtCheckRefCounts(targetClass, assoc->target.cardinality) ;
+
+            if (result) {
+                mrtZeroRefCounts(assocClass) ;
+                mrtCountClassAssocRefs(&assoc->target, assocClass) ;
+                result = mrtCheckRefCounts(assocClass, mrtExactlyOne) ;
+            }
+        }
     }
 }
 ----
@@ -3698,14 +3727,13 @@ First we consider counting the references in a simple association.
 static void
 mrtCountAssocRefs(
     struct mrtassociationrole const *source,
-    struct mrtassociationrole const *target) ;
+    MRT_Class const *targetClass) ;
 ----
 
 The `mrtCountAssocRefs` function counts the number of times each
-active instance of `source` refers to active instances of `target` and
-_vice versa_.
+active instance of `source` refers to active instances of `targetClass`.
 
-Counting references mean understanding how the reference pointers are
+Counting references implies understanding how the reference pointers are
 stored.
 There are three ways that reference pointer are stored:
 single pointer, counted arrays and linked lists.
@@ -3719,40 +3747,22 @@ where the pointer values are stored to access target instances.
 static void
 mrtCountAssocRefs(
     struct mrtassociationrole const *source,
-    struct mrtassociationrole const *target)
+    MRT_Class const *targetClass)
 {
     switch (source->storageType) {
     case mrtSingular:
         mrtCountSingularRefs(source->classDesc, source->storageOffset,
-            target->classDesc) ;
-        break ;
-
-    case mrtLinkedList:
-    case mrtArray:
-    default:
-        /*
-         * For simple associations, the reference from the referring class to
-         * the referenced class is always singular.  If we get here, there is a
-         * serious linkage problem.
-         */
-        mrtFatalError(mrtRelationshipLinkage) ;
-        break ;
-    }
-
-    switch (target->storageType) {
-    case mrtSingular:
-        mrtCountSingularRefs(target->classDesc, target->storageOffset,
-            source->classDesc) ;
+            targetClass) ;
         break ;
 
     case mrtArray:
-        mrtCountArrayRefs(target->classDesc, target->storageOffset,
-            source->classDesc) ;
+        mrtCountArrayRefs(source->classDesc, source->storageOffset,
+            targetClass) ;
         break ;
 
     case mrtLinkedList:
-        mrtCountLinkedListRefs(target->classDesc, target->storageOffset,
-                source->classDesc, target->linkOffset) ;
+        mrtCountLinkedListRefs(source->classDesc, source->storageOffset,
+                targetClass, source->linkOffset) ;
         break ;
 
     default:
@@ -3975,8 +3985,7 @@ we have already seen.
 static void
 mrtCountClassAssocRefs(
     struct mrtassociationrole const *participant,
-    MRT_Class const *assocClass,
-    MRT_AttrOffset assocOffset) ;
+    MRT_Class const *assocClass) ;
 ----
 
 To count class based associations,
@@ -3993,8 +4002,7 @@ singular.
 static void
 mrtCountClassAssocRefs(
     struct mrtassociationrole const *participant,
-    MRT_Class const *assocClass,
-    MRT_AttrOffset assocOffset)
+    MRT_Class const *assocClass)
 {
     switch (participant->storageType) {
     case mrtSingular:
@@ -4017,7 +4025,6 @@ mrtCountClassAssocRefs(
         mrtFatalError(mrtRelationshipLinkage) ;
         break ;
     }
-    mrtCountSingularRefs(assocClass, assocOffset, participant->classDesc) ;
 }
 ----
 
@@ -4165,7 +4172,8 @@ extern void
 mrt_CreateSimpleLinks(
     MRT_Relationship const *rel,
     void *source,
-    void *target) ;
+    void *target,
+    bool isForward) ;
 ----
 
 `rel`::
@@ -4177,10 +4185,30 @@ mrt_CreateSimpleLinks(
 `target`::
     A pointer to a class instance that serves the target role in the
     relationship.
-*****
+`isForward`::
+    A boolean to disambiguate the reflexive case. If `true`, then
+    the link from `source` to `target` is in the forward direction.
+    Otherwise, the link is to be made from `target` to `source`.
+    This argument is ignored for relationships that are not
+    class based associations.
 
-This function is used to establish pointer links when instances are create
-as well as when they are "swapped".
+This function is used to establish pointer links when instances which
+have simple association are created as well as when simple or
+class based association have their related instances "swapped".
+
+For simple associations, `source` is an instance of the referring class
+and `target` is an instance of the referenced class. The `isForward`
+argument is ignored.
+For class based associations, `source` is an instance of the
+associator class and `target` is an instance of one of the participants.
+If the asssociation is reflexive, then the `isForward`
+argument determines if `target` is a target participant (true) or
+as source participant (false) .
+For reference generalizations,
+`source` is an instance of a subclass and `target` is an instance
+of the superclass.
+Union based generalizations have no links.
+*****
 
 (((micca,Run Time Function,mrt_CreateSimpleLinks)))
 [source,c]
@@ -4191,7 +4219,8 @@ void
 mrt_CreateSimpleLinks(
     MRT_Relationship const *rel,
     void *source,
-    void *target)
+    void *target,
+    bool isForward)
 {
     assert(rel != NULL) ;
     assert(source != NULL) ;
@@ -4243,9 +4272,12 @@ if (assoc->source.classDesc != ((MRT_Instance *)source)->classDesc ||
     mrtFatalError(mrtRelationshipLinkage) ;
 }
 
+mrtUnlinkBackref(&assoc->target, source, target) ;       // <1>
 mrtLink(&assoc->source, source, target) ;
 mrtLink(&assoc->target, target, source) ;
 ----
+<1> First we unlink any back references from the target.
+Forward references from the source are always singular.
 
 Since the core of what is going on here is linking the two instances,
 let's look at what `mrtLink` does.
@@ -4335,37 +4367,60 @@ struct mrtassociatorrole const *arole = &cassoc->associator ;
 struct mrtassociationrole const *srole = &cassoc->source ;
 struct mrtassociationrole const *trole = &cassoc->target ;
 
-if (arole->classDesc != ((MRT_Instance *)source)->classDesc) { // <1>
+void *associator = source ;
+void *dest = target ;
+if (arole->classDesc != ((MRT_Instance *)associator)->classDesc) { // <1>
     mrtFatalError(mrtRelationshipLinkage) ;
 }
 
-if (srole->classDesc == ((MRT_Instance *)target)->classDesc) { // <2>
-    void **p_backRef = (void **)((uintptr_t)source + arole->backwardOffset) ;
-    *p_backRef = target ;
-    mrtLink(srole, target, source) ;
-} else if (trole->classDesc == ((MRT_Instance *)target)->classDesc) { // <3>
-    void **p_forwRef = (void **)((uintptr_t)source + arole->forwardOffset) ;
-    *p_forwRef = target ;
-    mrtLink(trole, target, source) ;
-} else {
-    mrtFatalError(mrtRelationshipLinkage) ;
+struct mrtassociationrole const *destrole ;
+MRT_AttrOffset assocOffset ;
+if (srole->classDesc == trole->classDesc) {                         // <2>
+    if (trole->classDesc != ((MRT_Instance *)dest)->classDesc) {
+        mrtFatalError(mrtRelationshipLinkage) ;
+    }
+    if (isForward) {                                                // <3>
+        destrole = trole ;
+        assocOffset = arole->forwardOffset ;
+    } else {
+        destrole = srole ;
+        assocOffset = arole->backwardOffset ;
+    }
+} else {                                                            // <4>
+    if (srole->classDesc == ((MRT_Instance *)dest)->classDesc) {
+        // backward
+        destrole = srole ;
+        assocOffset = arole->backwardOffset ;
+    } else if (trole->classDesc == ((MRT_Instance *)dest)->classDesc) {
+        destrole = trole ;
+        assocOffset = arole->forwardOffset ;
+    } else {
+        mrtFatalError(mrtRelationshipLinkage) ;
+    }
 }
+
+void **p_assocRef = (void **)((uintptr_t)associator + assocOffset) ;
+if (*p_assocRef != NULL) {
+    mrtUnlinkBackref(destrole, associator, *p_assocRef) ;            // <5>
+}
+*p_assocRef = dest ;
+mrtLink(destrole, dest, associator) ;
 ----
 <1> When invoked on a class based association,
 we insist that the "source" instance reference argument be an instance
 reference to the associator class.
-<2> Test to determine if the "target" instance reference refers to
-the source participant of the association.
-If so, then we update the "backward" side of the associative class,
-_i.e._ the reference from the associator instance to the source
-participant.
-The naming is a bit strained here.
-<3> Conversely, test to determin if the "target" instance reference refers
-to the target participant of the association.
-This corresponds to the "forward" reference by the associative class,
-_i.e._ the reference from the associator instance to the target
-participant.
-Again, the naming is a bit difficult.
+We introduce a new variable to prevent confusion of the `source`
+argument with the fact that it is now assumed to be an instance
+of the associator class.
+<2> Check for the reflexive case.
+<3> For the reflexive case, the `isForward` argument determines
+the direction of the destination of the link.
+<4> For the non-reflexive case we can determine the direction
+since the classes of the two ends are different.
+<5> Unlink any back references for the target.
+Install the pointer to the target at the proper place in the
+associative class and then create the new back links for the target
+to the associative class.
 
 When relating reference generalizations,
 the reference from the subclass to the superclass is singular and
@@ -4434,6 +4489,7 @@ A class based association is treated as being decomposed into
 two associations, one each between the participants and the associator
 class.
 
+*****
 [source,c]
 ----
 <<mrt external interfaces>>=
@@ -4444,6 +4500,20 @@ mrt_CreateAssociatorLinks(
     void *source,
     void *target) ;
 ----
+
+`rel`::
+    A pointer to a relationship description for the relationship
+    across which the relate operation is to happen.
+`assoc`::
+    A pointer to a class instance that serves the associator role
+    in the relationship.
+`source`::
+    A pointer to a class instance that serves the source role in the
+    relationship.
+`target`::
+    A pointer to a class instance that serves the target role in the
+    relationship.
+*****
 
 (((micca,Run Time Function,mrt_CreateAssociatorLinks)))
 [source,c]
@@ -4462,10 +4532,21 @@ mrt_CreateAssociatorLinks(
     assert(source != NULL) ;
     assert(target != NULL) ;
 
-    mrt_CreateSimpleLinks(rel, assoc, source) ; // <1>
-    mrt_CreateSimpleLinks(rel, assoc, target) ;
+    assert(rel->relType == mrtClassAssoc) ;
+    if (rel->relType != mrtClassAssoc) {
+        mrtFatalError(mrtRelationshipLinkage) ;
+    }
 
-    mrtMarkRelationship(&rel, 1) ;
+    struct mrtclassassociation const *cassoc = &rel->relInfo.classAssociation ;
+    struct mrtassociatorrole const *arole = &cassoc->associator ;
+
+    assert(arole->classDesc == ((MRT_Instance *)assoc)->classDesc) ;
+    if (arole->classDesc != ((MRT_Instance *)assoc)->classDesc) {
+        mrtFatalError(mrtRelationshipLinkage) ;
+    }
+
+    mrt_CreateSimpleLinks(rel, assoc, source, false) ; // <1>
+    mrt_CreateSimpleLinks(rel, assoc, target, true) ;
 }
 ----
 <1> In keeping with the concept that a class based assocation is
@@ -4556,12 +4637,15 @@ association and the perform the pointer operations to unlink the instances.
 <<mrtDeleteLinks: unlink simple association>>=
 struct mrtsimpleassociation const *s_assoc = &rel->relInfo.simpleAssociation ;
 
+if (!(instclass == s_assoc->source.classDesc ||
+        instclass == s_assoc->target.classDesc)) {
+    mrtFatalError(mrtRelationshipLinkage) ;
+}
 if (instclass == s_assoc->source.classDesc) {
     mrtSimpUnlinkForward(s_assoc, inst) ;
-} else if (instclass == s_assoc->target.classDesc) {
+}
+if (instclass == s_assoc->target.classDesc) {
     mrtSimpUnlinkBack(s_assoc, inst) ;
-} else {
-    mrtFatalError(mrtRelationshipLinkage) ;
 }
 ----
 
@@ -4717,13 +4801,23 @@ mrtUnlinkBackref(
     if (targetRole->storageType == mrtSingular) {
         void **p_sourceInst = (void **)
                 ((uintptr_t)target + targetRole->storageOffset) ; // <1>
-        *p_sourceInst = NULL ;
+        if (*p_sourceInst == source) {                            // <2>
+            *p_sourceInst = NULL ;
+        }
     } else if (targetRole->storageType == mrtLinkedList) {
         MRT_LinkRef *sourcelinks = (MRT_LinkRef *)
-                ((uintptr_t)source + targetRole->linkOffset) ; // <2>
+                ((uintptr_t)source + targetRole->linkOffset) ; // <3>
 
-        if (sourcelinks->next != NULL && sourcelinks->prev != NULL) { // <3>
-            mrtLinkRefRemove(sourcelinks) ;
+        if (sourcelinks->next != NULL && sourcelinks->prev != NULL) { // <4>
+            MRT_LinkRef *targetList = (MRT_LinkRef *)
+                    ((uintptr_t)target + targetRole->storageOffset) ;
+            for (MRT_LinkRef *item = mrtLinkRefBegin(targetList) ;
+                    item != mrtLinkRefEnd(targetList) ; item = item->next) {
+                if (item == sourcelinks) {
+                    mrtLinkRefRemove(sourcelinks) ;
+                    break ;
+                }
+            }
         }
     } else {
         // Can't unlink array type linkages.
@@ -4734,14 +4828,18 @@ mrtUnlinkBackref(
 <1> The entity at the storageOffset is a simple pointer back to the
 source instance.  Point to where the source reference is located
 in the target instance.
-<2> The source instance is linked onto a list whose list terminus is
+<2> We only want to unlink the backref if it is actually pointing
+back to the source.
+<3> The source instance is linked onto a list whose list terminus is
 contained in the target instance.
-We need to remove the source instance from that list.
+We must make sure the source instance is actually linked on the list
+before we try to remove it from the list.
+This means running the list to find the match.
 We only need a pointer to the links member in the
 source instance to remove it from the list (it is doubly linked).
 The links are offset into the source instance by the `linkOffset` given in
 the "target" role relationship descriptor.
-<3> Check that the instance is actually linked on the list.
+<4> Check that the instance is actually linked on the list.
 If the source has been deleted previously,
 then it will have been removed from the list already.
 
@@ -4929,7 +5027,7 @@ newSubInst = mrt_CreateInstance(newSubclass, MRT_StateCode_IG) ;
 /*
  * Create the links to the super class instance.
  */
-mrt_CreateSimpleLinks(rel, newSubInst, super) ;
+mrt_CreateSimpleLinks(rel, newSubInst, super, true) ;
 ----
 
 For generalizations implemented as unions,
@@ -5010,30 +5108,30 @@ and are presented here without little further comment.
 static inline
 MRT_LinkRef *
 mrtLinkRefBegin(
-    MRT_LinkRef const *iter)
+    MRT_LinkRef const *list)
 {
-    return iter->next ;
+    return list->next ;
 }
 static inline
 MRT_LinkRef *
 mrtLinkRefEnd(
-    MRT_LinkRef const *iter)
+    MRT_LinkRef const *list)
 {
-    return (MRT_LinkRef *)iter ;
+    return (MRT_LinkRef *)list ;
 }
 static inline
 bool
 mrtLinkRefEmpty(
-    MRT_LinkRef const *ref)
+    MRT_LinkRef const *list)
 {
-    return ref->next == ref ;
+    return list->next == list ;
 }
 static inline
 bool
 mrtLinkRefNotEmpty(
-    MRT_LinkRef const *ref)
+    MRT_LinkRef const *list)
 {
-    return ref->next != ref ;
+    return list->next != list ;
 }
 ----
 
@@ -7334,33 +7432,51 @@ static void
 mrtDispatchPolymorphicEvent(
     MRT_ecb *ecb)
 {
-    MRT_pdb const *pdb = ecb->targetInst->classDesc->pdb ;
+    MRT_Instance *superInst = ecb->targetInst ;
+    MRT_Class const *superClassDesc = superInst->classDesc ;
+    MRT_pdb const *pdb = superClassDesc->pdb ;
     assert(pdb != NULL) ;
     assert(pdb->genCount > 0) ;
+    /*
+     * Check for the "event-in-flight" error. We must make sure the
+     * superclass instance still exists.
+     */
+    if (superInst->alloc != ecb->alloc) {
+#           ifndef MRT_NO_NAMES
+        mrtFatalError(mrtEventInFlight,
+                ecb->sourceInst ? ecb->sourceInst->classDesc->name : "?",
+                ecb->sourceInst ? ecb->sourceInst->name : "?",
+                superClassDesc->eventNames[ecb->eventNumber],
+                superClassDesc->name,
+                superInst->name ? superInst->name : "?") ;
+#           else
+        mrtFatalError(mrtEventInFlight, ecb->sourceInst, ecb->eventNumber,
+                superInst) ;
+#           endif /* MRT_NO_NAMES */
+    }
     /*
      * Compute the base offset for polymorphic event numbering.  This base
      * offset will be used to turn the polymorphic event number into an array
      * index.
      */
-    MRT_edb const *edb = ecb->targetInst->classDesc->edb ;
+    MRT_edb const *edb = superClassDesc->edb ;
     MRT_EventCode eventOffset = edb == NULL ?  0 : edb->eventCount ;
     assert(ecb->eventNumber - eventOffset < pdb->eventCount) ;
     /*
-     * Save the original event number and target instance pointer.  We intend
-     * to reuse the same ECB for each event we dispatch and will need these
+     * Save the original event number.  We intend to reuse the same ECB for each
+     * event we dispatch and will need this and the super class instance pointer
      * values should there be more than one generalization associated with this
      * superclass.
      */
     MRT_EventCode origEvent = ecb->eventNumber ;
-    MRT_Instance *origTarget = ecb->targetInst ;
     /*
      * For each generalization that originates at the superclass an event is
      * generated down that generalization to one of the subclasss.
      */
-    MRT_gdb const *sdb = pdb->genDispatch ;
-    for (unsigned gnum = 0 ; gnum < pdb->genCount ; ++sdb, ++gnum) {
-        MRT_Relationship const *rel = sdb->relship ;
-        MRT_Instance *targetInst ;
+    MRT_gdb const *gdb = pdb->genDispatch ;
+    for (unsigned gnum = 0 ; gnum < pdb->genCount ; ++gdb, ++gnum) {
+        MRT_Relationship const *rel = gdb->relship ;
+        MRT_Instance *subInst ;
         int subclassCode ;
 
         /*
@@ -7375,23 +7491,23 @@ mrtDispatchPolymorphicEvent(
              */
             struct mrtrefgeneralization const *gen =
                     &rel->relInfo.refGeneralization ;
-            targetInst = *(MRT_Instance **)((uintptr_t)origTarget +
-                    gen->superclass.storageOffset) ;
-            assert(targetInst != NULL) ;
+            subInst = *(MRT_Instance **)
+                    ((uintptr_t)superInst + gen->superclass.storageOffset) ;
+            assert(subInst != NULL) ;
             /*
              * We must also guard against the possibility that the subclass was
              * unrelated from the superclass before the polymorphic event was
              * dispatched.
              */
-            if (targetInst == NULL) {
+            if (subInst == NULL) {
 #                   ifndef MRT_NO_NAMES
                 mrtFatalError(mrtRefIntegrity, rel->name) ;
 #                   else
                 mrtFatalError(mrtRefIntegrity, rel) ;
 #                   endif /* MRT_NO_NAMES */
             }
-            assert(targetInst->classDesc != NULL) ;
-            subclassCode = mrtFindRefGenSubclassCode(targetInst->classDesc,
+            assert(subInst->classDesc != NULL) ;
+            subclassCode = mrtFindRefGenSubclassCode(subInst->classDesc,
                     gen->subclasses, gen->subclassCount) ;
         } else if (rel->relType == mrtUnionGeneralization) {
             /*
@@ -7401,10 +7517,10 @@ mrtDispatchPolymorphicEvent(
              */
             struct mrtuniongeneralization const *gen =
                     &rel->relInfo.unionGeneralization ;
-            targetInst = (MRT_Instance *)((uintptr_t)origTarget +
-                    gen->superclass.storageOffset) ;
-            assert(targetInst->classDesc != NULL) ;
-            subclassCode = mrtFindUnionGenSubclassCode(targetInst->classDesc,
+            subInst = (MRT_Instance *)
+                    ((uintptr_t)superInst + gen->superclass.storageOffset) ;
+            assert(subInst->classDesc != NULL) ;
+            subclassCode = mrtFindUnionGenSubclassCode(subInst->classDesc,
                     gen->subclasses, gen->subclassCount) ;
         } else {
             mrtFatalError(mrtRelationshipLinkage) ;
@@ -7414,22 +7530,27 @@ mrtDispatchPolymorphicEvent(
          * are trying to guard against the possiblity that the subclass
          * instance was deleted before the polymorphic event was delivered.
          */
-        assert(targetInst->alloc > 0) ;
-        if (targetInst->alloc <= 0) {
+        assert(subInst->alloc > 0) ;
+        if (subInst->alloc <= 0) {
 #               ifndef MRT_NO_NAMES
             mrtFatalError(mrtEventInFlight,
                     ecb->sourceInst ? ecb->sourceInst->classDesc->name : "?",
                     ecb->sourceInst ? ecb->sourceInst->name : "?",
-                    targetInst->classDesc->eventNames[origEvent],
-                    targetInst->classDesc->name,
-                    targetInst->name ? targetInst->name : "?") ;
+                    subInst->classDesc->eventNames[origEvent],
+                    subInst->classDesc->name,
+                    subInst->name ? subInst->name : "?") ;
 #            else
             mrtFatalError(mrtEventInFlight, ecb->sourceInst, origEvent,
-                    targetInst) ;
+                    subInst) ;
 #           endif /* MRT_NO_NAMES */
         }
-        ecb->targetInst = targetInst ;
-        ecb->alloc = targetInst->alloc ;
+        /*
+         * Update the target and allocation status in the ECB to match
+         * that of the subclass instance, which is where the event
+         * is now directed.
+         */
+        ecb->targetInst = subInst ;
+        ecb->alloc = subInst->alloc ;
         /*
          * Fetch the event number for the subclass from the polymorphic
          * mapping.  The class of the subclass related to the superclass
@@ -7437,15 +7558,15 @@ mrtDispatchPolymorphicEvent(
          * off any offset in the event encoding that was consumed by the
          * transition events.
          */
-        ecb->eventNumber = *(sdb->eventMap +
-                subclassCode * pdb->eventCount + origEvent - eventOffset) ;
+        ecb->eventNumber = *(gdb->eventMap + subclassCode * pdb->eventCount +
+                origEvent - eventOffset) ;
 
 #           ifndef MRT_NO_TRACE
         /*
          * Trace the transition.
          */
-        mrtTracePolyEvent(origEvent, ecb->sourceInst, origTarget,
-                subclassCode, gnum, ecb->eventNumber) ;
+        mrtTracePolyEvent(origEvent, ecb->sourceInst, superInst, subclassCode,
+                gnum, ecb->eventNumber) ;
 #           endif /* MRT_NO_TRACE */
 
         mrtDispatchEvent(ecb) ; // <1>
@@ -7456,7 +7577,7 @@ mrtDispatchPolymorphicEvent(
 or to a transition event, we will use the general dispatch function
 to recursively dispatch the mapped event.
 
-The code loops through all of the generalizations for which the `targetInst`
+The code loops through all of the generalizations for which the `superInst`
 is a superclass.
 The vast majority of the time there is only one generalization.
 The strategy used here is to reuse the ECB that was carrying the polymorphic

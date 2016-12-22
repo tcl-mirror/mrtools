@@ -704,7 +704,8 @@ translation easier.
 `name`::
     The name of the association. Conventionally, relationships names are of the
     form *R<d>* where _<d>_ is one or more decimal digits but any
-    non-empty string which does not start with a tilde (\~) can be used.
+    non-empty string which does not start with a tilde character
+    (~) can be used.
 `option value ...`::
     Options to the `association` command are given as argument
     option / value pairs:
@@ -763,7 +764,9 @@ translation easier.
 `script`::
     An optional _script_ that is evaluated to define an assigner on the
     association.
+*****
 
+*****
 The `association` command defines an association relationship between
 _source_ class and _target_ class.
 The forward direction of navigating the relationship is from _source_
@@ -885,15 +888,15 @@ relvar eval {
             ReferringCond true ReferringMult false
             ReferencedCond true ReferencedMult false
     } {
-        SpecID sp3 NeedsAssociator false ReflexiveAllowed true
+        SpecID sp3 NeedsAssociator false ReflexiveAllowed false
             ReferringCond false ReferringMult true
             ReferencedCond false ReferencedMult false
     } {
-        SpecID sp4 NeedsAssociator false ReflexiveAllowed false
+        SpecID sp4 NeedsAssociator false ReflexiveAllowed true
             ReferringCond true ReferringMult true
             ReferencedCond false ReferencedMult false
     } {
-        SpecID sp5 NeedsAssociator true ReflexiveAllowed false
+        SpecID sp5 NeedsAssociator true ReflexiveAllowed true
             ReferringCond false ReferringMult true
             ReferencedCond true ReferencedMult false
     } {
@@ -2497,22 +2500,25 @@ The analyst will then have to decide if that is acceptable behavior.
 ----
 <<PropagatePolyEvents: warn of missing deferred event>>=
 set trule [findRelated $sub R40 R41 ~R51 R50 R59]
-switch -exact -- [readAttribute $trule Name] {
-    IG {
-        set phrase "ignoring the event"
+# Guard against there being no defined state model.
+if {[isNotEmptyRef $trule]} {
+    switch -exact -- [readAttribute $trule Name] {
+        IG {
+            set phrase "ignoring the event"
+        }
+        CH {
+            set phrase "a system error"
+        }
+        default {
+            set phrase "unknown behavior"
+        }
     }
-    CH {
-        set phrase "a system error"
-    }
-    default {
-        set phrase "unknown behavior"
-    }
-}
 
-log::warn "In domain, \"$subDomain\", class, \"$subClass\", event, \"$event\"\
-    is polymorphic across, \"$subRelationship\",\
-    and was not consumed in the state model: signalling $event to\
-    $subClass or its related superclasses will result in $phrase"
+    log::warn "In domain, \"$subDomain\", class, \"$subClass\", event,\
+        \"$event\" is polymorphic across, \"$subRelationship\",\
+        and was not consumed in the state model: signalling $event to\
+        $subClass or its related superclasses will result in $phrase"
+}
 ----
 
 When an event is deferred to a subclass that is subject to repeated
@@ -3920,6 +3926,54 @@ proc statemodel {body} {
     if {[llength $finalouts] != 0} {
         tailcall DeclError FINAL_OUTTRANS [join $finalouts {, }]
     }
+
+    # Check for isolated states. These are states with no inbound or
+    # outbound transitions and which are not the default initial state.
+    # Such states are unreachable unless the instance is explicitly
+    # created in the state.
+    set states [pipe {
+        State findWhere {$Domain eq $DomainName && $Model eq $ClassName} |
+        deRef ~
+    }]
+    # puts [relformat $states states]
+    set trans [pipe {
+        StateTransition findWhere\
+                {$Domain eq $DomainName && $Model eq $ClassName} |
+        deRef ~
+    }]
+    # puts [relformat $trans trans]
+    set initialState [pipe {
+        StateModel findWhere {$Domain eq $DomainName && $Model eq $ClassName} |
+        deRef ~ |
+        relation project ~ InitialState |
+        relation rename ~ InitialState Name
+    }]
+    # puts [relformat $initialState initialState]
+
+    set noins [pipe {
+        relation semiminus $trans $states\
+            -using {Domain Domain Model Model NewState Name} |
+        relation project ~ Name
+    }]
+    # puts [relformat $noins noins]
+    set noouts [pipe {
+        relation semiminus $trans $states\
+            -using {Domain Domain Model Model State Name} |
+        relation project ~ Name
+    }]
+    # puts [relformat $noouts noouts]
+    set isolated [pipe {
+        relation intersect $noins $noouts |
+        relation minus ~ $initialState |
+        relation list ~
+    }]
+    if {[llength $isolated] != 0} {
+        log::warn "In domain, \"$DomainName\", class, \"$ClassName\",\
+            state(s), \"[join $isolated {, }]\", have no inbound or outbound\
+            transitions and is(are) not the default initial state; the state(s)\
+            are unreachable unless an instance is explicitly created in\
+            the state"
+    }
 }
 ----
 
@@ -3927,7 +3981,7 @@ proc statemodel {body} {
 [source,tcl]
 ----
 <<error code formats>>=
-FINAL_OUTTRANS      {states, "%s", are final states, but have outgoing\
+FINAL_OUTTRANS      {state(s), "%s", is(are) final states, but have outgoing\
                     transitions defined for them}
 ----
 
@@ -5256,8 +5310,20 @@ proc class {name script} {
 
     ConfigEvaluate [namespace current]::ClassInstDef $script
 
-    ElementPopulation create Domain $DomainName Element $name
-    ClassPopulation create Domain $DomainName Class $name Allocation $Allocation
+    set epRef [ElementPopulation findById Domain $DomainName Element $name]
+    if {[isEmptyRef $epRef]} {
+        ElementPopulation create Domain $DomainName Element $name
+    }
+
+    set cpRef [ClassPopulation findById Domain $DomainName Class $name]
+    if {[isEmptyRef $cpRef]} {
+        ClassPopulation create Domain $DomainName Class $name\
+                Allocation $Allocation
+    } else {
+        assignAttribute $cpRef {Allocation prevAllocation}
+        updateAttribute $cpRef Allocation\
+                [expr {max($Allocation, $prevAllocation)}]
+    }
 
     return
 }
@@ -5464,6 +5530,7 @@ proc instance {name args} {
         Class $ClassName\
         Instance $name\
     ]
+    CheckDuplicate ClassInstance {*}$insttuple
     ClassInstance create {*}$insttuple\
         Number [GenNumber $DomainName ClassInstance [list $DomainName $ClassName]]
 
@@ -5864,6 +5931,7 @@ Class Component Values that match the arguments.
 [source,tcl]
 ----
 <<table: set values from arguments>>=
+CheckDuplicate ClassInstance {*}$insttuple
 ClassInstance create {*}$insttuple\
     Number [GenNumber $DomainName ClassInstance [list $DomainName $ClassName]]
 foreach compname $heading compvalue $compvalues {
@@ -6806,17 +6874,12 @@ test simpleassociation-3.2 {
 } -body {
     micca configure {
         domain bar {
-            class X {}
+            class X {
+                attribute a int
+            }
             association R1 X 1..*--1 X
         }
-
-        population bar {
-            class X {
-                instance x1 R1 x2
-                instance x2 R1 x2
-            }
-            # x1 not referenced
-        }
+        # R1 not allowed to be reflexive
     }
 } -result {encountered 1 configuration script errors} -returnCodes error
 ----
@@ -10036,6 +10099,13 @@ relvar insert Config_DataError {
     RefType             notrefed
     Format              {in domain, $Domain, class, $Model,\
                         there are no events defined for the state model}
+} {
+    Relationship        R87
+    RefClass            TransitioningEvent
+    RefType             refnone
+    Format              {in domain, $Domain, class, $Model,\
+                         event, $Event, is defined, but the class has no\
+                         state model: possible inherited polymorphic event}
 } {
     Relationship        R101
     RefClass            ElementPopulation
