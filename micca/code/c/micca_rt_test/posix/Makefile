@@ -34,9 +34,10 @@ runtests : micca_rt_test micca_rt_posixtest
 	micca_rt_test
 	micca_rt_posixtest
 	gcov micca_rt_test.c
+	lcov -t 'micca rt test' -o micca_rt_test.info -c -d .
+	genhtml -o micca_rt_results micca_rt_test.info
 
-micca_rt_test : CPPFLAGS += -I$(HOME)/local/include \
-    	-fprofile-arcs -ftest-coverage
+micca_rt_test : CPPFLAGS += -I$(HOME)/local/include --coverage
 
 micca_rt_test : LOADLIBES = $(HOME)/local/lib/libcunit.a
 
@@ -75,6 +76,7 @@ posixtestdomain.micca : $(POSIXDOCSRC)
 CLEANFILES =\
 	micca_rt_test\
 	micca_rt_test.c\
+	micca_rt_test.info\
 	micca_rt_posixtest\
 	micca_rt_posixtest.c\
 	testdomain.micca\
@@ -94,6 +96,7 @@ CLEANFILES =\
 
 clean :
 	$(RM) $(CLEANFILES)
+	$(RM) -r micca_rt_results
 
 #
 # vim :set sw=8 ts=8 sts=8 noexpandtab:

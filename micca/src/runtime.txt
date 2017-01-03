@@ -2944,6 +2944,8 @@ struct mrtassociationrole {
 ==== Simple Associations
 
 Simple associations are made up of a source and target.
+The forward direction of a simple association is from the source instance
+to the target instance.
 
 [source,c]
 ----
@@ -3544,6 +3546,9 @@ for (mrt_InstIteratorStart(&iter, superClass) ; mrt_InstIteratorMore(&iter) ;
 }
 ----
 
+[float]
+===== Zero Reference Counts
+
 The first of the generic operations that must be performed on
 class instances is to set the `refCount` member of the instance
 structure to zero.
@@ -3574,6 +3579,9 @@ mrtZeroRefCounts(
     }
 }
 ----
+
+[float]
+===== Checking Reference Counts
 
 The other operation that depends only upon accessing the `refCount` member
 of an instance is to evaluate the value of `refCount` against what
@@ -3697,11 +3705,11 @@ mrtCheckAssociatorRefs(
         void *inst = mrt_InstIteratorGet(&iter) ;
         MRT_Instance *ref = *(MRT_Instance **)
                 ((uintptr_t)inst + associator->forwardOffset) ;
-        if (ref == NULL || ref->alloc == 0) { // <1>
+        if (ref == NULL || ref->alloc <= 0) { // <1>
             return false ;
         }
         ref = *(MRT_Instance **)((uintptr_t)inst + associator->backwardOffset) ;
-        if (ref == NULL || ref->alloc == 0) {
+        if (ref == NULL || ref->alloc <= 0) {
             return false ;
         }
     }
@@ -3735,7 +3743,7 @@ active instance of `source` refers to active instances of `targetClass`.
 
 Counting references implies understanding how the reference pointers are
 stored.
-There are three ways that reference pointer are stored:
+There are three ways that reference pointers are stored:
 single pointer, counted arrays and linked lists.
 We use the knowledge of offsets in the instance to
 where the pointer values are stored to access target instances.
@@ -3952,23 +3960,23 @@ mrtCountLinkedListRefs(
             mrt_InstIteratorMore(&srciter) ; mrt_InstIteratorNext(&srciter)) {
         MRT_Instance *srcInst = mrt_InstIteratorGet(&srciter) ;
         MRT_LinkRef *ref = (MRT_LinkRef *)((uintptr_t)srcInst + refOffset) ;
-        if (ref->next != NULL) { // <1>
-            for (MRT_LinkRef *trgIter = mrtLinkRefBegin(ref) ;
-                    trgIter != mrtLinkRefEnd(ref) ; trgIter = trgIter->next) {
-                MRT_Instance *targetInst =
-                    (MRT_Instance *)((uintptr_t)trgIter - linkOffset) ; // <2>
-                if ((void *)targetInst >= targetiab->storageStart &&
-                        (void *)targetInst < targetiab->storageFinish &&
-                        targetInst->alloc > 0) {
-                    targetInst->refCount = targetInst->refCount == UINT8_MAX ?
-                            2 : targetInst->refCount + 1 ;
-                }
+        for (MRT_LinkRef *trgIter = mrtLinkRefBegin(ref) ;
+                !(trgIter == NULL || trgIter == mrtLinkRefEnd(ref)) ;   // <1>
+                trgIter = trgIter->next) {
+            MRT_Instance *targetInst =
+                (MRT_Instance *)((uintptr_t)trgIter - linkOffset) ;     // <2>
+            if ((void *)targetInst >= targetiab->storageStart &&
+                    (void *)targetInst < targetiab->storageFinish &&
+                    targetInst->alloc > 0) {
+                targetInst->refCount = targetInst->refCount == UINT8_MAX ?
+                        2 : targetInst->refCount + 1 ;
             }
         }
     }
 }
 ----
-<1> Guard against uninitialized link pointers.
+<1> Guard against uninitialized link pointers as well as detect
+the end of the linked list.
 <2> The link pointers that form the linked list of target instances are
 located `linkOffset` from the beginning of the target instance.
 So we need to do some pointer arithmetic to get the pointer to the beginning
@@ -4052,7 +4060,7 @@ mrtCountGenRefs(
 {
     MRT_Class const *superClass = gen->superclass.classDesc ;
     MRT_InstIterator iter ;
-    for (mrt_InstIteratorStart(&iter, superClass) ;
+    for (mrt_InstIteratorStart(&iter, superClass) ;                 // <1>
             mrt_InstIteratorMore(&iter) ; mrt_InstIteratorNext(&iter)) {
         MRT_Instance *instref = mrt_InstIteratorGet(&iter) ;
         MRT_Instance *subInst = *(MRT_Instance **)
@@ -4071,13 +4079,17 @@ mrtCountGenRefs(
     }
 
     struct mrtrefsubclassrole const *subclass = gen->subclasses ;
-    for (unsigned subcount = gen->subclassCount ; subcount != 0 ;
+    for (unsigned subcount = gen->subclassCount ; subcount != 0 ;   // <2>
             --subcount, ++subclass) {
         mrtCountSingularRefs(subclass->classDesc, subclass->storageOffset,
                 gen->superclass.classDesc) ;
     }
 }
 ----
+<1> Start by iterating over the instances of the superclass.
+<2> The refernces from the subclass to the superclass is just an ordinary
+singular pointer reference.
+We already know how to count them.
 
 === Operations on Relationship Instances
 
@@ -4104,9 +4116,10 @@ when an instance of an associator is created, the creation operation
 must be supplied with instance references to the participating instances.
 The run-time will make up the pointer references appropriately.
 The participating instances must not already be part of the relationship.
-This implies that they participating instances are newly created
+This implies that the participating instances are newly created
 or the run-time will unlink them from the association before creating
 the new instance of the association.
+
 * Conversely, deleting an instance of an associator class is sufficient
 to delete an instance of the class based association itself.
 * Deleting an instance of a class participating in a class based association
@@ -4117,7 +4130,7 @@ is also provided.
 
 For simple associations:
 
-* There is a one-to-one correspondence between instance of the simple
+* There is a one-to-one correspondence between instances of the simple
 association and instances of the class which has the _referring_ role.
 * Because of this correspondence,
 when an instance of the referring class is created, the creation operation
@@ -4336,8 +4349,7 @@ mrtLink(
 }
 ----
 <1> For a singular pointer, the `storageOffset` is to a simple pointer
-location.
-If the value stored at the pointer location was not `NULL`,
+location and
 overwriting it serves to unlink any previously linked participant.
 <2> If the target is already on a linked list somewhere,
 then we unlink it before placing it on the new list.
