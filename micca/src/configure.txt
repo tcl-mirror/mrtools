@@ -142,6 +142,29 @@ operation configureFromFile {filename} {
 }
 ----
 
+=== Clearing the Configuration
+
+It is sometimes convenient to be able to clear out the population
+of the underlying micca model.
+For example, processing successive different domain
+configurations requires removing the previous population.
+
+*****
++::micca clear+
+*****
+
+[float]
+==== Implementation
+
+(((micca,operation,clear)))
+[source,tcl]
+----
+<<micca configuration>>=
+operation clear {} {
+    return [@Config@::miccaClear]
+}
+----
+
 == Configuration Namespace Layout
 
 The +::micca::@Config@+ namespace holds all the procedures and data that
@@ -273,8 +296,12 @@ variable evalLambda {{body} {
                 eval $command
             } on error {result} {
                 # puts $::errorInfo
-                log::error "line $configlineno:\
-                    \"[string trim $command]\":\n\"$result\""
+                set cleancmd [string trim $command]
+                if {[string length $cleancmd] > 60} {
+                    set cleancmd [string range $cleancmd 0 54]
+                    append cleancmd " ..."
+                }
+                log::error "line $configlineno: \"$cleancmd\":\n\"$result\""
                 incr errcount
             }
             set command {} ; # <4>
@@ -292,6 +319,38 @@ we have something that has some chance of being a real command.
 <3> We need to keep track of where we are in the +body+.
 <4> After evaluating a command we begin to assemble another one and
 set our location counter to where that command starts.
+
+=== Clearing the Micca Model Population
+
+[float]
+==== Implementation
+
+(((micca,Config,miccaClear)))
+[source,tcl]
+----
+<<config commands>>=
+proc miccaClear {} {
+    set preserve {
+        ::micca::TransitionRule
+    }
+    relvar eval {
+        foreach var [relvar names {::micca::[A-Z]*}] {
+            if {$var ni $preserve} {
+                relvar set $var [relation empty [relvar set $var]]
+            }
+        }
+    }
+
+    set config {
+        ::micca::@Config@::Helpers::SeqNumbers
+    }
+    foreach var $config {
+        relvar set $var [relation empty [relvar set $var]]
+    }
+}
+----
+
+    return [@Config@::miccaClear]
 
 == Defining a Domain
 
@@ -347,14 +406,17 @@ proc domain {name body} {
 
     try {
         ral relvar eval {
-            ConfigEvaluate [namespace current]::DomainDef $body
+            set errs [ConfigEvaluate [namespace current]::DomainDef $body]
 
-            upvar #0 ::micca::@Config@::errcount errcount
+            # No reason to go on if we already have errors in the domain script
+            if {$errs == 0} {
+                upvar #0 ::micca::@Config@::errcount errcount
 
-            # We must compute how polymorphic events are inherited down
-            # generalization hierarchies.
-            <<domain: propagate polymorphic events>>
-            <<domain: union subclass semantics>>
+                # We must compute how polymorphic events are inherited down
+                # generalization hierarchies.
+                <<domain: propagate polymorphic events>>
+                <<domain: union subclass semantics>>
+            }
         }
     } on error {result opts} {
         # puts $::errorInfo
@@ -372,7 +434,7 @@ definition at once.
 [source,tcl]
 ----
 <<error code formats>>=
-BAD_NAME      {"%s" is not a valid name for a %s}
+BAD_NAME      {"%s" is not a valid name for a(n) %s}
 ----
 
 [[post-config-domain]]
@@ -399,7 +461,7 @@ test domain-1.0 {
     Define an empty domain
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -417,7 +479,7 @@ test domain-1.1 {
     Badly named domain
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain {} {}
@@ -572,7 +634,7 @@ test domain-2.0 {
     Define a domain with a non-empty interface
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -679,7 +741,7 @@ test class-1.0 {
     Define class with a bad name
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -941,7 +1003,7 @@ type of the association.
 <<domain config commands>>=
 proc association {name args} {
     if {$name eq {}} {
-        tailcall DeclError BAD_NAME association
+        tailcall DeclError BAD_NAME [list $name] association
     }
     if {[string index $name 0] eq "~"} {
         tailcall DeclError TILDE_NAME $name
@@ -951,6 +1013,7 @@ proc association {name args} {
         tailcall DeclError ASSOC_OPTIONS $args
     }
 
+    set allargs $args
     set associator {}
     set isstatic false
     while {1} {
@@ -963,16 +1026,17 @@ proc association {name args} {
         } elseif {$arg eq "-dynamic"} {
             set isstatic false
         } elseif {$arg eq "--"} {
+            set args [lassign $args source]
             break
         } elseif {[string index $arg 0] eq "-"} {
-            tailcall DeclError ASSOC_OPTIONS $args
+            tailcall DeclError ASSOC_OPTIONS $allargs
         } else {
             set source $arg
             break
         }
     }
     if {[llength $args] < 2 || [llength $args] > 3} {
-        tailcall DeclError ASSOC_OPTIONS $args
+        tailcall DeclError ASSOC_OPTIONS $allargs
     }
     lassign $args spec target script
 
@@ -1065,6 +1129,13 @@ of checking code.
 [source,tcl]
 ----
 <<association: check arguments>>=
+if {$source eq {}} {
+    tailcall DeclError BAD_NAME [list $source] class
+}
+if {$target eq {}} {
+    tailcall DeclError BAD_NAME [list $target] class
+}
+
 set csd [pipe {
     relvar restrictone ::micca::@Config@::Config_AssocSpec SpecName $spec |
     relation semijoin ~ [relvar set ::micca::@Config@::Config_SpecDetail]
@@ -1247,7 +1318,7 @@ test association-1.0 {
     Define simple association
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -1278,7 +1349,7 @@ test association-2.0 {
     Define class based association
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -1351,7 +1422,7 @@ The alternatives are specified as options to the generalization command.
 <<domain config commands>>=
 proc generalization {name args} {
     if {$name eq {}} {
-        tailcall DeclError BAD_NAME generalization
+        tailcall DeclError BAD_NAME [list $name] generalization
     }
     if {[string index $name 0] eq "~"} {
         tailcall DeclError TILDE_NAME $name
@@ -1366,6 +1437,7 @@ proc generalization {name args} {
         } elseif {$arg eq "-union"} {
             set type union
         } elseif {$arg eq "--"} {
+            set args [lassign $args super]
             break
         } elseif {[string index $arg 0] eq "-"} {
             tailcall DeclError GEN_OPTIONS $args
@@ -1493,7 +1565,7 @@ test generalization-1.0 {
     Define reference generalization
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -1526,7 +1598,7 @@ test generalization-2.0 {
     Define union generalization
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -1607,7 +1679,7 @@ test union-subclasses-1.0 {
     Union subclass in multiple generalizations
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -1640,7 +1712,7 @@ test union-subclasses-2.0 {
     Union subclass with creation state
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -1715,7 +1787,7 @@ test typealias-1.0 {
     Define a type alias
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -1800,7 +1872,7 @@ test domainop-1.0 {
     Define a domain operation
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -1894,7 +1966,7 @@ test externalop-1.0 {
     Define a external operation
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -2003,7 +2075,7 @@ in the relvars to hold the attribute characteristics.
 <<class config commands>>=
 proc attribute {name type args} {
     if {$name eq {}} {
-        tailcall DeclError BAD_NAME attribute
+        tailcall DeclError BAD_NAME [list $name] attribute
     }
     if {[llength $args] % 2 != 0} {
         tailcall DeclError ARG_FORMAT $args
@@ -2072,7 +2144,7 @@ test attribute-1.0 {
     Define class with attributes
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -2106,7 +2178,7 @@ test attribute-1.1 {
     Define class with dependent attribute
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -2818,7 +2890,7 @@ test polymorphic-1.0 {
     Define polymorphic events
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -2875,7 +2947,7 @@ test polymorphic-1.1 {
     Define polymorphic events -- inherit across one level
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -2939,7 +3011,7 @@ test polymorphic-1.2 {
     Define polymorphic events -- new event in leaf subclass
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -2998,7 +3070,7 @@ test polymorphic-1.3 {
     Define polymorphic events -- inject polymorphic event mid-level
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -3065,7 +3137,7 @@ test polymorphic-1.4 {
     Define polymorphic events -- multiple hierarchies
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -3136,7 +3208,7 @@ test polymorphic-1.5 {
     Define polymorphic events -- common subclass
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -3199,7 +3271,7 @@ test polymorphic-1.6 {
     Define polymorphic events -- consume mid level event
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -3271,7 +3343,7 @@ test polymorphic-1.7 {
     Define polymorphic events -- compound generalization at mid level
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -3364,7 +3436,7 @@ test polymorphic-1.8 {
     polymorphic events -- consume mid level event and use lower down
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -3448,7 +3520,7 @@ test polymorphic-1.9 {
     Define polymorphic event in leaf subclass
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -3491,7 +3563,7 @@ test polymorphic-1.10 {
     Define polymorphic events -- superfluous polymorphic definitions
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -3692,7 +3764,7 @@ test classop-1.0 {
     Define a class operation
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -3718,7 +3790,7 @@ test instop-1.0 {
     Define an instance operation
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -4019,7 +4091,7 @@ transition.
 <<state model config commands>>=
 proc state {name params body} {
     if {$name eq {}} {
-        tailcall DeclError BAD_NAME state
+        tailcall DeclError BAD_NAME [list $name] state
     }
     if {$name eq "@" || [isNotEmptyRef [TransitionRule findById Name $name]]} {
         tailcall DeclError BAD_STATE_NAME $name
@@ -4093,7 +4165,7 @@ test state-1.0 {
     Define a state with parameters
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -4142,7 +4214,7 @@ test state-1.1 {
     Define a state with parameters
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -4182,7 +4254,7 @@ test state-2.0 {
     State / event parameter mismatch
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -4593,7 +4665,7 @@ we will use it here when the State Transition is created.
 <<state model config commands>>=
 proc transition {source - event -> target} {
     if {$event eq {}} {
-        tailcall DeclError BAD_NAME event
+        tailcall DeclError BAD_NAME [list $event] event
     }
     if {[isNotEmptyRef [TransitionRule findById Name $source]]} {# <1>
         tailcall DeclError BAD_STATE_NAME $name
@@ -4725,8 +4797,10 @@ as the initial state.
 <<state model config commands>>=
 proc initialstate {name} {
     if {$name eq {}} {
-        tailcall DeclError BAD_NAME initialstate
+        tailcall DeclError BAD_NAME [list $name] initialstate
     }
+    # The initial state may not be the pseudo-initial state name
+    # nor any of the other transition rule pseudo states (i.e. IG or CH).
     if {$name eq "@" || [isNotEmptyRef [TransitionRule findById Name $name]]} {
         tailcall DeclError BAD_STATE_NAME $name
     }
@@ -5007,7 +5081,7 @@ test assigner-1.0 {
     Define a single assigner
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -5054,7 +5128,7 @@ test assigner-1.1 {
     Define a multiple assigner
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -5692,7 +5766,7 @@ test populate-1.0 {
     population instances
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -5732,7 +5806,7 @@ test populate-1.1 {
     population instances using default values
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -5779,7 +5853,7 @@ test populate-1.2 {
     population fails for under specifying components
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -5965,7 +6039,7 @@ test populate-2.0 {
     Population using tables
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -6008,7 +6082,7 @@ test populate-2.1 {
     Population using tables and default values
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -6184,7 +6258,7 @@ test populate-3.0 {
     Populate a multiple assigner
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -6373,7 +6447,7 @@ test populate-4.0 {
     Population missing elements
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain bar {
@@ -6472,7 +6546,7 @@ test populate-4.2 {
     class population with no instances and 0 allocation
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain bar {
@@ -6587,7 +6661,7 @@ test simpleassociation-1.0 {
     refer to non-existant instance
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain bar {
@@ -6618,7 +6692,7 @@ test simpleassociation-1.1 {
     refer to non-existant instance -- reflexive association
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain bar {
@@ -6711,7 +6785,7 @@ test simpleassociation-2.0 {
     multiple reference
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain bar {
@@ -6797,7 +6871,7 @@ test simpleassociation-3.0 {
     unconditional reference -- many to one
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain bar {
@@ -6830,7 +6904,7 @@ test classassociation-3.1 {
     unconditional reference -- many to at most one
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain bar {
@@ -6870,7 +6944,7 @@ test simpleassociation-3.2 {
     reflexive unconditional reference -- many to one
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain bar {
@@ -6983,7 +7057,7 @@ test associator-1.0 {
     associator class reference -- bad format
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain bar {
@@ -7078,7 +7152,7 @@ test associator-2.0 {
     associator class reference to non-participating classes
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain bar {
@@ -7160,7 +7234,7 @@ test associator-1.1 {
     associator class reference -- bad format for reflexive reference
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain bar {
@@ -7270,7 +7344,7 @@ test associator-3.0 {
     associator class reference to non-existent instances
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain bar {
@@ -7304,7 +7378,7 @@ test associator-3.1 {
     reflexive associator class reference to non-existent instances
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain bar {
@@ -7402,7 +7476,7 @@ test associator-4.0 {
     associator class -- duplicate references
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain bar {
@@ -7496,7 +7570,7 @@ test associator-5.0 {
     class based association with multiple source class references
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain bar {
@@ -7531,7 +7605,7 @@ test associator-5.1 {
     class based association with multiple target class references
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain bar {
@@ -7566,7 +7640,7 @@ test associator-5.2 {
     reflexive class based association with multiple target class references
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain bar {
@@ -7660,7 +7734,7 @@ test associator-6.0 {
     missing target class reference
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain bar {
@@ -7699,7 +7773,7 @@ test associator-6.1 {
     missing source class reference
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain bar {
@@ -7795,7 +7869,7 @@ test generalization-1.0 {
     subclass reference to bad superclass instance
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain bar {
@@ -7876,7 +7950,7 @@ test generalization-2.0 {
     multiple superclass reference
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain bar {
@@ -7947,7 +8021,7 @@ test generalization-3.0 {
     unreferenced superclass
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain bar {
@@ -8184,7 +8258,7 @@ test singlebackref-1.0 {
     Class based association with singular back reference
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -8239,7 +8313,7 @@ test singlebackref-1.1 {
     Class association singular back reference -- no initial instances
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -8276,7 +8350,7 @@ test singlebackref-1.2 {
     Class association singular back reference -- reflexive
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -8546,7 +8620,7 @@ test singlebackref-2.0 {
     Class based association singular back reference
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -8586,7 +8660,7 @@ test singlebackref-2.1 {
     Class based association singular back reference -- no linkage
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -8625,7 +8699,7 @@ test singlebackref-2.2 {
     Class based association singular back reference -- reflexive
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -8750,7 +8824,7 @@ test arraybackref-1.0 {
     Class association array back reference
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -8803,7 +8877,7 @@ test arraybackref-1.1 {
     Class based association array back reference -- reflexive
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -8924,7 +8998,7 @@ test arraybackref-2.0 {
     Class based association array back reference
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -8969,7 +9043,7 @@ test arraybackref-2.1 {
     Class based association array back reference -- reflexive
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -9095,7 +9169,7 @@ test arrayforwref-1.0 {
     Class based association array forward references
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -9143,7 +9217,7 @@ test arrayforwref-1.1 {
     Class based association array forward reference -- reflexive
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -9180,7 +9254,7 @@ test arrayforwref-1.2 {
     Class based association array forward reference -- reflexive, empty refs
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain codegen5_1 {
@@ -9349,7 +9423,7 @@ test linkbackref-1.0 {
     Class based association link back reference
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -9391,7 +9465,7 @@ test linkbackref-1.1 {
     Class association link back reference with no actual references
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -9430,7 +9504,7 @@ test linkbackref-1.2 {
     Class association link back reference -- multiple dynamic missing population
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain ship {
@@ -9501,7 +9575,7 @@ test linkbackref-2.0 {
     Class based association target link reference
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -9579,7 +9653,7 @@ test linkforwref-1.0 {
     Class based association link forward references
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -9627,7 +9701,7 @@ test linkforwref-1.1 {
     Class based association link forward reference -- reflexive
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -9700,7 +9774,7 @@ test subclassref-1.0 {
     generated components for subclass reference
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain bar {
@@ -9828,7 +9902,7 @@ test subcontainer-1.0 {
     generated components for subclass container
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain bar {
@@ -10063,6 +10137,13 @@ relvar insert Config_DataError {
     RefType             notrefed
     Format              {in domain, $Domain, relationship, $Name,\
                          failed to be completed created}
+} {
+    Relationship        R41
+    RefClass            ClassRole
+    RefType             refnone
+    Format              {in domain, $Domain, relationship, $Relationship,\
+                         $Class, participates in the relationship as a $Role,\
+                         but the class was not defined}
 } {
     Relationship        R54
     RefClass            MultipleAssigner
@@ -10410,7 +10491,7 @@ test typecheck-1.0 {
     attribute with bad data type
 } -setup {
 } -cleanup {
-    cleanupDomain
+    micca clear
 } -body {
     micca configure {
         domain foo {
@@ -10502,30 +10583,6 @@ proc formatMiccaClass {class} {
 namespace export readMiccaAttribute
 proc readMiccaAttribute {class attr args} {
     return [rosea tunnel [$class findById {*}$args] readAttribute $attr]
-}
-----
-
-[source,tcl]
-----
-<<test utility commands>>=
-proc cleanupDomain {} {
-    set preserve {
-        ::micca::TransitionRule
-    }
-    relvar eval {
-        foreach var [relvar names {::micca::[A-Z]*}] {
-            if {$var ni $preserve} {
-                relvar set $var [relation empty [relvar set $var]]
-            }
-        }
-    }
-
-    set config {
-        ::micca::@Config@::Helpers::SeqNumbers
-    }
-    foreach var $config {
-        relvar set $var [relation empty [relvar set $var]]
-    }
 }
 ----
 
