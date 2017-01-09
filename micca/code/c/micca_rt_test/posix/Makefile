@@ -34,7 +34,7 @@ runtests : micca_rt_test micca_rt_posixtest
 	micca_rt_test
 	micca_rt_posixtest
 	gcov micca_rt_test.c
-	lcov -t 'micca rt test' -o micca_rt_test.info -c -d .
+	lcov -t micca_rt_test -o micca_rt_test.info -c -d .
 	genhtml -o micca_rt_results micca_rt_test.info
 
 micca_rt_test : CPPFLAGS += -I$(HOME)/local/include --coverage
