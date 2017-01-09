@@ -30,42 +30,22 @@ ATANGLEOPTS =\
 
 all : runtests
 
-runtests : micca_rt_test micca_rt_posixtest
-	micca_rt_test
+runtests : micca_rt_posixtest
 	micca_rt_posixtest
-	gcov micca_rt_test.c
-	lcov -t micca_rt_test -o micca_rt_test.info -c -d .
-	genhtml -o micca_rt_results micca_rt_test.info
-
-micca_rt_test : CPPFLAGS += -I$(HOME)/local/include --coverage
-
-micca_rt_test : LOADLIBES = $(HOME)/local/lib/libcunit.a
-
-micca_rt_test : micca_rt_test.c
-
-micca_rt_test.c : micca_rt.c micca_rt.h testdomain.c testdomain.h
-
-micca_rt_test.c : $(DOCSRC)
-	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
+	gcov micca_rt.c
 
 micca_rt_posixtest : CPPFLAGS += -I$(HOME)/local/include  --coverage
 
-micca_rt_posixtest : LOADLIBES = $(HOME)/local/lib/libcunit.a
+micca_rt_posixtest : LOADLIBES = $(HOME)/local/lib/libcunit.a --coverage
 
-micca_rt_posixtest : micca_rt_posixtest.c
+micca_rt_posixtest : micca_rt_posixtest.o posixtestdomain.o micca_rt.o
 
-micca_rt_posixtest.c : micca_rt.c micca_rt.h posixtestdomain.c posixtestdomain.h
+micca_rt_posixtest.c : micca_rt.h micca_rt_internal.h posixtestdomain.h
 
 micca_rt_posixtest.c : $(POSIXDOCSRC)
 	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
 
 micca_rt.o : CFLAGS+=--coverage
-
-testdomain.c testdomain.h : testdomain.micca
-	micca $<
-
-testdomain.micca : $(DOCSRC)
-	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
 
 posixtestdomain.c posixtestdomain.h : posixtestdomain.micca
 	micca $<
@@ -74,29 +54,20 @@ posixtestdomain.micca : $(POSIXDOCSRC)
 	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
 
 CLEANFILES =\
-	micca_rt_test\
-	micca_rt_test.c\
-	micca_rt_test.info\
 	micca_rt_posixtest\
 	micca_rt_posixtest.c\
-	testdomain.micca\
-	testdomain.c\
-	testdomain.h\
-	testdomain.o\
 	posixtestdomain.micca\
 	posixtestdomain.c\
 	posixtestdomain.h\
-	posixtestdomain.o\
-	micca_rt.o\
-	$(PDF)\
+	*.o\
 	*.gcov\
 	*.gcda\
 	*.gcno\
+	$(PDF)\
 	$(NULL)
 
 clean :
 	$(RM) $(CLEANFILES)
-	$(RM) -r micca_rt_results
 
 #
 # vim :set sw=8 ts=8 sts=8 noexpandtab:
