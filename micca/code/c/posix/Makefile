@@ -42,7 +42,11 @@ all : code
 
 code : micca_rt.o
 
-micca_rt.o : micca_rt.h micca_rt.c
+micca_rt.o : micca_rt_internal.h micca_rt.h micca_rt.c
+
+micca_rt_internal.h : $(RTSRC)
+	cd $(MICCADIR) ; atangle $(ATANGLEOPTS) -root $@ -output $@ micca.aweb
+	mv $(MICCADIR)/micca_rt_internal.h .
 
 micca_rt.h : $(RTSRC)
 	cd $(MICCADIR) ; atangle $(ATANGLEOPTS) -root micca_rt_posix.h\
@@ -55,6 +59,7 @@ micca_rt.c : $(RTSRC) micca_rt.h
 
 CLEANFILES =\
 	micca_rt.c\
+	micca_rt_internal.h\
 	micca_rt.h\
 	micca_rt.o\
 	$(NULL)

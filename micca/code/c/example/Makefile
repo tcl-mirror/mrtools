@@ -41,7 +41,7 @@ $(MICCADIR)/wmctrl-trace.txt : wmctrl
 
 wmctrl : wmctrl.o micca_rt.o
 
-wmctrl.o : wmctrl.c wmctrl.h micca_rt.h
+wmctrl.o : wmctrl.c wmctrl.h micca_rt.h micca_rt_internal.h
 
 wmctrl.c : wmctrl.micca wmctrl_pop.micca build_wmctrl.tcl
 	tclsh build_wmctrl.tcl
@@ -61,12 +61,16 @@ wmctrl_pop.micca : $(DOCSRC)
 	    -output wmctrl_pop.micca micca.aweb
 	mv $(MICCADIR)/$@ .
 
-micca_rt.o : micca_rt.c micca_rt.h
+micca_rt.o : micca_rt.c micca_rt.h micca_rt_internal.h
 
 micca_rt.h : $(DOCSRC)
 	cd $(MICCADIR) ; atangle $(ATANGLEOPTS) -root micca_rt_posix.h\
 	    	-output $@ micca.aweb
 	mv $(MICCADIR)/micca_rt.h .
+
+micca_rt_internal.h : $(RTSRC)
+	cd $(MICCADIR) ; atangle $(ATANGLEOPTS) -root $@ -output $@ micca.aweb
+	mv $(MICCADIR)/micca_rt_internal.h .
 
 micca_rt.c : $(DOCSRC)
 	cd $(MICCADIR) ; atangle $(ATANGLEOPTS) -root micca_rt_posix.c -output $@ micca.aweb
@@ -81,6 +85,7 @@ CLEANFILES =\
 	wmctrl_pop.micca\
 	build_wmctrl.tcl\
 	micca_rt.h\
+	micca_rt_internal.h\
 	micca_rt.c\
 	$(NULL)
 

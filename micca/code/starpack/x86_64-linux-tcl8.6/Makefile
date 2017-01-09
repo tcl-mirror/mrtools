@@ -50,17 +50,17 @@ micca_main.tcl : $(ASRC)
 	    atangle $(ATANGLEOPTS) -root micca_main.tcl -output $@ micca.aweb
 	mv $(MICCADIR)/micca_main.tcl .
 
-posix/micca_rt.h posix/micca_rt.c : $(ASRC)
-	$(MAKE) --directory posix micca_rt.h micca_rt.c
+posix/micca_rt.h posix/micca_rt_internal.h posix/micca_rt.c : $(ASRC)
+	$(MAKE) --directory posix micca_rt.h micca_rt_internal.h micca_rt.c
 
-arm-7m/msp432/micca_rt.h arm-7m/msp432/micca_rt.c : $(ASRC)
-	$(MAKE) --directory arm-7m/msp432 micca_rt.h micca_rt.c
+arm-7m/msp432/micca_rt.h arm-7m/msp432/micca_rt_internal.h arm-7m/msp432/micca_rt.c : $(ASRC)
+	$(MAKE) --directory arm-7m/msp432 micca_rt.h micca_rt_internal.h micca_rt.c
 
-arm-7m/efm32gg/micca_rt.h arm-7m/efm32gg/micca_rt.c : $(ASRC)
-	$(MAKE) --directory arm-7m/efm32gg micca_rt.h micca_rt.c
+arm-7m/efm32gg/micca_rt.h arm-7m/efm32gg/micca_rt_internal.h arm-7m/efm32gg/micca_rt.c : $(ASRC)
+	$(MAKE) --directory arm-7m/efm32gg micca_rt.h micca_rt_internal.h micca_rt.c
 
-msp430/micca_rt.h msp430/micca_rt.c : $(ASRC)
-	$(MAKE) --directory msp430 micca_rt.h micca_rt.c
+msp430/micca_rt.h msp430/micca_rt_internal.h msp430/micca_rt.c : $(ASRC)
+	$(MAKE) --directory msp430 micca_rt.h micca_rt_internal.h micca_rt.c
 
 CLEANFILES =\
 	micca_main.tcl\
