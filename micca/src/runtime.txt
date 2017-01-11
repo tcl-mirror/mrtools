@@ -7936,6 +7936,7 @@ Non-negative return values indicate success and return the requested
 information.
 Negative return values indicate errors as described below.
 
+(((micca,Portal,Error Codes)))
 [source,c]
 ----
 <<mrt constants>>=
@@ -7957,8 +7958,8 @@ Negative return values indicate errors as described below.
 #define MICCA_PORTAL_NO_DYNAMIC     (-8)
     // Operation not allowed on a dependent attribute.
 #define MICCA_PORTAL_DEPENDENT_ATTR (-9)
-    // Value was truncated due to lack of space.
-#define MICCA_PORTAL_TRUNCATED      (-10)
+    // Operation failed from insufficient space to transfer value.
+#define MICCA_PORTAL_SIZE_ERROR     (-10)
 ----
 
 Internally,
@@ -8162,8 +8163,7 @@ mrt_PortalReadAttr(
             if (attrId < class->attrCount) {
                 MRT_Attribute const *attr = class->classAttrs + attrId ;
                 MRT_AttrSize srcSize = attr->size ;
-                if (dstSize >= srcSize) {
-                    result = srcSize ;
+                if (srcSize <= dstSize) {
                     if (attr->type == mrtIndependentAttr) {
                         void *src = (void *)((uintptr_t)instref +
                                 attr->access.offset) ;
@@ -8171,8 +8171,9 @@ mrt_PortalReadAttr(
                     } else {
                         attr->access.formula(instref, dst, srcSize) ;
                     }
+                    result = srcSize ;
                 } else {
-                    result = MICCA_PORTAL_TRUNCATED ;
+                    result = MICCA_PORTAL_SIZE_ERROR ;
                 }
             } else {
                 result = MICCA_PORTAL_NO_ATTR ;
@@ -8250,14 +8251,12 @@ mrt_PortalUpdateAttr(
             &dstSize) ;
     if (result == 0) {
         assert(dst != NULL) ;
-        int copied ;
-        if (srcSize == 0) {
-            copied = dstSize ;
+        if (srcSize <= dstSize) {
+            memcpy(dst, src, srcSize) ;
+            result = srcSize ;
         } else {
-            copied = dstSize < srcSize ? dstSize : srcSize ;
+            result = MICCA_PORTAL_SIZE_ERROR ;
         }
-        memcpy(dst, src, copied) ;
-        result = copied ;
     }
 
     return result ;
@@ -8357,38 +8356,28 @@ mrtPortalNewECB(
         if (instref->alloc > 0) {
             MRT_Class const *classDesc = instref->classDesc ;
 
-            if (classDesc->eventCount == 0) {
-                return MICCA_PORTAL_NO_STATE_MODEL ;
-            }
-
-            MRT_DispatchCount eventCount = 0 ;
-            bool hasEDB = classDesc->edb != NULL ;
-            bool hasPDB = classDesc->pdb != NULL ;
-
-            if (hasEDB && !hasPDB) {
-                eventCount = classDesc->edb->eventCount ;
-            } else if (!hasEDB && hasPDB) {
-                eventCount = classDesc->pdb->eventCount ;
-            } else if (hasEDB && hasPDB) {
-                eventCount = classDesc->edb->eventCount +
-                        classDesc->pdb->eventCount ;
-            }
-
-            if (eventNumber < eventCount) {
-                MRT_ecb *ecb = mrt_NewEvent(eventNumber, instref, NULL) ;
-                if (eventParameters != NULL) {
-                    size_t copy = paramSize <= sizeof(ecb->eventParameters) ?
-                        paramSize : sizeof(ecb->eventParameters) ;
-                    memcpy(ecb->eventParameters, eventParameters, copy) ;
-                }
-                if (ecbRef) {
-                    *ecbRef = ecb ;
+            if (classDesc->eventCount != 0) {
+                if (eventNumber < classDesc->eventCount) {
+                    if (paramSize <= sizeof(MRT_EventParams)) {
+                        MRT_ecb *ecb = mrt_NewEvent(eventNumber, instref, NULL) ;
+                        if (eventParameters != NULL) {
+                            memcpy(ecb->eventParameters, eventParameters,
+                                    paramSize) ;
+                        }
+                        if (ecbRef) {
+                            *ecbRef = ecb ;
+                        } else {
+                            mrtFreeEvent(ecb) ;             // <1>
+                        }
+                        result = 0 ;
+                    } else {
+                        return MICCA_PORTAL_SIZE_ERROR ;
+                    }
                 } else {
-                    mrtFreeEvent(ecb) ;
+                    result = MICCA_PORTAL_NO_EVENT ;
                 }
-                result = 0 ;
             } else {
-                result = MICCA_PORTAL_NO_EVENT ;
+                return MICCA_PORTAL_NO_STATE_MODEL ;
             }
         } else {
             result = MICCA_PORTAL_UNALLOC ;
@@ -8398,6 +8387,8 @@ mrtPortalNewECB(
     return result ;
 }
 ----
+<1> When the assertions are removed, we still need to protect ourselves
+from leaking ECB's.
 
 ==== Signaling Delayed Events
 
@@ -8531,6 +8522,8 @@ mrt_PortalCancelDelayedEvent(
 }
 ----
 
+==== Remaining Delay Time
+
 *****
 [source,c]
 ----
@@ -8607,6 +8600,8 @@ mrt_PortalRemainingDelayTime(
 }
 ----
 
+==== Synchronous Instance Creation
+
 ****
 [source,c]
 ----
@@ -8625,10 +8620,15 @@ mrt_PortalCreateInstance(
     the domain header file.
 `initialState`::
     The number of the state into which the new created instance is placed.
-    If `initialState` is given as `MRT_StateCode_IG`, then
+    If the class given by `classId` has no state model,
+    then `initialState` must be given as `MRT_StateCode_IG`.
+    If the class given by `classId` has as state model,
+    then if `initialState` is given as `MRT_StateCode_IG`,
     the instance will be placed in the default initial state as it
     was defined when the state model was configured.
-
+    Otherwise, `initialState` must be a valid state number for the
+    class and the new instance is created in that state.
+    N.B. no state activity is executed in any case.
 ****
 
 (((micca,Run Time Function,mrt_PortalCreateInstance)))
@@ -8670,6 +8670,8 @@ mrt_PortalCreateInstance(
 }
 ----
 
+==== Asynchronous Instance Creation
+
 *****
 [source,c]
 ----
@@ -8695,6 +8697,15 @@ mrt_PortalCreateAsync(
     no supplemental parameters, this argument should be `NULL`.
 `paramSize`::
     The number of bytes pointed to by `eventParameters`.
+
+The `mrt_PortalCreateAsync` function sends `eventNumber` as a
+creation event to the class given by `classId`.
+Any parameters of the event are pointed to by `eventParameters`
+and are `paramSize` bytes in length.
+The newly created instance is placed in its pseudo-initial state and the
+`eventNumber` event is signaled to it.
+N.B. a transition occurs when the event is delivered resulting
+in the execution of a state activity.
 *****
 
 (((micca,Run Time Function,mrt_PortalCreateAsync)))
@@ -8738,6 +8749,9 @@ mrt_PortalCreateAsync(
 ----
 <1> Union subclass instances cannot be created asynchronously.
 
+==== Deleting Instances
+
+*****
 [source,c]
 ----
 <<mrt external interfaces>>=
@@ -8747,6 +8761,19 @@ mrt_PortalDeleteInstance(
     MRT_ClassId classId,
     MRT_InstId instId) ;
 ----
+
+`portal`::
+    A pointer to the portal structure for the domain.
+`classId`::
+    The number of the class. This number is generated by micca and placed in
+    the domain header file.
+`instId`::
+    The number of the instance. Instance numbers are consecutive non-negative
+    integers up to the maximum number of instances defined for the class.
+
+The `mrt_PortalDeleteInstance` deletes the `instId` instance of
+the `classId` class.
+*****
 
 (((micca,Run Time Function,mrt_PortalDeleteInstance)))
 [source,c]
@@ -8842,14 +8869,17 @@ mrt_PortalSignalEventToAssigner(
             if (instref->alloc > 0) {
                 MRT_edb const *edb = passigner->edb ;
                 if (eventNumber < edb->eventCount) {
-                    MRT_ecb *ecb = mrt_NewEvent(eventNumber, instref, NULL) ;
-                    if (eventParameters != NULL) {
-                        size_t copy = paramSize <= sizeof(ecb->eventParameters) ?
-                            paramSize : sizeof(ecb->eventParameters) ;
-                        memcpy(ecb->eventParameters, eventParameters, copy) ;
+                    if (paramSize <= sizeof(MRT_EventParams)) {
+                        MRT_ecb *ecb = mrt_NewEvent(eventNumber, instref, NULL) ;
+                        if (eventParameters != NULL) {
+                            memcpy(ecb->eventParameters, eventParameters,
+                                    paramSize) ;
+                        }
+                        mrt_PostEvent(ecb) ;
+                        result = 0 ;
+                    } else {
+                        return MICCA_PORTAL_SIZE_ERROR ;
                     }
-                    mrt_PostEvent(ecb) ;
-                    result = 0 ;
                 } else {
                     result = MICCA_PORTAL_NO_EVENT ;
                 }
@@ -8882,6 +8912,18 @@ mrt_PortalInstanceCurrentState(
     MRT_ClassId classId,
     MRT_InstId instId) ;
 ----
+
+`portal`::
+    A pointer to the portal structure for the domain.
+`classId`::
+    The number of the class. This number is generated by micca and placed in
+    the domain header file.
+`instId`::
+    The number of the instance. Instance numbers are consecutive non-negative
+    integers up to the maximum number of instances defined for the class.
+
+The `mrt_PortalInstanceCurrentState` function returns the number of the
+current state of the `instId` instance of `classId` class.
 *****
 
 (((micca,Run Time Function,mrt_PortalInstanceCurrentState)))
