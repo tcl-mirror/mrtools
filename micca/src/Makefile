@@ -120,8 +120,9 @@ CLEANFILES =\
 	$(NULL)
 
 A2XOPTS =\
-	--verbose\
 	$(NULL)
+
+# --verbose\
 
 ATANGLEOPTS =\
 	$(NULL)
