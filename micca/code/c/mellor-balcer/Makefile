@@ -24,7 +24,6 @@ CFLAGS	=\
 	$(NULL)
 
 CPPFLAGS =\
-	 -D_POSIX_C_SOURCE=200112L\
 	 -D_ISOC11_SOURCE\
 	 -D_XOPEN_SOURCE\
 	 -DMRT_ECB_PARAM_SIZE=64\
@@ -56,6 +55,7 @@ CLEANFILES =\
 	bookstore\
 	bookstore.c\
 	bookstore.h\
+	bookstore.log\
 	*.o\
 	$(NULL)
 

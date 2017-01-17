@@ -6310,6 +6310,7 @@ set cmdmap [dict create\
     operation ${suppns}::InstanceOperation\
     foreachRelated ${suppns}::InstanceForeachRelated\
     foreachRelatedWhere ${suppns}::InstanceForeachRelatedWhere\
+    findRelatedWhere ${suppns}::InstanceFindRelatedWhere\
     findOneRelated ${suppns}::InstanceFindOneRelated\
     selectRelated ${suppns}::InstanceSetSelectRelated\
     selectRelatedWhere ${suppns}::InstanceSetSelectRelatedWhere\
@@ -6340,6 +6341,7 @@ set cmdmap [dict create\
     operation [list ${suppns}::InstanceOperation self]\
     foreachRelated [list ${suppns}::InstanceForeachRelated self]\
     foreachRelatedWhere [list ${suppns}::InstanceForeachRelatedWhere self]\
+    findRelatedWhere [list ${suppns}::InstanceFindRelatedWhere self]\
     findOneRelated [list ${suppns}::InstanceFindOneRelated self]\
     selectRelated [list ${suppns}::InstanceSetSelectRelated self]\
     selectRelatedWhere [list ${suppns}::InstanceSetSelectRelatedWhere self]\
@@ -8646,6 +8648,150 @@ test codegen-59.0 {
 ----
 endif::showtests[]
 
+==== Conditionally Find a Single Related Instance
+
+*****
+`%<instance` _start_ `findRelatedWhere` _instvar clause rel1 ?rel2? ..._ `>%`
+
+start::
+    The name of a ``C'' variable containing the instance reference where
+    the relationship navigation will begin.
+instvar::
+    The name of a ``C'' variable that holds a reference to a class instance.
+clause::
+    A ``C'' expression that evaluates to a value that can be interpreted
+    as a boolean.
+relN::
+    A set of relationship navigation specifications.
+
+The `findRelatedWhere` subccommand generates ``C'' statements
+to iterate across the set of instances obtained by navigating
+the relationship chain which starts at the _start_ instance
+and is given by the _relN_ arguments.
+A reference to each instance found in the navigation is assigned to
+the _instvar_ variable and then `clause` is executed.
+If the result of executing `clause` is non-zero,
+then the iteration stops and _instvar_ contains a reference to the
+matching instance.
+If no match is found, then _instvar_ will be set to `NULL`.
+The command finds the first matching related instance.
+If there is more than one matching related instance,
+the one found is arbitrary.
+*****
+
+[source,tcl]
+.Implementation
+----
+<<generation support commands>>=
+proc InstanceFindRelatedWhere {startref instref where args} {
+    set startlevel [GetBlock]
+    set endref [CreateTempSymbolName]
+
+    set chaincode [TraverseRelChain $startref $endref $args]
+    set endsym [LookUpSymbol $endref]
+
+    append chaincode [IndentToBlock [string cat\
+        "$instref = $endref ;\n"\
+        "if ($where) \{\n"\
+    ]]
+    PushBlock
+
+    append chaincode [IndentToBlock "break ;\n"]
+    PopBlock
+
+    append chaincode [IndentToBlock "\} else \{\n"]
+    PushBlock
+
+    append chaincode [IndentToBlock "$instref = NULL ;\n"]
+
+    set depth [expr {[GetBlock] - $startlevel}]
+    for {set i 0} {$i < $depth} {incr i} {
+        PopBlock
+        append chaincode [IndentToBlock "\}\n"]
+    }
+
+    set result [IndentToBlock [string cat\
+        [linecomment "instance $startref findRelatedWhere\
+                $instref [list $where] $args"]\
+        [CreateInstRefSymbol [dict get $endsym Class] $instref]\
+        "$instref = NULL ;\n"\
+    ]]
+
+    return [append result $chaincode]
+}
+----
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-63.0 {
+    Generated code file to select related instance
+} -setup {
+    validateutils genMiccaFile codegen63 {
+        domain codegen63 {
+            class X {
+                attribute color int -default 20
+            }
+            class Y {
+                attribute temp int -default 30
+            }
+            association R1 Y 1..*--1 X
+            class Z {
+                attribute pressure int -default 40
+            }
+            association R2 Z 0..1--1 Y
+            domainop void findZs {} {
+                %<X findByName x1 xref>%
+                %<instance xref findRelatedWhere zref {zref->pressure == 42}\
+                        ~R1 ~R2>%
+            }
+        }
+        population codegen63 {
+            class X {
+                instance x1
+            }
+            class Y {
+                instance y1 R1 x1 temp 31
+                instance y2 R1 x1 temp 32
+                instance y3 R1 x1 temp 33
+                instance y4 R1 x1 temp 34
+            }
+            class Z {
+                instance z1 R2 y1 pressure 41
+                instance z2 R2 y2 pressure 42
+                instance z3 R2 y3 pressure 43
+            }
+        }
+    }
+} -cleanup {
+    micca clear
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen63.c
+    validateutils matchLines codegen63.c {
+        struct Z *zref ;
+        zref = NULL ;
+        for (MRT_LinkRef *t__T2 = mrtLinkRefBegin(&xref->R1__BACK) ; t__T2 != mrtLinkRefEnd(&xref->R1__BACK) ;) {
+            struct Y *t__T3 = (struct Y *)((uintptr_t)t__T2 - offsetof(struct Y, R1__BLINKS)) ;
+            t__T2 = t__T2->next ;
+            struct Z *t__T4 = t__T3->R2__BACK ; // ~R2
+            if (t__T4 != NULL) {
+                struct Z *t__T1 ;
+                t__T1 = t__T4 ;
+                zref = t__T1 ;
+                if (zref->pressure == 42) {
+                    break ;
+                } else {
+                    zref = NULL ;
+                }
+            }
+        }
+    }
+} -result {1}
+----
+endif::showtests[]
+
 ==== Finding a Single Related Instance
 
 *****
@@ -10808,8 +10954,6 @@ value of `NULL`.
 proc ClassFindWhere {className instref where} {
     variable domain
 
-    set startlevel [GetBlock]
-
     set classDesc [GetClassDescriptor $domain $className]
     set iter [CreateTempSymbol Ctype {MRT_InstIterator}\
             Type InstanceIterator Class $className]
@@ -10827,16 +10971,21 @@ proc ClassFindWhere {className instref where} {
         "$instref = mrt_InstIteratorGet(&$iter) ;\n"\
         "if ($where) \{\n"\
     ]]
-
     PushBlock
+
     append result [IndentToBlock "break ;\n"]
     PopBlock
+
+    append result [IndentToBlock "\} else \{\n"]
+    PushBlock
+
+    append result [IndentToBlock "$instref = NULL ;\n"]
+    PopBlock
+
     append result [IndentToBlock "\}\n"]
     PopBlock
-    append result [IndentToBlock [string cat\
-        "\}\n"\
-        "$instref = mrt_InstIteratorMore(&$iter) ? $instref : NULL ;\n"\
-    ]]
+
+    append result [IndentToBlock "\}\n"]
 
     return $result
 }
@@ -10882,9 +11031,10 @@ test codegen-56.0 {
             xref = mrt_InstIteratorGet(&t__T1) ;
             if (xref->id == id) {
                 break ;
+            } else {
+                xref = NULL ;
             }
         }
-        xref = mrt_InstIteratorMore(&t__T1) ? xref : NULL ;
     }
 } -result {1}
 ----
