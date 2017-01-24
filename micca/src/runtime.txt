@@ -502,9 +502,8 @@ mrt_SyncToEventLoop() ;
 
 The `mrt_SyncToEventLoop` function will cause the event loop to exit
 after completing any ongoing thread of control.
-Note the event loop is exited only if the system is about to wait,
-_i.e._ we exit the event loop rather than wait for more work to come along.
-The previous value of the event loop exit status is returned.
+The function returns `false` if the event loop would not have exited and
+`true` otherwise.
 *****
 
 One use case for this function is in test code where the main
@@ -552,12 +551,13 @@ mrt_DispatchThreadOfControl(
     to dispatch, then the function blocks until one comes along
     and then runs the thread of control.
 
-The `mrt_DispatchThreadOfControl` function runs a single thread of
+The `mrt_DispatchThreadOfControl` function attempts to run a single thread of
 control and then returns to the caller a boolean value to indicate
 if a thread of control was actually executed.
-Any ongoing thread of control is finished.
+Any ongoing thread of control is finished and is not considered
+in the return value.
 If there are no queued events that would start a thread of control,
-then the function waits until there is one if the `wait`
+then the function waits until one is queued if the `wait`
 argument is `true`  and then
 runs the thread of control that results.
 If `wait` is `false` and there is no thread of control ready to run,
@@ -729,6 +729,7 @@ all the synchronization functions must be invoked.
 static bool mrtProcessOneEvent(MRT_EventQueue *queue) ;
 ----
 
+[[processing-one-event]]
 (((micca,Run Time Function,mtrProcessOneEvent)))
 [source,c]
 .Implementation
@@ -9478,7 +9479,7 @@ An interrupt signaled by some external hardware causes the processor
 to stop executing and transfer control to a different section of code
 so that immediate action can be taken on the cause of the interrupt.
 After the external condition is handled,
-execution can resume where it was interrupted.
+execution usually resumes where it was interrupted.
 The need for asynchronous execution was recognized early in computer
 architecture design as interaction with the external environment is much
 of what makes a computer a useful machine.
@@ -9521,26 +9522,37 @@ synchronization with the running background.
 This is accomplished by having the interrupt service code
 perform a synchronization request.
 
+*****
 [source,c]
 ----
 <<mrt external interfaces>>=
 extern MRT_SyncParams *
 mrt_SyncRequest(
-    MRT_SyncFunc f) ;
+    MRT_SyncFunc syncfunc) ;
 ----
 
-That request is in the form of a function with optional parameters
+The `mrt_SyncRequest` function is called from interrupt service routines
+to request that the synchronization function, `syncfunc`, be executed
+in the background at the first safe opportunity.
+The return value of the function is a pointer to a parameter area
+where arguments to `syncfunc` may be placed which are then made available
+when the function is invoked.
+*****
+
+That request is in the form of a function, with optional parameters,
 that is to be executed at the first *safe* opportunity.
 As we saw before,
 the synchronization functions are executed in between state actions
 to insure that the domain data are in a coherent state.
 
-The run-time provides a sync queue where interrupts may place
-their requests for background synchronization execution.
-We do this with a simple queue that is implemented in an array.
+To implement deferring the sync function,
+the run-time provides a sync queue where
+requests for background synchronization execution are placed.
+The queue is implemented in an array.
 Like all resources in the run-time,
 the storage required for the queue is fixed at compile time.
 
+(((micca,Run Time Constant,MRT_SYNCQUEUESIZE)))
 [source,c]
 ----
 <<mrt interface constants>>=
@@ -9613,9 +9625,10 @@ of the parameters.
 <<mrt implementation aggregate types>>=
 typedef struct mrtsyncblock {
     MRT_SyncFunc function ;
-    alignas(max_align_t) MRT_SyncParams params ;
+    alignas(max_align_t) MRT_SyncParams params ;    // <1>
 } MRT_SyncBlock ;
 ----
+<1> _N.B._ the use of a `C11` alignment feature.
 
 The sync queue is stored in an array and we use a couple of
 pointers to keep track of the head and tail.
@@ -9646,7 +9659,7 @@ static MRT_SyncQueue mrtSyncQueue = {
 ----
 
 There are only three operations on the sync queue.
-First we must be able to determine if the queue is empty or not.
+First we must be able to determine if the queue is empty.
 Emptiness is determined when the queue head is equal to the queue tail.
 For this type of queue operation,
 the head is where the next entry is removed and the tail is where the
@@ -9658,7 +9671,9 @@ next entry is inserted.
 static inline bool mrtSyncQueueEmpty(void) ;
 ----
 
+(((micca,Run Time Function,mrtSyncQueueEmpty)))
 [source,c]
+.Implementation
 ----
 <<mrt static functions>>=
 static inline bool
@@ -9668,12 +9683,7 @@ mrtSyncQueueEmpty(void)
 }
 ----
 
-Inserting a function into the synchronization queue is an activity
-that may only be performed from interrupt service level.
-*N.B.* that this function does *not* implement a critical section
-around access to the sync queue.
-It assumes that it is being invoked from an interrupt context already
-and will not be preempted by any other execution.
+We need to be able to add a sync function to the queue.
 
 [source,c]
 ----
@@ -9681,7 +9691,9 @@ and will not be preempted by any other execution.
 static inline MRT_SyncParams *mrtSyncQueuePut(MRT_SyncFunc f, bool fatal) ;
 ----
 
+(((micca,Run Time Function,mrtSyncQueuePut)))
 [source,c]
+.Implementation
 ----
 <<mrt static functions>>=
 static inline MRT_SyncParams *
@@ -9730,29 +9742,32 @@ The consumer of the sync queue entries is the main loop.
 static inline MRT_SyncBlock *mrtSyncQueueGet(void) ;
 ----
 
+(((micca,Run Time Function,mrtSyncQueueGet)))
 [source,c]
 ----
 <<mrt static functions>>=
 static inline MRT_SyncBlock *
 mrtSyncQueueGet(void)
 {
-    MRT_SyncBlock *head ;
+    MRT_SyncBlock *block ;
 
-    beginCriticalSection() ;
+    mrtBeginCriticalSection() ;
     if (mrtSyncQueueEmpty()) {
-        head = NULL ;
+        block = NULL ;
     } else {
-        head = mrtSyncQueue.head ;
+        block = mrtSyncQueue.head ;
         if (++mrtSyncQueue.head >=
-                mrtSyncQueueStorage + MRT_SYNCQUEUESIZE) {
+                mrtSyncQueueStorage + MRT_SYNCQUEUESIZE) {      // <1>
             mrtSyncQueue.head = mrtSyncQueueStorage ;
         }
     }
-    endCriticalSection() ;
+    mrtEndCriticalSection() ;
 
-    return head ;
+    return block ;
 }
 ----
+<1> Wrap around the end of the array as we advance the pointer
+to the next slot in the queue.
 
 Since the main loop runs with interrupts enabled,
 obtaining a sync queue entry must be done in a critical section.
@@ -9762,10 +9777,13 @@ the array storage wrap around.
 
 === Dispatching Synchronization Functions
 
-The event loop we saw above performed the background synchronization
+<<processing-one-event,Above>> we saw that
+during running the event the `mrtProcessOneEvent` function is called.
+This function performed the background synchronization
 before dispatching a single event.
 For all architectures except the ARM v7-M,
-the code is executed directly in the `mrt_ProcessOneEvent()` function.
+the following code is executed directly in the `mrt_ProcessOneEvent`
+function.
 
 [source,c]
 ----
@@ -9777,9 +9795,6 @@ while (mrtInvokeOneSyncFunction()) {
 
 We execute in a loop, invoking one sync function until there are no
 more queued up.
-It turns out we can do something a bit better for the ARM v7-M
-architecture.
-We will discuss that below when we consider the platform specific code.
 
 [source,c]
 ----
@@ -9791,7 +9806,9 @@ Invoking a sync function is a simple matter of pulling it off the
 sync queue and passing a pointer to the parameters to it.
 We return a value indicating if a function was called.
 
+(((micca,Run Time Function,mrtInvokeOneSyncFunction)))
 [source,c]
+.Implementation
 ----
 <<mrt static functions>>=
 static inline bool
@@ -9799,9 +9816,9 @@ mrtInvokeOneSyncFunction(void)
 {
     bool didOne ;
 
-    MRT_SyncBlock const *blk = mrtSyncQueueGet() ;
-    if (blk != NULL && blk->function != NULL) {
-        blk->function(&blk->params) ;
+    MRT_SyncBlock const *block = mrtSyncQueueGet() ;
+    if (block != NULL && block->function != NULL) {
+        block->function(&block->params) ;
         didOne = true ;
     } else {
         didOne = false ;
@@ -9811,12 +9828,21 @@ mrtInvokeOneSyncFunction(void)
 }
 ----
 
-For the ARM v7-M processor,
-we can execute the sync functions in a service handler and then there
+It turns out we can do something a bit better for the ARM v7-M
+architecture.
+We use the *Pend SV* exception in the ARM v7-M processor to
+execute the sync functions.
+This exception is intended to be used by interrupt service to
+``pend'' a service request.
+We can execute the sync functions in the service handler and then there
 is no burden to the event loop to constantly test if any synchronization
-need to be performed.
-The process will handle vectoring to this code when necessary.
+needs to be performed.
+The processor will handle vectoring to this code when necessary when
+requests are pending and by changing the base priority at which the
+processor runs, we can may sure that state actions are not interrupted
+by the service handler.
 
+(((micca,ARM v7-M Function,PendSV_Handler)))
 [source,c]
 ----
 <<arm7m external functions>>=
@@ -9826,6 +9852,10 @@ PendSV_Handler(void)
     <<execute sync functions>>
 }
 ----
+
+Note we are executing the same code,
+the difference is whether the processor exception architecture is
+starts the code or whether it is done directly by the event loop code.
 
 == Event Dispatch Tracing
 
@@ -10087,6 +10117,11 @@ mrtTraceCreationEvent(
 ----
 
 === Obtaining Tracing Output
+
+A default trace handler is supplied that simply prints the
+trace information to the standard output using `printf`.
+Two version are supplied. One for when strings are present and the other
+for when they are not and only numbers can be printed.
 
 (((micca,Run Time Function,mrtPrintTraceInfo)))
 [source,c]
@@ -10507,11 +10542,6 @@ mrtFatalError(
     ...)
 {
     va_list ap ;
-    /*
-     * All hope is lost here. Make sure we don't
-     * execute any asynchronous code.
-     */
-    beginCriticalSection() ;
 
     assert(mrtErrHandler != NULL) ;
     assert(errNum < COUNTOF(mrtErrorMsgs)) ;
@@ -10818,7 +10848,7 @@ signals.
 ----
 <<posix static functions>>=
 static inline void
-beginCriticalSection(void)
+mrtBeginCriticalSection(void)
 {
     if (sigprocmask(SIG_BLOCK, &mrtSigMask, NULL) != 0) {
         mrtFatalError(mrtSignalOpFailed, strerror(errno)) ;
@@ -10833,7 +10863,7 @@ the managed signals.
 ----
 <<posix static functions>>=
 static inline void
-endCriticalSection(void)
+mrtEndCriticalSection(void)
 {
     if (sigprocmask(SIG_UNBLOCK, &mrtSigMask, NULL) != 0) {
         mrtFatalError(mrtSignalOpFailed, strerror(errno)) ;
@@ -11396,7 +11426,7 @@ We then use `pselect` to atomically enable all signals and block the process.
 static void
 mrtWait(void)
 {
-    beginCriticalSection() ;
+    mrtBeginCriticalSection() ;
     if (mrtSyncQueueEmpty()) {
         /*
          * Copy the file descriptor sets since "pselect" modifies them in place
@@ -11456,7 +11486,7 @@ mrtWait(void)
             }
         }
     }
-    endCriticalSection() ;
+    mrtEndCriticalSection() ;
 }
 ----
 
@@ -11727,12 +11757,12 @@ mrtInitCriticalSection(void)
     NVIC_SetPriority(PendSV_IRQn, MRT_PENDSV_PRIORITY) ;
 }
 static inline void
-beginCriticalSection(void)
+mrtBeginCriticalSection(void)
 {
     __disable_irq() ;
 }
 static inline void
-endCriticalSection(void)
+mrtEndCriticalSection(void)
 {
     __enable_irq() ;
 }
@@ -11747,9 +11777,9 @@ MRT_SyncParams *
 mrt_SyncRequest(
     MRT_SyncFunc f)
 {
-    beginCriticalSection() ;
+    mrtBeginCriticalSection() ;
     MRT_SyncParams *params = mrtSyncQueuePut(f, true) ;
-    endCriticalSection() ;
+    mrtEndCriticalSection() ;
     SCB->ICSR = SCB_ICSR_PENDSVSET_Msk ;
     return params ;
 }
@@ -11764,9 +11794,9 @@ MRT_SyncParams *
 mrt_TrySyncRequest(
     MRT_SyncFunc f)
 {
-    beginCriticalSection() ;
+    mrtBeginCriticalSection() ;
     MRT_SyncParams *params = mrtSyncQueuePut(f, false) ;
-    endCriticalSection() ;
+    mrtEndCriticalSection() ;
     if (params) {
         SCB->ICSR = SCB_ICSR_PENDSVSET_Msk ;
     }
@@ -12051,11 +12081,11 @@ mrtPlatformInit(void)
 static void
 mrtWait(void)
 {
-    beginCriticalSection() ;
+    mrtBeginCriticalSection() ;
     if (mrtSyncQueueEmpty()) {
         EMU_EnterEM2(true) ;
     }
-    endCriticalSection() ;
+    mrtEndCriticalSection() ;
 }
 ----
 
@@ -12335,12 +12365,12 @@ mrtPlatformInit(void)
 static void
 mrtWait(void)
 {
-    beginCriticalSection() ;
+    mrtBeginCriticalSection() ;
     if (mrtSyncQueueEmpty()) {
         __DSB() ; // <1>
         __WFI() ;
     }
-    endCriticalSection() ;
+    mrtEndCriticalSection() ;
 }
 ----
 <1> ARM recommends a data synchronization barrier instruction before
@@ -12493,12 +12523,12 @@ mrtInitCriticalSection(void)
 {
 }
 static inline void
-beginCriticalSection(void)
+mrtBeginCriticalSection(void)
 {
     __disable_interrupt() ;
 }
 static inline void
-endCriticalSection(void)
+mrtEndCriticalSection(void)
 {
     __enable_interrupt() ;
 }
@@ -12787,11 +12817,11 @@ mrt_TrySyncRequest(
 static void
 mrtWait(void)
 {
-    beginCriticalSection() ;
+    mrtBeginCriticalSection() ;
     if (mrtSyncQueueEmpty()) {
         __bis_SR_register(LPM0_bits | GIE) ;
     } else {
-        endCriticalSection() ;
+        mrtEndCriticalSection() ;
     }
 }
 ----
