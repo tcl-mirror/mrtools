@@ -12,7 +12,6 @@
 
 LDFLAGS =\
 	 -g\
-	 -no-pie\
 	 $(NULL)
 
 CFLAGS	=\
@@ -20,13 +19,16 @@ CFLAGS	=\
 	 -g\
 	 -O0\
 	 -Wall\
-	 -fno-pie\
 	$(NULL)
 
 CPPFLAGS =\
 	 -D_ISOC11_SOURCE\
 	 -D_XOPEN_SOURCE\
 	 -DMRT_ECB_PARAM_SIZE=64\
+	 $(NULL)
+
+LDFLAGS =\
+	 --coverage\
 	 $(NULL)
 
 DOCSRC 	=\
@@ -106,6 +108,8 @@ code : bookstore
 bookstore : bookstore.o micca_rt.o
 
 bookstore.c : bookstore.h micca_rt.h
+
+micca_rt.o : CFLAGS += --coverage
 
 micca_rt.o : micca_rt.c micca_rt.h
 
