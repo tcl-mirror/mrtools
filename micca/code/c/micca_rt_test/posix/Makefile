@@ -15,7 +15,6 @@ CPPFLAGS =\
 	 -D_POSIX_C_SOURCE=200112L\
 	 -D_ISOC11_SOURCE\
 	 -D_XOPEN_SOURCE=600\
-	 -I..\
 	 $(NULL)
 
 DOCSRC 	=\
@@ -29,20 +28,16 @@ POSIXDOCSRC =\
 ATANGLEOPTS =\
 	$(NULL)
 
-LDFLAGS =\
-	 --coverage\
-	 $(NULL)
-
-LDLIBS =\
-	-lcunit\
-	 $(NULL)
-
 .PHONY : all runtests
 
 all : runtests
 
 runtests : micca_rt_posixtest
-	./micca_rt_posixtest
+	micca_rt_posixtest
+
+micca_rt_posixtest : CPPFLAGS += -I$(HOME)/local/include -I..
+
+micca_rt_posixtest : LOADLIBES = $(HOME)/local/lib/libcunit.a --coverage
 
 micca_rt_posixtest : micca_rt_posixtest.o posixtestdomain.o ../micca_rt.o
 

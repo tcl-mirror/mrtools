@@ -15,7 +15,7 @@ PKGDIR	= ../../packages
 IMAGEDIR = ./images
 CODEDIR	= ../code
 
-VERSION=1.0a1
+VERSION=1.0a2
 
 vpath %.pdf $(DOCDIR)
 vpath %.html $(DOCDIR)

@@ -51,20 +51,12 @@ CFLAGS	= -std=c11 -g -I$(HOME)/local/include -Wall
 CPPFLAGS =\
 	 $(NULL)
 
-LDFLAGS =\
-	 --coverage\
-	 $(NULL)
-
-LDLIBS =\
-	-lcunit\
-	 $(NULL)
-
 .PHONY : all doc runtests coverage
 
 all : runtests coverage
 
 runtests : micca_rt_test
-	./micca_rt_test
+	micca_rt_test
 	$(MAKE) --directory posix runtests
 
 coverage : runtests
@@ -72,6 +64,8 @@ coverage : runtests
 	    --output-file test_results.info
 	genhtml --quiet --title 'micca rt test coverage'\
 	    --output-directory test_results test_results.info
+
+micca_rt_test : LOADLIBES = $(HOME)/local/lib/libcunit.a --coverage
 
 micca_rt_test : micca_rt_test.o testdomain.o micca_rt.o
 
