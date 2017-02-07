@@ -3,7 +3,7 @@
 # PROJECT:
 #	micca
 # MODULE:
-# 	Run time tests
+# 	Association tests
 #
 # ABSTRACT:
 #
@@ -53,10 +53,10 @@ CPPFLAGS =\
 
 .PHONY : all doc runtests
 
-all : runtests
-
 runtests : micca_gen_test
 	./micca_gen_test
+
+all : runtests doc
 
 micca_gen_test : LOADLIBES = $(HOME)/local/lib/libcunit.a
 
@@ -94,7 +94,7 @@ clean :
 $(PDF) : $(DOCSRC) $(DOCINFO)
 
 %.pdf : %.aweb
-	a2x $(A2XOPTS) --doctype=book  --format=pdf\
+	a2x $(A2XOPTS) --doctype=article  --format=pdf\
 	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) $<
 	$(RM) ./*__[0-9].*
 

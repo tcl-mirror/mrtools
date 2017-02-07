@@ -136,6 +136,9 @@ DBLATEX_PARAMS =\
 	doc.section.depth=0\
 	$(NULL)
 
+# draft.mode=yes
+# draft.watermark=1
+
 DOCINFO	=\
 	$(patsubst %.aweb,%-docinfo.xml,$(DOCSRC))\
 	docinfo.xml\
