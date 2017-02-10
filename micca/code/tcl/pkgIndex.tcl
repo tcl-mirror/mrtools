@@ -1,1 +1,1 @@
-package ifneeded micca 1.0a2 [list source [file join $dir micca.tcl]]
+package ifneeded micca 1.0a3 [list source [file join $dir micca.tcl]]
