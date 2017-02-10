@@ -169,7 +169,7 @@ proc ::validateutils::genMiccaFile {domain content args} {
 proc ::validateutils::compileFiles {args} {
     set osuffix [expr {$::tcl_platform(os) eq "Windows" ? "obj" : "o"}]
     foreach fname $args {
-        puts -nonewline [exec -keepnewline -- cc -c -std=c11 -Wall $fname 2>@1]
+        puts -nonewline [exec -keepnewline -- gcc -c -std=c11 -Wall $fname 2>@1]
         file delete [file rootname $fname].$osuffix
     }
 }

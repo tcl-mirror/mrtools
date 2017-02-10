@@ -11,7 +11,7 @@
 
 MICCADIR = ../../../src
 DOCDIR = ../../../doc
-TCLCODEDIR = ../../tcl
+TCLCODE = ../../tcl
 
 ASRC 	=\
 	$(MICCADIR)/micca.aweb\
@@ -43,12 +43,12 @@ RTSRCS=\
 ATANGLEOPTS =\
 	$(NULL)
 
-.PHONY : all doc
+.PHONY : all
 
-all : micca_main.tcl $(RTSRCS) doc
+all : $(TCLCODE)/micca_main.tcl $(RTSRCS)
 
-micca.tcl micca_main.tcl : $(ASRC)
-	make --director $(MICCADIR) code
+$(TCLCODE)/micca_main.tcl : $(ASRC)
+	make --director $(TCLCODE) micca_main.tcl
 
 posix/micca_rt.h posix/micca_rt_internal.h posix/micca_rt.c : $(ASRC)
 	$(MAKE) --directory posix micca_rt.h micca_rt_internal.h micca_rt.c
@@ -66,6 +66,7 @@ doc :
 	$(MAKE) --directory $(DOCDIR)
 
 CLEANFILES =\
+	micca_main.tcl\
 	$(NULL)
 
 clean :

@@ -15,13 +15,12 @@ PKGDIR	= ../../packages
 IMAGEDIR = ./images
 CODEDIR	= ../code
 
-VERSION=0.1
+VERSION=1.0a3
 
 vpath %.pdf $(DOCDIR)
 vpath %.html $(DOCDIR)
 vpath %.test $(TESTDIR)
 vpath %.uxf $(IMAGEDIR)
-vpath %.tcl $(CODEDIR)/tcl
 
 DOCSRC 	=\
 	micca.aweb\
@@ -29,6 +28,7 @@ DOCSRC 	=\
 
 CODEFILE =\
 	  $(CODEDIR)/tcl/micca.tcl\
+	  $(CODEDIR)/tcl/micca_main.tcl\
 	  $(NULL)
 
 DOCPARTS=\
@@ -120,8 +120,9 @@ CLEANFILES =\
 	$(NULL)
 
 A2XOPTS =\
-	--verbose\
 	$(NULL)
+
+# --verbose\
 
 ATANGLEOPTS =\
 	$(NULL)
@@ -134,6 +135,9 @@ DBLATEX_PARAMS =\
 	toc.section.depth=2\
 	doc.section.depth=0\
 	$(NULL)
+
+# draft.mode=yes
+# draft.watermark=1
 
 DOCINFO	=\
 	$(patsubst %.aweb,%-docinfo.xml,$(DOCSRC))\
@@ -193,17 +197,17 @@ $(TCLSRC) : $(DOCSRC) $(DOCPARTS)
 
 $(TESTS) : $(DOCSRC) $(DOCPARTS)
 
-$(CODEFILE) : $(DOCSRC) $(DOCPARTS)
-	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $@ $<
+$(CODEDIR)/tcl/micca.tcl : $(DOCSRC) $(DOCPARTS)
+	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $@ $(DOCSRC)
+
+$(CODEDIR)/tcl/micca_main.tcl : $(DOCSRC) $(DOCPARTS)
+	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $@ $(DOCSRC)
 
 $(DOCDIR)/%.pdf : %.aweb
 	a2x $(A2XOPTS) --doctype=book  --format=pdf\
 	    --destination-dir=$(DOCDIR)\
 	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) $<
 	$(RM) $(DOCDIR)/*__[0-9].pdf
-
-%.tcl : %.aweb
-	atangle $(ATANGLEOPTS) -root $@ -output $(CODEDIR)/tcl/$@ $<
 
 %.test : %.aweb
 	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $(TESTDIR)/$@ $<
