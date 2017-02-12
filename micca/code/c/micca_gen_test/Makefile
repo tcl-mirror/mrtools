@@ -26,7 +26,7 @@ DBLATEX_PARAMS =\
 	index.numbered=0\
 	doc.publisher.show=0\
 	doc.lot.show=figure,table\
-	toc.section.depth=1\
+	toc.section.depth=3\
 	doc.section.depth=0\
 	$(NULL)
 
@@ -47,8 +47,14 @@ ASCIIDOC_OPTS =\
 	$(patsubst %,--attribute=%,$(ASCIIDOC_ATTRS))\
 	$(NULL)
 
-CFLAGS	= -std=c11 -g -I$(HOME)/local/include -Wall
+CFLAGS	=\
+	 -std=c11\
+	 -g\
+	 -I$(HOME)/local/include -Wall\
+	 $(NULL)
+
 CPPFLAGS =\
+	 -DMRT_NO_TRACE\
 	 $(NULL)
 
 .PHONY : all doc runtests
@@ -96,7 +102,7 @@ $(PDF) : $(DOCSRC) $(DOCINFO)
 %.pdf : %.aweb
 	a2x $(A2XOPTS) --doctype=article  --format=pdf\
 	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) $<
-	$(RM) ./*__[0-9].*
+	$(RM) ./*__[0-9]*.*
 
 #
 # vim :set sw=8 ts=8 sts=8 noexpandtab:
