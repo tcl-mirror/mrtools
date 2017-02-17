@@ -2124,6 +2124,9 @@ mrt_InstSetAddInstance(
     }
     unsigned instid = mrt_InstanceIndex(instance) ;
     assert(instid < MRT_INSTANCESETSIZE) ;
+    if (instid >= MRT_INSTANCESETSIZE) {
+        mrtFatalError(mrtInstSetOverflow, instid) ;
+    }
     set->instvector[instid / MRT_SETWORD_BITS] |=
             (1 << (instid % MRT_SETWORD_BITS)) ; // <2>
 }
@@ -2181,6 +2184,9 @@ mrt_InstSetRemoveInstance(
     }
     unsigned instid = mrt_InstanceIndex(instance) ;
     assert(instid < MRT_INSTANCESETSIZE) ;
+    if (instid >= MRT_INSTANCESETSIZE) {
+        mrtFatalError(mrtInstSetOverflow, instid) ;
+    }
     set->instvector[instid / MRT_SETWORD_BITS] &=
             ~(1 << (instid % MRT_SETWORD_BITS)) ; // <1>
 }
@@ -2232,6 +2238,9 @@ mrt_InstSetMember(
     }
     unsigned instid = mrt_InstanceIndex(instance) ;
     assert(instid < MRT_INSTANCESETSIZE) ;
+    if (instid >= MRT_INSTANCESETSIZE) {
+        mrtFatalError(mrtInstSetOverflow, instid) ;
+    }
     MRT_SetWord w = set->instvector[instid / MRT_SETWORD_BITS] ;
     MRT_SetWord mask = (1 << (instid % MRT_SETWORD_BITS)) ;
 
@@ -4446,6 +4455,8 @@ if (arole->classDesc != ((MRT_Instance *)associator)->classDesc) { // <1>
 
 struct mrtassociationrole const *destrole ;
 MRT_AttrOffset assocOffset ;
+void *srcInst ;
+void *targetInst ;
 if (srole->classDesc == trole->classDesc) {                         // <2>
     if (trole->classDesc != ((MRT_Instance *)dest)->classDesc) {
         mrtFatalError(mrtRelationshipLinkage) ;
@@ -4453,22 +4464,31 @@ if (srole->classDesc == trole->classDesc) {                         // <2>
     if (isForward) {                                                // <3>
         destrole = trole ;
         assocOffset = arole->forwardOffset ;
+        srcInst = *(void **)((uintptr_t)associator + arole->backwardOffset) ;
+        targetInst = dest ;
     } else {
         destrole = srole ;
         assocOffset = arole->backwardOffset ;
+        srcInst = dest ;
+        targetInst = *(void **)((uintptr_t)associator + arole->forwardOffset) ;
     }
 } else {                                                            // <4>
     if (srole->classDesc == ((MRT_Instance *)dest)->classDesc) {
         // backward
         destrole = srole ;
         assocOffset = arole->backwardOffset ;
+        srcInst = dest ;
+        targetInst = *(void **)((uintptr_t)associator + arole->forwardOffset) ;
     } else if (trole->classDesc == ((MRT_Instance *)dest)->classDesc) {
         destrole = trole ;
         assocOffset = arole->forwardOffset ;
+        srcInst = *(void **)((uintptr_t)associator + arole->backwardOffset) ;
+        targetInst = dest ;
     } else {
         mrtFatalError(mrtRelationshipLinkage) ;
     }
 }
+mrtCheckDupAssociator(rel, srcInst, targetInst) ;
 
 void **p_assocRef = (void **)((uintptr_t)associator + assocOffset) ;
 if (*p_assocRef != NULL) {
@@ -4618,13 +4638,85 @@ mrt_CreateAssociatorLinks(
         mrtFatalError(mrtRelationshipLinkage) ;
     }
 
-    mrt_CreateSimpleLinks(rel, assoc, source, false) ; // <1>
+    mrtCheckDupAssociator(rel, source, target) ;        // <1>
+
+    mrt_CreateSimpleLinks(rel, assoc, source, false) ;  // <2>
     mrt_CreateSimpleLinks(rel, assoc, target, true) ;
 }
 ----
-<1> In keeping with the concept that a class based assocation is
+<1> Problem arises when source and target are already related to
+each other through some other associator class instance. If that
+is the case, then we violate the identity contraint on the
+associator class and we would not have proper sets.
+So we have to navigate from source to see if we can find target.
+<2> In keeping with the concept that a class based assocation is
 decomposed into two association legs, we need only create the links
 for both sides.
+
+[source,c]
+----
+<<mrt static functions>>=
+static void
+mrtCheckDupAssociator(
+    MRT_Relationship const *rel,
+    void *source,
+    void *target)
+{
+    assert(rel->relType == mrtClassAssoc) ;
+
+    struct mrtclassassociation const *cassoc = &rel->relInfo.classAssociation ;
+    struct mrtassociatorrole const *arole = &cassoc->associator ;
+    struct mrtassociationrole const *srole = &cassoc->source ;
+
+    switch (srole->storageType) {
+    case mrtSingular: {
+        void *assocInst = *(void **)((uintptr_t)source +
+                srole->storageOffset) ;
+        if (assocInst == NULL) {
+            return ;
+        }
+        void *targetInst = *(void **)((uintptr_t)assocInst +
+                arole->forwardOffset) ;
+        if (targetInst == target) {
+#               ifndef MRT_NO_NAMES
+            mrtFatalError(mrtDupAssociator, rel->name) ;
+#               else
+            mrtFatalError(mrtDupAssociator, rel) ;
+#               endif /* MRT_NO_NAMES */
+        }
+    }
+        break ;
+    case mrtArray:
+        mrtFatalError(mrtStaticRelationship) ;
+        break ;
+
+    case mrtLinkedList: {
+        MRT_LinkRef *srcRefs = (MRT_LinkRef *)((uintptr_t)source +
+                srole->storageOffset) ;
+        for (MRT_LinkRef *srcIter = mrtLinkRefBegin(srcRefs) ;
+                !(srcIter == NULL || srcIter == mrtLinkRefEnd(srcRefs)) ;
+                srcIter = srcIter->next) {
+            void *assocInst = (void *)((uintptr_t)srcIter - srole->linkOffset) ;
+            void *targetInst = *(void **)((uintptr_t)assocInst +
+                    arole->forwardOffset) ;
+            if (targetInst == target) {
+#                   ifndef MRT_NO_NAMES
+                mrtFatalError(mrtDupAssociator, rel->name) ;
+#                   else
+                mrtFatalError(mrtDupAssociator, rel) ;
+#                   endif /* MRT_NO_NAMES */
+                return ;
+            }
+        }
+    }
+        break ;
+
+    default:
+        mrtFatalError(mrtRelationshipLinkage) ;
+        break ;
+    }
+}
+----
 
 === Deleting Relationship Linkage
 
@@ -4931,7 +5023,6 @@ if (instclass == c_assoc->associator.classDesc) {
             ((uintptr_t)inst + assocRole->forwardOffset) ; // <1>
     MRT_Instance *targetInst = *p_targetInst ;
     *p_targetInst = NULL ;
-    assert(targetInst != NULL) ;
     if (targetInst != NULL && targetInst->alloc > 0) {
         mrtUnlinkBackref(targetRole, inst, targetInst) ;
     }
@@ -4940,7 +5031,6 @@ if (instclass == c_assoc->associator.classDesc) {
             ((uintptr_t)inst + assocRole->backwardOffset) ;
     MRT_Instance *sourceInst = *p_sourceInst ;
     *p_sourceInst = NULL ;
-    assert(sourceInst != NULL) ;
     if (sourceInst != NULL && sourceInst->alloc > 0) {
         mrtUnlinkBackref(sourceRole, inst, sourceInst) ;
     }
@@ -10350,8 +10440,10 @@ typedef enum {
     mrtSyncOverflow,
     mrtRefIntegrity,
     mrtTransOverflow,
+    mrtInstSetOverflow,
     mrtStaticRelationship,
     mrtRelationshipLinkage,
+    mrtDupAssociator,
 
 #       ifdef _POSIX_C_SOURCE
     mrtTimerOpFailed,
@@ -10373,6 +10465,7 @@ static char const * const mrtErrorMsgs[] = {
     [mrtNoECB] = "no available Event Control Blocks\n",
     [mrtSyncOverflow] = "synchronization queue overflow\n",
     [mrtTransOverflow] = "transaction markings overflow\n",
+    [mrtInstSetOverflow] = "instance set overflow: instance number %u\n",
     [mrtStaticRelationship] = "attempt to modify static relationship\n",
     [mrtRelationshipLinkage] = "invalid instance linkage operation or value\n",
 
@@ -10382,12 +10475,14 @@ static char const * const mrtErrorMsgs[] = {
     [mrtNoInstSlot] = "no available instance slots: %s\n",
     [mrtUnallocSlot] = "unallocated instance slot: %u in class %s\n",
     [mrtRefIntegrity] = "referential integrity check failed: %s\n",
+    [mrtDupAssociator] = "duplicate associator instance: %s\n",
 #       else
     [mrtCantHappen] = "can't happen transition: %p: %u - %u -> CH\n",
     [mrtEventInFlight] = "event-in-flight error: %p - %u -> %p\n",
     [mrtNoInstSlot] = "no available instance slots: %p\n",
     [mrtUnallocSlot] = "unallocated instance slot: %u in class %p\n",
     [mrtRefIntegrity] = "referential integrity check failed: %p\n",
+    [mrtDupAssociator] = "duplicate associator instance: %p\n",
 #       endif /* MRT_NO_NAMES */
 
 #       ifdef _POSIX_C_SOURCE
