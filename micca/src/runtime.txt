@@ -4844,7 +4844,6 @@ mrtSimpUnlinkForward(
         *p_targetInst = NULL ; // <1>
 
         struct mrtassociationrole const *targetRole = &assoc->target ;
-        assert(targetInst != NULL) ;
         if (targetInst != NULL && targetInst->alloc > 0 &&
                 targetInst->classDesc == targetRole->classDesc) { // <2>
             mrtUnlinkBackref(targetRole, source, targetInst) ;
@@ -4857,10 +4856,11 @@ mrtSimpUnlinkForward(
 ----
 <1> Assigning `NULL` to the primary reference effectively unlinks
 the target instance.
-<2> The test for `NULL` is just _belt and suspenders_ for when the
-`assert` macro is conditionally compiled out.
-We only want to attempt to unlink the back reference is the target instance
+<2> We only want to attempt to unlink the back reference if the target instance
 is still allocated and of the same class.
+We accomodate the `NULL` case also, since this can arise
+if the construction of the instance errored out because of a static
+relationships.
 Normally, instance don't just change their class out from under themselves.
 However, union based subclass instances do.
 Migrating a union subclass instance results in any back reference pointers
@@ -4903,13 +4903,17 @@ mrtSimpUnlinkBack(
 {
     struct mrtassociationrole const *targetRole = &assoc->target ;
 
-    if (targetRole->storageType == mrtSingular) {
-        void **p_sourceInst = (void **)
-                ((uintptr_t)target + targetRole->storageOffset) ;
+    void *linkStorage =
+            (void *)((uintptr_t)target + targetRole->storageOffset) ;
+    switch (targetRole->storageType) {
+    case mrtSingular: {
+        void **p_sourceInst = (void **)linkStorage ;
         *p_sourceInst = NULL ; // <1>
-    } else if (targetRole->storageType == mrtLinkedList) { // <2>
-        MRT_LinkRef *sourceList = (MRT_LinkRef *)
-                ((uintptr_t)target + targetRole->storageOffset) ; // <3>
+    }
+        break ;
+
+    case mrtLinkedList: {
+        MRT_LinkRef *sourceList = (MRT_LinkRef *)linkStorage ;  // <3>
         assert(sourceList->next != NULL && sourceList->prev != NULL) ;
         for (MRT_LinkRef *iter = mrtLinkRefBegin(sourceList) ;
                 iter != mrtLinkRefEnd(sourceList) ; ) {
@@ -4917,9 +4921,21 @@ mrtSimpUnlinkBack(
             iter = iter->next ; // <4>
             mrtLinkRefRemove(sourceInst) ;
         }
-    } else {
-        // Can't unlink array type linkages.
-        mrtFatalError(mrtStaticRelationship) ;
+    }
+        break ;
+
+    case mrtArray: {
+        MRT_ArrayRef * alinks = (MRT_ArrayRef *)linkStorage ;  // <5>
+        if (alinks->links != NULL) {
+            // Can't unlink array type linkages.
+            mrtFatalError(mrtStaticRelationship) ;
+        }
+    }
+        break ;
+
+    default:
+        mrtFatalError(mrtRelationshipLinkage) ;
+        break ;
     }
 }
 ----
@@ -4931,6 +4947,11 @@ The link is severed.
 its back links must be removed.
 <3> This is the list of back links to source instances.
 <4> Be careful to advance the iterator before deleting the item from the list.
+<5> We allow attempting to unlink array backlinks as long as there
+aren't really any backlinks.
+This case can arise in creating instances that participate in static
+relationships and then trying to delete them after catching the fatal
+error.
 
 In this function we are trying to delete a single back link from the "target"
 to the "source".
@@ -4960,16 +4981,19 @@ mrtUnlinkBackref(
     assert(target != NULL) ;
     assert(targetRole != NULL) ;
 
-    if (targetRole->storageType == mrtSingular) {
-        void **p_sourceInst = (void **)
-                ((uintptr_t)target + targetRole->storageOffset) ; // <1>
+    void *linkStorage =
+            (void *)((uintptr_t)target + targetRole->storageOffset) ;
+    switch (targetRole->storageType) {
+    case mrtSingular: {
+        void **p_sourceInst = (void **)linkStorage ;              // <1>
         if (*p_sourceInst == source) {                            // <2>
             *p_sourceInst = NULL ;
         }
-    } else if (targetRole->storageType == mrtLinkedList) {
-        MRT_LinkRef *sourcelinks = (MRT_LinkRef *)
-                ((uintptr_t)source + targetRole->linkOffset) ; // <3>
+    }
+        break ;
 
+    case mrtLinkedList: {
+        MRT_LinkRef *sourcelinks = (MRT_LinkRef *)linkStorage ;  // <3>
         if (sourcelinks->next != NULL && sourcelinks->prev != NULL) { // <4>
             MRT_LinkRef *targetList = (MRT_LinkRef *)
                     ((uintptr_t)target + targetRole->storageOffset) ;
@@ -4981,9 +5005,21 @@ mrtUnlinkBackref(
                 }
             }
         }
-    } else {
-        // Can't unlink array type linkages.
-        mrtFatalError(mrtStaticRelationship) ;
+    }
+        break ;
+
+    case mrtArray: {
+        MRT_ArrayRef * alinks = (MRT_ArrayRef *)linkStorage ;
+        if (alinks->links != NULL) {
+            // Can't unlink array type linkages.
+            mrtFatalError(mrtStaticRelationship) ;
+        }
+    }
+        break ;
+
+    default:
+        mrtFatalError(mrtRelationshipLinkage) ;
+        break ;
     }
 }
 ----
