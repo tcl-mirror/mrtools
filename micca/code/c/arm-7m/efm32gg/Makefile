@@ -1,7 +1,16 @@
 MICCADIR = ../../../../src
 
 CC=arm-none-eabi-gcc
-CFLAGS	= -c -std=c11 -Os -g -Wall -mcpu=cortex-m4 -march=armv7e-m -mthumb
+CFLAGS	=\
+	 -c\
+	 -std=c11\
+	 -Os\
+	 -g\
+	 -Wall\
+	 -mcpu=cortex-m3\
+	 -march=armv7-m\
+	 -mthumb\
+	 $(NULL)
 SSTUDIO=/home/andrewm/opt/silabs/SimplicityStudio_v4/developer/sdks/exx32/v4.4.1
 CPPFLAGS =\
 	 -D_ISOC11_SOURCE\
@@ -17,7 +26,6 @@ DOCSRC 	=\
 
 RTSRC 	=\
 	$(MICCADIR)/micca.aweb\
-	$(MICCADIR)/bibliography.txt\
 	$(MICCADIR)/codeorg.txt\
 	$(MICCADIR)/configure.txt\
 	$(MICCADIR)/example.txt\

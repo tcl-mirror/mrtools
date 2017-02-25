@@ -55,6 +55,7 @@ CFLAGS	=\
 
 CPPFLAGS =\
 	 -DMRT_NO_TRACE\
+	 -DMRT_NO_NAMES\
 	 $(NULL)
 
 .PHONY : all doc runtests
