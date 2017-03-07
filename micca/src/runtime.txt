@@ -3456,10 +3456,9 @@ mrtCheckRelationship(
     }
         break ;
 
-    /*
-     * N.B. no default case. We will just fail the check if
-     * this happens.
-     */
+    default:
+        mrtFatalError(mrtRelationshipLinkage) ;
+        break ;
     }
 
     return result ;
@@ -3490,14 +3489,16 @@ MRT_SimpleAssociation const *assoc = &rel->relInfo.simpleAssociation ;
 MRT_Class const *const targetClass = assoc->target.classDesc ;
 mrtZeroRefCounts(targetClass) ;                                     // <1>
 mrtCountAssocRefs(&assoc->source, targetClass) ;                    // <2>
-result = mrtCheckRefCounts(targetClass, assoc->target.cardinality) ;
 
-if (result) {
-    MRT_Class const *const sourceClass = assoc->source.classDesc ;  // <3>
-    mrtZeroRefCounts(sourceClass) ;
-    mrtCountAssocRefs(&assoc->target, sourceClass) ;
-    result = mrtCheckRefCounts(sourceClass, assoc->source.cardinality) ;
+result = mrtCheckRefCounts(targetClass, assoc->target.cardinality) ;
+if (!result) {
+    break ;
 }
+
+MRT_Class const *const sourceClass = assoc->source.classDesc ;  // <3>
+mrtZeroRefCounts(sourceClass) ;
+mrtCountAssocRefs(&assoc->target, sourceClass) ;
+result = mrtCheckRefCounts(sourceClass, assoc->source.cardinality) ;
 ----
 <1> Start with the class that is the target of the association
 navigation.
@@ -3516,43 +3517,50 @@ So we will consider each side separately.
 MRT_ClassAssociation const *assoc = &rel->relInfo.classAssociation ;
 
 result = mrtCheckAssociatorRefs(&assoc->associator) ; // <1>
-if (result) {
-    /*
-     * On the first side, we evaluate the references from the source class
-     * to the associator class.
-     */
-    MRT_Class const *const assocClass = assoc->associator.classDesc ;
-    MRT_Class const *const sourceClass = assoc->source.classDesc ;
-
-    mrtZeroRefCounts(sourceClass) ;
-    mrtCountSingularRefs(assocClass, assoc->associator.backwardOffset,
-            sourceClass) ;
-    result = mrtCheckRefCounts(sourceClass, assoc->source.cardinality) ;
-
-    if (result) {
-        mrtZeroRefCounts(assocClass) ;
-        mrtCountClassAssocRefs(&assoc->source, assocClass) ;
-        result = mrtCheckRefCounts(assocClass, mrtExactlyOne) ;
-        /*
-         * If the first side is okay, then we can evaluate the references from
-         * the target class to the associator class.
-         */
-        if (result) {
-            MRT_Class const *const targetClass = assoc->target.classDesc ;
-
-            mrtZeroRefCounts(targetClass) ;
-            mrtCountSingularRefs(assocClass, assoc->associator.forwardOffset,
-                    targetClass) ;
-            result = mrtCheckRefCounts(targetClass, assoc->target.cardinality) ;
-
-            if (result) {
-                mrtZeroRefCounts(assocClass) ;
-                mrtCountClassAssocRefs(&assoc->target, assocClass) ;
-                result = mrtCheckRefCounts(assocClass, mrtExactlyOne) ;
-            }
-        }
-    }
+if (!result) {
+    break ;
 }
+/*
+ * On the first side, we evaluate the references from the source class
+ * to the associator class.
+ */
+MRT_Class const *const assocClass = assoc->associator.classDesc ;
+MRT_Class const *const sourceClass = assoc->source.classDesc ;
+
+mrtZeroRefCounts(sourceClass) ;
+mrtCountSingularRefs(assocClass, assoc->associator.backwardOffset,
+        sourceClass) ;
+
+result = mrtCheckRefCounts(sourceClass, assoc->source.cardinality) ;
+if (!result) {
+    break ;
+}
+
+mrtZeroRefCounts(assocClass) ;
+mrtCountClassAssocRefs(&assoc->source, assocClass) ;
+
+result = mrtCheckRefCounts(assocClass, mrtExactlyOne) ;
+if (!result) {
+    break ;
+}
+/*
+* If the first side is okay, then we can evaluate the references from
+* the target class to the associator class.
+*/
+MRT_Class const *const targetClass = assoc->target.classDesc ;
+
+mrtZeroRefCounts(targetClass) ;
+mrtCountSingularRefs(assocClass, assoc->associator.forwardOffset,
+        targetClass) ;
+
+result = mrtCheckRefCounts(targetClass, assoc->target.cardinality) ;
+if (!result) {
+    break ;
+}
+
+mrtZeroRefCounts(assocClass) ;
+mrtCountClassAssocRefs(&assoc->target, assocClass) ;
+result = mrtCheckRefCounts(assocClass, mrtExactlyOne) ;
 ----
 <1> We start by checking the singular references from the associator
 class to the two participants.
@@ -3591,28 +3599,35 @@ for (unsigned subcount = gen->subclassCount ; subcount != 0 && result ;
 
 When a generalization is stored in a union,
 there are no reference pointers.
-However, we can still verify that the subclass instance is actually
-allocated.
+So we don't have to follow any pointers to get to the subclass.
+Rather, the subclass in part of the superclass storage and
+pointer arithmetic computes the address of the subclass instance.
 
 [source,c]
 ----
 <<mrtCheckRelationship: union generalizations>>=
 MRT_UnionGeneralization const *gen = &rel->relInfo.unionGeneralization ;
 
-result = true ;
-MRT_Class const *const superClass = gen->superclass.classDesc ;
-MRT_InstIterator iter ;
-for (mrt_InstIteratorStart(&iter, superClass) ; mrt_InstIteratorMore(&iter) ;
-        mrt_InstIteratorNext(&iter)) {
-    MRT_Instance *instref = mrt_InstIteratorGet(&iter) ;
-    MRT_Instance *subInst = (MRT_Instance *)
-            ((uintptr_t)instref + gen->superclass.storageOffset) ;
-    if (subInst->alloc <= 0) {
-        result = false ;
-        break ;
-    }
-}
+mrtZeroRefCounts(gen->superclass.classDesc) ;
+assert(gen->subclassCount != 0) ;
+mrtZeroRefCounts(*gen->subclasses) ;                                    // <1>
+
+mrtCountUnionRefs(gen) ;                                                // <2>
+
+result = mrtCheckRefCounts(gen->superclass.classDesc, mrtExactlyOne) &&
+        mrtCheckRefCounts(*gen->subclasses, mrtExactlyOne) ;            // <3>
 ----
+<1> Since we know that the subclass storage is allocated as part of
+the superclass instance, we only have to zero out the reference
+counter for one of the subclasses.
+This is because all the subclasses are at the same address and all
+start with a `MRT_Instance` structure.
+<2> We need a different counting strategy to account for the union storage.
+<3> Again, since all the subclasses are stored in the same place
+and all begin with a `MRT_Instance` structure, we only have to
+count for one subclass.
+Compare this to the reference case, where we have visit each subclass
+instance and follow its reference back to the superclass instance
 
 [float]
 ===== Zero Reference Counts
@@ -4158,6 +4173,54 @@ mrtCountGenRefs(
 <2> The refernces from the subclass to the superclass is just an ordinary
 singular pointer reference.
 We already know how to count them.
+
+For a union based generalization,
+all the references are singular.
+However, since the storage for the subclass instance is part of the
+superclass instance storage,
+we only have to iterate across the superclass instances to have
+access to both reference counts.
+
+[source,c]
+----
+<<mrt forward references>>=
+static void
+mrtCountUnionRefs(
+    MRT_UnionGeneralization const *gen) ;
+----
+
+(((micca,Run Time Function,mrtCountUnionRefs)))
+[source,c]
+----
+<<mrt static functions>>=
+static void
+mrtCountUnionRefs(
+    MRT_UnionGeneralization const *gen)
+{
+    MRT_Class const *const superClass = gen->superclass.classDesc ;
+    MRT_InstIterator iter ;
+    for (mrt_InstIteratorStart(&iter, superClass) ;
+            mrt_InstIteratorMore(&iter) ; mrt_InstIteratorNext(&iter)) {
+        MRT_Instance *instref = mrt_InstIteratorGet(&iter) ;
+        instref->refCount = instref->refCount == UINT8_MAX ?            // <1>
+                2 : instref->refCount + 1 ;
+
+        MRT_Instance *subInst = (MRT_Instance *)
+                ((uintptr_t)instref + gen->superclass.storageOffset) ;  // <2>
+        if (subInst->alloc > 0) {                                       // <3>
+            subInst->refCount = subInst->refCount == UINT8_MAX ?
+                    2 : subInst->refCount + 1 ;
+        }
+    }
+}
+----
+<1> Since the instance iterater skips any unallocated slots,
+we can unconditionally update the reference counter of the superclass
+instance.
+<2> While we have a pointer to the superclass instance,
+we can compute the pointer to the subclass instance.
+<3> Here we must test that the subclass instance slot is actually in use.
+If it is, then this constitutes a "reference" to the superclass instance.
 
 === Operations on Relationship Instances
 
@@ -4933,7 +4996,6 @@ When we are unlinking the primary reference we will follow the reference
 and try to unlink any back references.
 
 [source,c]
-.Implementation
 ----
 <<mrtDeleteLinks: unlink simple forward>>=
 MRT_AssociationRole const *sourceRole = &assoc->source ;
@@ -4984,7 +5046,6 @@ This is because it is possible to delete the referenced instance of
 a simple association before deleting the referring instance.
 
 [source,c]
-.Implementation
 ----
 <<mrtDeleteLinks: unlink simple backward>>=
 MRT_AssociationRole const *targetRole = &assoc->target ;
@@ -7614,17 +7675,7 @@ mrtDispatchPolymorphicEvent(
      * superclass instance still exists.
      */
     if (superInst->alloc != ecb->alloc) {
-#           ifndef MRT_NO_NAMES
-        mrtFatalError(mrtEventInFlight,
-                ecb->sourceInst ? ecb->sourceInst->classDesc->name : "?",
-                ecb->sourceInst ? ecb->sourceInst->name : "?",
-                superClassDesc->eventNames[ecb->eventNumber],
-                superClassDesc->name,
-                superInst->name ? superInst->name : "?") ;
-#           else
-        mrtFatalError(mrtEventInFlight, ecb->sourceInst, ecb->eventNumber,
-                superInst) ;
-#           endif /* MRT_NO_NAMES */
+        mrtEventInFlightError(ecb->sourceInst, ecb->eventNumber, superInst) ;
     }
     /*
      * Compute the base offset for polymorphic event numbering.  This base
@@ -7699,17 +7750,7 @@ mrtDispatchPolymorphicEvent(
          */
         assert(subInst->alloc > 0) ;
         if (subInst->alloc <= 0) {
-#               ifndef MRT_NO_NAMES
-            mrtFatalError(mrtEventInFlight,
-                    ecb->sourceInst ? ecb->sourceInst->classDesc->name : "?",
-                    ecb->sourceInst ? ecb->sourceInst->name : "?",
-                    subInst->classDesc->eventNames[origEvent],
-                    subInst->classDesc->name,
-                    subInst->name ? subInst->name : "?") ;
-#            else
-            mrtFatalError(mrtEventInFlight, ecb->sourceInst, origEvent,
-                    subInst) ;
-#           endif /* MRT_NO_NAMES */
+            mrtEventInFlightError(ecb->sourceInst, origEvent, subInst) ;
         }
         /*
          * Update the target and allocation status in the ECB to match
