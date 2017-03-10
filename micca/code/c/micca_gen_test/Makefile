@@ -57,6 +57,9 @@ CPPFLAGS =\
 	 -DMRT_NO_TRACE\
 	 $(NULL)
 
+MICCAFLAGS =\
+	 $(NULL)
+
 .PHONY : all doc runtests
 
 runtests : micca_gen_test
@@ -77,7 +80,7 @@ gendomain.o : CPPFLAGS += -I$(HOME)/local/include
 gendomain.o : gendomain.c gendomain.h micca_rt.h micca_rt_internal.h
 
 gendomain.c gendomain.h : gendomain.micca
-	micca $<
+	micca $(MICCAFLAGS) $<
 
 gendomain.micca : $(DOCSRC)
 	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
@@ -95,7 +98,6 @@ CLEANFILES =\
 
 clean :
 	$(RM) $(CLEANFILES)
-	$(RM) -r test_results/*
 
 $(PDF) : $(DOCSRC) $(DOCINFO)
 
