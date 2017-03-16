@@ -6846,7 +6846,7 @@ nameN / valueN::
     The arguments to the external operation are given as a set of
     name / value pairs.
 
-The `external` command generates a ``C'' expression to invoke
+The `externalop` command generates a ``C'' expression to invoke
 the external operation given by, _opname_.
 Arguments passed to the operation are given as name / value pairs.
 The ordering of the pairs is arbitrary but all arguments of the
@@ -6872,7 +6872,7 @@ proc InvokeExternalOp {opName args} {
     set provided [dict keys $args]
     set params [deRef [findRelated $opRef ~R11]]
     set required [relation list $params Name -ascending Number]
-    ValidateParams $opName $provided $required
+    CheckSuppliedParams $opName $provided $required
 
     set pset {}
     foreach pname $required {
@@ -6904,7 +6904,7 @@ operation.
 Difference `subcommand` operation may require additional arguments
 as described.
 
-==== Access to Instance Attributes
+==== Reading Instance Attribute Values
 
 It is possible and often desirable to access attributes of an instance
 directly using ``C'' pointer indirection.
@@ -6949,7 +6949,7 @@ proc InstanceAttrRead {instref attr} {
             error "cannot use \"attr\" command for dependent attribute:\
                 use \"assign\" command instead"
         }
-        return "$instref->$attr"
+        return "$instref->$attr" ; # <1>
     } else {
         set massRef [MultipleAssigner findById Domain $domain\
             Association $className]
@@ -6962,6 +6962,9 @@ proc InstanceAttrRead {instref attr} {
     }
 }
 ----
+<1> Normal return is just the pointer indirection expression.
+
+==== Updating Instance Attribute Values
 
 *****
 `<%instance` _instvar_ `update` ? _attrname1_ _value1_ ... ? `%>`
@@ -7007,7 +7010,7 @@ proc InstanceAttrUpdate {instref args} {
                 named, $attr"
         }
 
-        set depRef [findRelated $attrRef {~R29 DependentAttribute}]
+        set depRef [findRelated $attrRef {~R29 DependentAttribute}] ; # <1>
         if {[isNotEmptyRef $depRef]} {
             error "cannot update dependent attribute"
         }
@@ -7019,6 +7022,7 @@ proc InstanceAttrUpdate {instref args} {
     return [IndentToBlock $result]
 }
 ----
+<1> Dependent attributes are read only.
 
 [source,tcl]
 ----
@@ -7079,6 +7083,11 @@ test codegen-55.0 {
 endif::showtests[]
 
 ==== Assigning Instance Attributes to Variables
+
+A variation of the the `attr` command is the `assign` command.
+This command assigns instance attributes to local ``C'' variables.
+Note that dependent attributes can only be accessed in this way
+(because in ``C'' an array cannot be treated as an ordinary value).
 
 *****
 `<%instance` _instvar_ `assign` _?assignspec1 assignspec2  ...?_ `%>`
@@ -7356,7 +7365,7 @@ proc InstanceOperation {instref opName args} {
     set provided [dict keys $args]
     set params [deRef [findRelated $opRef ~R4]]
     set required [relation list $params Name -ascending Number] ; # <2>
-    ValidateParams $opName $provided $required
+    CheckSuppliedParams $opName $provided $required
 
     set pset {}
     foreach pname $required {
@@ -7378,7 +7387,7 @@ code for invoking other types of operations.
 [source,tcl]
 ----
 <<generation support commands>>=
-proc ValidateParams {name provided required} {
+proc CheckSuppliedParams {name provided required} {
     if {![struct::set equal $provided $required]} {
         lassign [struct::set intersect3 $provided $required]\
             p_inter_r p_minus_r r_minus_p
@@ -8427,6 +8436,11 @@ if {[isNotEmptyRef $sassocRef]} {
 }
 ----
 
+For simple associations,
+it is a matter of making we are specifying things correctly with
+respect to the direction and then dealing with the correct type
+of storage for the back links.
+
 [source,tcl]
 ----
 <<LookUpRelationship: simple associations>>=
@@ -8466,9 +8480,28 @@ if {$dir eq "forw"} {
 }
 ----
 
+For class based associations,
+we have the added complication of traversal to the associative class
+or across the entire association.
+
 [source,tcl]
 ----
 <<LookUpRelationship: class based associations>>=
+
+<<LookUpRelationship: lookup participant properties>>
+<<LookUpRelationship: determine target properties>>
+<<LookUpRelationship: determine source properties>>
+
+if {$destclass eq {}} {
+    <<LookUpRelationship: full traversal>>
+} else {
+    <<LookUpRelationship: partial traversal>>
+}
+----
+
+[source,tcl]
+----
+<<LookUpRelationship: lookup participant properties>>=
 set cassocRef [findRelated $assocRef {~R31 ClassBasedAssociation}]
 assignAttribute [findRelated $cassocRef ~R34]\
     {Class srcclass} {Conditionality srccond} {Multiplicity srcmult}
@@ -8476,6 +8509,11 @@ assignAttribute [findRelated $cassocRef ~R35]\
     {Class trgclass} {Conditionality trgcond} {Multiplicity trgmult}
 assignAttribute [findRelated $cassocRef ~R42]\
     {Class assocclass}
+----
+
+[source,tcl]
+----
+<<LookUpRelationship: determine target properties>>=
 if {!$trgmult} {
     set srctype reference
     set srccomp ${relname}__FORW
@@ -8488,6 +8526,11 @@ if {!$trgmult} {
         set srccomp [list ${relname}__FORW ${relname}__FLINKS]
     }
 }
+----
+
+[source,tcl]
+----
+<<LookUpRelationship: determine source properties>>=
 if {!$srcmult} {
     set trgtype reference
     set trgcomp ${relname}__BACK
@@ -8500,62 +8543,69 @@ if {!$srcmult} {
         set trgcomp [list ${relname}__BACK ${relname}__BLINKS]
     }
 }
-if {$destclass eq {}} {
-    if {$dir eq "forw"} {
-        if {$startclass eq $srcclass} {
-            return [list\
-                $srcclass $assocclass $srctype $trgcond $srccomp\
-                $assocclass $trgclass reference false ${relname}.forward\
-            ]
-        } elseif {$startclass eq $assocclass} {
-            return [list\
-                $assocclass $trgclass reference false ${relname}.forward\
-            ]
-        } else {
-            error "relationship, $relname, is from class based from\
-                $srcclass to $trgclass via $assocclass: got, $startclass,\
-                as the traversal start"
-        }
+----
+
+[source,tcl]
+----
+<<LookUpRelationship: full traversal>>=
+if {$dir eq "forw"} {
+    if {$startclass eq $srcclass} {
+        return [list\
+            $srcclass $assocclass $srctype $trgcond $srccomp\
+            $assocclass $trgclass reference false ${relname}.forward\
+        ]
+    } elseif {$startclass eq $assocclass} {
+        return [list\
+            $assocclass $trgclass reference false ${relname}.forward\
+        ]
     } else {
-        if {$startclass eq $trgclass} {
-            return [list\
-                $trgclass $assocclass $trgtype $srccond $trgcomp\
-                $assocclass $srcclass reference false ${relname}.backward\
-            ]
-        } elseif {$startclass eq $assocclass} {
-            return [list\
-                $assocclass $srcclass reference false ${relname}.backward\
-            ]
-        } else {
-            error "relationship, ~$relname, is from class based from\
-                $trgclass to $srcclass via $assocclass: got, $startclass,\
-                as the traversal start"
-        }
+        error "relationship, $relname, is from class based from\
+            $srcclass to $trgclass via $assocclass: got, $startclass,\
+            as the traversal start"
     }
 } else {
-    if {$destclass eq $assocclass} {
-        if {$dir eq "forw"} {
-            return [list $srcclass $assocclass $srctype $trgcond $srccomp]
-        } else {
-            return [list $trgclass $assocclass $trgtype $srccond $trgcomp]
-        }
-    } elseif {$destclass eq $trgclass} {
-        if {$dir eq "forw"} {
-            return [list $assocclass $trgclass reference false ${relname}.forward]
-        } else {
-            error "navigating forward from $assocclass arrives at\
-                $trgclass: got $destclass"
-        }
-    } elseif {$destclass eq $srcclass} {
-        if {$dir eq "back"} {
-            return [list $assocclass $srcclass reference false ${relname}.backward]
-        } else {
-            error "navigating backward from $assocclass arrives at\
-                $srcclass: got $destclass"
-        }
+    if {$startclass eq $trgclass} {
+        return [list\
+            $trgclass $assocclass $trgtype $srccond $trgcomp\
+            $assocclass $srcclass reference false ${relname}.backward\
+        ]
+    } elseif {$startclass eq $assocclass} {
+        return [list\
+            $assocclass $srcclass reference false ${relname}.backward\
+        ]
     } else {
-        error "$destclass does not participate in $relname"
+        error "relationship, ~$relname, is from class based from\
+            $trgclass to $srcclass via $assocclass: got, $startclass,\
+            as the traversal start"
     }
+}
+----
+
+[source,tcl]
+----
+<<LookUpRelationship: partial traversal>>=
+if {$destclass eq $assocclass} {
+    if {$dir eq "forw"} {
+        return [list $srcclass $assocclass $srctype $trgcond $srccomp]
+    } else {
+        return [list $trgclass $assocclass $trgtype $srccond $trgcomp]
+    }
+} elseif {$destclass eq $trgclass} {
+    if {$dir eq "forw"} {
+        return [list $assocclass $trgclass reference false ${relname}.forward]
+    } else {
+        error "navigating forward from $assocclass arrives at\
+            $trgclass: got $destclass"
+    }
+} elseif {$destclass eq $srcclass} {
+    if {$dir eq "back"} {
+        return [list $assocclass $srcclass reference false ${relname}.backward]
+    } else {
+        error "navigating backward from $assocclass arrives at\
+            $srcclass: got $destclass"
+    }
+} else {
+    error "$destclass does not participate in $relname"
 }
 ----
 
@@ -8580,6 +8630,9 @@ if {[isNotEmptyRef $refGenRef]} {
     set isRefGen false
 }
 ----
+
+The code can be the same since we have parameterized it for the different
+types of generalization storage.
 
 [source,tcl]
 ----
@@ -9320,7 +9373,7 @@ proc InstanceNewECB {instref event arglist} {
         set params [FindParamsFromSig $psig]
         set required [relation list $params Name -ascending Position]
         set supplied [dict keys $arglist]
-        ValidateParams $event $supplied $required
+        CheckSuppliedParams $event $supplied $required
 
         set result {}
         set sourceinst [expr {[LookUpSymbol self] eq {} ? "NULL" : "self"}]
@@ -10921,7 +10974,7 @@ _class_::
 instref::
     The name of a variable into which a reference to a class instance is placed.
 where::
-    ``C'' code statements that can be evaluated to yield a boolean value.
+    ``C'' code expression that can be evaluated to yield a boolean value.
 
 The `foreachWhere` subcommand for a class generates ``C'' statements
 to visit conditionally the instances of _class_.
@@ -11024,7 +11077,7 @@ _class_::
 instref::
     The name of a variable into which a reference to a class instance is placed.
 where::
-    ``C'' code statements that can be evaluated to yield a boolean value.
+    ``C'' code expression that can be evaluated to yield a boolean value.
 
 The `findWhere` subcommand for a class generates ``C'' statements
 to search the instances of _class_.
@@ -11139,7 +11192,7 @@ _class_::
 instref::
     The name of a variable into which a reference to a class instance is placed.
 where::
-    ``C'' code statements that can be evaluated to yield a boolean value.
+    ``C'' code expression that can be evaluated to yield a boolean value.
 instset::
     The name of a variable which will contain an instance set.
 
@@ -11252,7 +11305,7 @@ endif::showtests[]
 ==== Declaring Instance Reference Variables
 
 *****
-`<%` _class_ `instref` _varname_ `%>`
+`<%` _class_ `refvar` _varname_ `%>`
 
 _class_::
     The name of a domain class.
@@ -11260,7 +11313,7 @@ varname::
     The name of a variable which will be declared as an instance reference
     to an instance of _class_.
 
-The `instref` subcommand for a class generates ``C'' statements
+The `refvar` subcommand for a class generates ``C'' statements
 declare _varname_ to be a variable whose type is suitable to hold
 an instance reference to instances of _class_.
 *****
@@ -11280,6 +11333,28 @@ proc ClassInstanceReference {className varName} {
 
 ==== Converting an ID to an Instance Reference
 
+*****
+`<%` _class_ `idtoref` _instid_ _instref_ `%>`
+
+_class_::
+    The name of a domain class.
+_instid_::
+    An instance identifier value. This is a small non-negative integer value.
+_instref_::
+    The name of a variable which will be set to a reference
+    to an instance of _class_.
+
+
+The `idtoref` subcommand for a class generates ``C'' statements
+to set the value of the _instref_ variable to be an instance reference
+to an instance of _class_.
+The _instid_ argument is a small integer value that is equivalent to
+the index into the storage pool array for _class_.
+It is a fatal system error to attempt to obtain an instance reference
+to an unallocated slot in the storage pool or if _instid_ is not a
+valid instance identifier number.
+*****
+
 (((micca,Activity Generation,idtoref)))
 [source,tcl]
 ----
@@ -11298,6 +11373,29 @@ proc ClassIdToRef {className instid instref} {
 ----
 
 ==== Finding an Initial Instance by Name
+
+*****
+`<%` _class_ `findByName` _instname_ _instref_ `%>`
+
+_class_::
+    The name of a domain class.
+_instname_::
+    The name given to an instance as part of an initial instance
+    population.
+_instref_::
+    The name of a variable which will be set to a reference
+    to an instance of _class_.
+
+
+The `findByName` subcommand for a class generates ``C'' statements
+to set the value of the _instref_ variable to be an instance reference
+to an instance of _class_ that was given the name, _name_, as part
+of an initial instance population.
+This subcommand provides a way to directly obtain a reference to
+a well know instance.
+It is a fatal system error to attempt to obtain an instance reference
+to the named instance if it has been deleted.
+*****
 
 (((micca,Activity Generation,findByName)))
 [source,tcl]
@@ -11342,7 +11440,7 @@ proc ClassOperation {className opName args} {
     set provided [dict keys $args]
     set params [deRef [findRelated $opRef ~R4]]
     set required [relation list $params Name -ascending Number]
-    ValidateParams $opName $provided $required
+    CheckSuppliedParams $opName $provided $required
 
     set pset {}
     foreach pname $required {
