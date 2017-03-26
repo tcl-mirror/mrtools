@@ -2,6 +2,7 @@ DOCS =\
     micca\
     config\
     embedded\
+    portal\
     $(NULL)
 
 SRCS = $(patsubst %,micca/%.man,$(DOCS))
