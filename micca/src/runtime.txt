@@ -6244,6 +6244,10 @@ The `mrt_PostDelayedEvent` function requests that the event given by
 The value of the `time` argument may be 0,
 in which case the event is posted for dispatch immediately.
 All delayed events start a new thread of control.
+Any request to post a delayed event of the same event number that
+already exists for some sending / receiving pair of instances results
+in the first event being canceled and a the event being posted at the
+given delay time.
 *****
 
 (((micca,Run Time Function,mrt_PostDelayedEvent)))
@@ -6257,66 +6261,50 @@ mrt_PostDelayedEvent(
 {
     assert(ecb != NULL) ;
 
-    if (time != 0) {
+    mrtStopDelayedQueueTiming() ;                                   // <1>
+    mrtRemoveDelayedEvent(ecb->sourceInst, ecb->targetInst,
+            ecb->eventNumber) ;
+
+    MRT_ecb *qloc ;
+    if (time != 0) {                                                // <2>
         ecb->delay = mrtMsecToTicks(time) ;
-        /*
-         * Stop the timing queue so we may examine it.
-         */
-        mrtStopDelayedQueueTiming() ;
-        /*
-         * If the event already exists, remove it.
-         */
-        MRT_ecb *dupEvent = mrtFindEvent(&delayedEventQueue,
-                ecb->sourceInst, ecb->targetInst, ecb->eventNumber) ;
-        if (dupEvent) {
-            mrtRemoveDelayedEvent(dupEvent) ;
-        }
-        /*
-         * Insert the new event.
-         * We walk down the queue to find the correct slot.  That slot is the
-         * first place in the queue where our delay value is less than the delay
-         * value at that place in the queue.  As we walk the queue, we subtract
-         * the delay value of each entry we pass since that entry will have
-         * expired before the one being inserted.
-         */
-        MRT_ecb *iter ;
-        for (iter = mrtEventQueueBegin(&delayedEventQueue) ;
-                iter != mrtEventQueueEnd(&delayedEventQueue) ;
-                iter = iter->next) {
-            /*
-             * By keeping this comparison to be strictly less than, we preserve
-             * the order of event dispatch to match that of event generation.
-             */
-            if (ecb->delay < iter->delay) {
-                /*
-                 * We are going to insert before the entry pointed to by "iter".
-                 * Therefore, we need to decrease its delay value by the amount of
-                 * time that will have elapsed after the entry we are about to
-                 * insert expires.
-                 */
-                iter->delay -= ecb->delay ;
+        for (qloc = mrtEventQueueBegin(&delayedEventQueue) ;
+                qloc != mrtEventQueueEnd(&delayedEventQueue) ;
+                qloc = qloc->next) {
+            if (ecb->delay < qloc->delay) {                         // <3>
+                qloc->delay -= ecb->delay ;                         // <4>
                 break ;
             } else {
-                ecb->delay -= iter->delay ;
+                ecb->delay -= qloc->delay ;
             }
         }
-        /*
-         * At this point we have found our place in the queue.  Either we are
-         * between entries or this delay was longer than the cumulative delays of
-         * all the ECB's in the queue. Insert the ECB.
-         */
-        mrtEventQueueInsert(ecb, iter) ;
-        /*
-         * Start the timer to expire for the first event on the queue.
-         */
-        mrtStartDelayedQueueTiming() ;
+        // <5>
     } else {
-        mrtEventQueueInsert(ecb, (MRT_ecb *)&tocEventQueue) ; // <1>
+        qloc = (MRT_ecb *)&tocEventQueue ;                          // <6>
     }
+    mrtEventQueueInsert(ecb, qloc) ;
+    mrtStartDelayedQueueTiming() ;                                  // <7>
 }
 ----
-<1> All delayed events start a new thread of control,
-even those which have had no delay.
+<1> The timing queue must be stopped so we may examine it safely.
+<2> Insert the event if a non-zero delay was requested.
+We walk down the queue to find the correct slot.  That slot is the
+first place in the queue where our delay value is less than the delay
+value at that place in the queue.  As we walk the queue, we subtract
+the delay value of each entry we pass since that entry will have
+expired before the one being inserted.
+<3> By keeping this comparison to be strictly less than, we preserve
+the order of event dispatch to match that of event generation.
+<4> We are going to insert before the entry pointed to by `iter`.
+Therefore, we need to decrease its delay value by the amount of
+time that will have elapsed after the entry we are about to
+insert expires.
+<5> At this point we have found our place in the queue.
+Either we are between entries or this delay was longer than the cumulative
+delays of all the ECB's in the queue. Insert the ECB.
+<6> All delayed events start a new thread of control,
+even those which have a zero delay time.
+<7> Start the timer to expire for the first event on the queue.
 
 We see here the distinction between posting a delayed event and
 the ordinary posting of an event.
@@ -6349,8 +6337,55 @@ This enforces the rule about not having two delayed events of the
 same type between the same sending / receiving pair.
 If one is found then it is removed.
 . Assured of no duplicates, the new event can be inserted into the timing
-queue.  We will see how that happens below.
+queue.
 . Finally, the timing of the delayed queue is started.
+
+Since removing delayed events is something we do
+when canceling a delayed event,
+we factor out the code into a function.
+
+(((micca,Run Time Function,mrtRemoveDelayedEvent)))
+[source,c]
+----
+<<mrt static functions>>=
+static void
+mrtRemoveDelayedEvent(
+    MRT_Instance *sourceInst,
+    MRT_Instance *targetInst,
+    MRT_EventCode eventNumber)
+{
+    MRT_ecb *found = mrtFindEvent(&delayedEventQueue, sourceInst,
+            targetInst, eventNumber) ;                                  // <1>
+    if (found != NULL) {
+        if (!(found->delay == MRT_DELAY_EXPIRED ||                      // <2>
+            found->next == mrtEventQueueEnd(&delayedEventQueue))) {
+            found->next->delay += found->delay ;
+        }
+    } else {
+        found = mrtFindEvent(&tocEventQueue, sourceInst, targetInst,
+                eventNumber) ;
+    }
+    if (found != NULL) {
+        mrtEventQueueRemove(found) ;
+        mrtECBfree(found) ;
+    }
+    // <3>
+}
+----
+<1> If the event already exists, remove it.
+First we search the delayed event queue. If we don't find the event
+there, it could have already expired and it would then be on the
+Thread of Control event queue. If we find it in either place, it
+is a duplicate event and it is removed. This is in keeping with our
+interpretation that a duplicate delayed event is a request to cancel
+the first and create one with a new delay time.
+<2> If event is not already expired and the event is not at the end of the
+queue, all the delay from the removed entry is added onto the next
+entry in the queue. This keeps insures that the time associated with
+the deleted event is accounted for when subsequent events expire.
+<3> If we get here and `found` is still `NULL`, then there was no
+delayed event matching the source / target / event and we just do
+nothing.
 
 ==== Canceling Delayed Events
 
@@ -6411,46 +6446,17 @@ mrt_CancelDelayedEvent(
     void *target,
     void *source)
 {
-    MRT_Instance *targetInst = target ;
-    MRT_Instance *sourceInst = source ;
-    assert(targetInst != NULL) ;
-    /*
-     * Stop delayed queue so that we may examine it.
-     */
-    mrtStopDelayedQueueTiming() ;
-    /*
-     * Search for the event in the delayed event queue.
-     */
-    MRT_ecb *foundEvent = mrtFindEvent(&delayedEventQueue, sourceInst,
-            targetInst, event) ;
-    if (foundEvent) {
-        /*
-         * Removing from the delayed queue requires additional processing of
-         * the delay times.
-         */
-        mrtRemoveDelayedEvent(foundEvent) ;
-    } else {
-        /*
-         * If the event is not in the delayed queue, then search the thread of
-         * control event queue. The timer could have expired and the event
-         * placed in the queue.
-         */
-        foundEvent = mrtFindEvent(&tocEventQueue, sourceInst, targetInst, event) ;
-        if (foundEvent) {
-            mrtEventQueueRemove(foundEvent) ;
-            mrtECBfree(foundEvent) ;
-        }
-        /*
-         * We can get here, without finding the event in the delayed queue or
-         * the thread of control event queue.  That's okay, it just amounts to
-         * an expensive no-op and implies that the event has expired, was
-         * queued and has already been dispatched or had never been generated
-         * at all.
-         */
-    }
+    assert(target != NULL) ;
+
+    mrtStopDelayedQueueTiming() ;                           // <1>
+    mrtRemoveDelayedEvent(source, target, event) ;
     mrtStartDelayedQueueTiming() ;
 }
 ----
+<1> As before, we must stop the delayed queue so we can
+examine and manipulate it.
+We can't have delayed queue operations go on while we are walking
+and changing the queue contents.
 
 Like all operations dealing with the delayed event queue,
 we must first put the queue in a state that we
@@ -6547,46 +6553,6 @@ Note that zero is returned if we did not find the event on the
 delayed queue.
 Returning zero does _not_ tell us if the event has already been
 dispatched or might be still in flight on the event queue.
-
-==== Removing Delayed Events
-
-There are two places where we must remove an event from the delayed
-event queue.
-The job here is to account for the time that the entry would
-have consumed had it been left in the queue.
-That time must be added to its next neighbor (if there is one).
-
-[source,c]
-----
-<<mrt forward references>>=
-static void mrtRemoveDelayedEvent(MRT_ecb *ecb) ;
-----
-
-(((micca,Run Time Function,mrtRemoveDelayedEvent)))
-[source,c]
-----
-<<mrt static functions>>=
-static void
-mrtRemoveDelayedEvent(
-    MRT_ecb *ecb)
-{
-    /*
-     * If we are not at the end of the queue, all the delay from the removed
-     * entry is added onto the next entry in the queue.
-     */
-    if (ecb->next != mrtEventQueueEnd(&delayedEventQueue)) {
-        ecb->next->delay += ecb->delay ;
-    }
-    /*
-     * Remove the ECB from the delayed queue.
-     */
-    mrtEventQueueRemove(ecb) ;
-    /*
-     * Return the ECB back to the pool.
-     */
-    mrtECBfree(ecb) ;
-}
-----
 
 ==== Expired Events in the Delayed Event Queue
 
