@@ -48,7 +48,7 @@ ATANGLEOPTS =\
 all : $(TCLCODE)/micca_main.tcl $(RTSRCS)
 
 $(TCLCODE)/micca_main.tcl : $(ASRC)
-	make --director $(TCLCODE) micca_main.tcl
+	make --directory $(TCLCODE) micca_main.tcl
 
 posix/micca_rt.h posix/micca_rt_internal.h posix/micca_rt.c : $(ASRC)
 	$(MAKE) --directory posix micca_rt.h micca_rt_internal.h micca_rt.c
