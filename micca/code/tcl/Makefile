@@ -42,7 +42,11 @@ CLEANFILES =\
 ATANGLEOPTS =\
 	$(NULL)
 
+ifeq ($(OS),Windows_NT)
+THISDIR = $(shell cygpath -m $(shell pwd))
+else
 THISDIR = $(shell pwd)
+endif
 
 .PHONY : all
 

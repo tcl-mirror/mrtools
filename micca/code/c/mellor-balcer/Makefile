@@ -122,7 +122,7 @@ clean :
 $(PDF) : $(DOCSRC) $(INFO) bookstore.log
 
 bookstore.log : bookstore
-	bookstore > bookstore.log
+	./bookstore > bookstore.log
 
 simplebookstore.micca : $(DOCSRC)
 	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
