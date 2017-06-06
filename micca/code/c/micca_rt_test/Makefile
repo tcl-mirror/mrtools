@@ -56,7 +56,7 @@ CPPFLAGS =\
 all : runtests coverage
 
 runtests : micca_rt_test
-	micca_rt_test
+	./micca_rt_test
 	$(MAKE) --directory posix runtests
 
 coverage : runtests

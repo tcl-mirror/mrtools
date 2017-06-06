@@ -32,7 +32,7 @@ ATANGLEOPTS =\
 all : runtests
 
 runtests : micca_rt_posixtest
-	micca_rt_posixtest
+	./micca_rt_posixtest
 
 micca_rt_posixtest : CPPFLAGS += -I$(HOME)/local/include -I..
 
