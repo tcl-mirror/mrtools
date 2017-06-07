@@ -48,7 +48,7 @@ ATANGLEOPTS =\
 all : micca_main.tcl $(RTSRCS) doc
 
 micca.tcl micca_main.tcl : $(ASRC)
-	make --director $(MICCADIR) code
+	make --directory $(MICCADIR) code
 
 posix/micca_rt.h posix/micca_rt_internal.h posix/micca_rt.c : $(ASRC)
 	$(MAKE) --directory posix micca_rt.h micca_rt_internal.h micca_rt.c
