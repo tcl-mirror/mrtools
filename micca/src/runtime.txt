@@ -1546,6 +1546,65 @@ mrt_CreateInstance(
 }
 ----
 
+[source,c]
+----
+<<mrt internal external interfaces>>=
+extern void *
+mrt_CreateUnionInstance(
+    MRT_Class const *const classDesc,
+    MRT_StateCode initialState,
+    MRT_Relationship const *const genRel,
+    void *super) ;
+----
+
+(((micca,Run Time Function,mrt_CreateUnionInstance)))
+[source,c]
+----
+<<mrt external functions>>=
+void *
+mrt_CreateUnionInstance(
+    MRT_Class const *const classDesc,
+    MRT_StateCode initialState,
+    MRT_Relationship const *const genRel,
+    void *super)
+{
+    assert(classDesc != NULL) ;
+    assert(genRel != NULL) ;
+    assert(super != NULL) ;
+    assert(genRel->relType == mrtUnionGeneralization) ;
+
+    if (genRel->relType != mrtUnionGeneralization) {
+        mrtFatalError(mrtRelationshipLinkage) ;
+    }
+    MRT_UnionGeneralization const *const gen =
+            &genRel->relInfo.unionGeneralization ;
+    /*
+     * Verify that the new subclass is actually a subclass of the
+     * generalization.
+     */
+    mrtFindUnionGenSubclassCode(classDesc, gen->subclasses,
+            gen->subclassCount) ;
+    /*
+     * Verify the super class instance is truly of the super class.
+     */
+    MRT_Instance *superInst = super ;
+    if (superInst->classDesc != gen->superclass.classDesc) {
+        mrtFatalError(mrtRelationshipLinkage) ;
+    }
+    /*
+     * Compute the location of the union subclass instance
+     * within the superclass instance.
+     */
+    void *inst = (void *)((uintptr_t)super + gen->superclass.storageOffset) ;
+    /*
+     * Initialize the memory for the instance.
+     */
+    mrtInitializeInstance(inst, classDesc, initialState) ;
+
+    return inst ;
+}
+----
+
 ==== Initializing Instance Memory
 
 Once we have identified the memory for an instance,
@@ -5248,27 +5307,26 @@ The run-time provides a function to accomplish the details.
 extern void *
 mrt_Reclassify(
     MRT_Relationship const *rel,
-    void *super,
+    void *sub,
     MRT_Class const *const newSubclass) ;
 ----
 
 `rel`::
     A pointer to a relationship description for the relationship
     across which the reclassify operation is to happen.
-`super`::
-    A pointer to a class instance that serves the superclass role in the
-    relationship.
+`sub`::
+    A pointer to a class instance that is to be reclassified.
 `newSubclass`::
     A pointer to the class description to which the currently related
     subclass instance is to be reclassified.
 
-The `mrt_Reclassify` function migrates the class of the instance
-currently related to `super` along the `rel` generalization to be of
-the new class, `newSubclass`.
+The `mrt_Reclassify` function migrates the class of the `sub` instance
+along the `rel` generalization to be of the new class, `newSubclass`.
 Conceptually,
-reclassification implies that the currently related subclass instance
+reclassification implies that the `sub` instance
 is unrelated and deleted and a new instance of `newSubclass` is created
-and related to `super`.
+and related to the superclass instance to which `sub` was previously
+related.
 
 The return value of the function is an instance pointer to the newly
 created subclass instance.
@@ -5284,9 +5342,16 @@ the reclassification considers each type separately.
 void *
 mrt_Reclassify(
     MRT_Relationship const *rel,
-    void *super,
+    void *sub,
     MRT_Class const *const newSubclass)
 {
+    assert(rel != NULL) ;
+    assert(newSubclass != NULL) ;
+
+    MRT_Instance *currentSubInst = sub ;
+    assert(currentSubInst != NULL) ;
+    assert(currentSubInst->alloc > 0) ;
+
     void *newSubInst = NULL ;
 
     if (rel->relType == mrtRefGeneralization) {
@@ -5307,29 +5372,37 @@ we must perform the complete delete / create sequence.
 [source,c]
 ----
 <<mrt_Reclassify: reclassify reference generalization>>=
-MRT_RefGeneralization const *gen = &rel->relInfo.refGeneralization ;
+MRT_RefGeneralization const *const gen = &rel->relInfo.refGeneralization ;
 
 /*
- * Check that we have the correct superclass.
+ * Verify the subclass instance is an instance of that class that
+ * is part of the relationship.
  */
-MRT_Class const *const superclassClass = ((MRT_Instance *)super)->classDesc ;
-if (gen->superclass.classDesc != superclassClass) {
+int subclassCode = mrtFindRefGenSubclassCode(currentSubInst->classDesc,
+        gen->subclasses, gen->subclassCount) ;
+/*
+ * Fetch the superclass instance via the reference in the subclass instance.
+ */
+MRT_Instance *super = *(MRT_Instance **)((uintptr_t)sub +
+        gen->subclasses[subclassCode].storageOffset) ;
+/*
+ * Check that the subclass instance is related to a superclass that is
+ * the correct one for the relationship.
+ */
+if (gen->superclass.classDesc != super->classDesc) {
     mrtFatalError(mrtRelationshipLinkage) ;
 }
 /*
- * Offset into the superclass instance to where the pointer to the
- * subclass instance is located.
+ * Verify that the new subclass is indeed a subclass of the relationship.
+ * We don't care about the subtype code and are only using
+ * mrtFindRefGenSubclassCode() to validate the new requested subclass.
  */
-void **p_subInst = (void **)((uintptr_t)super + gen->superclass.storageOffset) ;
-void *subInst = *p_subInst ;
-if (subInst != NULL) {
-    /*
-     * Delete the old subclass instance.  Deleting will cause the subclass
-     * instance to be unlinked from the generalization.
-     */
-    mrt_DeleteInstance(subInst) ;
-}
-
+mrtFindRefGenSubclassCode(newSubclass, gen->subclasses, gen->subclassCount) ;
+/*
+ * Delete the old subclass instance.  Deleting will cause the subclass
+ * instance to be unlinked from the generalization.
+ */
+mrt_DeleteInstance(sub) ;
 /*
  * Create a new instance of the new subclass.
  */
@@ -5350,10 +5423,23 @@ subclass.
 [source,c]
 ----
 <<mrt_Reclassify: reclassify union generalization>>=
-MRT_UnionGeneralization const *gen = &rel->relInfo.unionGeneralization ;
-
-MRT_Class const *const superclassClass = ((MRT_Instance *)super)->classDesc ;
-if (gen->superclass.classDesc != superclassClass) {
+MRT_UnionGeneralization const *const gen = &rel->relInfo.unionGeneralization ;
+/*
+ * Verify the subclass instance is an instance of that class that
+ * is part of the relationship. We don't need the subclass code.
+ */
+MRT_Class const *const subClass = currentSubInst->classDesc ;
+mrtFindUnionGenSubclassCode(subClass, gen->subclasses, gen->subclassCount) ;
+/*
+ * Compute the pointer to the superclass instance.
+ */
+MRT_Instance *super = (MRT_Instance *)((uintptr_t)currentSubInst -
+        gen->superclass.storageOffset) ;
+/*
+ * Check that the subclass instance is related to a superclass that is
+ * the correct one for the relationship.
+ */
+if (gen->superclass.classDesc != super->classDesc) {
     mrtFatalError(mrtRelationshipLinkage) ;
 }
 /*
@@ -5362,21 +5448,17 @@ if (gen->superclass.classDesc != superclassClass) {
  */
 mrtFindUnionGenSubclassCode(newSubclass, gen->subclasses, gen->subclassCount) ;
 /*
- * Point to where the subclass instance is stored within the superclass.
+ * Clean up any relationship pointers in the currently related instance.
  */
-newSubInst = (void *)((uintptr_t)super + gen->superclass.storageOffset) ;
-MRT_Instance *subInst = newSubInst ;
+mrtDeleteLinks(subClass->classRels, subClass->relCount, currentSubInst) ;
 /*
- * Clean up any relationship pointers.
+ * The new instance occupies the same memory as the old one.
  */
-if (subInst->alloc > 0) {
-    MRT_Class const *const newSubClass = subInst->classDesc ;
-    mrtDeleteLinks(newSubClass->classRels, newSubClass->relCount, subInst) ;
-}
+newSubInst = currentSubInst ;
 /*
  * Set up the memory for the subclass instance according to the new subclass.
  */
-mrtInitializeInstance(subInst, newSubclass, MRT_StateCode_IG) ;
+mrtInitializeInstance(newSubInst, newSubclass, MRT_StateCode_IG) ;
 ----
 
 This function is the counterpart for finding a subclass among the
@@ -6127,16 +6209,7 @@ mrt_CreateInstanceAsync(
             targetClass->edb->creationState) ; // <1>
     targetInst->alloc = -targetInst->alloc ; // <2>
 
-    MRT_ecb *ecb = mrt_NewEvent(event, targetInst, sourceInst) ;
-
-    assert(paramsize <= sizeof(ecb->eventParameters)) ;
-    if (eventparams != NULL) {
-        size_t copy = paramsize <= sizeof(ecb->eventParameters) ?
-            paramsize : sizeof(ecb->eventParameters) ;
-        memcpy(ecb->eventParameters, eventparams, copy) ;
-    }
-
-    mrt_PostEvent(ecb) ;
+    mrtGenerateEvent(event, targetInst, sourceInst, eventparams, paramsize) ;
 
     return targetInst ;
 }
@@ -6147,6 +6220,76 @@ the dispatch of a creation event.
 Effectively the negative `alloc` value signals that the memory is reserved
 but the instance is not yet active.
 During event dispatch, this value will be turned back into a positive one.
+
+[source,c]
+----
+<<mrt static functions>>=
+static void
+mrtGenerateEvent(
+    MRT_EventCode event,
+    void *targetInst,
+    void *sourceInst,
+    void const *eventparams,
+    size_t paramsize)
+{
+    MRT_ecb *ecb = mrt_NewEvent(event, targetInst, sourceInst) ;
+
+    assert(paramsize <= sizeof(ecb->eventParameters)) ;
+    if (eventparams != NULL) {
+        size_t toCopy = paramsize <= sizeof(ecb->eventParameters) ?
+            paramsize : sizeof(ecb->eventParameters) ;
+        memcpy(ecb->eventParameters, eventparams, toCopy) ;
+    }
+
+    mrt_PostEvent(ecb) ;
+}
+----
+
+[source,c]
+----
+<<mrt internal external interfaces>>=
+extern void *
+mrt_CreateUnionInstanceAsync(
+    MRT_Class const *const targetClass,
+    MRT_EventCode event,
+    void const *eventparams,
+    size_t paramsize,
+    void *sourceInst,
+    MRT_Relationship const *const genRel,
+    void *super) ;
+----
+
+(((micca,Run Time Function,mrt_CreateUnionInstanceAsync)))
+[source,c]
+----
+<<mrt external functions>>=
+void *
+mrt_CreateUnionInstanceAsync(
+    MRT_Class const *const targetClass,
+    MRT_EventCode event,
+    void const *eventparams,
+    size_t paramsize,
+    void *sourceInst,
+    MRT_Relationship const *const genRel,
+    void *super)
+{
+    assert(targetClass != NULL) ;
+    assert(targetClass->edb != NULL) ;
+    assert(targetClass->edb->creationState >= 0) ;
+    assert(event < targetClass->edb->eventCount) ;
+
+    MRT_Instance *targetInst = mrt_CreateUnionInstance(targetClass,
+            targetClass->edb->creationState, genRel, super) ;
+    targetInst->alloc = -targetInst->alloc ; // <1>
+
+    mrtGenerateEvent(event, targetInst, sourceInst, eventparams, paramsize) ;
+
+    return targetInst ;
+}
+----
+<1> As with non-union classes, we mark the instance as allocated but
+not active. When the creation event is dipatched, the allocation status
+is changed to indicate the instance is now active.
 
 === Delayed Events
 

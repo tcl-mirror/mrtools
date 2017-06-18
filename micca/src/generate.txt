@@ -6159,6 +6159,15 @@ relation foreach info $classInfo {
         if {$HasCreationState} {
             dict set cmdmap createasync [list ${suppns}::ClassCreateAsync $Name]
         }
+    } else {
+        dict set cmdmap create [list ${suppns}::USubClassCreate $Name]
+        if {$HasStateModel} {
+            dict set cmdmap createin [list ${suppns}::USubClassCreateIn $Name]
+        }
+        if {$HasCreationState} {
+            dict set cmdmap createasync\
+                [list ${suppns}::USubClassCreateAsync $Name]
+        }
     }
     namespace ensemble create\
         -command ${actns}::$Name\
@@ -10105,12 +10114,55 @@ synchronously.
 <<generation support commands>>=
 proc ClassCreate {className instref args} {
     variable domain
+    if {[llength $args] % 2 != 0} {
+        error "initializers must be given as name / value pairs"
+    }
 
     set classDesc [GetClassDescriptor $domain $className]
     append result\
         [linecomment "$className create $instref [list $args]"]\
         [CreateInstRefSymbol $className $instref]\
         "$instref = mrt_CreateInstance(&$classDesc, MRT_StateCode_IG) ;\n"\
+        [AssignComponentValues $className $instref $args]
+
+    return [IndentToBlock $result]
+}
+----
+
+(((micca,Activity Generation,create)))
+[source,tcl]
+----
+<<generation support commands>>=
+proc USubClassCreate {className instref args} {
+    variable domain
+    if {[llength $args] % 2 != 0} {
+        error "initializers must be given as name / value pairs"
+    }
+
+    # Find the relationship for which the class is a union subclass.
+    set usubclass [UnionSubclass findWhere\
+            {$Domain eq $domain && $Class eq $className && $Role eq "source"}]
+    if {[isEmptyRef $usubclass]} {
+        error "\"$className\" is not a union subclass"
+    }
+
+    # Get the superclass name.
+    set supername [readAttribute [findRelated $usubclass R45 ~R44] Class]
+    set relName [readAttribute $usubclass Relationship]
+    set relDesc [GetRelationshipDescriptor $domain $relName]
+
+    # Find the super class instance reference among the arguments.
+    if {![dict exists $args $relName]} {
+        error "no value supplied for superclass reference, \"$relName\""
+    }
+    set superinst [dict get $args $relName]
+
+    set classDesc [GetClassDescriptor $domain $className]
+    append result\
+        [linecomment "$className create $instref [list $args]"]\
+        [CreateInstRefSymbol $className $instref]\
+        "$instref = mrt_CreateUnionInstance(&$classDesc, MRT_StateCode_IG, "\
+        "$relDesc, $superinst) ;\n"\
         [AssignComponentValues $className $instref $args]
 
     return [IndentToBlock $result]
@@ -10126,7 +10178,6 @@ proc AssignComponentValues {className instref suppliedvalues} {
     set result {}
 
     set popcomps [GetPopComponents $className]
-    # puts [relformat $popcomps popcomps]
     relation foreach popcomp $popcomps {
         relation assign $popcomp
         switch -exact -- $Type {
@@ -10208,6 +10259,10 @@ proc AssignComponentValues {className instref suppliedvalues} {
                 error "no value supplied for superclass reference, \"$Name\""
             } else {
                 set superrefvar [dict get $suppliedvalues $Name]
+                if {$superrefvar eq {}} {
+                    dict unset suppliedvalues $Name
+                    continue
+                }
             }
             set superref [pipe {
                 SuperclassReference findById Domain $Domain Class $Class\
@@ -10524,9 +10579,56 @@ proc ClassCreateIn {className instref state args} {
     set classDesc [GetClassDescriptor $domain $className]
 
     append result\
-        [linecomment "$className create $instref [list $args]"]\
+        [linecomment "$className createin $instref [list $args]"]\
         [CreateInstRefSymbol $className $instref]\
         "$instref = mrt_CreateInstance(&$classDesc, $statenum) ;\n"\
+        [AssignComponentValues $className $instref $args]
+
+    return [IndentToBlock $result]
+}
+----
+
+(((micca,Activity Generation,createin)))
+[source,tcl]
+----
+<<generation support commands>>=
+proc USubClassCreateIn {className instref state args} {
+    variable domain
+    if {[llength $args] % 2 != 0} {
+        error "initializers must be given as name / value pairs"
+    }
+
+    if {$state eq "@"} {
+        error "instances may not be synchronously created\
+                in the pseudo-initial state, \"@\""
+    }
+
+    # Find the relationship for which the class is a union subclass.
+    set usubclass [UnionSubclass findWhere\
+            {$Domain eq $domain && $Class eq $className && $Role eq "source"}]
+    if {[isEmptyRef $usubclass]} {
+        error "\"$className\" is not a union subclass"
+    }
+
+    # Get the superclass name.
+    set supername [readAttribute [findRelated $usubclass R45 ~R44] Class]
+    set relName [readAttribute $usubclass Relationship]
+    set relDesc [GetRelationshipDescriptor $domain $relName]
+
+    # Find the super class instance reference among the arguments.
+    if {![dict exists $args $relName]} {
+        error "no value supplied for superclass reference, \"$relName\""
+    }
+    set superinst [dict get $args $relName]
+
+    set statenum [GetStateNumber $domain $className $state]
+    set classDesc [GetClassDescriptor $domain $className]
+
+    append result\
+        [linecomment "$className createin $instref [list $args]"]\
+        [CreateInstRefSymbol $className $instref]\
+        "$instref = mrt_CreateUnionInstance(&$classDesc, $statenum, "\
+        "$relDesc, $superinst) ;\n"\
         [AssignComponentValues $className $instref $args]
 
     return [IndentToBlock $result]
@@ -10701,6 +10803,29 @@ proc ClassCreateAsync {className event eventparams args} {
         [linecomment "$className createasync $event [list $eventparams]\
             [list $args]"]
 
+    lassign [GenCreationEventParams $className $eventRef $eventparams]\
+        paramptr paramsize
+
+    set sourceinst [expr {[LookUpSymbol self] eq {} ? "NULL" : "self"}]
+
+    lassign [CreateTempRefSymbol $className] reftype refvar
+    set classDesc [GetClassDescriptor $domain $className]
+    append result\
+        "$reftype$refvar = mrt_CreateInstanceAsync(&$classDesc, $eventNum,\
+            $paramptr, $paramsize, $sourceinst) ;\n"\
+        [AssignComponentValues $className $refvar $args]
+
+    return [IndentToBlock $result]
+}
+----
+
+[source,tcl]
+----
+<<generation support commands>>=
+proc GenCreationEventParams {className eventRef eventparams {resultRef result}} {
+    variable domain
+    upvar 1 $resultRef result
+
     set psig [findRelated $eventRef R69]
     set params [FindParamsFromSig $psig]
     if {[relation isnotempty $params]} {
@@ -10712,6 +10837,7 @@ proc ClassCreateAsync {className event eventparams args} {
                 \"[join $supplied {, }]\""
         }
 
+        set event [readAttribute $eventRef Event]
         set eparamsname ${domain}_${className}_${event}__EPARAMS
         set paramvar [CreateTempSymbol Ctype "struct *$eparamsname"\
             Type EventParams Class $className]
@@ -10731,14 +10857,63 @@ proc ClassCreateAsync {className event eventparams args} {
         set paramsize 0
     }
 
+    return [list $paramptr $paramsize]
+}
+----
+
+(((micca,Activity Generation,createasync)))
+[source,tcl]
+----
+<<generation support commands>>=
+proc USubClassCreateAsync {className event eventparams args} {
+    variable domain
+
+    if {[llength $eventparams] % 2 != 0} {
+        error "event parameters must be given as name / value pairs, got:\
+            \"$eventparams\""
+    }
+    if {[llength $args] % 2 != 0} {
+        error "initializers must be given as name / value pairs"
+    }
+
+    # Find the relationship for which the class is a union subclass.
+    set usubclass [UnionSubclass findWhere\
+            {$Domain eq $domain && $Class eq $className && $Role eq "source"}]
+    if {[isEmptyRef $usubclass]} {
+        error "\"$className\" is not a union subclass"
+    }
+
+    # Get the superclass name.
+    set supername [readAttribute [findRelated $usubclass R45 ~R44] Class]
+    set relName [readAttribute $usubclass Relationship]
+    set relDesc [GetRelationshipDescriptor $domain $relName]
+
+    # Find the super class instance reference among the arguments.
+    if {![dict exists $args $relName]} {
+        error "no value supplied for superclass reference, \"$relName\""
+    }
+    set superinst [dict get $args $relName]
+
+    set eventRef [Event findById Domain $domain Model $className Event $event]
+    if {[isEmptyRef $eventRef]} {
+        error "class, $className, has no event named, $event"
+    }
+    set eventNum [readAttribute $eventRef Number]
+
+    append result\
+        [linecomment "$className createasync $event [list $eventparams]\
+            [list $args]"]
+
+    lassign [GenCreationEventParams $className $eventRef $eventparams]\
+        paramptr paramsize
+
     set sourceinst [expr {[LookUpSymbol self] eq {} ? "NULL" : "self"}]
 
     lassign [CreateTempRefSymbol $className] reftype refvar
-    variable domain
     set classDesc [GetClassDescriptor $domain $className]
     append result\
-        "$reftype$refvar = mrt_CreateInstanceAsync(&$classDesc, $eventNum,\
-            $paramptr, $paramsize, $sourceinst) ;\n"\
+        "$reftype$refvar = mrt_CreateUnionInstanceAsync(&$classDesc, $eventNum,\
+            $paramptr, $paramsize, $sourceinst, $relDesc, $superinst) ;\n"\
         [AssignComponentValues $className $refvar $args]
 
     return [IndentToBlock $result]
@@ -10794,6 +10969,83 @@ test codegen-28.0 {
             .a = 20,
         } ;
         struct X *t__T2 = mrt_CreateInstanceAsync(&codegen28__CLASSES[0], 2, &t__T1, sizeof(t__T1), NULL) ;
+        t__T2->color = 30 ;
+    }
+} -result {1}
+----
+endif::showtests[]
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-65.0 {
+    asynchronous instance creation -- union subclass
+} -setup {
+    validateutils genMiccaFile codegen65 {
+        domain codegen65 {
+            class S {
+                attribute size int -default 10
+            }
+
+            class Y {
+                attribute height int -default 30
+            }
+
+            class X {
+                attribute color int -default 20
+            }
+
+            generalization R1 -union S X Y
+
+            class X {
+                statemodel {
+                    state s1 {a int} {
+                        printf("in s1 with %d\n", a) ;
+                        (void)self ;
+                    }
+                    state s2 {b char} {
+                        printf("in s2 with %c\n", b) ;
+                        (void)self ;
+                    }
+                    transition @ - e3 -> s1
+                    transition @ - e4 -> s2
+                    transition s1 - e1 -> s2
+                    transition s2 - e2 -> s1
+                }
+            }
+            domainop void newX {} {
+                <%S create s1%>
+                <%X createasync e3 {a 20} color 30 R1 s1%>
+            }
+        }
+        population codegen65 {
+            class X {
+                allocate 4
+            }
+            class Y {
+                allocate 4
+            }
+            class S {
+                allocate 4
+            }
+        }
+    }
+} -cleanup {
+    micca clear
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen65.c
+    validateutils matchLines codegen65.c {
+        // S create s1 {}
+        struct S *s1 ;
+        s1 = mrt_CreateInstance(&codegen65__CLASSES[0], MRT_StateCode_IG) ;
+        s1->size = 10 ;
+        // X createasync e3 {a 20} {color 30 R1 s1}
+        struct codegen65_X_e3__EPARAMS t__T1 = {
+            .a = 20,
+        } ;
+        struct X *t__T2 = mrt_CreateUnionInstanceAsync(&codegen65__CLASSES[2], 2, &t__T1, sizeof(t__T1), NULL, &codegen65__RSHIPS[0], s1) ;
         t__T2->color = 30 ;
     }
 } -result {1}
@@ -11516,8 +11768,7 @@ instance contained in `targetref`.
 proc RelSimpleAssocSwap {relName sourceref targetref} {
     variable domain
     set relRef [SimpleAssociation findById Domain $domain Name $relName]
-    set relNum [readAttribute [findRelated $relRef R31 R30] Number]
-    set rship &${domain}__RSHIPS\[$relNum\]
+    set rship [GetRelationshipDescriptor $domain $relName]
 
     set sourceClass [readAttribute [findRelated $relRef ~R32] Class]
     CheckInstRefSymbol $sourceref Class $sourceClass
@@ -11605,8 +11856,7 @@ instance contained in `partref`.
 proc RelClassAssocSwap {relName assocref partref {dir {}}} {
     variable domain
     set relRef [ClassBasedAssociation findById Domain $domain Name $relName]
-    set relNum [readAttribute [findRelated $relRef R31 R30] Number]
-    set rship &${domain}__RSHIPS\[$relNum\]
+    set rship [GetRelationshipDescriptor $domain $relName]
 
     set assocClass [readAttribute [findRelated $relRef ~R42] Class]
     set assocsym [CheckInstRefSymbol $assocref Class $assocClass]
@@ -11758,28 +12008,30 @@ endif::showtests[]
 [source,tcl]
 ----
 <<generation support commands>>=
-proc RelRefGenReclassify {relName superref subclass subref args} {
+proc RelRefGenReclassify {relName subref newSubclass newref args} {
     if {[llength $args] % 2 != 0} {
         error "initializers must be given as name / value pairs"
     }
-    set result [linecomment "$relName reclassify $superref $subclass $subref"]
+    set result [linecomment "$relName reclassify $subref $newSubclass\
+            $newref [list $args]"]
 
     variable domain
     set relRef [ReferenceGeneralization findById Domain $domain Name $relName]
-    set relNum [readAttribute [findRelated $relRef R43 R30] Number]
 
-    set supername [readAttribute [findRelated $relRef ~R36] Class]
-    CheckInstRefSymbol $superref Class $supername
-    CheckSubClassName $subclass [findRelated $relRef ~R37]
+    set subclasses [findRelated $relRef ~R37]
+    CheckSubClassName $newSubclass $subclasses
 
-    set classDesc [GetClassDescriptor $domain $subclass]
+    set subrefClass [dict get [CheckSymbol $subref] Class]
+    CheckSubClassName $subrefClass $subclasses
+
+    set classDesc [GetClassDescriptor $domain $newSubclass]
+    set relDesc [GetRelationshipDescriptor $domain $relName]
     append result\
-        [CreateInstRefSymbol $subclass $subref]\
-        "$subref = mrt_Reclassify\(&${domain}__RSHIPS\[$relNum\], $superref, "\
-        "&$classDesc\) ;\n"
+        [CreateInstRefSymbol $newSubclass $newref]\
+        "$newref = mrt_Reclassify\($relDesc, $subref, &$classDesc\) ;\n"
 
-    lappend args $relName $superref
-    append result [AssignComponentValues $subclass $subref $args]
+    lappend args $relName {}
+    append result [AssignComponentValues $newSubclass $newref $args]
 
     return [IndentToBlock $result]
 }
@@ -11820,7 +12072,7 @@ test codegen-33.0 {
             domainop void makePair {} {
                 <%S create s1%>
                 <%X create x1 R1 s1%>
-                <%R1 reclassify s1 Y y1 color 20%>
+                <%R1 reclassify x1 Y y1 color 20%>
             }
         }
         population codegen33 {
@@ -11841,10 +12093,9 @@ test codegen-33.0 {
 } -body {
     validateutils compileFiles codegen33.c
     validateutils matchLines codegen33.c {
-        // R1 reclassify s1 Y y1
+        // R1 reclassify x1 Y y1 {color 20}
         struct Y *y1 ;
-        y1 = mrt_Reclassify(&codegen33__RSHIPS[0], s1, &codegen33__CLASSES[2]) ;
-        mrt_CreateSimpleLinks(&codegen33__RSHIPS[0], y1, s1, true) ;
+        y1 = mrt_Reclassify(&codegen33__RSHIPS[0], x1, &codegen33__CLASSES[2]) ;
         y1->color = 20 ;
     }
 } -result {1}
@@ -11854,28 +12105,30 @@ endif::showtests[]
 [source,tcl]
 ----
 <<generation support commands>>=
-proc RelUnionGenReclassify {relName superref subclass subref args} {
+proc RelUnionGenReclassify {relName subref newSubclass newref args} {
     if {[llength $args] % 2 != 0} {
         error "initializers must be given as name / value pairs"
     }
-    set result [linecomment "$relName reclassify $superref $subclass $subref"]
+    set result [linecomment "$relName reclassify $subref $newSubclass\
+            $newref [list $args]"]
 
     variable domain
     set relRef [UnionGeneralization findById Domain $domain Name $relName]
-    set relNum [readAttribute [findRelated $relRef R43 R30] Number]
 
-    set supername [readAttribute [findRelated $relRef ~R44] Class]
-    CheckInstRefSymbol $superref Class $supername
-    CheckSubClassName $subclass [findRelated $relRef ~R45]
+    set subclasses [findRelated $relRef ~R45]
+    CheckSubClassName $newSubclass $subclasses
 
-    set classDesc [GetClassDescriptor $domain $subclass]
+    set subrefClass [dict get [CheckSymbol $subref] Class]
+    CheckSubClassName $subrefClass $subclasses
+
+    set classDesc [GetClassDescriptor $domain $newSubclass]
+    set relDesc [GetRelationshipDescriptor $domain $relName]
     append result\
-        [CreateInstRefSymbol $subclass $subref]\
-        "$subref = mrt_Reclassify\(&${domain}__RSHIPS\[$relNum\], $superref, "\
-        "&$classDesc\) ;\n"
+        [CreateInstRefSymbol $newSubclass $newref]\
+        "$newref = mrt_Reclassify\($relDesc, $subref, &$classDesc\) ;\n"
 
-    lappend args $relName $superref
-    append result [AssignComponentValues $subclass $subref $args]
+    lappend args $relName {}
+    append result [AssignComponentValues $newSubclass $newref $args]
 
     return [IndentToBlock $result]
 }
@@ -11900,7 +12153,8 @@ test codegen-34.0 {
 
             domainop void makePair {} {
                 <%S create s1%>
-                <%R1 reclassify s1 Y y1 color 30%>
+                <%X create x1 R1 s1%>
+                <%R1 reclassify x1 Y y1 color 30%>
             }
         }
         population codegen34 {
@@ -11915,9 +12169,15 @@ test codegen-34.0 {
 } -body {
     validateutils compileFiles codegen34.c
     validateutils matchLines codegen34.c {
-        // R1 reclassify s1 Y y1
+        // S create s1 {}
+        struct S *s1 ;
+        s1 = mrt_CreateInstance(&codegen34__CLASSES[0], MRT_StateCode_IG) ;
+        // X create x1 {R1 s1}
+        struct X *x1 ;
+        x1 = mrt_CreateUnionInstance(&codegen34__CLASSES[1], MRT_StateCode_IG, &codegen34__RSHIPS[0], s1) ;
+        // R1 reclassify x1 Y y1 {color 30}
         struct Y *y1 ;
-        y1 = mrt_Reclassify(&codegen34__RSHIPS[0], s1, &codegen34__CLASSES[2]) ;
+        y1 = mrt_Reclassify(&codegen34__RSHIPS[0], x1, &codegen34__CLASSES[2]) ;
         y1->color = 30 ;
     }
 } -result {1}
@@ -11941,7 +12201,6 @@ proc GenClassify {relName superref subref} {
     set result [linecomment "$relName classify $superref $subref"]
 
     set relRef [Generalization findById Domain $domain Name $relName]
-    set relNum [readAttribute [findRelated $relRef R30] Number]
 
     set superclassref [Superclass findWhere {$Domain eq $domain &&\
             $Relationship eq $relName && $Role eq "target"}]
