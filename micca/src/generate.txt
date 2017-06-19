@@ -9358,12 +9358,19 @@ an error is thrown.
 ----
 <<generation support commands>>=
 proc InstanceSignal {instref event args} {
-    lassign [InstanceNewECB $instref $event $args] ecbvar ecbcode
-    return [IndentToBlock [string cat\
-        [linecomment "instance $instref signal $event [list $args]"]\
-        $ecbcode\
-        "mrt_PostEvent($ecbvar) ;\n"\
-    ]]
+    set result [linecomment "instance $instref signal $event [list $args]"]
+    set eventRef [VerifyEvent $event $instref]
+    set params [VerifyEventParams $eventRef $args]
+    if {[relation isempty $params]} {
+        set eventNum [readAttribute $eventRef Number]
+        set sourceinst [expr {[LookUpSymbol self] eq {} ? "NULL" : "self"}]
+        append result "mrt_SignalEvent($eventNum, $instref, $sourceinst,\
+                NULL, 0) ; // $event\n"
+    } else {
+        set ecbvar [ECBAllocAndFill $instref $eventRef $params $args]
+        append result "mrt_PostEvent($ecbvar) ;\n"
+    }
+    return [IndentToBlock $result]
 }
 ----
 
@@ -9374,54 +9381,108 @@ obtain an ECB from the run-time and fill in any event parameters.
 [source,tcl]
 ----
 <<generation support commands>>=
-proc InstanceNewECB {instref event arglist} {
+proc VerifyEvent {event targetinst} {
     variable domain
 
-    if {[llength $arglist] % 2 != 0} {
-        error "event parameters must be given as name / value pairs, got:\
-            \"$arglist\""
+    set targetsym [CheckInstRefSymbol $targetinst]
+    set className [dict get $targetsym Class]
+    set eventRef [Event findById Domain $domain Model $className Event $event]
+    if {[isEmptyRef $eventRef]} {
+        error "event, $event, is not a known event for class, $className"
     }
-    set target [CheckInstRefSymbol $instref]
+    return $eventRef
+}
 
-    dict with target {
-        set eventRef [Event findById Domain $domain Model $Class Event $event]
-        if {[isEmptyRef $eventRef]} {
-            error "event, $event, is not a known event for class, $Class"
+proc VerifyEventParams {eventRef supplied} {
+    if {[llength $supplied] % 2 != 0} {
+        error "event parameters must be given as name / value pairs, got:\
+            \"$supplied\""
+    }
+    set psig [findRelated $eventRef R69]
+    set params [FindParamsFromSig $psig]
+    set suppliedNames [dict keys $supplied]
+    set requiredNames [relation list $params Name -ascending Position]
+    CheckSuppliedParams [readAttribute $eventRef Event]\
+            $suppliedNames $requiredNames
+    return $params
+}
+
+proc ECBAllocAndFill {targetinst eventRef params arglist {resultRef result}} {
+    upvar 1 $resultRef result
+    variable domain
+
+    set className [readAttribute $eventRef Model]
+    set eventName [readAttribute $eventRef Event]
+    set eventNum [readAttribute $eventRef Number]
+    set sourceinst [expr {[LookUpSymbol self] eq {} ? "NULL" : "self"}]
+
+    set ecbvar [CreateTempSymbol Ctype {MRT_ecb *} Type ECB Class $className]
+    append result "MRT_ecb *$ecbvar =\
+            mrt_NewEvent($eventNum, $targetinst, $sourceinst) ; // $eventName\n"
+    if {[relation isnotempty $params]} {
+        set eparamsname ${domain}_${className}_${eventName}__EPARAMS
+        set ptrparams [CreateTempSymbol Ctype "struct *$eparamsname"\
+            Type EventParams Class $className]
+        append result\
+            "struct $eparamsname *const $ptrparams =\n"\
+            "    (struct $eparamsname *)$ecbvar->eventParameters ;\n"
+        relation foreach param $params -ascending Position {
+            relation assign $param {Name pname} {DataType datatype}
+            append result [GenValueAssignment $domain $ptrparams->$pname\
+                    [dict get $arglist $pname] $datatype]
         }
-        set eventNum [readAttribute $eventRef Number]
+    }
+    return $ecbvar
+}
+----
 
-        set psig [findRelated $eventRef R69]
-        set params [FindParamsFromSig $psig]
-        set required [relation list $params Name -ascending Position]
-        set supplied [dict keys $arglist]
-        CheckSuppliedParams $event $supplied $required
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-66.0 {
+    Signal an event without parameters
+} -setup {
+    validateutils genMiccaFile codegen66 {
+        domain codegen66 {
+            class X {
+                attribute temp int -default 20
 
-        set result {}
-        set sourceinst [expr {[LookUpSymbol self] eq {} ? "NULL" : "self"}]
-        set ecbvar [CreateTempSymbol Ctype {MRT_ecb *} Type ECB Class $Class]
-        append result "MRT_ecb *$ecbvar =\
-                mrt_NewEvent($eventNum, $instref, $sourceinst) ; // $event\n"
-        if {[llength $required] != 0} {
-            set eparamsname ${domain}_${Class}_${event}__EPARAMS
-            set ptrparams [CreateTempSymbol Ctype "struct *$eparamsname"\
-                Type EventParams Class $Class]
-            append result\
-                "struct $eparamsname *const $ptrparams =\n"\
-                "    (struct $eparamsname *)$ecbvar->eventParameters ;\n"
-            relation foreach param $params -ascending Position {
-                relation assign $param {Name pname} {DataType datatype}
-                if {![dict exists $arglist $pname]} {
-                    error "required event parameter, $pname,\
-                            was not supplied a value"
+                statemodel {
+                    state Idle {} {
+                    }
+                    transition Idle - E1 -> Running
+
+                    state Running {} {
+                        <%my attr temp%> += 10 ;
+                    }
+                    transition Running - E1 -> Running ;
                 }
-                append result [GenValueAssignment $domain $ptrparams->$pname\
-                        [dict get $arglist $pname] $datatype]
+            }
+
+            domainop void startx1 {} {
+                <%X findByName x1 xref%>
+                <%instance xref signal E1%>
+            }
+        }
+        population codegen66 {
+            class X {
+                instance x1
             }
         }
     }
-    return [list $ecbvar $result]
-}
+} -cleanup {
+    micca clear
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen66.c
+    validateutils matchLines codegen66.c {
+        // instance xref signal E1 {}
+        mrt_SignalEvent(0, xref, NULL, NULL, 0) ; // E1
+    }
+} -result {1}
 ----
+endif::showtests[]
 
 ifdef::showtests[]
 [source,tcl]
@@ -9515,14 +9576,126 @@ an error is thrown.
 ----
 <<generation support commands>>=
 proc InstanceDelaySignal {instref time event args} {
-    lassign [InstanceNewECB $instref $event $args] ecbvar ecbcode
-    return [IndentToBlock [string cat\
-        [linecomment "instance $instref delaysignal $time $event [list $args]"]\
-        $ecbcode\
-        "mrt_PostDelayedEvent($ecbvar, $time) ;\n"\
-    ]]
+    set result\
+        [linecomment "instance $instref delaysignal $time $event [list $args]"]
+    set eventRef [VerifyEvent $event $instref]
+    set params [VerifyEventParams $eventRef $args]
+    if {[relation isempty $params]} {
+        set eventNum [readAttribute $eventRef Number]
+        set sourceinst [expr {[LookUpSymbol self] eq {} ? "NULL" : "self"}]
+        append result "mrt_SignalDelayedEvent($time, $eventNum, $instref,\
+                $sourceinst, NULL, 0) ; // $event\n"
+    } else {
+        set ecbvar [ECBAllocAndFill $instref $eventRef $params $args]
+        append result "mrt_PostDelayedEvent($ecbvar, $time) ;\n"
+    }
+    return [IndentToBlock $result]
 }
 ----
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-67.0 {
+    Signal an event without parameters
+} -setup {
+    validateutils genMiccaFile codegen67 {
+        domain codegen67 {
+            class X {
+                attribute temp int -default 20
+
+                statemodel {
+                    state Idle {} {
+                    }
+                    transition Idle - E1 -> Running
+
+                    state Running {} {
+                        <%my attr temp%> += 10 ;
+                    }
+                    transition Running - E1 -> Running ;
+                }
+            }
+
+            domainop void startx1 {} {
+                <%X findByName x1 xref%>
+                <%instance xref delaysignal 100 E1%>
+            }
+        }
+        population codegen67 {
+            class X {
+                instance x1
+            }
+        }
+    }
+} -cleanup {
+    micca clear
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen67.c
+    validateutils matchLines codegen67.c {
+        // instance xref delaysignal 100 E1 {}
+        mrt_SignalDelayedEvent(100, 0, xref, NULL, NULL, 0) ; // E1
+    }
+} -result {1}
+----
+endif::showtests[]
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-68.0 {
+    Signal an event with parameters
+} -setup {
+    validateutils genMiccaFile codegen68 {
+        domain codegen68 {
+            class X {
+                attribute temp int -default 20
+                attribute name {char[4]}
+
+                statemodel {
+                    state Idle {} {
+                    }
+                    transition Idle - E1 -> Running
+
+                    state Running {incr int newname {char[4]}} {
+                        <%my attr temp%> += incr ;
+                        strcpy(<%my attr name%>, newname) ;
+                    }
+                    transition Running - E1 -> Running ;
+                }
+            }
+
+            domainop void startx1 {} {
+                <%X findByName x1 xref%>
+                <%instance xref delaysignal 200 E1 incr 30 newname {"bar"}%>
+            }
+        }
+        population codegen68 {
+            class X {
+                instance x1 name {"foo"}
+            }
+        }
+    }
+} -cleanup {
+    micca clear
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen68.c
+    validateutils matchLines codegen68.c {
+        // instance xref delaysignal 200 E1 {incr 30 newname {"bar"}}
+        MRT_ecb *t__T1 = mrt_NewEvent(0, xref, NULL) ; // E1
+        struct codegen68_X_E1__EPARAMS *const t__T2 =
+            (struct codegen68_X_E1__EPARAMS *)t__T1->eventParameters ;
+        t__T2->incr = 30 ;
+        strncpy(t__T2->newname, "bar", 3) ;
+        t__T2->newname[3] = '\0' ;
+        mrt_PostDelayedEvent(t__T1, 200) ;
+    }
+} -result {1}
+----
+endif::showtests[]
 
 ==== Cancel a Delayed Signal
 
@@ -10156,6 +10329,7 @@ proc USubClassCreate {className instref args} {
         error "no value supplied for superclass reference, \"$relName\""
     }
     set superinst [dict get $args $relName]
+    CheckInstRefSymbol $superinst Class $supername
 
     set classDesc [GetClassDescriptor $domain $className]
     append result\
@@ -10620,6 +10794,7 @@ proc USubClassCreateIn {className instref state args} {
         error "no value supplied for superclass reference, \"$relName\""
     }
     set superinst [dict get $args $relName]
+    CheckInstRefSymbol $superinst Class $supername
 
     set statenum [GetStateNumber $domain $className $state]
     set classDesc [GetClassDescriptor $domain $className]
@@ -10893,6 +11068,7 @@ proc USubClassCreateAsync {className event eventparams args} {
         error "no value supplied for superclass reference, \"$relName\""
     }
     set superinst [dict get $args $relName]
+    CheckInstRefSymbol $superinst Class $supername
 
     set eventRef [Event findById Domain $domain Model $className Event $event]
     if {[isEmptyRef $eventRef]} {
@@ -12026,12 +12202,12 @@ proc RelRefGenReclassify {relName subref newSubclass newref args} {
 
     set classDesc [GetClassDescriptor $domain $newSubclass]
     set relDesc [GetRelationshipDescriptor $domain $relName]
+    lappend args $relName {}
     append result\
         [CreateInstRefSymbol $newSubclass $newref]\
-        "$newref = mrt_Reclassify\($relDesc, $subref, &$classDesc\) ;\n"
-
-    lappend args $relName {}
-    append result [AssignComponentValues $newSubclass $newref $args]
+        "$newref = mrt_Reclassify\($relDesc, $subref, &$classDesc\) ;\n"\
+        [AssignComponentValues $newSubclass $newref $args]\
+        "$subref = NULL ;\n"
 
     return [IndentToBlock $result]
 }
@@ -12123,12 +12299,12 @@ proc RelUnionGenReclassify {relName subref newSubclass newref args} {
 
     set classDesc [GetClassDescriptor $domain $newSubclass]
     set relDesc [GetRelationshipDescriptor $domain $relName]
+    lappend args $relName {}
     append result\
         [CreateInstRefSymbol $newSubclass $newref]\
-        "$newref = mrt_Reclassify\($relDesc, $subref, &$classDesc\) ;\n"
-
-    lappend args $relName {}
-    append result [AssignComponentValues $newSubclass $newref $args]
+        "$newref = mrt_Reclassify\($relDesc, $subref, &$classDesc\) ;\n"\
+        [AssignComponentValues $newSubclass $newref $args]\
+        "$subref = NULL ;\n"
 
     return [IndentToBlock $result]
 }
@@ -12592,10 +12768,10 @@ test codegen-35.0 {
 } -body {
     validateutils compileFiles codegen35.c
     validateutils matchLines codegen35.c {
+        // R1 signal clerkReady {}
         struct R1 *t__T1 = &R1__POOL[0] ;
         // instance t__T1 signal clerkReady {}
-        MRT_ecb *t__T2 = mrt_NewEvent(1, t__T1, NULL) ; // clerkReady
-        mrt_PostEvent(t__T2) ;
+        mrt_SignalEvent(1, t__T1, NULL, NULL, 0) ; // clerkReady
     }
 } -result {1}
 ----
