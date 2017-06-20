@@ -59,6 +59,9 @@ CLEANFILES =\
 	bookstore.h\
 	bookstore.log\
 	*.o\
+	*.gcda\
+	*.gcno\
+	*.gcov\
 	$(NULL)
 
 A2XOPTS =\
