@@ -19,6 +19,7 @@ PDF 	=\
      	$(NULL)
 
 A2XOPTS =\
+	--verbose\
 	$(NULL)
 
 DBLATEX_PARAMS =\

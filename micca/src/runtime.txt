@@ -709,12 +709,12 @@ mrtRunThreadOfControl(void)
 {
     assert(mrtEventQueueEmpty(&eventQueue)) ;
 
-    bool rantoc = mrtProcessOneEvent(&tocEventQueue) ;
-    if (rantoc) {
+    bool startedtoc = mrtProcessOneEvent(&tocEventQueue) ;
+    if (startedtoc) {
         mrtFinishThreadOfControl() ;
     }
 
-    return rantoc ;
+    return startedtoc ;
 }
 ----
 
@@ -1276,8 +1276,8 @@ the storage array.
 === Instance Containment
 
 For most classes,
-the Instance Allocation Block describes everything we need to know
-about how the instances are stored.
+the Instance Allocation Block describes everything needed about how
+instances are stored.
 However,
 classes that are subclasses of a union generalization do not have
 their own storage pool.
@@ -1287,8 +1287,8 @@ The containment may be several levels deep as a union subclass can be
 the superclass for another union generalization.
 The `MRT_Class` data structure contains the necessary information
 to deal with this.
-Here we present a function that forms the basis of allowing us to
-treat the union subclasses the same as other classes.
+The following function forms the basis for
+treating the union subclasses the same as other classes.
 
 *****
 [source,c]
@@ -1376,7 +1376,6 @@ in its storage pool.
 
 (((micca,Run Time Function,mrt_InstanceIndex)))
 [source,c]
-.Implemenation
 ----
 <<mrt external functions>>=
 MRT_InstId
@@ -1483,8 +1482,25 @@ storage pool.
 
 === Creating an Instance
 
-The function, `mrt_CreateInstance`, is used to synchronously
-create an instance of a class.
+Creating an instance involves allocating memory to hold the instance.
+Normally,
+each class has its own pool of memory for its instance and the
+IAB and functions shown previously are used to manage that memory.
+However,
+instances of union-based subclasses have their memory allocated internal
+to the superclass instance.
+This means finding memory for a union subclass instance is different
+than finding memory for other classes.
+For the union subclass case,
+we must locate the correct place inside the instance memory for its
+related superclass instance.
+This difference is dealt with by using a separate function
+to create union subclass instances.
+Note there are two functions for each of the various types
+of creation operations.
+
+We first start with a description of synchronously creating a normal,
+non-union-based instance.
 
 *****
 [source,c]
@@ -1546,6 +1562,107 @@ mrt_CreateInstance(
 }
 ----
 
+Union based subclasses pose special cases since the memory used to
+hold an instance is _not_ allocated from a pool but rather is embedded
+in the instance of a superclass.
+A different function is required and additional parameters are used
+to determine the memory location of the subclass instance.
+
+*****
+[source,c]
+----
+<<mrt internal external interfaces>>=
+extern void *
+mrt_CreateUnionInstance(
+    MRT_Class const *const classDesc,
+    MRT_StateCode initialState,
+    MRT_Relationship const *const genRel,
+    void *super) ;
+----
+
+`classDesc`::
+    A pointer to the class data for the instance to be created.
+    The class described by `classDesc` must be a subclass of the
+    relationship described by `genRel`.
+`initialState`::
+    The state number into which the instance will be placed.
+    For classes that do not have an associated state model this argument
+    is ignored.
+    For classes that do have an associated state model,
+    the class will be created in the state given by `initialState`.
+    If this argument is `MRT_StateCode_IG` or if the value given for
+    `initialState` is not a valid state number for the class,
+    then the instance is created in its default initial state.
+`genRel`::
+    A pointer to a relationship description for the generalization
+    in which the instance is a union-based subclass.
+    The `relType` field of `genRel` must be `mrtUnionGeneralization`.
+`super`::
+    A pointer to the superclass instance where the subclass instance
+    is to be created.
+    `super` must be an instance of the superclass described by `genRel`.
+
+
+`mrt_CreateUnionInstance` allocates memory for an instance of the union-based
+subclass described by `classDesc` and places the instance in the state given by
+`initialState`.
+No state activity is run as part of synchronous instance creation.
+The instance is created in place in the memory pointed to by `super`.
+*****
+
+The two additional parameters required by `mrt_CreateUnionInstance`
+are need to provide the memory of the created instance (`super`) and
+to determine the offset into that memory where the instance storage
+is located (`genRel`).
+
+(((micca,Run Time Function,mrt_CreateUnionInstance)))
+[source,c]
+----
+<<mrt external functions>>=
+void *
+mrt_CreateUnionInstance(
+    MRT_Class const *const classDesc,
+    MRT_StateCode initialState,
+    MRT_Relationship const *const genRel,
+    void *super)
+{
+    assert(classDesc != NULL) ;
+    assert(genRel != NULL) ;
+    assert(super != NULL) ;
+    assert(genRel->relType == mrtUnionGeneralization) ;
+
+    if (genRel->relType != mrtUnionGeneralization) {
+        mrtFatalError(mrtRelationshipLinkage) ;
+    }
+    MRT_UnionGeneralization const *const gen =
+            &genRel->relInfo.unionGeneralization ;
+    /*
+     * Verify that the new subclass is actually a subclass of the
+     * generalization.
+     */
+    mrtFindUnionGenSubclassCode(classDesc, gen->subclasses,
+            gen->subclassCount) ;
+    /*
+     * Verify the super class instance is truly of the super class.
+     */
+    MRT_Instance *superInst = super ;
+    if (superInst->classDesc != gen->superclass.classDesc) {
+        mrtFatalError(mrtRelationshipLinkage) ;
+    }
+    /*
+     * Compute the location of the union subclass instance
+     * within the superclass instance.
+     */
+    void *inst = (void *)((uintptr_t)super + gen->superclass.storageOffset) ;
+    /*
+     * Initialize the memory for the instance.
+     */
+    mrtInitializeInstance(inst, classDesc, initialState) ;
+
+    return inst ;
+}
+----
+
 ==== Initializing Instance Memory
 
 Once we have identified the memory for an instance,
@@ -1573,7 +1690,7 @@ mrtInitializeInstance(
     /*
      * Start with a zeroed out memory space.
      */
-    memset(inst, 0, iab->instanceSize) ; // <1>
+    memset(inst, 0, iab->instanceSize) ;                            // <1>
     inst->classDesc = classDesc ;
     /*
      * Mark the slot as in use.
@@ -1584,14 +1701,14 @@ mrtInitializeInstance(
 
         inst->currentState = (initialState == MRT_StateCode_IG ||
             initialState >= classDesc->edb->stateCount) ?
-                classDesc->edb->initialState : initialState ; // <2>
+                classDesc->edb->initialState : initialState ;       // <2>
     } else {
-        inst->currentState = MRT_StateCode_IG ; // <3>
+        inst->currentState = MRT_StateCode_IG ;                     // <3>
     }
 
-    MRT_AttrOffset const *offsets = iab->linkOffsets ; // <4>
-    for (unsigned count = iab->linkCount ; count != 0 ; count--, offsets++) {
-        MRT_LinkRef *link = (MRT_LinkRef *)((uintptr_t) inst + *offsets) ;
+    MRT_AttrOffset const *offsets = iab->linkOffsets ;              // <4>
+    for (unsigned count = iab->linkCount ; count != 0 ; count--) {
+        MRT_LinkRef *link = (MRT_LinkRef *)((uintptr_t) inst + *offsets++) ;
         mrtLinkRefInit(link) ;
     }
     /*
@@ -1631,9 +1748,9 @@ This is described further below.
 The effect of running this counter is that every instance gets a
 different `alloc` member value (modulo the size of the counter variable)
 The increment has one little catch.
-The counter is signed and we use the positive and negative values
+The counter is signed and the positive and negative values are used
 differently.
-Here we want to make sure the value remains positive.
+Here, we make sure the value remains positive.
 
 [source,c]
 ----
@@ -1661,6 +1778,12 @@ mrtIncrAllocCounter(
 
 The function, `mrt_DeleteInstance`, is used to synchronously
 destroy an instance.
+Note that union subclass instances are treated the same as other
+class instances.
+Returning the memory for an instance is accomplished by setting
+the value of its `alloc` member to zero and this is the same
+in both cases, regardless of the fact that union subclass instance
+do not have their own memory pool.
 
 *****
 [source,c]
@@ -1706,15 +1829,15 @@ mrt_DeleteInstance(
     MRT_iab *iab = classDesc->iab ;
     assert(iab != NULL) ;
     /*
+     * Unlink the instance from its relationships.
+     */
+    mrtDeleteLinks(classDesc->classRels, classDesc->relCount, instref) ;
+    /*
      * Run the destructor, if there is one.
      */
     if (iab->destruct) {
         iab->destruct(inst) ;
     }
-    /*
-     * Unlink the instance from its relationships.
-     */
-    mrtDeleteLinks(classDesc->classRels, classDesc->relCount, instref) ;
     /*
      * Mark the slot as free.
      */
@@ -1730,6 +1853,7 @@ like a request to immediately delete it could happen.
 Won't happen when using the embedded commands, but ...
 
 Deleting an instance is a simple matter.
+First, unlink the instance from its relationships.
 If there is a destructor, it is run.
 The slot is free when its `alloc` member has a value of 0.
 But beware,
@@ -1959,14 +2083,21 @@ it is not necessary to accumulate a set first and then iterate over the set.
 However,
 there are times when obtaining a set is crucial and cannot be replaced
 by simple iteration over the class instances.
+For example,
+iterating across a many-to-many association may result in visiting the same
+destination instance multiple times.
+If we are applying a non-idempotent operation to the destination instance,
+the what we really need is the set of related instances so as not
+to have duplicates.
 For those cases the run-time provides an instance set concept.
+
 The design of the instance set has the goal of making it reasonable
 to allocate the sets as automatic variables on the stack.
 One could design the instance set to be a list of instance reference
 pointers.
 Unfortunately, such sets would occupy a significant amount of space.
 We want to be able to allocate instance sets as automatic variables
-to avoid the complication of managing the lifetime of the set variables.
+to avoid the complication of managing the lifetime of set variables.
 Since our target environment is usually quite limited,
 large automatic variables are to be avoided.
 
@@ -1980,7 +2111,7 @@ For example, since instance sets do not contain duplicates,
 the ability to arithmetically `OR` in a bit means we do not have to
 make any explicit tests to avoid inserting duplicate instances in the set.
 
-The data structure for a instance set is shown below.
+The following is the data structure for an instance set.
 
 (((micca,Run Time Data,MRT_InstSet)))
 [source,c]
@@ -1994,9 +2125,9 @@ typedef struct mrtinstanceset MRT_InstSet ;
 
 <<mrt internal aggregate types>>=
 struct mrtinstanceset {
-    MRT_Class const *classDesc ; // <1>
+    MRT_Class const *classDesc ;                                // <1>
     MRT_SetWord instvector[(MRT_INSTANCE_SET_SIZE + MRT_SETWORD_BITS - 1) /
-            MRT_SETWORD_BITS] ; // <2>
+            MRT_SETWORD_BITS] ;                                 // <2>
 } ;
 
 <<mrt internal constants>>=
@@ -2019,6 +2150,7 @@ By default we set that number to 128.
 #ifndef MRT_INSTANCE_SET_SIZE
 #   define MRT_INSTANCE_SET_SIZE 128
 #endif /* MRT_INSTANCE_SET_SIZE */
+_Static_assert(MRT_INSTANCE_SET_SIZE > 0, "Instance set size must be > 0") ;
 ----
 
 A function is provided to properly initalize an instance set variable.
@@ -2096,7 +2228,7 @@ mrt_InstSetAddInstance(
 
     assert(instref != NULL) ;
     assert(instref->classDesc == set->classDesc) ;
-    if (instref->classDesc != set->classDesc) { // <1>
+    if (instref->classDesc != set->classDesc) {         // <1>
         return ;
     }
     unsigned instid = mrt_InstanceIndex(instance) ;
@@ -2105,7 +2237,7 @@ mrt_InstSetAddInstance(
         mrtFatalError(mrtInstSetOverflow, instid) ;
     }
     set->instvector[instid / MRT_SETWORD_BITS] |=
-            (1 << (instid % MRT_SETWORD_BITS)) ; // <2>
+            (1 << (instid % MRT_SETWORD_BITS)) ;        // <2>
 }
 ----
 <1> Make sure we do not add instances of the wrong class.
@@ -2777,7 +2909,7 @@ supports the relational model of data (_e.g._ `rosea` or TclRAL),
 referential integrity checking comes with the underlying data management
 facilities.
 Such data management facilities constrain the values of data and
-move much of the data integrity validation away from the application code.
+move much of the data integrity validation away from the runtime code.
 Such is the motivation to use these facilities since they replace
 application code with declarative specifications of validity.
 
@@ -5248,27 +5380,26 @@ The run-time provides a function to accomplish the details.
 extern void *
 mrt_Reclassify(
     MRT_Relationship const *rel,
-    void *super,
+    void *sub,
     MRT_Class const *const newSubclass) ;
 ----
 
 `rel`::
     A pointer to a relationship description for the relationship
     across which the reclassify operation is to happen.
-`super`::
-    A pointer to a class instance that serves the superclass role in the
-    relationship.
+`sub`::
+    A pointer to a class instance that is to be reclassified.
 `newSubclass`::
     A pointer to the class description to which the currently related
     subclass instance is to be reclassified.
 
-The `mrt_Reclassify` function migrates the class of the instance
-currently related to `super` along the `rel` generalization to be of
-the new class, `newSubclass`.
+The `mrt_Reclassify` function migrates the class of the `sub` instance
+along the `rel` generalization to be of the new class, `newSubclass`.
 Conceptually,
-reclassification implies that the currently related subclass instance
+reclassification implies that the `sub` instance
 is unrelated and deleted and a new instance of `newSubclass` is created
-and related to `super`.
+and related to the superclass instance to which `sub` was previously
+related.
 
 The return value of the function is an instance pointer to the newly
 created subclass instance.
@@ -5284,9 +5415,16 @@ the reclassification considers each type separately.
 void *
 mrt_Reclassify(
     MRT_Relationship const *rel,
-    void *super,
+    void *sub,
     MRT_Class const *const newSubclass)
 {
+    assert(rel != NULL) ;
+    assert(newSubclass != NULL) ;
+
+    MRT_Instance *currentSubInst = sub ;
+    assert(currentSubInst != NULL) ;
+    assert(currentSubInst->alloc > 0) ;
+
     void *newSubInst = NULL ;
 
     if (rel->relType == mrtRefGeneralization) {
@@ -5307,29 +5445,37 @@ we must perform the complete delete / create sequence.
 [source,c]
 ----
 <<mrt_Reclassify: reclassify reference generalization>>=
-MRT_RefGeneralization const *gen = &rel->relInfo.refGeneralization ;
+MRT_RefGeneralization const *const gen = &rel->relInfo.refGeneralization ;
 
 /*
- * Check that we have the correct superclass.
+ * Verify the subclass instance is an instance of that class that
+ * is part of the relationship.
  */
-MRT_Class const *const superclassClass = ((MRT_Instance *)super)->classDesc ;
-if (gen->superclass.classDesc != superclassClass) {
+int subclassCode = mrtFindRefGenSubclassCode(currentSubInst->classDesc,
+        gen->subclasses, gen->subclassCount) ;
+/*
+ * Fetch the superclass instance via the reference in the subclass instance.
+ */
+MRT_Instance *super = *(MRT_Instance **)((uintptr_t)sub +
+        gen->subclasses[subclassCode].storageOffset) ;
+/*
+ * Check that the subclass instance is related to a superclass that is
+ * the correct one for the relationship.
+ */
+if (gen->superclass.classDesc != super->classDesc) {
     mrtFatalError(mrtRelationshipLinkage) ;
 }
 /*
- * Offset into the superclass instance to where the pointer to the
- * subclass instance is located.
+ * Verify that the new subclass is indeed a subclass of the relationship.
+ * We don't care about the subtype code and are only using
+ * mrtFindRefGenSubclassCode() to validate the new requested subclass.
  */
-void **p_subInst = (void **)((uintptr_t)super + gen->superclass.storageOffset) ;
-void *subInst = *p_subInst ;
-if (subInst != NULL) {
-    /*
-     * Delete the old subclass instance.  Deleting will cause the subclass
-     * instance to be unlinked from the generalization.
-     */
-    mrt_DeleteInstance(subInst) ;
-}
-
+mrtFindRefGenSubclassCode(newSubclass, gen->subclasses, gen->subclassCount) ;
+/*
+ * Delete the old subclass instance.  Deleting will cause the subclass
+ * instance to be unlinked from the generalization.
+ */
+mrt_DeleteInstance(sub) ;
 /*
  * Create a new instance of the new subclass.
  */
@@ -5350,10 +5496,23 @@ subclass.
 [source,c]
 ----
 <<mrt_Reclassify: reclassify union generalization>>=
-MRT_UnionGeneralization const *gen = &rel->relInfo.unionGeneralization ;
-
-MRT_Class const *const superclassClass = ((MRT_Instance *)super)->classDesc ;
-if (gen->superclass.classDesc != superclassClass) {
+MRT_UnionGeneralization const *const gen = &rel->relInfo.unionGeneralization ;
+/*
+ * Verify the subclass instance is an instance of that class that
+ * is part of the relationship. We don't need the subclass code.
+ */
+MRT_Class const *const subClass = currentSubInst->classDesc ;
+mrtFindUnionGenSubclassCode(subClass, gen->subclasses, gen->subclassCount) ;
+/*
+ * Compute the pointer to the superclass instance.
+ */
+MRT_Instance *super = (MRT_Instance *)((uintptr_t)currentSubInst -
+        gen->superclass.storageOffset) ;
+/*
+ * Check that the subclass instance is related to a superclass that is
+ * the correct one for the relationship.
+ */
+if (gen->superclass.classDesc != super->classDesc) {
     mrtFatalError(mrtRelationshipLinkage) ;
 }
 /*
@@ -5362,21 +5521,17 @@ if (gen->superclass.classDesc != superclassClass) {
  */
 mrtFindUnionGenSubclassCode(newSubclass, gen->subclasses, gen->subclassCount) ;
 /*
- * Point to where the subclass instance is stored within the superclass.
+ * Clean up any relationship pointers in the currently related instance.
  */
-newSubInst = (void *)((uintptr_t)super + gen->superclass.storageOffset) ;
-MRT_Instance *subInst = newSubInst ;
+mrtDeleteLinks(subClass->classRels, subClass->relCount, currentSubInst) ;
 /*
- * Clean up any relationship pointers.
+ * The new instance occupies the same memory as the old one.
  */
-if (subInst->alloc > 0) {
-    MRT_Class const *const newSubClass = subInst->classDesc ;
-    mrtDeleteLinks(newSubClass->classRels, newSubClass->relCount, subInst) ;
-}
+newSubInst = currentSubInst ;
 /*
  * Set up the memory for the subclass instance according to the new subclass.
  */
-mrtInitializeInstance(subInst, newSubclass, MRT_StateCode_IG) ;
+mrtInitializeInstance(newSubInst, newSubclass, MRT_StateCode_IG) ;
 ----
 
 This function is the counterpart for finding a subclass among the
@@ -5471,11 +5626,11 @@ a well defined class (and not sets of classes or the domain as whole)
 there is no need for more complicated state execution schemes
 such as hierarchies.
 
-Generally, state actions affect other computations in the domain
+Generally, state activities affect other computations in the domain
 by updating instance attribute values or by generating events to
 other instances.
 The important distinction here is that the application code of the
-state actions does not deal with actually dispatching the events
+state activities does not deal with actually dispatching the events
 nor does it control which event is dispatched next.
 
 === Event Types
@@ -5638,7 +5793,7 @@ places in a system and gathering them together is a difficult
 undertaking.
 
 Here we take the approach of providing a fixed amount of memory and letting
-state actions cast that memory into the appropriate type.
+state activities cast that memory into the appropriate type.
 Needless to say, this can also be a source of errors, but is
 much easier to manage.
 This choice makes sense for many systems.
@@ -5924,6 +6079,9 @@ mrtFindEvent(
 Signaling an event is a very common operation for a state activity.
 In this section,
 we describe the code to accomplish event signaling.
+
+==== Obtaining An ECB
+
 As we mentioned previously,
 before an event can be signaled, we must obtain and fill in an ECB.
 We start our description with a function that does just that.
@@ -5987,17 +6145,17 @@ errors.
 delay time.
 Most frequently, we are performing immediate signaling.
 
-=== Posting an Event
+==== Posting an Event
 
-Once you have obtained an ECB initialized for the proper type of the
-event, then you need to fill in any event parameter data.
-Frequently, there are none.
+Once you have obtained an ECB initialized for an event,
+then you need to fill in any event parameter data.
+Frequently, there are no parameters for an event.
 Then the ECB is ready to be placed on a queue.
 There is a distinction between events an instance sends to itself and those
 that an instance sends to a different instance.
 Self directed events are placed on the front of the event queue
 so that they are dispatched in preference to the non-self directed events.
-This is one of the fundamental execution rules.
+This is one of the fundamental state machine dispatch rules.
 Posting an event involves determining the correct place in the queue
 for the ECB.
 The decision is made based on the ECB values.
@@ -6035,11 +6193,11 @@ mrt_PostEvent(
          */
     MRT_ecb *place ;
 
-    if (ecb->sourceInst == NULL) { // <1>
+    if (ecb->sourceInst == NULL) {                              // <1>
         place = (MRT_ecb *)&tocEventQueue ;
     } else {
         place = (MRT_ecb *)&eventQueue ;
-        if (ecb->sourceInst == ecb->targetInst) { // <2>
+        if (ecb->sourceInst == ecb->targetInst) {               // <2>
             while (place != mrtEventQueueEnd(&eventQueue) &&
                     place->sourceInst == place->targetInst) {
                 place = place->next ;
@@ -6057,8 +6215,69 @@ are queued to the end of the event queue.
 For self directed events we have to find the appropriate place.
 That place is the first event in the queue that is not self directed.
 The loop preserves the order of event dispatch in the unlikely
-(but not illegal) case that a state activity sends multiple
+(but not technically illegal) case that a state activity signals multiple
 self directed events.
+
+==== One Step Event Signaling
+
+For the case where the event has no parameters
+or the parameters have already been marshalled into a parameter block,
+a single function can create the event and post it.
+
+*****
+[source,c]
+----
+<<mrt internal external interfaces>>=
+extern void
+mrt_SignalEvent(
+    MRT_EventCode event,
+    void *targetInst,
+    void *sourceInst,
+    void const *eventparams,
+    size_t paramsize) ;
+----
+
+`event`::
+    The numerical code for the event.
+`targetInst`::
+    A pointer to the instance that is to receive the event.
+`sourceInst`::
+    A pointer to the instance that is sending the event.
+    If the event is being sent outside of the context of a class instance,
+    then this argument should be set to `NULL`.
+`eventparams`::
+    A pointer to the event parameters for the event.
+    If the event requires no additional parameters, then this argument
+    is passed as `NULL`.
+`paramsize`::
+    The number of bytes of event parameter data pointed to by `eventparams`.
+    If the event requires no additional parameters, then this argument
+    is passed as `0`.
+*****
+
+[source,c]
+----
+<<mrt external functions>>=
+void
+mrt_SignalEvent(
+    MRT_EventCode event,
+    void *targetInst,
+    void *sourceInst,
+    void const *eventparams,
+    size_t paramsize)
+{
+    MRT_ecb *ecb = mrt_NewEvent(event, targetInst, sourceInst) ;
+
+    if (eventparams != NULL) {
+        assert(paramsize <= sizeof(ecb->eventParameters)) ;
+        size_t toCopy = paramsize <= sizeof(ecb->eventParameters) ?
+                paramsize : sizeof(ecb->eventParameters) ;
+        memcpy(ecb->eventParameters, eventparams, toCopy) ;
+    }
+
+    mrt_PostEvent(ecb) ;
+}
+----
 
 === Asynchronous Instance Creation
 
@@ -6067,6 +6286,10 @@ asynchronous instance creation is accomplished by a combination of
 creating an instance and then sending it an event.
 The transition caused by the event then causes a state activity to be
 executed.
+The creation is asynchronous in the sense that after an activity
+requests an asynchronous creation, the return from the request is
+immediate, but the instance does not come into existance until its
+creation event is dispatched.
 
 *****
 [source,c]
@@ -6124,19 +6347,10 @@ mrt_CreateInstanceAsync(
     assert(event < targetClass->edb->eventCount) ;
 
     MRT_Instance *targetInst = mrt_CreateInstance(targetClass,
-            targetClass->edb->creationState) ; // <1>
-    targetInst->alloc = -targetInst->alloc ; // <2>
+            targetClass->edb->creationState) ;                  // <1>
+    targetInst->alloc = -targetInst->alloc ;                    // <2>
 
-    MRT_ecb *ecb = mrt_NewEvent(event, targetInst, sourceInst) ;
-
-    assert(paramsize <= sizeof(ecb->eventParameters)) ;
-    if (eventparams != NULL) {
-        size_t copy = paramsize <= sizeof(ecb->eventParameters) ?
-            paramsize : sizeof(ecb->eventParameters) ;
-        memcpy(ecb->eventParameters, eventparams, copy) ;
-    }
-
-    mrt_PostEvent(ecb) ;
+    mrt_SignalEvent(event, targetInst, sourceInst, eventparams, paramsize) ;
 
     return targetInst ;
 }
@@ -6147,6 +6361,103 @@ the dispatch of a creation event.
 Effectively the negative `alloc` value signals that the memory is reserved
 but the instance is not yet active.
 During event dispatch, this value will be turned back into a positive one.
+Note that the effect here is to use one of the instance slots as a
+temporary buffer to hold the attribute values for the instance until
+the creation event is dispatched.
+This temporary usage must be accounted for when defining the number
+of instance memory slots for a class.
+
+As we have already seen,
+subclass instances stored as a union require separate treatment.
+The following function is the asynchronous counterpart to
+`mrt_CreateUnionInstance`.
+
+*****
+[source,c]
+----
+<<mrt internal external interfaces>>=
+extern void *
+mrt_CreateUnionInstanceAsync(
+    MRT_Class const *const targetClass,
+    MRT_EventCode event,
+    void const *eventparams,
+    size_t paramsize,
+    void *sourceInst,
+    MRT_Relationship const *const genRel,
+    void *super) ;
+----
+
+`targetClass`::
+    A pointer to the class description for the instance that is to
+    be created.
+    The class described by `classDesc` must be a subclass of the
+    relationship described by `genRel`.
+`event`::
+    The number of the event to signal to the newly created instance.
+`eventparams`::
+    A pointer to the event parameters for the creation event.
+`paramsize`::
+    The number of bytes of event parameter data pointed to by `eventparams`.
+`sourceInst`::
+    A pointer to the class instance that is the source of the creation
+    event. If the creation event is signaled outside of a state activity,
+    then this value should be `NULL`.
+`genRel`::
+    A pointer to a relationship description for the generalization
+    in which the instance is a union-based subclass.
+    The `relType` field of `genRel` must be `mrtUnionGeneralization`.
+`super`::
+    A pointer to the superclass instance where the subclass instance
+    is to be created.
+    `super` must be an instance of the superclass described by `genRel`.
+
+The `mrt_CreateUnionInstanceAsync` function asynchronously creates an instance
+of the union-based subclass described by `targetClass`
+and arranges for `event` to be signaled to the new instance.
+Note the event parameters must be provided.
+After the function returns,
+the instance has been created in an inactive state and the event
+has been posted.
+The return value is the pointer to the newly created instance and
+can be used to initialize the values of attribute of the instance.
+*****
+
+Like the `mrt_CreateUnionInstance` function,
+the main change here is that the memory for the instance is located in
+the space allocated for its related superclass instance.
+
+
+(((micca,Run Time Function,mrt_CreateUnionInstanceAsync)))
+[source,c]
+----
+<<mrt external functions>>=
+void *
+mrt_CreateUnionInstanceAsync(
+    MRT_Class const *const targetClass,
+    MRT_EventCode event,
+    void const *eventparams,
+    size_t paramsize,
+    void *sourceInst,
+    MRT_Relationship const *const genRel,
+    void *super)
+{
+    assert(targetClass != NULL) ;
+    assert(targetClass->edb != NULL) ;
+    assert(targetClass->edb->creationState >= 0) ;
+    assert(event < targetClass->edb->eventCount) ;
+
+    MRT_Instance *targetInst = mrt_CreateUnionInstance(targetClass,
+            targetClass->edb->creationState, genRel, super) ;
+    targetInst->alloc = -targetInst->alloc ;                            // <1>
+
+    mrt_SignalEvent(event, targetInst, sourceInst, eventparams, paramsize) ;
+
+    return targetInst ;
+}
+----
+<1> As with non-union classes, we mark the instance as allocated but
+not active. When the creation event is dispatched, the allocation status
+is changed to indicate the instance is active.
 
 === Delayed Events
 
@@ -6156,6 +6467,10 @@ This implies that the run-time has access to some type of timing
 facility by which it can know that a given amount of time has elapsed
 and this implies that the run-time will hold on to the ECB until
 that future time has arrived.
+We also interpret delayed events as being signaled from outside
+of an instance context.
+So, all delayed events start a new thread of control when they are
+dispatched.
 
 There is one significant XUML rule associated with delayed events.
 There can be only one outstanding delayed event of a given event
@@ -6225,6 +6540,8 @@ There are three functions supplied for dealing with delayed events:
 . Query the remaining time for a delayed event.
 
 The unit of time for delayed events is milliseconds.
+
+==== Posting A Delayed Event
 
 *****
 [source,c]
@@ -6343,6 +6660,74 @@ If one is found then it is removed.
 . Assured of no duplicates, the new event can be inserted into the timing
 queue.
 . Finally, the timing of the delayed queue is started.
+
+==== One Step Delayed Event Signaling
+
+Just as for non-delayed events,
+delayed events without additional parameters or for which the parameters
+have been marshalled into a parameter block,
+a single function can both fill in an ECB and post it to the delayed event
+queue.
+
+*****
+[source,c]
+----
+<<mrt internal external interfaces>>=
+extern void
+mrt_SignalDelayedEvent(
+    MRT_DelayTime time,
+    MRT_EventCode event,
+    void *targetInst,
+    void *sourceInst,
+    void const *eventparams,
+    size_t paramsize) ;
+----
+
+`time`::
+    The minimum number of milliseconds of time that must elapse before
+    the event is to be dispatched.
+`event`::
+    The numerical code for the event.
+`targetInst`::
+    A pointer to the instance that is to receive the event.
+`sourceInst`::
+    A pointer to the instance that is sending the event.
+    If the event is being sent outside of the context of a class instance,
+    then this argument should be set to `NULL`.
+`eventparams`::
+    A pointer to the event parameters for the event.
+    If the event requires no additional parameters, then this argument
+    is passed as `NULL`.
+`paramsize`::
+    The number of bytes of event parameter data pointed to by `eventparams`.
+    If the event requires no additional parameters, then this argument
+    is passed as `0`.
+*****
+
+[source,c]
+----
+<<mrt external functions>>=
+void
+mrt_SignalDelayedEvent(
+    MRT_DelayTime time,
+    MRT_EventCode event,
+    void *targetInst,
+    void *sourceInst,
+    void const *eventparams,
+    size_t paramsize)
+{
+    MRT_ecb *ecb = mrt_NewEvent(event, targetInst, sourceInst) ;
+
+    if (eventparams != NULL) {
+        assert(paramsize <= sizeof(ecb->eventParameters)) ;
+        size_t toCopy = paramsize <= sizeof(ecb->eventParameters) ?
+                paramsize : sizeof(ecb->eventParameters) ;
+        memcpy(ecb->eventParameters, eventparams, toCopy) ;
+    }
+
+    mrt_PostDelayedEvent(ecb, time) ;
+}
+----
 
 Since removing delayed events is something we do
 when canceling a delayed event,
@@ -6568,7 +6953,7 @@ and restart the timer.
 Such a design is subject to problematic, unpredictable timing skew.
 After the timer source has expired and posted the synchronization request,
 the background may not execute immediately.
-Either a currently executing state action or a previously queued
+Either a currently executing state activities or a previously queued
 sync function would delay the transfer of expired events from the delayed
 queue to the event queue.
 If there if another delayed event to expire,
@@ -6976,8 +7361,8 @@ interactions of the system with the outside world.
 
 When the run-time needs to dispatch an event it invokes the
 `mrtDispatchEventFromQueue` function.
-This function deals with the two event queues and determines if we
-are at the end of a thread of control.
+This function takes as a parameter
+the queue from which the event is to be dispatched.
 
 (((micca,Run Time Function,mrtDispatchEventFromQueue)))
 [source,c]
@@ -7060,7 +7445,7 @@ starting at 0 up to E - 1,
 where E is the number of transitioning events in the state model.
 Polymorphic events for the class are then encoded starting at E
 up to E + P - 1, where P is the number of polymorphic events.
-Note that only superclass classes that have both polymorphic events
+Note that only superclasses that have both polymorphic events
 (either defined or inherited) and
 a state model of its own will have both transition events and
 polymorphic events defined for it.
@@ -7177,7 +7562,7 @@ as polymorphic events.
 In the sections below,
 we consider the dispatch of each particular event type.
 
-=== Transition Event Dispatch
+==== Transition Event Dispatch
 
 The most frequent event type to dispatch is that of a transitioning event to a
 state machine.
@@ -7307,11 +7692,12 @@ The second argument is a pointer to the event parameters.
 Again, the correct type is recovered in the state activity to match
 the parameter signature of the activity.
 Notice that assigning back into event parameters does not make any sense as the
-parameter values are discarded after the state action completes.
+parameter values are discarded after the state activity completes.
 
 One other feature of the state machine dispatch rules regards final states.
 A state may be marked as final and if so,
-then the run-time will destroy the instance when the state action is completed.
+then the run-time will destroy the instance when the state activity is
+completed.
 The `finalStates` member points to an array, indexed by state number,
 that specifies if a particular state is indeed a final state.
 As is frequently the case, the class may have no final states.
@@ -7401,8 +7787,8 @@ After obtaining the new state,
 we must determine if we are actually going to make a transition
 or if the event is to be ignored or considered a fatal error.
 Assuming that we are transitioning,
-then the associated state action is found and executed.
-Note that empty state actions may be dispensed with and a `NULL`
+then the associated state activity is found and executed.
+Note that empty state activity may be dispensed with and a `NULL`
 inserted into the action table.
 After the action, we check if the instance entered a final state.
 
@@ -7449,7 +7835,7 @@ is queued will result in the event being dispatched to the wrong
 instance.
 This is considered such a remote possibility as to be of no practical concern.
 
-=== Polymorphic Event Dispatch
+==== Polymorphic Event Dispatch
 
 Polymorphic events in their full generality can be complex,
 but they are based on a simple idea.
@@ -7612,6 +7998,7 @@ mrtDispatchPolymorphicEvent(
      */
     MRT_edb const *const edb = superClassDesc->edb ;
     MRT_EventCode eventOffset = edb == NULL ? 0 : edb->eventCount ;
+    assert(ecb->eventNumber >= eventOffset) ;
     assert(ecb->eventNumber - eventOffset < pdb->eventCount) ;
     /*
      * Save the original event number.  We intend to reuse the same ECB for each
@@ -7751,7 +8138,7 @@ the event,
 the dispatch order is determined by the order the code generator
 decides for generalization dispatch blocks.
 
-=== Creation Event Dispatch
+==== Creation Event Dispatch
 
 Fortunately, creation events are much simpler than polymorphic events.
 Creation event dispatch fixes up the `alloc` field of the
@@ -7784,7 +8171,7 @@ mrtDispatchCreationEvent(
     mrtDispatchTransitionEvent(ecb) ;
 }
 ----
-<1> By negating the `alloc` value, we show that the instance is now active.
+<1> By negating the `alloc` value, we show that the instance is active.
 
 == Bridging Domains
 
@@ -7921,7 +8308,7 @@ set for implementing bridge operations.
 
 === Portal Data Structures [[portal-data-structures,Portal Data Structures]]
 
-The only externally scoped identifiers in the generate ``C'' code file
+The only externally scoped identifiers in the generated ``C'' code file
 are those of the domain operations.
 All other generated code contains identifiers that are file static in
 scope.
@@ -8510,16 +8897,10 @@ mrtPortalNewECB(
     if (eventParameters != NULL) {
         memcpy(ecb->eventParameters, eventParameters, paramSize) ;
     }
-    if (ecbRef) {
-        *ecbRef = ecb ;
-    } else {
-        mrtECBfree(ecb) ;             // <1>
-    }
+    *ecbRef = ecb ;
     return 0 ;
 }
 ----
-<1> When the assertions are removed, we still need to protect ourselves
-from leaking ECB's.
 
 ==== Signaling Delayed Events
 
@@ -9851,7 +10232,7 @@ when the function is invoked.
 The request is in the form of a function, with optional parameters,
 that is to be executed at the first *safe* opportunity.
 As we saw before,
-the synchronization functions are executed in between state actions
+the synchronization functions are executed in between state activities
 to insure that the domain data are in a coherent state.
 
 To implement deferring the sync function,
@@ -10185,7 +10566,7 @@ if any synchronization needs to be performed.
 The processor will handle vectoring to this code when
 requests are pending and,
 by changing the base priority at which the processor runs,
-we can may sure that state actions are not interrupted
+we can may sure that state activities are not interrupted
 by the service handler.
 
 (((micca,ARM v7-M Function,PendSV_Handler)))
@@ -10419,7 +10800,7 @@ previous value of the callback.
 Tracing can be turned off by invoking `mrt_RegisterTraceHandler` with `NULL`.
 
 The trace handling function is invoked with a pointer to the trace
-information for the event being dipatched.
+information for the event being dispatched.
 The data pointed to by the argument is not valid after the
 return from the trace handler function.
 So handler functions must copy the trace data if they wish it to be
@@ -11047,7 +11428,7 @@ For example, as discussed in delayed event generation,
 we interpret the attempt to generate a duplicate delayed event
 as wishing to cancel the existing one and instantiate a new one.
 This semantic interpretation avoids generating an error and avoids
-all the additional code require in state actions that generate
+all the additional code require in state activities that generate
 delayed events.
 
 Exactly how fatal errors are handled will depend upon the specifics

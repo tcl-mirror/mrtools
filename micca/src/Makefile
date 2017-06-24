@@ -15,7 +15,7 @@ PKGDIR	= ../../packages
 IMAGEDIR = ./images
 CODEDIR	= ../code
 
-VERSION=1.0b2
+VERSION=1.0b3
 
 vpath %.pdf $(DOCDIR)
 vpath %.html $(DOCDIR)
@@ -242,5 +242,5 @@ builddoc :
 
 #atangle $(ATANGLEOPTS) -line '#line %l% "%f%"' -root micca_rt_test.c -output $@ $<
 #
-# vim :set sw=8 ts=8 sts=8 noexpandtab:
+# vim: sw=8 ts=8 sts=8 noexpandtab
 #
