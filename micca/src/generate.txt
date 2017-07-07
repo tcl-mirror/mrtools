@@ -169,7 +169,7 @@ proc miccaGenerate {arglist} {
 (((error code,CONFIG_ERRORS)))
 ----
 <<error code formats>>=
-GENERATE_ERRORS     {encountered %d code generation error(s)}
+GENERATE_ERRORS     {%d code generation error(s)}
 ----
 
 We set up options for the generation in a dictionary.
@@ -657,15 +657,12 @@ The same type of query is needed for the external operations.
 [source,tcl]
 ----
 <<FindInterfaceTypeAliases:: find aliases in external operations>>=
-set eoRefs [pipe {
-    findRelated $domRef ~R10 |
-    deRef % |
-    relation semijoin % $aliases\
-            -using {Domain Domain ReturnDataType TypeName}
-} {} |%]
+set eops [findRelated $domRef ~R1 {~R2 ExternalEntity} ~R10]
+set eoRefs [relation semijoin [deRef $eops] $aliases\
+            -using {Domain Domain ReturnDataType TypeName}]
 # puts [relformat $eoRefs eoRefs]
 set eopRefs [pipe {
-    findRelated $domRef ~R10 ~R11 |
+    findRelated $eops ~R11 |
     deRef % |
     relation semijoin % $aliases\
             -using {Domain Domain DataType TypeName}
@@ -777,24 +774,16 @@ Here we start with declarations for the domain operations.
 Domain operations are just ordinary ``C'' functions but are given
 external scope.
 
-There are several different operations defined in the platform model.
-Since they use the same attribute names,
-it is possible to factor the generation of declaration code into
-a common procedure.
-We need to know the instance references to the operation
-and the name of the relationship used to find the parameters of
-the operation.
-Optionally, a suffix can be added to the ``C'' identifier for the
-operation.
-
-(((micca,Helpers,GenOperationDeclarations)))
+(((micca,Header Generation,domainOpDeclarations)))
 [source,tcl]
 ----
-<<generation helper commands>>=
-proc GenOperationDeclarations {opRefs paramRel {suffix {}}} {
-    set result {}
+<<generation header commands>>=
+proc domainOpDeclarations {} {
+    variable domain
+    set result [comment "Domain Operations External Declarations"]
 
-    set params [deRef [findRelated $opRefs $paramRel]] ; # <1>
+    set opRefs [DomainOperation findWhere {$Domain eq $domain}]
+    set params [deRef [findRelated $opRefs ~R6]] ; # <1>
     set ops [pipe {
         deRef $opRefs |
         relation project ~ Domain Name ReturnDataType Comment |
@@ -811,7 +800,7 @@ proc GenOperationDeclarations {opRefs paramRel {suffix {}}} {
         set plist [relation list $Parameters DataType -ascending Number]
         set pdecl [expr {[llength $plist] == 0 ? "void" : [join $plist {, }]}]
         append result "extern $ReturnDataType\
-                ${Domain}_${Operation}$suffix\($pdecl\) ;\n" ; # <2>
+                ${Domain}_${Operation}\($pdecl\) ;\n" ; # <2>
     }
 
     return $result
@@ -822,26 +811,7 @@ but this is Tcl and portions of a query can be variable.
 <2> Note that we prepend the domain name to the operation name
 in order to avoid naming conflicts in the global namespace.
 Naming conventions are necessary when dealing with a language like
-``C'' which does not have support for name spaces.
-
-Given a procedure to emit the operation declaration,
-then the template expansion for the domain operations just invokes
-the common code with the correct references and relationship name.
-
-(((micca,Header Generation,domainOpDeclarations)))
-[source,tcl]
-----
-<<generation header commands>>=
-proc domainOpDeclarations {} {
-    variable domain
-    set opRefs [DomainOperation findWhere {$Domain eq $domain}]
-
-    return [string cat\
-        [comment "Domain Operations External Declarations"]\
-        [GenOperationDeclarations $opRefs ~R6]\
-    ]
-}
-----
+``C'' which does not have support for namespaces.
 
 ifdef::showtests[]
 [source,tcl]
@@ -862,8 +832,10 @@ test headergen-3.0 {
             } {
                 pointer type parameters
             }
-            externalop void ext1 {b int c {void *}}
-            externalop void ext2 {d char e unsigned}
+            eentity ext {
+                operation void ext1 {b int c {void *}}
+                operation void ext2 {d char e unsigned}
+            }
             class c1 {
                 attribute color int -default 20
             }
@@ -905,14 +877,34 @@ for domain operations.
 <<generation header commands>>=
 proc externalOpDeclarations {} {
     variable domain
-    set opRefs [ExternalOperation findWhere {$Domain eq $domain}]
+    set result [comment "External Operations Declarations"]
 
-    return [string cat\
-        [comment "External Operations Declarations"]\
-        [GenOperationDeclarations $opRefs ~R11 __EOP]\
-    ]
+    set opRefs [ExternalOperation findWhere {$Domain eq $domain}]
+    set params [deRef [findRelated $opRefs ~R11]]
+    set ops [pipe {
+        deRef $opRefs |
+        relation project ~ Domain Entity Name ReturnDataType Comment |
+        relation rename ~ Name Operation |
+        ralutil::rvajoin ~ $params Parameters
+    }]
+    # puts [relformat $ops ops]
+
+    relation foreach op $ops {
+        relation assign $op
+        if {$Comment ne {}} {
+            append result [comment [string trim $Comment \n]]
+        }
+        set plist [relation list $Parameters DataType -ascending Number]
+        set pdecl [expr {[llength $plist] == 0 ? "void" : [join $plist {, }]}]
+        append result "extern $ReturnDataType\
+                ${Domain}_${Entity}_${Operation}__EOP\($pdecl\) ;\n" ; # <1>
+    }
+
+    return $result
 }
 ----
+<1> Note that we prepend the domain name and the external entity name to the
+operation name in order to avoid naming conflicts in the global namespace.
 
 ifdef::showtests[]
 [source,tcl]
@@ -926,10 +918,10 @@ test headergen-3.1 {
 } -body {
     testConditions\
         {[validateutils matchLines header3.h {
-            extern void header3_ext1__EOP(int, void *) ;
+            extern void header3_ext_ext1__EOP(int, void *) ;
         }]}\
         {[validateutils matchLines header3.h {
-            extern void header3_ext2__EOP(char, unsigned) ;
+            extern void header3_ext_ext2__EOP(char, unsigned) ;
         }]}
 } -result {1}
 ----
@@ -5784,7 +5776,7 @@ proc externalOpDefinitions {} {
     relation foreach op $ops {
         relation assign $op
         append result\
-            "$ReturnDataType\n${domain}_${Operation}__EOP"
+            "$ReturnDataType\n${domain}_${Entity}_${Operation}__EOP"
 
         if {[relation isempty $Parameters]} {
             append result "\(void\)\n"
@@ -5837,8 +5829,10 @@ test codegen-19.0 {
 } -setup {
     validateutils genMiccaFile codegen19 {
         domain codegen19 {
-            externalop void color {a int b {char *const}} {
-                printf("a = %d, b = %s", a, b) ;
+            eentity Ext {
+                operation void color {a int b {char *const}} {
+                    printf("a = %d, b = %s", a, b) ;
+                }
             }
 
             class X {
@@ -5858,7 +5852,7 @@ test codegen-19.0 {
     validateutils compileFiles codegen19.c
     validateutils matchLines codegen19.c {
         void
-        codegen19_color__EOP(
+        codegen19_Ext_color__EOP(
             int a,
             char *const b)
     }
@@ -6076,8 +6070,8 @@ proc CreateActivityCommands {domain} {
     <<CreateActivityCommands: relationships>>
     <<CreateActivityCommands: instances>>
     <<CreateActivityCommands: instance sets>>
+    <<CreateActivityCommands: external operations>>
 
-    interp alias {} ${actns}::externalop {} ${suppns}::InvokeExternalOp
     interp alias {} ${actns}::end {} ${suppns}::End
     interp alias {} ${actns}::subclass {} ${suppns}::SubclassCase
     interp alias {} ${actns}::default {} ${suppns}::DefaultSubclass
@@ -6191,7 +6185,7 @@ set relRefs [Relationship findWhere {$Domain eq $domain}]
 ----
 
 The functions for association commands deal primarily with
-swapping instances instances across the association.
+updating references to instances across the association.
 Associations can also have an assigner defined for them.
 In that case they need to be able to signal an event to the assigner.
 In the case of a multiple assigner,
@@ -6217,7 +6211,7 @@ set simpassocs [findRelated $assocs {~R31 SimpleAssociation}]
 forAllRefs simpassoc $simpassocs {
     set simpname [readAttribute $simpassoc Name]
     set cmdmap [dict create\
-        swap [list ${suppns}::RelSimpleAssocSwap $simpname]\
+        reference [list ${suppns}::RelSimpleAssocSwap $simpname]\
     ]
     set assigner [findRelated $simpassoc R31 ~R52]
     if {[isNotEmptyRef $assigner]} {
@@ -6243,7 +6237,7 @@ set classassocs [findRelated $assocs {~R31 ClassBasedAssociation}]
 forAllRefs classassoc $classassocs {
     set cbname [readAttribute $classassoc Name]
     set cmdmap [dict create\
-        swap [list ${suppns}::RelClassAssocSwap $cbname]\
+        reference [list ${suppns}::RelClassAssocSwap $cbname]\
     ]
     set assigner [findRelated $classassoc R31 ~R52]
     if {[isNotEmptyRef $assigner]} {
@@ -6394,6 +6388,37 @@ namespace ensemble create\
     -command ${actns}::instset\
     -parameters instset\
     -map $cmdmap
+----
+
+[source,tcl]
+----
+<<CreateActivityCommands: external operations>>=
+set ops [pipe {
+    ExternalOperation findWhere {$Domain eq $domain} |
+    deRef ~ |
+    relation project ~ Domain Entity Name
+}]
+set eops [pipe {
+    ExternalEntity findWhere {$Domain eq $domain} |
+    deRef ~ |
+    relation rename ~ Name Entity |
+    ralutil::rvajoin ~ $ops Operations
+}]
+
+relation foreach eop $eops {
+    relation assign $eop
+
+    set cmdmap [dict create]
+    relation foreach op $Operations {
+        relation assign $op Name
+        dict set cmdmap $Name\
+                [list ${suppns}::InvokeExternalOp $Entity $Name]
+    }
+
+    namespace ensemble create\
+        -command ${actns}::$Entity\
+        -map $cmdmap
+}
 ----
 
 === Symbol Table
@@ -6869,15 +6894,18 @@ will not compile.
 === Invoking External Operations
 
 *****
-`<%externalop` _opname_ _?name1 value1 name2 value2 ...?_ `%>`
+`<%` _extentity_ _opname_ _?name1 value1 name2 value2 ...?_ `%>`
 
+extentity::
+    The name of the external entity.
 opname::
-    The name of the external operation.
+    The name of the external operation of the entity.
 nameN / valueN::
     The arguments to the external operation are given as a set of
     name / value pairs.
 
-The `externalop` command generates a ``C'' expression to invoke
+The _opname_ subcommand of the _extentity_ command
+generates a ``C'' expression to invoke
 the external operation given by, _opname_.
 Arguments passed to the operation are given as name / value pairs.
 The ordering of the pairs is arbitrary but all arguments of the
@@ -6888,16 +6916,17 @@ operation must be given.
 [source,tcl]
 ----
 <<generation support commands>>=
-proc InvokeExternalOp {opName args} {
+proc InvokeExternalOp {entity opName args} {
     if {[llength $args] % 2 != 0} {
         error "operation parameters must be given as name / value pairs"
     }
     variable domain
 
     set opRef [ExternalOperation findWhere {$Domain eq $domain &&\
-            $Name eq $opName}]
+            $Entity eq $entity && $Name eq $opName}]
     if {[isEmptyRef $opRef]} {
-        error "unknown external operation, $opName, for domain, $domain"
+        error "unknown external operation, $opName, for domain, $domain\
+                and external entity, $entity"
     }
 
     set provided [dict keys $args]
@@ -6911,9 +6940,53 @@ proc InvokeExternalOp {opName args} {
     }
     set pset [string trimright $pset {, }]
 
-    return "${domain}_${opName}__EOP\($pset\)"
+    return "${domain}_${entity}_${opName}__EOP\($pset\)"
 }
 ----
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-69.0 {
+    Invoke an external operation
+} -setup {
+} -cleanup {
+    micca clear
+} -setup {
+    validateutils genMiccaFile codegen69 {
+        domain codegen69 {
+            eentity Ext {
+                operation void color {a int b {char *const}} {
+                    printf("a = %d, b = %s", a, b) ;
+                }
+            }
+
+            class X {
+                attribute color int -default 10
+
+                classop void doColor {} {
+                    <%Ext color a 10 b {"foo"}%> ;
+                }
+            }
+        }
+        population codegen69 {
+            class X {
+                instance x1
+            }
+        }
+    } stubexternalops true
+} -cleanup {
+    micca clear
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen69.c
+    validateutils matchLines codegen69.c {
+        codegen69_Ext_color__EOP(10, "foo") ;
+    }
+} -result {1}
+----
+endif::showtests[]
 
 === Instance Macro Commands
 
@@ -10621,7 +10694,7 @@ test codegen-26.1 {
     micca clear
 } -body {
     micca generate
-} -result {encountered 1 code generation error(s)} -returnCodes error
+} -result {1 code generation error(s)} -returnCodes error
 ----
 
 [source,tcl]
@@ -10652,7 +10725,7 @@ test codegen-26.2 {
     micca clear
 } -body {
     micca generate
-} -result {encountered 1 code generation error(s)} -returnCodes error
+} -result {1 code generation error(s)} -returnCodes error
 ----
 
 [source,tcl]
@@ -10683,7 +10756,7 @@ test codegen-26.3 {
     micca clear
 } -body {
     micca generate
-} -result {encountered 1 code generation error(s)} -returnCodes error
+} -result {1 code generation error(s)} -returnCodes error
 ----
 
 [source,tcl]
@@ -10940,7 +11013,7 @@ test codegen-27.1 {
     micca clear
 } -body {
     micca generate
-} -result {encountered 1 code generation error(s)} -returnCodes error
+} -result {1 code generation error(s)} -returnCodes error
 ----
 endif::showtests[]
 
@@ -11945,7 +12018,7 @@ of the same name as the relationship.
 ==== Association Commands
 
 *****
-`<%` _assoc_ `swap` _sourceref_ _targetref_`%>`
+`<%` _assoc_ `reference` _sourceref_ _targetref_`%>`
 
 _assoc_::
     The name of a simple association.
@@ -11959,12 +12032,12 @@ targetref::
     referenced class in _assoc_.
 
 When applied to a simple association,
-the `swap` command replaces the references for the association in
+the `reference` command replaces the references for the association in
 the instance contained in `sourceref` so that it now refers to the
 instance contained in `targetref`.
 *****
 
-(((micca,Activity Generation,swap)))
+(((micca,Activity Generation,reference)))
 [source,tcl]
 ----
 <<generation support commands>>=
@@ -11980,7 +12053,7 @@ proc RelSimpleAssocSwap {relName sourceref targetref} {
     CheckInstRefSymbol $targetref Class $targetClass
 
     return [IndentToBlock [string cat\
-        [linecomment "$relName swap $sourceref $targetref"]\
+        [linecomment "$relName reference $sourceref $targetref"]\
         "mrt_CreateSimpleLinks($rship, $sourceref, $targetref, true) ;\n"\
     ]]
 }
@@ -12033,7 +12106,7 @@ test codegen-30.0 {
 endif::showtests[]
 
 *****
-`<%` _assoc_ `swap` _assocref_ _partref_`%>`
+`<%` _assoc_ `reference` _assocref_ _partref_`%>`
 
 _assoc_::
     The name of a simple association.
@@ -12047,12 +12120,12 @@ partref::
     participant class in _assoc_.
 
 When applied to a class based association,
-the `swap` command replaces one of the references in
+the `reference` command replaces one of the references in
 the instance contained in `assocref` so that it now refers to the
 instance contained in `partref`.
 *****
 
-(((micca,Activity Generation,swap)))
+(((micca,Activity Generation,reference)))
 [source,tcl]
 ----
 <<generation support commands>>=
@@ -12077,13 +12150,13 @@ proc RelClassAssocSwap {relName assocref partref {dir {}}} {
             which does not participate in relationship, $relName"
     }
 
-    set result [linecomment "$relName swap $assocref $partref $dir"]
+    set result [linecomment "$relName reference $assocref $partref $dir"]
 
     # Check for reflexive case
     if {$sourceClass eq $targetClass} {
         if {$dir eq {}} {
             error "for reflexive association, \"$relName\", the direction\
-                of the swap must be specified"
+                of the reference must be specified"
         }
         switch -exact -- $dir {
             forward {

@@ -245,7 +245,7 @@ proc miccaConfigure {script} {
 [source,tcl]
 ----
 <<error code formats>>=
-CONFIG_ERRORS     {encountered %d configuration script errors}
+CONFIG_ERRORS     {%d configuration script error(s)}
 ----
 
 You could evaluate the configuration script by simply gathering it together
@@ -255,13 +255,13 @@ the first error that is encountered will terminate the evaluation.
 This is decidedly inconvenient as you would prefer to continue on and
 come up with a list of errors for the evaluation much like a
 conventional language compiler does when compiling a source file.
-Discovering errors one at a time is tediously unproductive.
+Discovering errors one at a time is tediously under-productive.
 
 Of course, it is possible to continue evaluating after an error but
 that requires a bit more code.
 We will also want to be able to evaluate scripts in different namespace
 contexts as we described above.
-We will accomplish all this by taking advantage of the core +::apply+ command
+We will accomplish all this by taking advantage of the core `::apply` command
 and its ability to execute a lambda function in a given namespace.
 So given a script body and an namespace we can evaluate it as shown below.
 
@@ -501,7 +501,7 @@ test domain-1.1 {
     micca configure {
         domain {} {}
     }
-} -result {encountered 1 configuration script errors} -returnCodes error
+} -result {1 configuration script error(s)} -returnCodes error
 ----
 endif::showtests[]
 
@@ -530,10 +530,11 @@ namespace eval DomainDef {
     # Child namespaces for domain commands with additional structure
     <<class config namespace layout>>
     <<assigner config namespace layout>>
+    <<external entity config namespace layout>>
 }
 ----
 
-We see that there are two child namespaces defined with `DomainDef`.
+We see that there are three child namespaces defined with `DomainDef`.
 These correspond to commands that have script bodies associated with them.
 
 === Interface
@@ -723,11 +724,19 @@ then any additional configuration is added to the definition of the class.
 proc class {name {body {}}} {
     variable DomainName ; # <1>
 
-    if {[isEmptyRef [DomainElement findById Domain $DomainName Name $name]]} {# <2>
+    set elemRef [DomainElement findById Domain $DomainName Name $name]
+
+    if {[isEmptyRef $elemRef]} {# <2>
         DomainElement create Domain $DomainName Name $name
         Class create Domain $DomainName Name $name\
             Number [GenNumber $DomainName Class [list $DomainName]]
         ValueElement create Domain $DomainName Name $name
+    } else {
+        set classRef [findRelated $elemRef {~R2 Class}]
+        if {[isEmptyRef $classRef]} {
+            EntityError "Domain Element" DUPLICATE_ENTITY\
+                [list Domain $DomainName Name $name]
+        }
     }
 
     namespace upvar ClassDef ClassName ClassName ; # <3>
@@ -765,7 +774,7 @@ test class-1.0 {
             class @%x {}
         }
     }
-} -result {encountered 1 configuration script errors} -returnCodes error
+} -result {1 configuration script error(s)} -returnCodes error
 ----
 endif::showtests[]
 
@@ -1696,7 +1705,92 @@ test union-subclasses-1.0 {
             generalization R2 -union super2 sub1 sub3
         }
     }
-} -result {encountered 2 configuration script errors} -returnCodes error
+} -result {2 configuration script error(s)} -returnCodes error
+----
+endif::showtests[]
+
+=== External Entity
+
+We define external entities as a collection of operations that
+serve as a proxy for services delegated by the domain.
+
+*****
+`eentity` _name_ ?__script__?
+
+`name`::
+    The name of the external entity.
+    An external entity name must be a valid ``C'' identifier.
+`script`::
+    An optional Tcl script containing invocations of the external entity
+    definition commands to specify the operations of the external
+    entity configuration.
+
+The `eentity` command defines a external entity named, _name_,
+and evaluates _script_ to configure the external entity.
+External entity definitions are open ended and extensible.
+If the `eentity` command is invoked on a previously defined eentity,
+then any additional configuration is added to the definition of the eentity.
+*****
+
+[float]
+==== Implementation
+
+(((micca,Config,eentity)))
+[source,tcl]
+----
+<<domain config commands>>=
+proc eentity {name {body {}}} {
+    variable DomainName ; # <1>
+
+    set elemRef [DomainElement findById Domain $DomainName Name $name]
+
+    if {[isEmptyRef $elemRef]} {# <2>
+        DomainElement create Domain $DomainName Name $name
+        ExternalEntity create Domain $DomainName Name $name
+    } else {
+        set eeRef [findRelated $elemRef {~R2 ExternalEntity}]
+        if {[isEmptyRef $eeRef]} {
+            EntityError "Domain Element" DUPLICATE_ENTITY\
+                [list Domain $DomainName Name $name]
+        }
+    }
+
+    namespace upvar EEntityDef EntityName EntityName ; # <3>
+    set EntityName $name
+    ConfigEvaluate [namespace current]::EEntityDef $body
+
+    return
+}
+----
+<1> We have arranged for a namespace variable to hold the current
+domain context.
+This is a convenient way to pass the domain name to where it is needed
+by the configuration commands.
+<2> We allow the `eentity` command to be invoked multiple times with the
+same name.
+This makes extending external entity definitions much easier.
+<3> Provide the external entity name to the body of the external entity
+definition script.
+
+[float]
+==== Tests
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<config command tests>>=
+test eentity-1.0 {
+    Define external entity with a bad name
+} -setup {
+} -cleanup {
+    micca clear
+} -body {
+    micca configure {
+        domain foo {
+            eentity @%x {}
+        }
+    }
+} -result {1 configuration script error(s)} -returnCodes error
 ----
 endif::showtests[]
 
@@ -1855,108 +1949,6 @@ test domainop-1.0 {
     testConditions\
         {[refMultiplicity [DomainOperation findAll]] == 1}\
         {[refMultiplicity [DomainOperationParameter findAll]] == 2}\
-} -result {1}
-----
-endif::showtests[]
-
-=== External Operation
-
-The `externalop` command is used to define external operations.
-External operations are functionality the domain has delegated to
-an entity outside of the domain itself.
-
-*****
-`externalop` _rettype_ _name_ _parameters_ _body_ ?_comment_?
-
-`rettype`::
-    A ``C'' typename that gives the type of the value returned from
-    the external operation.
-`name`::
-    The name of the external operation. `Name` must be a valid ``C'' identifier.
-`parameters`::
-    A list of parameter name / parameter type pairs giving the
-    names of the external operation parameters and their corresponding
-    ``C'' data type names.
-`body`::
-    A string containing code.
-    Normally the external operation code is _not_ included in the generated
-    output for the domain.
-    However, the code generate can be requested to generate the external
-    operation code.
-    This simplifies certain test situation and makes it easier to generate
-    an executable for the domain by resolving the external operations
-    via the code generateor.
-    This string is presumed to be ``C'' code optionally interspersed with
-    architecture macros.
-`comment`::
-    An optional string that is passed along by the code generated to the
-    generated header file.
-*****
-
-[float]
-==== Implementation
-
-(((micca,Config,domainop)))
-[source,tcl]
-----
-<<domain config commands>>=
-proc externalop {rettype name parameters {body {}} {comment {}}} {
-    variable DomainName
-    upvar #0\
-            ::micca::@Config@::configfile configfile\
-            ::micca::@Config@::configlineno configlineno
-
-    CheckDuplicate ExternalOperation {external operation}\
-            Domain $DomainName Name $name
-    ExternalOperation create\
-        Domain $DomainName\
-        Name $name\
-        Body $body\
-        ReturnDataType $rettype\
-        Comment [string trim $comment]\
-        File $configfile\
-        Line $configlineno
-
-    set paramtuple [dict create Domain $DomainName Operation $name]
-    dict for {paramname paramtype} $parameters {
-        dict set paramtuple Name $paramname
-        dict set paramtuple DataType $paramtype
-        dict set paramtuple Number\
-                [GenNumber $DomainName ExternalOperationParameter\
-                [list $DomainName $name]]
-        ExternalOperationParameter create {*}$paramtuple
-    }
-
-    return
-}
-----
-
-ifdef::showtests[]
-[float]
-==== Tests
-
-[source,tcl]
-----
-<<config command tests>>=
-test externalop-1.0 {
-    Define a external operation
-} -setup {
-} -cleanup {
-    micca clear
-} -body {
-    micca configure {
-        domain foo {
-            externalop void temp {t int}
-            externalop void color {a int b {char *const}} {
-                printf("a = %d, b = %s", a, b) ;
-            }
-        }
-    }
-    log::debug [formatMiccaClass ExternalOperation]
-    log::debug [formatMiccaClass ExternalOperationParameter]
-    testConditions\
-        {[refMultiplicity [ExternalOperation findAll]] == 2}\
-        {[refMultiplicity [ExternalOperationParameter findAll]] == 3}\
 } -result {1}
 ----
 endif::showtests[]
@@ -3493,7 +3485,7 @@ test polymorphic-1.8 {
             generalization R3 A C D
         }
     }
-} -result {encountered 2 configuration script errors} -returnCodes error
+} -result {2 configuration script error(s)} -returnCodes error
 ----
 
 [source,tcl]
@@ -3536,7 +3528,7 @@ test polymorphic-1.9 {
             generalization R1 S X Y
         }
     }
-} -result {encountered 1 configuration script errors} -returnCodes error
+} -result {1 configuration script error(s)} -returnCodes error
 ----
 
 [source,tcl]
@@ -4308,7 +4300,7 @@ test state-2.0 {
     log::debug [formatMiccaClass Parameter]
     log::debug [formatMiccaClass ArgumentSignature]
     log::debug [formatMiccaClass Argument]
-} -result {encountered 1 configuration script errors} -returnCodes error
+} -result {1 configuration script error(s)} -returnCodes error
 ----
 endif::showtests[]
 
@@ -5195,6 +5187,138 @@ test assigner-1.1 {
 ----
 endif::showtests[]
 
+== Defining External Entities
+
+External entities are a collection of operations that
+define the services delegated by the domain to be satisfied elsewhere.
+The `eentity` command takes a _script_ argument which should
+invoke the commands we discuss in this section.
+Following our pattern,
+we define a namespace where the class body script is evaluated.
+
+[source,tcl]
+----
+<<external entity config namespace layout>>=
+namespace eval EEntityDef {
+    logger::initNamespace [namespace current]
+
+    <<tclral imports>>
+    namespace path {::micca ::micca::@Config@::Helpers ::rosea::InstCmds}
+
+    <<external entity config commands>>
+}
+----
+
+=== External Operation
+
+The `operation` command is used in a `eentity` script defines
+an operation of the external entity.
+External operations define the invocable interface for functionality the domain
+has delegated to an entity outside of the domain itself.
+
+*****
+`operation` _rettype_ _name_ _parameters_ _body_ ?_comment_?
+
+`rettype`::
+    A ``C'' typename that gives the type of the value returned from
+    the external operation.
+`name`::
+    The name of the external operation. `Name` must be a valid ``C'' identifier.
+`parameters`::
+    A list of parameter name / parameter type pairs giving the
+    names of the external operation parameters and their corresponding
+    ``C'' data type names.
+`body`::
+    A string containing code.
+    Normally the external operation code is _not_ included in the generated
+    output for the domain.
+    However, the code generate can be requested to generate the external
+    operation code.
+    This simplifies certain test situation and makes it easier to generate
+    an executable for the domain by resolving the external operations
+    via the code generateor.
+    This string is presumed to be ``C'' code optionally interspersed with
+    architecture macros.
+`comment`::
+    An optional string that is passed along by the code generated to the
+    generated header file.
+*****
+
+[float]
+==== Implementation
+
+(((micca,Config,domainop)))
+[source,tcl]
+----
+<<external entity config commands>>=
+proc operation {rettype name parameters {body {}} {comment {}}} {
+    variable EntityName
+    upvar #0\
+            [namespace parent]::DomainName DomainName\
+            ::micca::@Config@::configfile configfile\
+            ::micca::@Config@::configlineno configlineno
+
+    CheckDuplicate ExternalOperation {external operation}\
+            Domain $DomainName Entity $EntityName Name $name
+    ExternalOperation create\
+        Domain $DomainName\
+        Entity $EntityName\
+        Name $name\
+        Body $body\
+        ReturnDataType $rettype\
+        Comment [string trim $comment]\
+        File $configfile\
+        Line $configlineno
+
+    set paramtuple [dict create Domain $DomainName Entity $EntityName\
+            Operation $name]
+    dict for {paramname paramtype} $parameters {
+        dict set paramtuple Name $paramname
+        dict set paramtuple DataType $paramtype
+        dict set paramtuple Number\
+                [GenNumber $DomainName ExternalOperationParameter\
+                [list $DomainName $name]]
+        ExternalOperationParameter create {*}$paramtuple
+    }
+
+    return
+}
+----
+
+ifdef::showtests[]
+[float]
+==== Tests
+
+[source,tcl]
+----
+<<config command tests>>=
+test operation-1.0 {
+    Define a external operation
+} -setup {
+} -cleanup {
+    micca clear
+} -body {
+    micca configure {
+        domain foo {
+            eentity Baz {
+                operation void temp {t int}
+                operation void color {a int b {char *const}} {
+                    printf("a = %d, b = %s", a, b) ;
+                }
+            }
+        }
+    }
+    log::debug [formatMiccaClass ExternalEntity]
+    log::debug [formatMiccaClass ExternalOperation]
+    log::debug [formatMiccaClass ExternalOperationParameter]
+    testConditions\
+        {[refMultiplicity [ExternalEntity findAll]] == 1}\
+        {[refMultiplicity [ExternalOperation findAll]] == 2}\
+        {[refMultiplicity [ExternalOperationParameter findAll]] == 3}\
+} -result {1}
+----
+endif::showtests[]
+
 == Populating a Domain
 
 At this point we have covered all the commands that are used to
@@ -5923,7 +6047,7 @@ test populate-1.2 {
             }
         }
     }
-} -result {encountered 2 configuration script errors} -returnCodes error
+} -result {2 configuration script error(s)} -returnCodes error
 ----
 endif::showtests[]
 
@@ -6513,7 +6637,7 @@ test populate-4.0 {
             # no population for "c2"
         }
     }
-} -result {encountered 1 configuration script errors} -returnCodes error
+} -result {1 configuration script error(s)} -returnCodes error
 ----
 endif::showtests[]
 
@@ -6614,7 +6738,7 @@ test populate-4.2 {
             }
         }
     }
-} -result {encountered 1 configuration script errors} -returnCodes error
+} -result {1 configuration script error(s)} -returnCodes error
 ----
 endif::showtests[]
 
@@ -6727,7 +6851,7 @@ test simpleassociation-1.0 {
             }
         }
     }
-} -result {encountered 1 configuration script errors} -returnCodes error
+} -result {1 configuration script error(s)} -returnCodes error
 ----
 
 [source,tcl]
@@ -6753,7 +6877,7 @@ test simpleassociation-1.1 {
             }
         }
     }
-} -result {encountered 2 configuration script errors} -returnCodes error
+} -result {2 configuration script error(s)} -returnCodes error
 ----
 endif::showtests[]
 
@@ -6851,7 +6975,7 @@ test simpleassociation-2.0 {
             }
         }
     }
-} -result {encountered 1 configuration script errors} -returnCodes error
+} -result {1 configuration script error(s)} -returnCodes error
 ----
 endif::showtests[]
 
@@ -6939,7 +7063,7 @@ test simpleassociation-3.0 {
             }
         }
     }
-} -result {encountered 1 configuration script errors} -returnCodes error
+} -result {1 configuration script error(s)} -returnCodes error
 ----
 
 [source,tcl]
@@ -6979,7 +7103,7 @@ test classassociation-3.1 {
             }
         }
     }
-} -result {encountered 1 configuration script errors} -returnCodes error
+} -result {1 configuration script error(s)} -returnCodes error
 ----
 
 [source,tcl]
@@ -7000,7 +7124,7 @@ test simpleassociation-3.2 {
         }
         # R1 not allowed to be reflexive
     }
-} -result {encountered 1 configuration script errors} -returnCodes error
+} -result {1 configuration script error(s)} -returnCodes error
 ----
 endif::showtests[]
 
@@ -7125,7 +7249,7 @@ test associator-1.0 {
             }
         }
     }
-} -result {encountered 1 configuration script errors} -returnCodes error
+} -result {1 configuration script error(s)} -returnCodes error
 ----
 endif::showtests[]
 
@@ -7221,7 +7345,7 @@ test associator-2.0 {
             }
         }
     }
-} -result {encountered 2 configuration script errors} -returnCodes error
+} -result {2 configuration script error(s)} -returnCodes error
 ----
 endif::showtests[]
 
@@ -7299,7 +7423,7 @@ test associator-1.1 {
             }
         }
     }
-} -result {encountered 1 configuration script errors} -returnCodes error
+} -result {1 configuration script error(s)} -returnCodes error
 ----
 endif::showtests[]
 
@@ -7413,7 +7537,7 @@ test associator-3.0 {
             }
         }
     }
-} -result {encountered 2 configuration script errors} -returnCodes error
+} -result {2 configuration script error(s)} -returnCodes error
 ----
 
 [source,tcl]
@@ -7446,7 +7570,7 @@ test associator-3.1 {
             }
         }
     }
-} -result {encountered 1 configuration script errors} -returnCodes error
+} -result {1 configuration script error(s)} -returnCodes error
 ----
 endif::showtests[]
 
@@ -7545,7 +7669,7 @@ test associator-4.0 {
             }
         }
     }
-} -result {encountered 1 configuration script errors} -returnCodes error
+} -result {1 configuration script error(s)} -returnCodes error
 ----
 endif::showtests[]
 
@@ -7640,7 +7764,7 @@ test associator-5.0 {
             }
         }
     }
-} -result {encountered 1 configuration script errors} -returnCodes error
+} -result {1 configuration script error(s)} -returnCodes error
 ----
 
 [source,tcl]
@@ -7675,7 +7799,7 @@ test associator-5.1 {
             }
         }
     }
-} -result {encountered 1 configuration script errors} -returnCodes error
+} -result {1 configuration script error(s)} -returnCodes error
 ----
 
 [source,tcl]
@@ -7711,7 +7835,7 @@ test associator-5.2 {
             }
         }
     }
-} -result {encountered 2 configuration script errors} -returnCodes error
+} -result {2 configuration script error(s)} -returnCodes error
 ----
 endif::showtests[]
 
@@ -7808,7 +7932,7 @@ test associator-6.0 {
             }
         }
     }
-} -result {encountered 1 configuration script errors} -returnCodes error
+} -result {1 configuration script error(s)} -returnCodes error
 ----
 
 [source,tcl]
@@ -7845,7 +7969,7 @@ test associator-6.1 {
             }
         }
     }
-} -result {encountered 1 configuration script errors} -returnCodes error
+} -result {1 configuration script error(s)} -returnCodes error
 ----
 endif::showtests[]
 
@@ -7936,7 +8060,7 @@ test generalization-1.0 {
             }
         }
     }
-} -result {encountered 1 configuration script errors} -returnCodes error
+} -result {1 configuration script error(s)} -returnCodes error
 ----
 endif::showtests[]
 
@@ -8017,7 +8141,7 @@ test generalization-2.0 {
             }
         }
     }
-} -result {encountered 1 configuration script errors} -returnCodes error
+} -result {1 configuration script error(s)} -returnCodes error
 ----
 endif::showtests[]
 
@@ -8091,7 +8215,7 @@ test generalization-3.0 {
             # super3 not referenced
         }
     }
-} -result {encountered 1 configuration script errors} -returnCodes error
+} -result {1 configuration script error(s)} -returnCodes error
 ----
 endif::showtests[]
 
@@ -10553,7 +10677,7 @@ test typecheck-1.0 {
             }
         }
     }
-} -result {encountered 2 configuration script errors} -returnCodes error
+} -result {2 configuration script error(s)} -returnCodes error
 ----
 
 [source,tcl]
