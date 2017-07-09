@@ -10,27 +10,29 @@
 #*--
 #
 
-LDFLAGS = -g
-CFLAGS	= -std=c11 -g -Og -Wall\
-	-Wno-unused-variable\
-	-Wno-unused-function\
-	-Wno-unused-but-set-variable\
+LDFLAGS =\
+	 -g\
+	 $(NULL)
+
+CFLAGS	=\
+	 -std=c11\
+	 -g\
+	 -O0\
+	 -Wall\
 	$(NULL)
+
 CPPFLAGS =\
-	 -D_POSIX_C_SOURCE=200112L\
 	 -D_ISOC11_SOURCE\
 	 -D_XOPEN_SOURCE\
 	 -DMRT_ECB_PARAM_SIZE=64\
 	 $(NULL)
 
+LDFLAGS =\
+	 --coverage\
+	 $(NULL)
+
 DOCSRC 	=\
 	simplebookstore.aweb\
-	$(NULL)
-
-MICCADIR = ../../../src
-
-RTSRC	=\
-	$(MICCADIR)/runtime.txt\
 	$(NULL)
 
 PDF 	=\
@@ -52,13 +54,17 @@ SCENARIOS =\
 CLEANFILES =\
 	$(PDF)\
 	$(ROOTS)\
-	micca_rt.c\
-	micca_rt.h\
+	bookstore\
+	bookstore.c\
+	bookstore.h\
+	bookstore.log\
 	*.o\
+	*.gcda\
+	*.gcno\
+	*.gcov\
 	$(NULL)
 
 A2XOPTS =\
-	--verbose\
 	$(NULL)
 
 ATANGLEOPTS =\
@@ -106,18 +112,11 @@ bookstore : bookstore.o micca_rt.o
 
 bookstore.c : bookstore.h micca_rt.h
 
+micca_rt.o : CFLAGS += --coverage
+
 micca_rt.o : micca_rt.c micca_rt.h
 
-micca_rt.h : $(RTSRC)
-	cd $(MICCADIR) ; atangle $(ATANGLEOPTS) -root micca_rt_posix.h\
-	    	-output $@ micca.aweb
-	mv $(MICCADIR)/micca_rt.h .
-
-micca_rt.c : $(RTSRC)
-	cd $(MICCADIR) ; atangle $(ATANGLEOPTS) -root micca_rt_posix.c -output $@ micca.aweb
-	mv $(MICCADIR)/micca_rt.c .
-
-bookstore.c : simplebookstore.micca sbs_population.micca
+bookstore.c bookstore.h : simplebookstore.micca sbs_population.micca
 	micca -stubexternalops simplebookstore.micca sbs_population.micca
 
 clean :
@@ -126,7 +125,7 @@ clean :
 $(PDF) : $(DOCSRC) $(INFO) bookstore.log
 
 bookstore.log : bookstore
-	bookstore > bookstore.log
+	./bookstore > bookstore.log
 
 simplebookstore.micca : $(DOCSRC)
 	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
