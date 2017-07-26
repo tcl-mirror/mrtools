@@ -27,17 +27,19 @@ DOCSRC 	=\
 	bosal.aweb\
 	$(NULL)
 
-CODEFILE =\
+CODEFILES =\
 	  $(CODEDIR)/tcl/bosal.tcl\
+	  $(CODEDIR)/tcl/bosal_main.tcl\
 	  $(NULL)
 
 DOCPARTS=\
 	intro.txt\
 	model.txt\
-	litprog.txt\
-	codeorg.txt\
 	configure.txt\
 	generate.txt\
+	utils.txt\
+	codeorg.txt\
+	litprog.txt\
 	$(NULL)
 
 DIAGRAMS =\
@@ -116,7 +118,7 @@ all : doc code
 
 doc : $(PDF)
 
-code : $(CODEFILE)
+code : $(CODEFILES)
 
 tests : code $(TESTS)
 
@@ -130,7 +132,10 @@ $(DOCSRC) : $(DOCPARTS)
 
 $(PDF) : $(DOCSRC) $(DOCPARTS) $(EXTRAS) $(IMAGES)
 
-$(CODEFILE) : $(DOCSRC) $(DOCPARTS)
+$(CODEDIR)/tcl/bosal.tcl : $(DOCSRC) $(DOCPARTS)
+	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $@ $(DOCSRC)
+
+$(CODEDIR)/tcl/bosal_main.tcl : $(DOCSRC) $(DOCPARTS)
 	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $@ $(DOCSRC)
 
 $(TESTS) : $(DOCSRC) $(DOCPARTS)
@@ -141,15 +146,12 @@ $(DOCDIR)/%.pdf : %.aweb
 	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) $<
 	$(RM) $(DOCDIR)/*__[0-9].pdf
 
-$(IMAGEDIR)/bosal-harness-classes.pdf : bosal-harness-classes.uxf
+$(IMAGEDIR)/%.pdf : %.uxf
 	umlet -action=convert -format=pdf\
 		-filename=$< -output=$(basename $@)-cvt
 	pdftk $(basename $@)-cvt.pdf cat 1left output $@
 	$(RM) $(basename $@)-cvt.pdf
 
-$(IMAGEDIR)/%.pdf : %.uxf
-	umlet -action=convert -format=pdf\
-		-filename=$< -output=$(basename $@)
 %.tcl : %.aweb
 	atangle $(ATANGLEOPTS) -root $@ -output $(CODEDIR)/tcl/$@ $<
 

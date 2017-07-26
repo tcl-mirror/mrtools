@@ -4,3 +4,422 @@
 
 == Introduction
 Place holder.
+
+=== Configure
+
+One of our top level `bosal` commands is to configure a test harness from
+a script.
+
+*****
+`::bosal configure` _script_
+
+`script`::
+    A Tcl script that is executed in an environment that will resolve
+    _harness configuration_ commands that may be used to define
+    the characteristics of a test harness to be translated by `bosal`.
+*****
+
+[float]
+==== Implementation
+
+(((bosal,operation,configure)))
+[source,tcl]
+----
+<<bosal configuration>>=
+operation configure {script} {
+    return [@Config@::bosalConfigure $script]
+}
+----
+
+=== ConfigureFromChan
+
+It is often convenient to obtain the `configure` script from an I/O channel.
+The `bosal configureFromChan` command supports reading the configure
+script directly from a channel.
+
+*****
+`::bosal configureFromChan` _channel_
+
+`channel`::
+    A Tcl channel handle that has been opened for reading.
+
+The `configureFromChan` command invokes `configure` on the script
+obtained by reading _channel_ until end of file is reached.
+*****
+
+[float]
+==== Implementation
+
+(((bosal,operation,configureFromChan)))
+[source,tcl]
+----
+<<bosal configuration>>=
+operation configureFromChan {chan} {
+    return [@Config@::bosalConfigure [::chan read -nonewline $chan]]
+}
+----
+
+=== ConfigureFromFile
+
+It is often convenient to hold the `configure` script in a file.
+The `bosal configureFromFile` command supports reading the configure
+script directly from a file.
+
+*****
+`::bosal configureFromFile` _filename_
+
+`filename`::
+    The name of a file containing a test harness configuration script.
+
+The `configureFromFile` command invokes `configure` on the script
+obtained by reading the contents of the file named, _filename_.
+*****
+
+[float]
+==== Implementation
+
+(((bosal,operation,configureFromFile)))
+[source,tcl]
+----
+<<bosal configuration>>=
+operation configureFromFile {filename} {
+    set chan [::open $filename r]
+    try {
+        return [@Config@::bosalConfigure [::chan read -nonewline $chan]]
+    } finally {
+        ::chan close $chan
+    }
+}
+----
+
+== Configuration Namespace Layout
+
+The `::bosal::@Config@` namespace holds all the procedures and data that
+correspond to the DSL to populate the platform model.
+We will create a set of child namespaces that mirror the nesting of the
+configuration language statements.
+At the top level,
+the `harness` command is used to define each test harness.
+The `harness` command accepts a script body that then defines the
+components of the test harness.
+That script will be evaluated in a namespace where the commands that
+define the test harness components resolve appropriately.
+This lets us put commands for the body specifying a particular component into a
+namespace which prevents any problems of accidentally invoking commands that
+are inappropriate for that context.
+
+We will use this technique for other child namespaces that correspond to
+the nesting of DSL statements.
+We layout the `::bosal::@Config@` namespace as shown below.
+
+[source,tcl]
+----
+<<configuration commands namespace>>=
+namespace eval @Config@ {
+    logger::initNamespace [namespace current]
+
+    <<tclral imports>>
+    <<helper commands namespace>>
+
+    namespace path {::bosal ::bosal::@Config@::Helpers ::rosea::InstCmds} ; # <1>
+    <<config data>>
+    <<config commands>>
+
+    <<harness config namespace layout>>
+}
+----
+<1> We are evaluating the configuration DSL inside a child namespace of
+of the `bosal` harness, but we are trying to populate `bosal` classes.
+We find it convenient to resolve commands through the main `bosal` namespace
+as well as others that help things along.
+
+=== Evaluating Configuration Scripts
+
+The top level operations of `bosal` that configure test harnesses
+all invoke `bosalConfigure` as the common entry point into the configuration
+DSL code.
+
+[float]
+==== Implementation
+
+(((bosal,Config,bosalConfigure)))
+[source,tcl]
+----
+<<config commands>>=
+proc bosalConfigure {script} {
+    variable errcount
+    set errcount 0
+
+    variable configlineno
+    set configlineno 1
+
+    ConfigEvaluate [namespace current] $script
+
+    if {$errcount > 0} {
+        tailcall DeclError CONFIG_ERRORS $errcount
+    }
+    return $errcount
+}
+----
+
+(((error code,CONFIG_ERRORS)))
+[source,tcl]
+----
+<<error code formats>>=
+CONFIG_ERRORS     {%d configuration script error(s)}
+----
+
+You could evaluate the configuration script by simply gathering it together
+and passing it to the core `namespace eval` command.
+Unfortunately,
+the first error that is encountered will terminate the evaluation.
+This is decidedly inconvenient as you would prefer to continue on and
+come up with a list of errors for the evaluation much like a
+conventional language compiler does when compiling a source file.
+Discovering errors one at a time is tediously unproductive.
+
+Of course, it is possible to continue evaluating after an error but
+that requires a bit more code.
+We will also want to be able to evaluate scripts in different namespace
+contexts as we described above.
+We will accomplish all this by taking advantage of the core `::apply` command
+and its ability to execute a lambda function in a given namespace.
+So given a script body and an namespace we can evaluate it as shown below.
+
+(((bosal,Config,ConfigEvaluate)))
+[source,tcl]
+----
+<<config commands>>=
+namespace export ConfigEvaluate
+
+proc ConfigEvaluate {ns body} {
+    variable evalLambda
+    tailcall ::apply [concat $evalLambda [list $ns]] $body ; # <1>
+}
+----
+<1> The `concat` command treats its arguments as a list.
+On the off chance that the `ns` argument contains embedded whitespace,
+we need to insure that it is treated as a single element list.
+Hence the need to include the invocation of the `list` command.
+
+The lambda function that performs the command evaluation is given below.
+We hold the evaluation lambda as a piece of data.
+
+[source,tcl]
+----
+<<config data>>=
+variable evalLambda {{body} {
+    upvar #0 ::bosal::@Config@::errcount errcount ; # <1>
+    upvar #0 ::bosal::@Config@::configlineno configlineno
+    set lineno $configlineno
+    set command {}
+    foreach line [split $body \n] { # <2>
+        append command $line \n
+        incr lineno ; # <3>
+        if {[info complete $command]} {
+            try {
+                eval $command
+            } on error {result} {
+                # puts $::errorInfo
+                log::error "line $configlineno:\
+                    \"[string trim $command]\":\n\"$result\""
+                incr errcount
+            }
+            set command {} ; # <4>
+            set configlineno $lineno
+        }
+    }
+    return $errcount
+}}
+----
+<1> We need to keep track of all the errors encountered and
+what line of the script we are currently dealing with.
+<2> We split the body along lines and then reassemble the lines
+into a complete command. The `info complete` command tells us when
+we have something that has some chance of being a real command.
+<3> We need to keep track of where we are in the `body`.
+<4> After evaluating a command we begin to assemble another one and
+set our location counter to where that command starts.
+
+== Defining a Test Harness
+
+As we described above,
+the test harness configuration commands will take the data in their
+arguments and store it away.
+After we have finished all the configuration scripts,
+then the `generate` command is used to produce the ``C'' code and header files.
+
+When configuring a test harness,
+we will evaluate the configuration script in the `HarnessDef` child namespace.
+That namespace will define commands for all the components of the
+test harness.
+We will use a similar arrangement for other nested aspects of
+test harness definitions.
+
+=== Harness
+
+*****
+`harness` _name_ _body_
+
+`name`::
+    The name of the test harness. A test harness name must be a non-empty
+    string.  The test harness name is used as a component for the file name of
+    the generated code files, so test harness names must be compatible with
+    file name path components for the operating platform where `bosal` is run.
+`body`::
+    A Tcl script containing invocation of the harness definition commands
+    to specify the details of the test harness configuration.
+
+The `harness` command defines a test harness named, _name_, and evaluates
+_body_ in a context where commands in _body_ may be used to define
+the characteristics of the test harness.
+*****
+
+(((bosal,Config,harness)))
+[source,tcl]
+----
+<<config commands>>=
+proc harness {name body} {
+    if {$name eq {}} {
+        tailcall DeclError BAD_NAME $name harness
+    }
+
+    namespace upvar HarnessDef HarnessName HarnessName ; # <1>
+    set HarnessName $name
+    variable InitCode
+    set InitCode {}
+
+    CheckDuplicate TestHarness Name $name ; # <2>
+    TestHarness create Name $name Initialization $InitCode
+
+    try {
+        ral relvar eval {
+            ConfigEvaluate [namespace current]::HarnessDef $body
+
+            upvar #0 ::bosal::@Config@::errcount errcount
+        }
+    } on error {result opts} {
+        # puts $::errorInfo
+        HandleConfigError $result
+    }
+}
+----
+<1> We place the harness name into a variable in the child namespace where the
+context implies that all the components defined are to be part of this harness.
+<2> We do not allow the `harness` command to be invoked more than once.
+To configure a harness properly we need to be able to see its entire
+definition at once.
+
+(((error code,BAD_NAME)))
+[source,tcl]
+----
+<<error code formats>>=
+BAD_NAME      {"%s" is not a valid name for a %s}
+----
+
+== Defining Test Harness Components
+
+In this section we discuss the commands that are used to define
+the components of a test harness.
+Following our established pattern,
+we define child namespaces for those harness component commands
+that have a nested structure.
+
+We start with the namespace layout for the `HarnessDef` namespace.
+
+[source,tcl]
+----
+<<harness config namespace layout>>=
+namespace eval HarnessDef {
+    logger::initNamespace [namespace current]
+
+    <<tclral imports>>
+    namespace import ::bosal::@Config@::ConfigEvaluate
+    namespace import ::bosal::@Config@::Helpers::DeclError
+    namespace path {::bosal ::bosal::@Config@::Helpers ::rosea::InstCmds}
+    <<harness config commands>>
+}
+----
+
+We see that there are two child namespaces defined with `HarnessDef`.
+These correspond to commands that have script bodies associated with them.
+
+=== Init
+
+*****
+`init` _code_
+
+`code`::
+    Arbitrary ``C'' code that will be run as part of the test harness
+    initialization.
+
+The `init` command gives ``C'' code that will be run when the test
+harness is initialized.
+*****
+
+(((bosal,Config,init)))
+[source,tcl]
+----
+<<harness config commands>>=
+proc init {code} {
+    variable InitCode
+    set InitCode $code
+}
+----
+
+=== Path
+
+*****
+`path` _dirname1 dirname2 ..._
+
+`dirnameN`::
+    The name of a directory to search when looking for domains to be
+    included in the test harness.
+
+The `path` command specifies file system directory names that are to be
+searched when looking for domains.
+*****
+
+(((bosal,Config,init)))
+[source,tcl]
+----
+<<harness config commands>>=
+proc path {args} {
+    variable HarnessName
+
+    foreach dir $args {
+        if {![file isdirectory $dir]} {
+            error "path, \"$dir\" is not a directory"
+        }
+        FileDirectory create Name $dir Harness $HarnessName
+    }
+}
+----
+
+=== Domain
+
+*****
+`domain` _domain1 domain2 ..._
+
+`domainN`::
+    The name of a domain to be included in the test harness.
+
+The `domain` command specifies the names of domains that are to be included
+in the test harness.
+A saved file from `micca` named `<domainN>.ral` must be found in the
+current working directory or one of the directories mentioned in a `path`
+command.
+*****
+
+(((bosal,Config,init)))
+[source,tcl]
+----
+<<harness config commands>>=
+proc domain {args} {
+    variable HarnessName
+
+    foreach domain $args {
+        Domain create Name $domain Harness $HarnessName
+    }
+}
+----
