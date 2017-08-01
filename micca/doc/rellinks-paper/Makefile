@@ -31,6 +31,7 @@ DIAGRAMS =\
 	X-Y-1-to-1.uxf\
 	1to1-reflex.uxf\
 	0-1to0-1-reflex.uxf\
+	0-Mto1-reflex.uxf\
 	$(NULL)
 
 IMAGES =\
@@ -47,8 +48,9 @@ CLEANFILES =\
 	$(NULL)
 
 A2XOPTS =\
-	--verbose\
 	$(NULL)
+
+#	--verbose
 
 
 ATANGLEOPTS =\
