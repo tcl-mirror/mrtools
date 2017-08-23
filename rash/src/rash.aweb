@@ -1,0 +1,2968 @@
+// vim:set syntax=asciidoc:
+= Rash -- Rosea Assisted Software Harness
+
+== Introduction [[introduction,Introduction]]
+
+This document is about a Tcl package named, `rash`.
+`Rash` is a companion package to `rosea`.
+By integrating `rash` into a `rosea` based application
+it is possible to view and manipulate the internals of the application
+without any modifications to the application itself.
+
+Recall that `rosea` is an XUML data and execution domain.
+It consists of two primary parts.
+First is run-time code that implements the execution rules of XUML.
+The second part is a domain specific configuration languge that allows
+you to specify the characteristics of the XUML domain and from that
+specification the data needed by the run-time code is generated.
+
+The specification of an XUML domain is gathered by the `rosea` configuration
+language into a set of relation variables.
+The schema of those relation variables form a meta-description of the domains.
+The values held in the meta-description relation variables allow
+`rash` to construct, at run-time, a detailed interactive interface
+to the domain specific data and control structures.
+For example,
+`rash` can show all the instances of the classes of a domain,
+generate events to the instances and
+invoke operations on the domain or class instances.
+Given the dynamic abilities of Tcl/Tk applications,
+`rash` is able to tailor its behavior and interface to match the
+characteristics of an arbitrary domain and to do so at run time
+without any 'a priori' assistance from the domain.
+
+`Rash` uses Tk to provide an interactive interface.
+Using the meta-description of the domain gathered by `rosea`,
+`rash` creates at run time a set of windows and widgets to provide access to
+the aspects of the domain.
+`Rash` is intended to be interactive and provide a means to control
+and view the dynamics of a running application.
+As such,
+it is not particularly well suited to automated operations such as
+automated testing.
+However,
+all the infrastructure that `rash` uses is available for other uses
+such as automated testing.
+
+== Design Approach [[designapproach,Design Approach]]
+
+It would be very tempting to implement `rash` using `rosea`.
+However,
+such an approach would end up mixing up the specification of `rash` with
+that of the domains that `rash` is trying to view and control.
+It turns out that `rash` does not use the full capablity that
+`rosea` provides and so we can make do with a simpler structure
+while avoiding any conflict with the domains that `rash` is dealing with.
+
+We will structure `rash` in much the same way as `rosea` generates
+code for domains.
+So we will use `namespace ensemble` as the fundamental Tcl construct in
+organizing `rash`.
+`Rash` classes will become relvars in a namespace.
+Each class will have its operations placed in a child namespace.
+Namespace ensemble commands will be used to group collections of operations.
+In other words,
+we intend to implement `rash` in the same manner as `rosea` would have
+generated it but without creating an explicit `rosea` configuration.
+We will serve as our own generator for `rash`.
+This will make sure that none of the artifacts of `rash` can possibly interfer
+with the domains on which `rash` is being used.
+
+`Rash` will be very aware of `rosea` as it needs to access configuration
+data and will use some procedures defined in `rosea`.
+This does create a rather tight coupling between the two packages but
+that is unavoidable given what `rash` accomplishes.
+We will not be able to use `rosea` constructs for navigating the class
+model and other types of activities that would
+require a fully configured `rosea` domain.
+We will find ourselves having to code such things directly.
+Fortunately,
+`rash` is a relatively small application and coding the relational
+algebraic expressions directly is not particularly onerous.
+
+[source,tcl]
+----
+<<required packages>>=
+package require rosea
+----
+
+== Class Diagram [[classdiagram,Class Diagram]]
+
+Although we do not intend to translate `rash` using `rosea`,
+a class diagram is essential in knowing how `rash` is structured.
+The figure below shows the classes and relationships for `rash`.
+The classes in this model represent visual items with which a user
+interacts and which show the internal aspects of a domain.
+We will directly interface to the Tk commands that control the GUI.
+We will not make any attempt to add a bridging layer into this package.
+That `rosea` is bound to Tcl and `rash` is bound to `rosea` makes us
+conclude that there is nothing to be gained by abstracting the GUI
+to be able to run on a different windowing toolkit.
+We are firmly in the Tcl/Tk camp and there is no reason to introduce
+abstraction layers that can potentially obscure the logic of the program.
+
+image::classes.pdf[title="Rash Class Diagram"]
+
+From the graphic we can see that `rash` will consist of the following
+clases.
+
+[source,tcl]
+----
+<<rash classes>>=
+<<APP class>>
+<<MBAR class>>
+<<DSEL class>>
+<<DOMSTAT class>>
+<<TRCVIEW class>>
+<<DOMCLASS class>>
+<<DVAL class>>
+<<CEVT class>>
+<<EVTPARAM class>>
+<<SM class>>
+----
+
+Similarly,
+the following relationships are shown in the graphic.
+
+[source,tcl]
+----
+<<rash relationships>>=
+<<R1>>
+<<R2>>
+<<R3>>
+<<R4>>
+<<R5>>
+<<R6>>
+<<R7>>
+<<R8>>
+<<R9>>
+----
+
+=== Application Class
+
+// HERE need cross reference
+We will describe later how to integrate `rash` with a `rosea` application
+so that you may interact with domains in that application.
+From the `rash` point of view,
+the Application class represents the top level of the Tk widget
+hierarchy that is used to present domains to the user.
+The class diagram graphic shows the following attributes.
+
+[source,tcl]
+----
+<<APP data>>=
+relvar create APP {
+    AppId string
+    Hull string
+    Version string
+} AppId Hull
+----
+
+We will use the convention of having a `Hull`
+attribute to hold the Tk window name that is the visual representation
+of an aspect of the `rash` display.
+We will not hold every window in the application as an attribute
+of some class.
+Only those windows to which we must later refer need be held as an attribute.
+Frequently, we need only record the root of some window subtree
+in order to accomplish the operations we want.
+We also note that Tk window names, which are just strings, are unque
+within an application and can serve as an identifier.
+To a great extent,
+the use of the `Hull` attribute can be viewed as a mapping from the application
+logic to the windowing toolkit.
+
+==== Create Operation
+
+Since the classes in `rash` are tightly bound to the Tk windows
+they use,
+we need to be able to execute some code when an instance is created.
+We establish the convention of using a `create` method on the class
+to obtain the needed processing when an instance of a class is created.
+
+Creating an APP instance involves inserting the instance tuple into
+the APP relvar and creating a corresponding Tk widget.
+The closely related classes are then created.
+
+(((rash,APP,create)))
+[source,tcl]
+----
+<<APP code>>=
+proc create {appid hull {version 1.0a3}} {
+    relvar eval {
+        <<APP create: insert instance>>
+        <<APP create: configure display>>
+        <<APP create: create menu bar>>
+        <<APP create: create domain selector>>
+        <<APP create: create trace viewer>>
+    }
+
+    return $self
+}
+<<APP exports>>=
+namespace export create
+----
+
+We use `relvar insert` to create the class instance.
+
+[source,tcl]
+----
+<<APP create: insert instance>>=
+set self [relvar insert ::rash::APP [list\
+    AppId       $appid\
+    Hull        $hull\
+    Version     $version\
+]]
+relation assign $self ; # <1>
+----
+<1> `relvar insert` returns a relation value that contains the _as inserted_
+values of the attributes.
+These can then be easily placed into Tcl variables using `relation assign`.
+
+Visually,
+a `rash` application will appear as an ordinary top level window that contains
+three components:
+
+. A menu bar allowing various aspects to be controlled.
+. A domain selector that allows the user to select a particular domain to view.
+. A state machine trace viewing window allowing control of the tracing.
+
+We use a `toplevel` widget to hold the application.
+
+[source,tcl]
+----
+<<APP create: configure display>>=
+toplevel $Hull
+wm title $Hull "Rash Version $Version"
+wm protocol $Hull WM_DELETE_WINDOW ::exit
+
+grid rowconfigure $Hull 1 -weight 1 ; # <1>
+grid columnconfigure $Hull 0 -weight 1
+----
+<1> Give all of the extra space to the trace viewer component.
+
+We now go about creating the three components of the `rash` application
+interface.
+First the menu bar.
+
+[source,tcl]
+----
+<<APP create: create menu bar>>=
+set mbarHull $Hull.mbar
+MBAR create $AppId $mbarHull
+$Hull configure -menu $mbarHull
+----
+
+Then the domain selector.
+
+[source,tcl]
+----
+<<APP create: create domain selector>>=
+set dselHull $Hull.dsel
+DSEL create $AppId $dselHull
+grid $dselHull -sticky nsew -pady 4
+----
+
+And finally the trace viewer.
+
+[source,tcl]
+----
+<<APP create: create trace viewer>>=
+set trcHull $Hull.tview
+TRCVIEW create $AppId $trcHull
+grid $trcHull -sticky nsew -pady 4
+----
+
+==== ShowUserMessage Operation
+
+It is convenient to localize the processing for communicating with
+the user into one place.
+
+(((rash,APP,ShowUserMessage)))
+[source,tcl]
+----
+<<APP code>>=
+proc ShowUserMessage {self type title msg} {
+    tk_messageBox\
+        -icon $type\
+        -title $title\
+        -parent [readAttribute $self Hull]\
+        -type ok\
+        -message $msg
+}
+<<APP exports>>=
+namespace export ShowUserMessage
+----
+
+Note the use of the `readAttribute` procedure above.
+This is actually a `rosea` procedure and we will find it convenient
+to use some `rosea` constructs, especially for instance references,
+and the procedures associated with those constructs.
+After all,
+we are in effect directly coding the `rash` model in a manner that
+is similar to what `rosea` would have generated.
+It is not surprising that some of the `rosea` code would be useful.
+To make access to the `rosea` code easier,
+we can use the ability of a namespace to have a command resolution
+path.
+
+[source,tcl]
+----
+<<class namespace path>>=
+namespace path {::rash ::rosea::InstCmds ::rosea::Helpers}
+----
+
+==== Class Implementation
+
+We now compose the components of the `APP` class implementation.
+This will be a repeated pattern for the other classes in `rash`.
+Following the pattern of `rosea` generated code,
+each class is placed in its own namespace that is, in this case,
+a child namespace of `::rash`.
+
+[source,tcl]
+----
+<<APP class>>=
+<<APP data>>
+namespace eval APP {
+    <<class namespace path>>
+    <<APP code>>
+    <<APP exports>>
+    namespace ensemble create
+}
+----
+
+=== Menu Bar Class
+
+Visually,
+a menu bar is a set of buttons attached to cascading menus that sits
+along the top of the main application window.
+A menu bar provides easy access to common control functions.
+
+[source,tcl]
+----
+<<MBAR data>>=
+relvar create MBAR {
+    AppId string
+    Hull string
+} AppId Hull
+----
+
+==== Create Operation
+
+Following our established pattern,
+we provide a `create` method to create an `MBAR` instance
+and all of the Tk machinery behind it.
+
+(((rash,MBAR,create)))
+[source,tcl]
+----
+<<MBAR code>>=
+proc create {appid hull {debuglevel warn}} {
+    <<MBAR create: insert instance>>
+    <<MBAR create: configure display>>
+
+    return $self
+}
+<<MBAR exports>>=
+namespace export create
+----
+
+As before,
+we insert an instance into the relvar that holds the `MBAR` instances
+and assign the attributes into Tcl variables for later use.
+
+[source,tcl]
+----
+<<MBAR create: insert instance>>=
+set self [relvar insert ::rash::MBAR [list\
+    AppId           $appid\
+    Hull            $hull\
+]]
+relation assign $self
+----
+
+Menus in Tk are constructed by the `menu` command.
+Components of the menu are then added and it is possible to associate
+labels and other properties to the menu items.
+In this case,
+we will have two cascading menu items that hold the controls for the
+application.
+
+First,
+we create the *File* cascading entry and provide the traditional
+*Exit* control.
+
+[source,tcl]
+----
+<<MBAR create: configure display>>=
+menu $Hull
+$Hull add cascade\
+    -label File\
+    -menu $Hull.file
+
+menu $Hull.file
+$Hull.file add command\
+    -label Exit\
+    -command ::exit
+----
+
+The other cascading entry is labeled *Show*.
+
+[source,tcl]
+----
+<<MBAR create: configure display>>=
+$Hull add cascade\
+    -label Show\
+    -menu $Hull.show
+----
+
+We provide a console window that is helpful in testing and debugging
+on some platforms.
+
+[source,tcl]
+----
+<<MBAR create: configure display>>=
+menu $Hull.show
+if {$::tcl_platform(platform) eq "windows"} {
+    $Hull.show add command\
+        -label Console\
+        -command [namespace code [list ShowConsole $AppId]]
+}
+----
+
+Dynamic control over the debug level is also a convenient testing
+and debugging aid.
+We use a set of radio buttons for each debug level.
+
+[source,tcl]
+----
+<<MBAR create: configure display>>=
+$Hull.show add cascade\
+    -label Debug\
+    -menu $Hull.debug
+
+set levelvar [namespace current]::DebugLevel($AppId)
+set cmd [namespace code [list LogLevel $AppId]]
+menu $Hull.debug
+foreach level [::logger::levels] {
+    $Hull.debug add radiobutton\
+        -label $level\
+        -variable $levelvar\
+        -command $cmd
+}
+----
+
+Note how we have handled the variable needed by the radiobutton menu items.
+Frequently,
+Tk widgets use Tcl variables to store the data displayed by the widget.
+Naturally, Tk does not know about relation variables and attributes.
+So sometimes it is necessary to use namespace variables to accomodate Tk.
+By placing the data needed by Tk into an array indexed by an identifier
+of the class instance,
+then we achieve the same purpose,
+albeit in a slightly less convenient form,
+as holding the data in an attribute of the class.
+
+[source,tcl]
+----
+<<MBAR create: insert instance>>=
+variable DebugLevel
+set DebugLevel($AppId) $debuglevel
+----
+
+Finally,
+we provide the conventional display of version information.
+
+[source,tcl]
+----
+<<MBAR create: configure display>>=
+$Hull.show add command\
+    -label About\
+    -command [namespace code [list ShowAbout $AppId]]
+----
+
+
+==== ShowConsole Operation
+
+The `ShowConsole` operation brings up a console window.
+Since this is not available on all platforms,
+we make sure and `catch` the commands in case something goes wrong.
+
+(((rash,MBAR,ShowConsole)))
+[source,tcl]
+----
+<<MBAR code>>=
+proc ShowConsole {appid} {
+    catch {
+        ::console show
+        ::console title "Rash Console"
+    }
+}
+----
+
+==== ShowAbout Operation
+
+The `ShowAbout` operation gives us our first glance at how
+instances and relationship navigation can be handled.
+
+(((rash,MBAR,ShowAbout)))
+[source,tcl]
+----
+<<MBAR code>>=
+proc ShowAbout {appid} {
+    set app [pipe {
+        relvar restrictone ::rash::APP AppId $appid |
+        ToRef ::rash::APP ~
+    }]
+    APP ShowUserMessage $app info Rash\
+        "$appid\n\
+        Copyright 2015, G. Andrew Mangogna\n\
+        Revision: [readAttribute $app Version]"
+
+    return
+}
+----
+
+The procedure is invoked with an `appid` argument whose value is
+an identifier for an `APP` instance.
+We can do a lookup and then use the `rosea` command, `ToRef`, to generate
+an instance reference that is needed by the `APP` operation.
+
+==== LogLevel Operation
+
+The `logger` package provides a means to set the logging level on an
+application basis.
+
+(((rash,MBAR,LogLevel)))
+[source,tcl]
+----
+<<MBAR code>>=
+proc LogLevel {appid} {
+    variable DebugLevel
+    ::logger::setlevel $DebugLevel($appid)
+    return
+}
+----
+
+==== Class Implementation
+
+[source,tcl]
+----
+<<MBAR class>>=
+<<MBAR data>>
+namespace eval MBAR {
+    <<class namespace path>>
+    <<MBAR code>>
+    <<MBAR exports>>
+    namespace ensemble create
+}
+----
+
+=== R1 -- MBAR => APP
+
+Relationship, `R1`, enforces the constraint that
+each Application has exactly one Menu Bar and each Menu Bar
+serves exactly one Application.
+
+Class relationships become `relvar` constraints in `rash`.
+
+[source,tcl]
+----
+<<R1>>=
+relvar association R1\
+    MBAR AppId 1\
+    APP AppId 1
+----
+
+We will see this pattern repeated for the other relationships
+in the `rash` class model.
+
+=== Domain Selector Class
+
+`Rash` can handle applications that contain multiple domains.
+The Domain Selector class allows a user to choose a domain to view and
+control.
+
+[source,tcl]
+----
+<<DSEL data>>=
+relvar create DSEL {
+    AppId string
+    Hull string
+} AppId Hull
+----
+
+==== Create Operation
+
+As with other classes,
+we need to run some code to create a `DSEL` instance and so have a
+`create` method.
+The implementation pattern is much the same as for the `APP` class.
+
+(((rash,DSEL,create)))
+[source,tcl]
+----
+<<DSEL code>>=
+proc create {appid hull} {
+    <<DSEL create: insert instance>>
+    <<DSEL create: configure display>>
+    <<DSEL create: bind to selection>>
+
+    return $self
+}
+<<DSEL exports>>=
+namespace export create
+----
+
+Inserting the instance into its relvar follows our familiar pattern.
+
+[source,tcl]
+----
+<<DSEL create: insert instance>>=
+set self [relvar insert ::rash::DSEL [list\
+    AppId           $appid\
+    Hull            $hull\
+]]
+relation assign $self
+----
+
+We use a labeled frame to separate out the domain selection function
+in the interface.
+
+[source,tcl]
+----
+<<DSEL create: configure display>>=
+ttk::labelframe $Hull\
+    -takefocus 0\
+    -text "Domain Selection"
+grid rowconfigure $Hull 0 -weight 1
+grid columnconfigure $Hull 0 -weight 1
+----
+
+We can gather up the available domain names by a query of the `rosea`
+configuration data.
+
+The list of selectable domain names is used by the `combobox` to present
+the user with a choice of domains to examine.
+
+[source,tcl]
+----
+<<DSEL create: configure display>>=
+ttk::combobox $Hull.doms\
+    -values $domlist\
+    -textvariable [namespace current]::DomainSelect($AppId)
+grid $Hull.doms\
+    -padx 4\
+    -sticky w
+----
+
+We use the ``trick'' of a namespace variable to interface to the
+`combobox` and to supply the currently selected domain.
+
+[source,tcl]
+----
+<<DSEL create: insert instance>>=
+set domlist [relation list $::rosea::Config::Domain Name]
+variable DomainSelect
+set DomainSelect($AppId) [lindex $domlist 0]
+----
+
+Binding to the virtual event generated by the `combobox` gives us
+the entry back into the `::rash` application.
+We also bind the Return and Enter keys so the user can type a name
+directly into the combobox.
+
+[source,tcl]
+----
+<<DSEL create: bind to selection>>=
+::bind $Hull.doms <<ComboboxSelected>>\
+    [namespace code [list DomainSelect $AppId]]
+::bind $Hull.doms <Return>\
+    [namespace code [list DomainSelect $AppId]]
+::bind $Hull.doms <KP_Enter>\
+    [namespace code [list DomainSelect $AppId]]
+----
+
+==== Domain Select Operation
+
+Control is given to the `DomainSelect` procedure when the user
+selects a domain from the `combobox`.
+
+(((rash,DSEL,DomainSelect)))
+[source,tcl]
+----
+<<DSEL code>>=
+proc DomainSelect {appid} {
+    set self [relvar restrictone ::rash::DSEL AppId $appid] ; # <1>
+    relation assign $self
+    variable DomainSelect
+    if {$DomainSelect($AppId) ne {}} { # <2>
+        <<DSEL DomainSelect: find related domain status instance>>
+
+        if {[relation isempty $dstat]} { # <3>
+            relvar eval {
+                DOMSTAT create $AppId $DomainSelect($AppId)\
+                    $Hull.[string tolower $DomainSelect($AppId)]
+            }
+        } else {
+            wm deiconify [relation extract $dstat Hull]
+        }
+    }
+}
+----
+<1> Look up the instance that corresponds to the `appid` value.
+<2> Check that a domain selection was actually made.
+<3> If there is no related Domain Status instance, then we create it.
+Otherwise, we can simply show its window to the user.
+
+Formally,
+we find the related Domain Status instance by traversing relation R2 followed
+by R3 and then restrict the result to the domain name the user selected.
+In the implementation,
+we can circumvent traversing R2 by noting that R2 one-to-one and unconditional.
+This allows us to `semijoin` to the `DOMSTAT` relvar directly.
+
+[source,tcl]
+----
+<<DSEL DomainSelect: find related domain status instance>>=
+set dstat [pipe {
+    relvar set ::rash::DOMSTAT |
+    relation semijoin $self ~ -using {AppId AppId} |
+    relation restrict ~ dstup {
+        [tuple extract $dstup Domain] eq $DomainSelect($AppId)}
+}]
+----
+
+==== Class Implementation
+
+[source,tcl]
+----
+<<DSEL class>>=
+<<DSEL data>>
+namespace eval DSEL {
+    <<class namespace path>>
+    <<DSEL code>>
+    <<DSEL exports>>
+    namespace ensemble create
+}
+----
+
+=== R2 -- DSEL => APP
+
+The `R2` relationship enforces the rule that there is exactly one
+Domain Selector for each Application and 'vice versa'.
+There is no need to provide more than one selector and `rash`
+must provide at least one selector to allow users to select specific domain
+for applications that contain multiple domains.
+
+[source,tcl]
+----
+<<R2>>=
+relvar association R2\
+    DSEL AppId 1\
+    APP AppId 1
+----
+
+=== Domain Status Class
+
+Instances of the Domain Status class contain the visual controls allowing
+users to interact with the internals of a `rosea` constructed domain.
+
+[source,tcl]
+----
+<<DOMSTAT data>>=
+relvar create DOMSTAT {
+    AppId string
+    Domain string
+    Hull string
+} {AppId Domain} Hull
+----
+
+==== Create Operation
+
+Again, we will need a `create` operation to build up the Tk widgets
+for the visible aspects of the instance.
+
+(((rash,DOMSTAT,create)))
+[source,tcl]
+----
+<<DOMSTAT code>>=
+proc create {appid domain hull} {
+    <<DOMSTAT create: insert instance>>
+    <<DOMSTAT create: configure display>>
+
+    return $self
+}
+<<DOMSTAT exports>>=
+namespace export create
+----
+
+We are careful to insure that there is indeed a domain that matches
+the user requested domain.
+
+[source,tcl]
+----
+<<DOMSTAT create: insert instance>>=
+set dominst [ral relvar restrictone ::rosea::Config::Domain Name $domain]
+if {[relation isempty $dominst]} {
+    set app [pipe {
+        relvar restrictone ::rash::APP AppId $appid |
+        ToRef ::rash::APP ~
+    }] ; # <1>
+    APP ShowUserMessage $app error "Domain Error" "Unknown Domain, \"$domain\""
+    return
+}
+----
+<1> We need a reference to the application instance to display a message
+to the user.
+
+After verifying that the domain exists,
+we can create the instance as a tuple in the class relvar.
+
+[source,tcl]
+----
+<<DOMSTAT create: insert instance>>=
+set self [relvar insert ::rash::DOMSTAT [list\
+    AppId $appid\
+    Domain $domain\
+    Hull $hull
+]]
+relation assign $self
+set ref [ToRef ::rash::DOMSTAT $self] ; # <1>
+----
+<1> We create a `rosea` style instance reference.
+This will come in handy later.
+
+Each Domain Status instance is shown in a Tk `toplevel` window.
+
+[source,tcl]
+----
+<<DOMSTAT create: configure display>>=
+toplevel $Hull
+wm title $Hull "Domain: $domain"
+wm protocol $Hull WM_DELETE_WINDOW [list wm withdraw $Hull]
+grid rowconfigure $Hull 0 -weight 1
+grid columnconfigure $Hull 0 -weight 1
+----
+
+The `toplevel` widget is divided up into various labeled frames for
+the components of domain that we will be able to control.
+First we put up a set of controls for the classes in the domain.
+We create a notebook to hold all the class information.
+
+[source,tcl]
+----
+<<DOMSTAT create: configure display>>=
+set frame [ttk::labelframe $hull.clf -text Classes]
+grid $frame -sticky nsew
+grid rowconfigure $frame 0 -weight 1
+grid columnconfigure $frame 0 -weight 1
+
+set nb [ttk::notebook $frame.nb -takefocus 0]
+grid $nb -sticky nsew
+grid rowconfigure $nb 0 -weight 1
+grid columnconfigure $nb 0 -weight 1
+----
+
+We intend to create a tab in the notebook for each class in the domain.
+We start by finding all the classes in the domain.
+This query reaches into the configuration data stored by `rosea`.
+
+[source,tcl]
+----
+<<DOMSTAT create: configure display>>=
+set classes [pipe {
+    ral relvar set ::rosea::Config::Class |
+    relation restrict ~ classtup {
+        [tuple extract $classtup Domain] eq $Domain
+    }
+}]
+----
+
+We now iterate over the classes in the domain, creating instances
+of Domain Class.
+The Domain Class instances manage the visual aspects show the class
+data and dynamics.
+Here we include the `DOMCLASS` window as a tab in the notebook.
+
+
+[source,tcl]
+----
+<<DOMSTAT create: configure display>>=
+relation foreach class $classes -ascending Name {
+    relation assign $class {Name className}
+    set cframe $nb.[string tolower $className]
+    DOMCLASS create $AppId $Domain $className $cframe
+
+    $nb add $cframe -text $className -sticky nsew
+}
+----
+
+The other aspect of domain that needs a visual representation is
+domain operations.
+Similar to classes,
+we query the `rosea` configuration information to discover the
+set of domain operations.
+
+[source,tcl]
+----
+<<DOMSTAT create: configure display>>=
+set ops [pipe {
+    ral relvar set ::rosea::Config::DomainOperation |
+    relation restrict ~ optup {
+        [tuple extract $optup Domain] eq $Domain
+    }
+}]
+if {[relation isnotempty $ops]} {
+    <<DOMSTAT create: configure operations>>
+}
+----
+
+If we find that there are operations defined for the domain,
+then we create a frame to label and separate them out.
+Then, we iterate over the operations and set up widgets to control
+invocation of the operation and marshalling operation parameters.
+Then, we iterate over the operations and set up widgets to control
+invocation of the operation and marshalling operation parameters.
+
+[source,tcl]
+----
+<<DOMSTAT create: configure operations>>=
+set frame [ttk::labelframe $hull.opf -text Operations]
+grid $frame -sticky nsew
+
+set opnum 0 ; # <1>
+relation foreach op $ops -ascending Name {
+    relation assign $op {Name name} {Parameters params}
+
+    <<DOMSTAT create: operation controls>>
+    <<DOMSTAT create: operation parameters>>
+}
+----
+<1> We need to keep track of how many operation we have in order
+to place properly the widgets into rows.
+
+We use a Tk button to represent invoking the domain operation.
+The button is labeled with the operation name.
+
+[source,tcl]
+----
+<<DOMSTAT create: operation controls>>=
+set but [ttk::button $frame.op$opnum\
+    -text $name\
+    -takefocus 1\
+    -command [namespace code\
+        [list InvokeDomOp $ref $name $opnum [llength $params]]]\
+]
+grid $but -pady 4 -row $opnum -column 0 -sticky e
+----
+
+We bind the *Return* and *Enter* keys so that we can invoke the
+button from the keyboard.
+
+[source,tcl]
+----
+<<DOMSTAT create: operation controls>>=
+bind $but <Return> {%W invoke}
+bind $but <KP_Enter> {%W invoke}
+----
+
+We iterate through the parameter list of the operation in order
+to set up label and entry widgets for each parameter.
+
+[source,tcl]
+----
+<<DOMSTAT create: operation parameters>>=
+set prnum 0 ; # <1>
+foreach param $params {
+    <<DOMSTAT create: configure parameter>>
+}
+
+if {$prnum > 0} {
+    bind $ent <Return> [list focus $but]
+    bind $ent <KP_Enter> [list focus $but]
+} ; # <2>
+incr opnum
+----
+<1> Because parameter passing is positional,
+we will find it necessary to place a total ordering on the set of
+parameters to a domain operation.
+<2> This code sequence implements a widget focus scheme that aids in
+keyboard entry of the domain operation parameters.
+It does so by binding *Return* on the last parameter entry widget to
+shift the focus back to the button used to invoke the operation.
+Since we also bound *Return* to the button, the net effect is that
+parameter values can be typed into their entry widgets,
+*Return* will take the focus to the next entry, *Return* in the last
+parameter entry will take the user back to the button and finally,
+*Return* with the focus on the button will invoke the operation.
+This just makes doing all via the keyboard easier.
+
+We use a simple label / entry widget combination to allow the user to
+enter parameter values.
+
+[source,tcl]
+----
+<<DOMSTAT create: configure parameter>>=
+lassign $param pname pdefault
+set lab [ttk::label $frame.lab$opnum$prnum -text $pname]
+set ent [ttk::entry $frame.ent$opnum$prnum]
+$ent insert 0 $pdefault
+----
+
+By creating binding to the *Return* and *Enter* keys we can
+advance the data entry to the next parameter.
+
+[source,tcl]
+----
+<<DOMSTAT create: configure parameter>>=
+bind $ent <Return> {focus [tk_focusNext %W]}
+bind $ent <KP_Enter> {focus [tk_focusNext %W]}
+----
+
+We need a little arithmetic to calculate the column number in which
+a parameter resides.
+This lets us place all the widgets in the `grid` at the proper
+row and column numbers.
+
+[source,tcl]
+----
+<<DOMSTAT create: configure parameter>>=
+grid $lab\
+    -padx 2\
+    -row $opnum\
+    -column [expr {$prnum * 2 + 1}]\
+    -sticky e ; # <1>
+grid $ent\
+    -padx 2\
+    -row $opnum\
+    -column [expr {$prnum * 2 + 2}]\
+    -sticky w
+
+incr prnum
+----
+<1> The `+ 1` and `+ 2` are needed to account for the column taken up by
+the button that invokes the operation itself.
+The `* 2` accounts for the fact that there are two widgets that make up the
+interface to enter a single parameter, _i.e._ the label widget and the
+entry widget.
+
+==== InvokeDomOp Operation
+
+All the buttons that invoke domain operations use
+`InvokeDomOp` as their callback to actually invoke the operation.
+So control comes here when the button is invoked.
+
+(((rash,DOMSTAT,InvokeDomOp)))
+[source,tcl]
+----
+<<DOMSTAT code>>=
+proc InvokeDomOp {self opname opnum pnum} {
+    assignAttribute $self Domain Hull
+
+    set params [list]
+    for {set i 0} {$i < $pnum} {incr i} {
+        lappend params [$Hull.opf.ent$opnum$i get] ; # <1>
+    }
+    set domcmd [FullyQualifyDomain $Domain]
+
+    $domcmd $opname {*}$params
+
+    set nextwin [tk_focusNext $Hull.opf.op$opnum] ; # <2>
+    focus $nextwin
+    after idle [list $nextwin selection range 0 end] ; # <3>
+}
+----
+<1> We use the naming convention that determines the window path from the
+`Hull` that was established when the `create` is done.
+<2> After we invoke the operation, we move the focus to the next window.
+Since that next window will be an entry widget we set the selection
+to cover the entire entry.
+Again, this is just an attempt to make entry easier under the presumption
+that if you invoke the operation once you may wish to do so again and
+perhaps with different parameter values
+<3> We want the selection range to take effect only after the focus
+has been transferred, hence the use of `after` here.
+
+Since the name of a domain and its location in a namespace are controlled
+separately in `rosea`,
+we find it convenient to factor out some code the determine the fully
+qualified namespace name for a domain.
+
+(((rash,FullyQualifyDomain)))
+[source,tcl]
+----
+<<rash code>>=
+proc FullyQualifyDomain {domain} {
+    return [pipe {
+        relvar restrictone ::rosea::Config::Domain Name $domain |
+        relation extract ~ Location |
+        string cat ~ ::${domain}
+    }]
+}
+----
+
+==== Class Implementation
+
+[source,tcl]
+----
+<<DOMSTAT class>>=
+<<DOMSTAT data>>
+namespace eval DOMSTAT {
+    <<class namespace path>>
+    <<DOMSTAT code>>
+    <<DOMSTAT exports>>
+    namespace ensemble create
+}
+----
+
+=== R3 -- DOMSTAT => APP
+
+The `R3` relationship states how an Application shows the status of
+a domain using one or more Domain Status instances.
+It may be that the Application is showing no domain status and any
+domain status being shown is associated to a particular Application.
+
+[source,tcl]
+----
+<<R3>>=
+relvar association R3\
+    DOMSTAT AppId *\
+    DSEL AppId 1
+----
+
+=== Trace View Class
+
+Viewing the trace of events dispatch is a primary debugging tool and
+focus of `rash`.
+The `TRCVIEW` class is the means to visualize the event trace.
+
+[source,tcl]
+----
+<<TRCVIEW data>>=
+relvar create TRCVIEW {
+    AppId string
+    Hull string
+    IsFrozen boolean
+    SaveDir string
+} AppId Hull
+----
+
+The visualization of traces will be done with a text widget and some
+scollbars.
+We will add a few controls over how things are displayed.
+It is convenient to prevent the display from continuing to scroll as traces
+are added and the `IsFrozen` attribute is used to record that parameter.
+
+==== Create Operation
+
+Following our established pattern,
+we have a `create` operation to build the Tk visuals in correspondence
+with the instance data.
+
+(((rash,TRCVIEW,create)))
+[source,tcl]
+----
+<<TRCVIEW code>>=
+proc create {appid hull} {
+    <<TRCVIEW create: insert instance>>
+    <<TRCVIEW create: configure display>>
+
+    return $self
+}
+<<TRCVIEW exports>>=
+namespace export create
+----
+
+Creating the instance data also follows the established pattern.
+
+[source,tcl]
+----
+<<TRCVIEW create: insert instance>>=
+set self [relvar insert ::rash::TRCVIEW [list\
+    AppId $appid\
+    Hull $hull\
+    IsFrozen false\
+    SaveDir [pwd]\
+]]
+relation assign $self
+----
+
+Since we will have both the text display of the traces and we need
+some controls,
+we will use a frame to hold everything together.
+
+[source,tcl]
+----
+<<TRCVIEW create: configure display>>=
+ttk::frame $Hull
+grid rowconfigure $Hull 0 -weight 1
+grid columnconfigure $Hull 0 -weight 1
+----
+
+We separate the traces from the controls using labeled frames.
+
+[source,tcl]
+----
+<<TRCVIEW create: configure display>>=
+ttk::labelframe $Hull.traces\
+    -text "State Machine Traces"
+grid $Hull.traces\
+    -sticky nsew
+grid rowconfigure $Hull.traces 0 -weight 1
+grid columnconfigure $Hull.traces 0 -weight 1
+----
+
+We now configure the text widget used to show the event traces.
+Rather than use horizontal scrolling for long trace lines,
+it seems to work better to let the text wrap and then the user
+may resize the window if he wishes to see each trace on a separate line.
+This is because some of the critical information in the trace occurs at
+the end of the line and automatic scrolling tends to force the beginning
+of the last line to be visible.
+So, below we only create a vertical scrollbar.
+
+[source,tcl]
+----
+<<TRCVIEW create: configure display>>=
+text $Hull.traces.text\
+    -wrap word\
+    -setgrid true\
+    -width 100\
+    -insertwidth 0\
+    -yscrollcommand [list $Hull.traces.vsb set]
+
+ttk::scrollbar $Hull.traces.vsb\
+    -orient vertical\
+    -command [list $Hull.traces.text yview]
+::autoscroll::autoscroll $Hull.traces.vsb
+
+grid $Hull.traces.text $Hull.traces.vsb -sticky nsew
+----
+
+We use the `autoscroll` package to make scrollbars come and go as needed.
+
+[source,tcl]
+----
+<<required packages>>=
+package require autoscroll
+----
+
+We use text widget tags to handle coloring the timestamp field and
+to display *Can't Happen* and *Ignored* traces
+
+[source,tcl]
+----
+<<TRCVIEW create: configure display>>=
+$Hull.traces.text tag configure CHtrace\
+    -background red\
+    -foreground black
+$Hull.traces.text tag configure IGtrace\
+    -background yellow\
+    -foreground black
+$Hull.traces.text tag configure TSfield\
+    -background gray90
+----
+
+The controls over the trace display are also placed in a label frame
+to group them together.
+A separate command is used to implement each control operation.
+
+[source,tcl]
+----
+<<TRCVIEW create: configure display>>=
+ttk::labelframe $Hull.ctrls\
+    -text "Trace Controls"
+grid $Hull.ctrls\
+    -sticky nsew\
+    -pady 4
+ttk::button $Hull.ctrls.start\
+    -text Start\
+    -command [namespace code [list StartTrace $AppId]]
+ttk::button $Hull.ctrls.frz\
+    -text Freeze\
+    -command [namespace code [list FreezeTrace $AppId]]
+ttk::button $Hull.ctrls.clr\
+    -text Clear\
+    -command [namespace code [list ClearTrace $AppId]]
+ttk::button $Hull.ctrls.save\
+    -text Save\
+    -command [namespace code [list SaveTrace $AppId]]
+grid $Hull.ctrls.start $Hull.ctrls.frz $Hull.ctrls.clr $Hull.ctrls.save\
+    -padx 4\
+    -pady 4
+----
+
+==== FormatTrace Operations
+
+Control comes here when tracing is enabled and we are at the appropriate
+`logger` level.
+The main detail here is that we need to look at the text of the trace
+message to determine if it is a *Can't Happen* or *Ignored* trace.
+If so,
+we want to use the proper tag when the text is inserted into the
+widget.
+We also timestamp the trace before it is inserted into the display and the
+timestamp field has its own take to make the lines in the trace display
+more distinct.
+
+(((rash,TRCVIEW,FormatTrace)))
+[source,tcl]
+----
+<<TRCVIEW code>>=
+proc FormatTrace {appid txt {tag {}}} {
+    set self [relvar restrictone ::rash::TRCVIEW AppId $appid]
+    relation assign $self Hull IsFrozen
+
+    switch -glob -- $txt {
+        {*-> CH*} {
+            set tag CHtrace
+        }
+        {*-> IG*} {
+            set tag IGtrace
+        }
+    }
+
+    $Hull.traces.text insert end\
+        [::rosea::Trace::FormatTimestamp [clock microseconds]] TSfield\
+        { } {}\
+        $txt\n $tag
+
+    if {!$IsFrozen} {
+        $Hull.traces.text see end
+    }
+}
+----
+
+==== StartTrace Operations
+
+Starting the event tracing display involves two details:
+
+. Tracing in rose must be turned on along with logging the trace.
+. The logging procedure must be overriden to direct `logger` to invoke
+`FormatTrace` to perform the logging.
+
+Below we show how that happens.
+
+(((rash,TRCVIEW,StartTrace)))
+[source,tcl]
+----
+<<TRCVIEW code>>=
+proc StartTrace {appid} {
+    set self [relvar restrictone ::rash::TRCVIEW AppId $appid]
+    relation assign $self
+
+    rosea trace control on
+    rosea trace control logon
+    rosea trace control loglevel info
+    interp alias {} log_$AppId {} ::rash::TRCVIEW::FormatTrace $AppId ; # <1>
+    [logger::servicecmd rosea]::logproc info log_$AppId
+
+    $Hull.ctrls.start configure\
+        -text Stop\
+        -command [namespace code [list StopTrace $AppId]] ; # <2>
+}
+----
+<1> We create an alias to the `FormatTrace` command.
+This allows us to pass along other arguments when the command is invoked.
+Here we are passing the `AppId` value.
+Then we override the log procedure to the `rosea` logging service.
+All of this is required because `logger` insists the log procedure must be
+a command name rather than a command prefix.
+Just a bit of extra bother.
+<2> We toggle the sense of the button once is has been invoked.
+
+
+==== StopTrace Operations
+
+The `StopTrace` procedures unwinds the set up of `logger` and inverts
+the labeling of the control button.
+
+(((rash,TRCVIEW,StopTrace)))
+[source,tcl]
+----
+<<TRCVIEW code>>=
+proc StopTrace {appid} {
+    set self [relvar restrictone ::rash::TRCVIEW AppId $appid]
+    relation assign $self
+
+    rosea trace control off
+    rosea trace control logoff
+    interp alias {} log_$AppId {}
+
+    $Hull.ctrls.start configure\
+        -text Start\
+        -command [namespace code [list StartTrace $AppId]]
+}
+----
+
+==== FreezeTrace Operations
+
+(((rash,TRCVIEW,FreezeTrace)))
+[source,tcl]
+----
+<<TRCVIEW code>>=
+proc FreezeTrace {appid} {
+    set self [relvar updateone ::rash::TRCVIEW trtup [list AppId $appid] {
+        tuple update $trtup IsFrozen true
+    }]
+    relation assign $self Hull
+
+    $Hull.ctrls.frz configure\
+        -text Scroll\
+        -command [namespace code [list UnfreezeTrace $appid]]
+}
+----
+
+==== UnfreezeTrace Operations
+
+(((rash,TRCVIEW,UnfreezeTrace)))
+[source,tcl]
+----
+<<TRCVIEW code>>=
+proc UnfreezeTrace {appid} {
+    set self [relvar updateone ::rash::TRCVIEW trtup [list AppId $appid] {
+        tuple update $trtup IsFrozen false
+    }]
+    relation assign $self Hull
+
+    $Hull.ctrls.frz configure\
+        -text Freeze\
+        -command [namespace code [list FreezeTrace $appid]]
+}
+----
+
+==== ClearTrace Operations
+
+(((rash,TRCVIEW,ClearTrace)))
+[source,tcl]
+----
+<<TRCVIEW code>>=
+proc ClearTrace {appid} {
+    set self [relvar restrictone ::rash::TRCVIEW AppId $appid]
+    relation assign $self Hull
+
+    rosea trace control clear
+    $Hull.traces.text delete 1.0 end
+}
+----
+
+==== SaveTrace Operations
+
+We provide for saving the event trace.
+The only complication here is that we allow saving to a SQLite database
+or as a text file.
+`Rosea` supports saving to a SQLite database directly.
+For the text file,
+we just pull the contents of the text widget and save that.
+
+(((rash,TRCVIEW,SaveTrace)))
+[source,tcl]
+----
+<<TRCVIEW code>>=
+proc SaveTrace {appid} {
+    set self [relvar restrictone ::rash::TRCVIEW AppId $appid]
+    relation assign $self Hull SaveDir
+
+    set app [relvar restrictone ::rash::APP AppId $appid]
+
+    set savefile [tk_getSaveFile\
+        -confirmoverwrite true\
+        -parent [relation extract $app Hull]\
+        -initialdir $SaveDir\
+        -title "Select Trace Save File"\
+        -defaultextension .sqlite\
+        -initialfile [clock format [clock seconds]\
+                -format "Trace-%Y-%m-%dT%H-%M-%S.sqlite"]\
+        -filetypes {
+            {{SQLite Files}     .sqlite}
+            {{Text Files}       .txt}
+            {{All Files}        *}
+        }\
+    ]
+    if {$savefile ne {}} {
+        relvar updateone ::rash::TRCVIEW tv [list AppId $appid] {
+            tuple update $tv SaveDir [file dirname $savefile]
+        }
+        if {[file extension $savefile] eq ".sqlite"} {
+            ::rosea trace control save $savefile
+        } else {
+            set outchan [open $savefile w]
+            try {
+                chan puts -nonewline $outchan [$Hull.traces.text get 1.0 end]
+            } finally {
+                close $outchan
+            }
+        }
+    }
+}
+----
+
+==== Class Implementation
+
+[source,tcl]
+----
+<<TRCVIEW class>>=
+<<TRCVIEW data>>
+namespace eval TRCVIEW {
+<<class namespace path>>
+    <<TRCVIEW code>>
+    <<TRCVIEW exports>>
+    namespace ensemble create
+}
+----
+
+=== R8 -- TRCVIEW => APP
+
+The `R8` relationship enforces the rule that there can only be
+one viewer of event trace data associated to an application.
+The trace data from `rosea` is gathered in a single source for each
+application and that source is always available to the application.
+
+[source,tcl]
+----
+<<R8>>=
+relvar association R8\
+    TRCVIEW AppId 1\
+    APP AppId 1
+----
+
+=== Domain Class Class
+
+The Domain Class class represents the visual expression of a `rosea` class
+in `rash`.
+
+[source,tcl]
+----
+<<DOMCLASS data>>=
+relvar create DOMCLASS {
+    AppId string
+    Domain string
+    Class string
+    Hull string
+} {AppId Domain Class} Hull
+----
+
+==== Create Operation
+
+The `create` operation follows the familiar pattern of inserting
+the instance into a relvar and then configuring Tk widgets for the
+visual representation.
+
+(((rash,DOMCLASS,create)))
+[source,tcl]
+----
+<<DOMCLASS code>>=
+proc create {appid domain class hull} {
+    <<DOMCLASS create: insert instance>>
+    <<DOMCLASS create: configure display>>
+    <<DOMCLASS create: create components>>
+
+    return $self
+}
+<<DOMCLASS exports>>=
+namespace export create
+----
+
+[source,tcl]
+----
+<<DOMCLASS create: insert instance>>=
+set self [relvar insert ::rash::DOMCLASS [list\
+    AppId $appid\
+    Domain $domain\
+    Class $class\
+    Hull $hull\
+]]
+relation assign $self
+----
+
+We enclose the components of the Domain Class in a frame.
+
+[source,tcl]
+----
+<<DOMCLASS create: configure display>>=
+ttk::frame $Hull
+grid $Hull -sticky nsew
+grid rowconfigure $Hull {0 1} -weight 1
+grid columnconfigure $Hull 0 -weight 1
+----
+
+Each Domain Class has a Data Value associated with it.
+This component provides access to the instance values.
+
+[source,tcl]
+----
+<<DOMCLASS create: create components>>=
+DVAL create $AppId $Domain $Class $Hull.data
+----
+
+If there are any events,
+then the class has a state model and there are additional controls
+that must be put into place.
+
+[source,tcl]
+----
+<<DOMCLASS create: create components>>=
+set events [pipe {
+    ral relvar set ::rosea::Config::Event |
+    relation restrict ~ evttup {
+        [tuple extract $evttup Domain] eq $Domain &&\
+        [tuple extract $evttup Model] eq $Class
+    }
+}]
+
+if {[relation isnotempty $events]} {
+    <<DOMCLASS create: create current state display>>
+    <<DOMCLASS create: create event controls>>
+}
+----
+
+Displaying state information consists two parts:
+
+. Displaying the current state.
+. Providing a means to send events to instances.
+
+We place the current state information in a labeled frame.
+
+[source,tcl]
+----
+<<DOMCLASS create: create current state display>>=
+ttk::labelframe $Hull.sm\
+    -takefocus 0\
+    -text "Current State"
+grid $Hull.sm -sticky nsew
+grid rowconfigure $Hull.sm 0 -weight 1
+grid columnconfigure $Hull.sm 0 -weight 1
+----
+
+The State Model class is the visual representation of current state
+of an instance.
+
+[source,tcl]
+----
+<<DOMCLASS create: create current state display>>=
+SM create $AppId $Domain $Class $Hull.sm.cs
+----
+
+Event controls are also placed in a separate labeled frame.
+
+[source,tcl]
+----
+<<DOMCLASS create: create event controls>>=
+set evtframe [ttk::labelframe $Hull.sm.evts\
+    -takefocus 0\
+    -text Events]
+grid $evtframe -sticky nsew
+----
+
+Iterating over the events in the state model,
+we create a Class Event instance for each event in the model.
+
+[source,tcl]
+----
+<<DOMCLASS create: create event controls>>=
+set evtnum -1
+relation foreach event $events -ascending Event {
+    relation assign $event Event
+    set evtHull $evtframe.evt_[incr evtnum]
+    CEVT create $AppId $Domain $Class $Event $evtHull
+    grid $evtHull -pady 2 -sticky w
+}
+----
+
+==== Class Implementation
+
+[source,tcl]
+----
+<<DOMCLASS class>>=
+<<DOMCLASS data>>
+namespace eval DOMCLASS {
+<<class namespace path>>
+    <<DOMCLASS code>>
+    <<DOMCLASS exports>>
+    namespace ensemble create
+}
+----
+
+=== R4 -- DOMCLASS => DOMSTAT
+
+The `R4` relationship states that the status of a domain is displayed
+by one or more Domain Class instances.
+Every domain has at least one and potentially many classes and
+a Domain Class instance is needed to display a class.
+Domain Classes are associated to one particular Domain Status instance
+that is displaying a Domain in the application.
+
+[source,tcl]
+----
+<<R4>>=
+relvar association R4\
+    DOMCLASS {AppId Domain} +\
+    DOMSTAT {AppId Domain} 1
+----
+
+=== Data Value Class
+
+The Data Value class represents the visual appearance of the instances
+of the class.
+We want to support dialogs that will create and delete instances of a class.
+We also want to be able to modify individual attributes.
+As we see below,
+we have chosen to use the `tablelist` widget to support these activities.
+This widget is quite full featured and supports in cell editing easily.
+
+[source,tcl]
+----
+<<DVAL data>>=
+relvar create DVAL {
+    AppId string
+    Domain string
+    Class string
+    Instances list
+    Hull string
+    CreateHull string
+} {AppId Domain Class} Hull
+----
+
+One operation we will need to do in this class is to map screen
+representations of widgets onto an instance reference for the widget.
+We have chose to store this mapping in the `Instances` attribute
+as a list.
+Instances appear in rows in the `tablelist` widget and we can use
+the `Instances` attribute to map a row index into an instance reference.
+We'll see how that works below.
+
+==== Create Method
+
+We use the `tablelist` widget to display class instances as tables.
+Specifically we use the Tk Tile version of `tablelist`.
+
+[source,tcl]
+----
+<<required packages>>=
+package require tablelist_tile
+package require struct::set
+----
+
+(((rash,DVAL,create)))
+[source,tcl]
+----
+<<DVAL code>>=
+proc create {appid domain class hull} {
+    <<DVAL create: insert instance>>
+    <<DVAL create: configure display>>
+
+    return $self
+}
+<<DVAL exports>>=
+namespace export create
+----
+
+[source,tcl]
+----
+<<DVAL create: insert instance>>=
+set crhull .create_[string tolower $class]
+set self [relvar insert ::rash::DVAL [list\
+    AppId $appid\
+    Domain $domain\
+    Class $class\
+    Instances [list]\
+    Hull $hull\
+    CreateHull $crhull\
+]]
+relation assign $self
+set ref [ToRef ::rash::DVAL $self]
+----
+
+We enclose the details of the Data Value in a labeled frame to set it
+off from the surroundings.
+
+[source,tcl]
+----
+<<DVAL create: configure display>>=
+ttk::labelframe $Hull\
+    -takefocus 0\
+    -text "Class Data"
+grid $Hull -sticky nsew
+grid rowconfigure $Hull 0 -weight 1
+grid columnconfigure $Hull 0 -weight 1
+----
+
+One problem we have to solve involves identifying attributes.
+The problem is to insure the identifying attributes are not
+made editable.
+We insist that changes in the identity of instances happen via
+create and delete operations.
+So we must be able to find the set of attributes that part of any identifier.
+
+[source,tcl]
+----
+<<DVAL create: configure display>>=
+set classrelvar [FullyQualifyDomain $Domain]::$Class
+set insts [relvar set $classrelvar]
+set attrs [relation attributes $insts]
+set idattrs [list]
+foreach id [relvar identifiers $classrelvar] {
+    ::struct::set add idattrs $id
+}
+----
+
+The `tablelist` widget itself is setup with some of its many possible
+options.
+Mainly, we want to deal with scrolling and editing.
+Since we are allowing edits to attributes,
+we need a command, `EditDone`, to deal with attribute value updates.
+
+[source,tcl]
+----
+<<DVAL create: configure display>>=
+set tv [tablelist::tablelist $Hull.inst\
+    -columntitles $attrs\
+    -showseparators true\
+    -showarrow false\
+    -stripebackground lightgreen\
+    -setgrid true\
+    -stretch all\
+    -height 4\
+    -xscrollcommand [list $Hull.xs set]\
+    -yscrollcommand [list $Hull.ys set]\
+    -editendcommand [namespace code [list EditDone $ref]]\
+]
+----
+
+Here we configure the columns in the `tablelist` widget.
+Columns are identified by a number and we will give them a name to make later
+reference to the column easier.
+Also for those attributes that are not identifying attributes,
+we make them editable and use an `entry` widget to perform that editing.
+The `tablelist` widget handles the low level details dealing with
+inline editing.
+
+[source,tcl]
+----
+<<DVAL create: configure display>>=
+set attrnum 0
+foreach attr $attrs {
+    set opts [list -name col_$attr]
+    if {$attr ni $idattrs} {
+        lappend opts\
+            -editable true\
+            -editwindow ttk::entry
+    }
+    $tv columnconfigure $attrnum {*}$opts
+    incr attrnum
+}
+----
+
+We round out the visualization with scroll bars which we make automatic
+as necessary.
+
+[source,tcl]
+----
+<<DVAL create: configure display>>=
+ttk::scrollbar $Hull.xs\
+    -orient horizontal\
+    -command [list $Hull.inst xview]
+ttk::scrollbar $Hull.ys\
+    -orient vertical\
+    -command [list $Hull.inst yview]
+
+grid $tv $Hull.ys -sticky nsew
+grid $Hull.xs - -sticky nsew
+::autoscroll::autoscroll $Hull.xs
+::autoscroll::autoscroll $Hull.ys
+----
+
+Creating and deleting instances will be handled by a
+``right click'' popup menu.
+
+[source,tcl]
+----
+<<DVAL create: configure display>>=
+set tlmenu [menu $Hull.tlmenu]
+$tlmenu add command\
+    -label "Create"\
+    -command [namespace code [list CreateDialog $ref]]
+$tlmenu add command\
+    -label "Delete"\
+    -command [namespace code [list DeleteInst $ref]]
+----
+
+Because MacOSX is a bit different in the naming conventions for mouse
+buttons,
+we want to bind to the second mouse button on a Mac and the third
+on other platforms.
+
+[source,tcl]
+----
+<<DVAL create: configure display>>=
+set eventtag [expr {[tk windowingsystem] eq "aqua" ? "<ButtonPress-2>" :\
+        "<ButtonPress-3>"}]
+bind [$tv bodytag] $eventtag [list tk_popup $tlmenu %X %Y] ; # <1>
+----
+<1> Note the use of `bodytag` as the binding window.
+The `tablelist` widget provides a method to obtain the correct window
+for event bindings.
+
+When creating an instance,
+we will use a dialog to obtain the attribute values.
+That dialog is just a `toplevel` widget with the approprate
+labels and entries for the attributes that correspond to the class.
+We create the dialog now, keeping it withdrawn from the screen until
+the user requests to create an instance.
+
+[source,tcl]
+----
+<<DVAL create: configure display>>=
+toplevel $crhull
+if {[winfo viewable .]} {
+    wm transient $crhull .
+}
+wm withdraw $crhull
+
+wm title $crhull "Create Instance of $Class"
+wm protocol $crhull WM_DELETE_WINDOW\
+    [namespace code [list CancelCreate $ref]]
+
+foreach {attr type} [relation heading $insts] {
+    set awin [string tolower $attr]
+    set lab [ttk::label $crhull.lab_$awin\
+        -text "$attr \[$type\]"\
+        -takefocus 0\
+    ]
+    set ent [ttk::entry $crhull.ent_$awin]
+
+    bind $ent <Return> {focus [tk_focusNext %W]}
+    bind $ent <KP_Enter> {focus [tk_focusNext %W]}
+
+    grid $lab $ent\
+        -padx 2
+    grid configure $lab\
+        -sticky e
+    grid configure $ent\
+        -sticky w
+}
+
+focus $crhull.ent_[string tolower [lindex $attrs 0]]
+----
+
+We need a couple of buttons to finish of the instance creation dialog.
+The use may *Cancel* the dialog and we need some indication that proceed
+with the instance creation.
+
+[source,tcl]
+----
+<<DVAL create: configure display>>=
+ttk::button $crhull.create\
+    -text Create\
+    -command [namespace code [list CreateInst $ref]]
+bind $crhull.create <Return> {%W invoke}
+bind $crhull.create <KP_Enter> {%W invoke}
+
+ttk::button $crhull.cancel\
+    -text Cancel\
+    -takefocus 0\
+    -command [namespace code [list CancelCreate $ref]]
+
+grid $crhull.create $crhull.cancel
+----
+
+The last detail of the `DVAL` class is how to deal with
+changes to the underlying class instance values.
+As an application executes,
+it will change the values of attributes.
+We want to keep the display in sync with the underlying instance values.
+Fortunately, this is not that difficult since a `relvar` may be traced
+and we can intercede in the execution when changes to the relvar
+take place.
+
+[source,tcl]
+----
+<<DVAL create: configure display>>=
+relvar trace add variable $classrelvar\
+    {delete insert set unset update}\
+    [namespace code [list ModTrace $ref]]
+----
+
+Finally,
+we need to set up all the values in the display.
+The `Refresh` method transfers all the instance data to the `tablelist`
+widget so that the display reflects the current values of the instances.
+
+[source,tcl]
+----
+<<DVAL create: configure display>>=
+Refresh $ref $classrelvar
+----
+
+==== ModTrace Method
+
+Control is given to the `ModTrace` method when the `relvar` that
+holds a set of class instances if modified.
+This procedure is invoked as a `relvar trace` callback.
+It just schedules the `Refresh` of the widget and then returns an appropriate
+value as expected by the `relvar trace` callback conventions.
+
+(((rash,DVAL,ModTrace)))
+[source,tcl]
+----
+<<DVAL code>>=
+proc ModTrace {self op relvar args} {
+    after 0 [namespace code [list Refresh $self $relvar]] ; # <1>
+
+    switch -exact -- $op {
+        insert -
+        set {
+            return [lindex $args 0]
+        }
+        update {
+            return [lindex $args 1]
+        }
+    }
+}
+----
+<1> Note the refresh is scheduled as an event callback.
+This prevents getting in the way of the `relvar trace` and makes sure
+any ongoing `relvar transaction` does not interfer with the callback code.
+
+==== Refresh Method
+
+The `Refresh` method takes a very simple approach to displaying
+the class instances.
+Everything is simply deleted and then re-written.
+Note that this implies computing a new mapping between the
+widget rows and the class instances that are shown in a row.
+Since `Refresh` is called upon all changes to a class,
+it does not know if things were added, deleted or just modified.
+Bringing everything into sync is just the simplest approach to handle
+things.
+Clearly for very large class instance populations,
+this could be a slow operation.
+
+(((rash,DVAL,Refresh)))
+[source,tcl]
+----
+<<DVAL code>>=
+proc Refresh {self relvar} {
+    assignAttribute $self
+
+    set tv $Hull.inst
+    $tv selection clear 0 end
+    $tv delete 0 end
+
+    set insts [relvar set $relvar]
+    set attrs [relation attributes $insts]
+    set instmap [list]
+
+    relation foreach inst $insts {
+        $tv insert end [relation extract $inst {*}$attrs]
+        lappend instmap [ToRef $relvar $inst]
+    }
+    $tv selection set 0 0
+    updateAttribute $self Instances $instmap
+}
+----
+
+==== SelectedInst Method
+
+(((rash,DVAL,SelectedInst)))
+[source,tcl]
+----
+<<DVAL code>>=
+proc SelectedInst {self} {
+    assignAttribute $self AppId Hull Instances
+
+    set activecell [$Hull.inst cellindex active]
+    lassign [split $activecell ,] selected selectedcolumn
+    if {$selected eq {}} {
+        set app [::rosea::ClassCmds::findById ::rash::APP AppId $AppId]
+        APP ShowUserMessage $app info "No Instance Selected"\
+            "Select instance from table where event is signaled"
+        return [nilInstRef]
+    } else {
+        return [lindex $Instances $selected]
+    }
+}
+<<DVAL exports>>=
+namespace export SelectedInst
+----
+
+==== CreateDialog Method
+
+(((rash,DVAL,CreateDialog)))
+[source,tcl]
+----
+<<DVAL code>>=
+proc CreateDialog {self} {
+    assignAttribute $self CreateHull
+    wm deiconify $CreateHull
+    tkwait visibility $CreateHull
+    focus [tk_focusNext $CreateHull]
+    grab set $CreateHull
+}
+----
+
+==== CreateInst Method
+
+(((rash,DVAL,CreateInst)))
+[source,tcl]
+----
+<<DVAL code>>=
+proc CreateInst {self} {
+    assignAttribute $self Domain Class Hull CreateHull
+
+    set classrelvar [FullyQualifyDomain $Domain]::$Class
+    set insts [relvar set $classrelvar]
+    set attrs [relation attributes $insts]
+    set values [list]
+    foreach attr $attrs {
+        set ent $CreateHull.ent_[string tolower $attr]
+        lappend values $attr [$ent get]
+    }
+
+    try {
+        ::rosea::ClassCmds::create $classrelvar {*}$values
+    } on error {result} {
+        DataOpFailed $self $result
+    }
+
+    grab release $CreateHull
+    wm withdraw $CreateHull
+}
+----
+
+==== DataOpFailed Method
+
+(((rash,DVAL,DataOpFailed)))
+[source,tcl]
+----
+<<DVAL code>>=
+proc DataOpFailed {self result} {
+set line [lindex [split [string trimright $result \n] \n] 0]
+if {[regexp {\A[^:]+([^(]+)[^,]+, in relvar (\S+)} $line\
+        match rnum refclass]} {
+    set msg "Referential constraint, $rnum, on class, $refclass, failed"
+} else {
+    set msg $result
+}
+
+tk_messageBox\
+    -icon error\
+    -title "Data Operation Failed"\
+    -parent [readAttribute $self Hull]\
+    -type ok\
+    -message "Data Operation Failed:\n$msg"
+}
+----
+
+==== CancelCreate Method
+
+(((rash,DVAL,CancelCreate)))
+[source,tcl]
+----
+<<DVAL code>>=
+proc CancelCreate {self} {
+    assignAttribute $self CreateHull
+    grab release $CreateHull
+    wm withdraw $CreateHull
+}
+----
+
+==== DeleteInst Method
+
+(((rash,DVAL,DeleteInst)))
+[source,tcl]
+----
+<<DVAL code>>=
+proc DeleteInst {self} {
+    set selected [SelectedInst $self]
+    if {[::rosea::InstCmds::isNotEmptyRef $selected]} {
+        try {
+            ::rosea::InstCmds::delete $selected
+        } on error {result} {
+            DataOpFailed $self $result
+        }
+    }
+}
+----
+
+==== EditDone Method
+
+We have instructed the `tablelist` widget to callback to `EditDone` when
+a table cell has been edited.
+It is instructive to examine this code sequence in more detail to show
+how individual edits to the cells in the `tablelist` widget are realized
+as updates to attributes.
+
+(((rash,DVAL,EditDone)))
+[source,tcl]
+----
+<<DVAL code>>=
+proc EditDone {self path row col value} {
+    set ref [lindex [readAttribute $self Instances] $row]
+    lassign $ref relvar inst
+    set id [tuple get [relation tuple $inst]]
+    set attrs [relation attributes [relvar set $relvar]]
+    try {
+        relvar updateone $relvar rvtup $id {
+            tuple update $rvtup [lindex $attrs $col] $value
+        }
+        return $value
+    } on error {result opts} {
+        $path rejectinput
+        return -options $opts $result
+    }
+}
+----
+
+The `self` argument is an instance reference to the `DVAL` instance.
+First, we obtain an instance reference to the `rosea` class instance
+that has been edited.
+Recall that the `Instances` attribute of `DVAL` contains a list of instance
+references that is indexed by the row number of the `tablelist` widget row.
+This is the mapping between the visual representation and the
+class instance to be updated.
+
+To update the class instance,
+we need an identifier which we can obtain from the instance reference.
+From `rosea`,
+we know that an instance reference is a two element list which we assign
+to the `relvar` and `inst` variables.
+The contents of `inst` is then a relation value whose attributes form an
+identifier of the instance.
+To perform the update,
+we need a list of attribute name / value pairs and that list is the tuple value
+of the relation value portion of the instance reference.
+we assign the identifier to the `id` variable.
+We need a list of attributes because that will give us the mapping of the
+column number to the attribute name and we need the attribute name
+to assign it a new value.
+Finally,
+we can invoke `relvar updateone` to change the attribute value.
+Should there be an error, we instruct the `tablelist` widget to reject
+the input and re-throw the error so that we end up showing it to the user.
+
+==== Class Implementation
+
+[source,tcl]
+----
+<<DVAL class>>=
+<<DVAL data>>
+namespace eval DVAL {
+<<class namespace path>>
+    <<DVAL code>>
+    <<DVAL exports>>
+    namespace ensemble create
+}
+----
+
+=== R5 -- DVAL => DOMCLASS
+
+The `R5` relationship enforces the rule that every Domain Class has
+a corresponding Data Value and 'vice versa'.
+
+[source,tcl]
+----
+<<R5>>=
+relvar association R5\
+    DVAL {AppId Domain Class} 1\
+    DOMCLASS {AppId Domain Class} 1
+----
+
+=== Class Event Class
+
+The Class Event class provides a visual representation of an event
+and gives the user controls to signal the event along with any
+parameters that the event carries.
+
+[source,tcl]
+----
+<<CEVT data>>=
+relvar create CEVT {
+    AppId string
+    Domain string
+    Class string
+    Event string
+    Hull string
+} {AppId Domain Class Event} Hull
+----
+
+==== Create Method
+
+The `create` method follows our established pattern.
+
+(((rash,CEVT,create)))
+[source,tcl]
+----
+<<CEVT code>>=
+proc create {appid domain class event hull} {
+    <<CEVT create: insert instance>>
+    <<CEVT create: configure display>>
+    <<CEVT create: find event parameters>>
+    <<CEVT create: configure parameter display>>
+
+    return $self
+}
+<<CEVT exports>>=
+namespace export create
+----
+
+[source,tcl]
+----
+<<CEVT create: insert instance>>=
+set self [relvar insert ::rash::CEVT [list\
+    AppId $appid\
+    Domain $domain\
+    Class $class\
+    Event $event\
+    Hull $hull\
+]]
+relation assign $self
+set ref [ToRef ::rash::CEVT $self]
+----
+
+[source,tcl]
+----
+<<CEVT create: configure display>>=
+ttk::frame $Hull
+set evtb [ttk::button $Hull.__button\
+    -text $Event\
+    -command [namespace code [list SendEvent $ref]]\
+]
+grid $evtb\
+    -sticky w\
+    -row 0\
+    -column 0
+----
+
+One complication for events is to find the parameters that the event
+must carry.
+We don't define the event signatures 'per se'.
+Rather, the signature is defined by the state activity into which
+the event causes a transition.
+It turns out that any given event may cause a transition into multiple
+states.
+The argument signature of the state activities need not be identical.
+We will simply take the first one we find as the event signature.
+
+The query to accomplish this looks for all the events that cause a
+transition and then looks at the states into which the machine transitions.
+From there we can extract the `Parameters` attribute which is an argument
+list in the same form as accepted by the `::proc` command.
+
+[source,tcl]
+----
+<<CEVT create: find event parameters>>=
+set params [pipe {
+    ral relvar restrictone ::rosea::Config::EffectiveEvent\
+            Domain $Domain Model $Class Event $Event |
+    relation semijoin ~ $::rosea::Config::StateTransition |
+    relation eliminate ~ State Event |
+    relation rename ~ NewState Name |
+    relation semijoin ~ $::rosea::Config::State |
+    relation list ~ Parameters |
+    lindex ~ 0
+}]
+----
+
+Once we know the event parameters,
+then we must iterate across them and create an `EVTPARAM` instance
+to manage the user input of the parameter values.
+
+[source,tcl]
+----
+<<CEVT create: configure parameter display>>=
+set counter -1
+foreach param $params {
+    set pname [lindex $param 0]
+    set phull $Hull.[string tolower $pname]
+    EVTPARAM create $AppId $Domain $Class\
+        $Event $pname [incr counter] $phull
+
+    grid $phull\
+        -row 0\
+        -column [expr {$counter + 1}]
+}
+----
+
+==== SendEvent Method
+
+The event buttons transfer control to `SendEvent` when they are invoked.
+Since events are signaled to a particular instance,
+the first thing we must do is to determine which instance has been
+selected.
+The selection is maintained by the associated `DVAL` class.
+
+(((rash,CEVT,SendEvent)))
+[source,tcl]
+----
+<<CEVT code>>=
+proc SendEvent {self} {
+    lassign $self relvar inst
+
+    set classinst [pipe {
+        relation semijoin $inst $::rash::DVAL\
+                -using {AppId AppId Domain Domain Class Class} |
+            ToRef ::rash::DVAL ~ |
+            DVAL SelectedInst ~
+    }]
+
+    if {[isNotEmptyRef $classinst]} {
+        # Gather up the parameters
+        set evtparams [relation semijoin $inst $::rash::EVTPARAM\
+            -using {AppId AppId Domain Domain Class Class Event Event}
+        ]
+        set values [list]
+        relation foreach paramvalue $evtparams -ascending Order {
+            lappend values [EVTPARAM ReadValue $paramvalue]
+        }
+
+        ::rosea tunnel $classinst signal [relation extract $inst Event]\
+                {*}$values
+    }
+}
+----
+
+Assuming an instance has been selected,
+we have to obtain the values of all the event arguments and then
+can signal the event via the `rosea tunnel` command.
+
+==== Class Implementation
+
+[source,tcl]
+----
+<<CEVT class>>=
+<<CEVT data>>
+namespace eval CEVT {
+<<class namespace path>>
+    <<CEVT code>>
+    <<CEVT exports>>
+    namespace ensemble create
+}
+----
+
+=== R6 -- CEVT => DOMCLASS
+
+Relationship `R6` enforces the rule that controls for signalling
+events are associated to a particular class in a domain.
+However a class may not respond to any events.
+
+[source,tcl]
+----
+<<R6>>=
+relvar association R6\
+    CEVT {AppId Domain Class} *\
+    DOMCLASS {AppId Domain Class} 1
+----
+
+=== Event Parameter Class
+
+Some event carry parametric data.
+The Event Parameter class provides a means for the user to specify
+the values of the parameters of an event.
+
+[source,tcl]
+----
+<<EVTPARAM data>>=
+relvar create EVTPARAM {
+    AppId string
+    Domain string
+    Class string
+    Event string
+    Param string
+    Order int
+    Hull string
+} {AppId Domain Class Event Param} {AppId Domain Class Event Order} Hull
+----
+
+Note that we introduce another identifier that uses the `Order` attribute
+so as to provide a definite order to the event parameters.
+This is in keeping with the ordering of arguments to a state activity that
+will ultimately receive the parameter values.
+
+==== Create Method
+
+[source,tcl]
+----
+<<EVTPARAM code>>=
+proc create {appid domain class event param order hull} {
+    set self [relvar insert ::rash::EVTPARAM [list\
+        AppId $appid\
+        Domain $domain\
+        Class $class\
+        Event $event\
+        Param $param\
+        Order $order\
+        Hull $hull\
+    ]]
+    relation assign $self
+
+    ttk::frame $Hull
+    ttk::label $Hull.label -text $Param
+    ttk::entry $Hull.entry
+
+    grid $Hull.label $Hull.entry\
+        -padx 2
+    grid configure $Hull.label\
+        -sticky e
+    grid configure $Hull.entry\
+        -sticky w
+}
+<<EVTPARAM exports>>=
+namespace export create
+----
+
+==== Read Value Method
+
+The event parameter is held in the entry widget and we provide method
+to obtain that value.
+
+[source,tcl]
+----
+<<EVTPARAM code>>=
+proc ReadValue {self} {
+    relation assign $self Hull
+    return [$Hull.entry get]
+}
+<<EVTPARAM exports>>=
+namespace export ReadValue
+----
+
+==== Class Implementation
+
+[source,tcl]
+----
+<<EVTPARAM class>>=
+<<EVTPARAM data>>
+namespace eval EVTPARAM {
+<<class namespace path>>
+    <<EVTPARAM code>>
+    <<EVTPARAM exports>>
+    namespace ensemble create
+}
+----
+
+=== R7 -- EVTPARAM => CEVT
+
+The `R7` relationship enforces the rule that event parameters are associated
+with a particular event in a class.
+It is also that case that an event might have no parameters.
+
+[source,tcl]
+----
+<<R7>>=
+relvar association R7\
+    EVTPARAM {AppId Domain Class Event} *\
+    CEVT {AppId Domain Class Event} 1
+----
+
+=== State Model Class
+
+For those classes that have a state model,
+we use the State Model class to provide the user with feedback on
+the current state of the instances.
+
+[source,tcl]
+----
+<<SM data>>=
+relvar create SM {
+    AppId string
+    Domain string
+    Class string
+    Hull string
+} {AppId Domain Class} Hull
+----
+
+==== Create Method
+
+(((rash,SM,create)))
+[source,tcl]
+----
+<<SM code>>=
+proc create {appid domain class hull} {
+    <<SM create: insert instance>>
+    <<SM create: configure display>>
+    <<SM create: configure current state display>>
+
+    return $self
+}
+<<SM exports>>=
+namespace export create
+----
+
+[source,tcl]
+----
+<<SM create: insert instance>>=
+set self [relvar insert ::rash::SM [list\
+    AppId $appid\
+    Domain $domain\
+    Class $class\
+    Hull $hull
+]]
+relation assign $self
+
+set smrelvar [FullyQualifyDomain $Domain]::${Class}__STATEINST
+set insts [relvar set $smrelvar]
+set attrs [relation attributes $insts]
+----
+
+[source,tcl]
+----
+<<SM create: configure display>>=
+ttk::frame $Hull
+grid $Hull -sticky nsew
+grid rowconfigure $Hull 0 -weight 1
+grid columnconfigure $Hull 0 -weight 1
+
+set tv [ttk::treeview $Hull.inst\
+    -columns $attrs\
+    -displaycolumns $attrs\
+    -selectmode none\
+    -show headings\
+    -height 4\
+    -xscrollcommand [list $Hull.xs set]\
+    -yscrollcommand [list $Hull.ys set]\
+]
+
+ttk::scrollbar $Hull.xs\
+    -orient horizontal\
+    -command [list $Hull.inst xview]
+ttk::scrollbar $Hull.ys\
+    -orient vertical\
+    -command [list $Hull.inst yview]
+
+grid $tv $Hull.ys -sticky nsew
+grid $Hull.xs - -sticky nsew
+::autoscroll::autoscroll $Hull.xs
+::autoscroll::autoscroll $Hull.ys
+----
+
+[source,tcl]
+----
+<<SM create: configure current state display>>=
+    foreach attr $attrs {
+        $tv column $attr\
+            -anchor w\
+            -width [expr\
+                {[font measure TkDefaultFont $attr] + 20}]\
+            -stretch true
+        $tv heading $attr\
+            -text $attr\
+            -anchor w
+    }
+----
+
+[source,tcl]
+----
+<<SM create: configure current state display>>=
+relvar trace add variable $smrelvar\
+    {delete insert set unset update}\
+    [namespace code [list ModTrace $self]]
+
+Refresh $self $smrelvar
+----
+
+==== ModTrace Method
+
+(((rash,SM,ModTrace)))
+[source,tcl]
+----
+<<SM code>>=
+proc ModTrace {self op relvar args} {
+    after 0 [namespace code [list Refresh $self $relvar]]
+
+    switch -exact -- $op {
+        insert -
+        set {
+            return [lindex $args 0]
+        }
+        update {
+            return [lindex $args 1]
+        }
+    }
+}
+----
+
+==== Refresh Method
+
+(((rash,SM,Refresh)))
+[source,tcl]
+----
+<<SM code>>=
+proc Refresh {self relvar} {
+    relation assign $self
+    set tv $Hull.inst
+    $tv delete [$tv children {}]
+
+    set insts [relvar set $relvar]
+    set attrs [relation attributes $insts]
+    relation foreach inst $insts {
+        $tv insert {} end -values [relation extract $inst {*}$attrs]
+    }
+}
+----
+
+==== Class Implementation
+
+[source,tcl]
+----
+<<SM class>>=
+<<SM data>>
+namespace eval SM {
+<<class namespace path>>
+    <<SM code>>
+    <<SM exports>>
+    namespace ensemble create
+}
+----
+
+=== R9 -- SM => DOMCLASS
+
+The `R9` relationship enforces the rule that a Domain Class may have
+a State Model but no more than one.
+
+[source,tcl]
+----
+<<R9>>=
+relvar association R9\
+    SM {AppId Domain Class} ?\
+    DOMCLASS {AppId Domain Class} 1
+----
+
+== Code Organization
+
+In this section we show the organization of the files that can be
+tangled from the literate source.
+
+First, this software is copyrighted.
+It is licensed in the same manner as Tcl itself.
+
+[source,tcl]
+----
+<<copyright info>>=
+# DO NOT EDIT THIS FILE!
+# THIS FILE IS AUTOMATICALLY GENERATED FROM A LITERATE PROGRAM SOURCE FILE.
+#
+# This software is copyrighted 2015 by G. Andrew Mangogna.
+# The following terms apply to all files associated with the software unless
+# explicitly disclaimed in individual files.
+# 
+# The authors hereby grant permission to use, copy, modify, distribute,
+# and license this software and its documentation for any purpose, provided
+# that existing copyright notices are retained in all copies and that this
+# notice is included verbatim in any distributions. No written agreement,
+# license, or royalty fee is required for any of the authorized uses.
+# Modifications to this software may be copyrighted by their authors and
+# need not follow the licensing terms described here, provided that the
+# new terms are clearly indicated on the first page of each file where
+# they apply.
+# 
+# IN NO EVENT SHALL THE AUTHORS OR DISTRIBUTORS BE LIABLE TO ANY PARTY FOR
+# DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES ARISING
+# OUT OF THE USE OF THIS SOFTWARE, ITS DOCUMENTATION, OR ANY DERIVATIVES
+# THEREOF, EVEN IF THE AUTHORS HAVE BEEN ADVISED OF THE POSSIBILITY OF
+# SUCH DAMAGE.
+# 
+# THE AUTHORS AND DISTRIBUTORS SPECIFICALLY DISCLAIM ANY WARRANTIES,
+# INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.  THIS SOFTWARE
+# IS PROVIDED ON AN "AS IS" BASIS, AND THE AUTHORS AND DISTRIBUTORS HAVE
+# NO OBLIGATION TO PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS,
+# OR MODIFICATIONS.
+# 
+# GOVERNMENT USE: If you are acquiring this software on behalf of the
+# U.S. government, the Government shall have only "Restricted Rights"
+# in the software and related documentation as defined in the Federal
+# Acquisition Regulations (FARs) in Clause 52.227.19 (c) (2).  If you
+# are acquiring the software on behalf of the Department of Defense,
+# the software shall be classified as "Commercial Computer Software"
+# and the Government shall have only "Restricted Rights" as defined in
+# Clause 252.227-7013 (c) (1) of DFARs.  Notwithstanding the foregoing,
+# the authors grant the U.S. Government and others acting in its behalf
+# permission to use and distribute the software in accordance with the
+# terms specified in this license.
+----
+
+Each _root chunk_ is described in a section below.
+
+=== Source Code
+
+[source,tcl]
+----
+<<rash.tcl>>=
+<<copyright info>>
+
+package require Tcl 8.6
+package require Tk 8.6
+
+option add *tearOff false
+
+package require logger
+<<required packages>>
+
+namespace eval ::rash {
+    namespace import ::ral::*
+    namespace import ::ralutil::*
+
+    variable version 1.0a3
+
+    <<rash classes>>
+    <<rash relationships>>
+    <<rash code>>
+
+    namespace export init
+    proc init {{appid Rash}} {
+        APP create $appid .[string tolower $appid]
+    }
+    namespace ensemble create
+}
+
+package provide rash $::rash::version
+----
+
+=== Package Index
+
+We also provide a root chunk to extract a package index file.
+
+[source,tcl]
+----
+<<pkgIndex.tcl>>=
+package ifneeded rash 1.0a2 [list source [file join $dir rash.tcl]]
+----
+
+=== User's Manual
+
+[source,tcl]
+----
+<<rash.man>>=
+[manpage_begin rash n 1.0a2]
+[comment {
+<<copyright info>>
+}]
+[moddesc "Rosea Interactive Introspection"]
+[titledesc "Rash"]
+[copyright "2015 by G. Andrew Mangogna"]
+[require rash [opt 1.0a2]]
+[description]
+Rash
+[manpage_end]
+----
+
+=== Unit Tests
+
+[source,tcl]
+----
+<<rash.test>>=
+<<copyright info>>
+
+package require cmdline
+package require logger
+
+# Add custom arguments here.
+set optlist {
+    {level.arg warn {Log debug level}}
+}
+array set options [::cmdline::getKnownOptions argv $optlist]
+
+logger::setlevel $options(level)
+
+source ../src/rash.tcl
+chan puts "testing rash version: [package require rash]"
+
+package require tcltest
+eval tcltest::configure $argv
+
+namespace eval ::rash::test {
+    namespace import ::tcltest::*
+    ::logger::initNamespace [namespace current]
+
+    wm withdraw .
+
+    source ./wmctrl.tcl
+    source ./wmctrl-stubs.tcl
+    source ./decima-ui.tcl
+    source ./decima-ui-stubs.tcl
+
+    rash init
+
+    tkwait window .rash
+
+    cleanupTests
+}
+----
+
+////
+----
+test X-1.0 {
+} -setup {
+} -cleanup {
+} -body {
+} -result {}
+----
+////
+
+[appendix]
+== Literate Programming [[literate-programming,Literate Programming]]
+
+The source for this document conforms to
+http://www.methods.co.nz/asciidoc/[asciidoc] syntax.
+This document is also a
+http://www.literateprogramming.com/[literate program].
+The source code for the implementation is included directly in the document
+source and the build process extracts the source that is then given to the Tcl
+interpreter.
+This process is known as __tangle__ing.
+The program,
+http://repos.modelrealization.com/cgi-bin/fossil/mrtools/[+atangle+],
+is available to extract source code from the document source
+and the +asciidoc+ tool chain can be used to produce a variety
+of different output formats, although PDF is the intended choice.
+
+The goal of a literate program is to explain the logic of the
+program in an order and fashion that facilitates human understanding of the
+program and then _tangle_ the document source to obtain
+the Tcl code in an order suitable for the Tcl interpreter.
+Briefly,
+code is extracted from the literate source by
+defining a series of _chunks_ that contain the source.
+A chunk is _defined_ by including its name as:
+
+........................
+<<chunk name>>=
+........................
+
+The trailing +=+ sign denotes a definition.
+A chunk definition ends at the end of the source block
+or at the beginning of another chunk definition.
+A chunk may be _referenced_ from within a chunk definition by
+using its name without the trailing +=+ sign, as in:
+
+........................
+<<chunk definition>>=
+    <<chunk reference>>
+........................
+
+Chunk names are arbitrary strings.
+Multiple definitions with the same name are simply concatenated in the order
+they are encountered.
+There are one or more _root chunks_ which form the conceptual tree
+for the source files that are contained in the literate source.
+By convention, root chunks are named the same as the file name to
+which they will be tangled.
+Tangling is then the operation of starting at a root chunk and
+recursively substituting the definition for the chunk references that
+are encountered.
+
+For readers that are not familiar with the literate style and
+who are adept at reading source code directly,
+the chunks definitions and reordering
+provided by the tangle operation can be a bit disconcerting at first.
+You can, of course, examine the tangled source output,
+but if you read the program as a document,
+you will have to trust that the
+author managed to arrange the chunk definitions and references in
+a manner so that the tangled output is acceptable to the Tcl interpreter.
+
+[index]
+.Index

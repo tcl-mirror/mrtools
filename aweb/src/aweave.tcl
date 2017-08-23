@@ -49,19 +49,29 @@
 #*--
 #
 
+set iswrapped [expr {[lindex [file system [info script]] 0] ne "native"}]
+if {$iswrapped} {
+    set libdir [file join $::starkit::topdir lib]
+    set appdir [file join $libdir application]
+    set libs [list]
+    if {$::tcl_platform(os) eq "Linux"} {
+        set libs [glob -nocomplain -directory $libdir P-linux*]
+    } elseif {$::tcl_platform(os) eq "Darwin"} {
+        set libs [glob -nocomplain -directory $libdir P-macosx*]
+    }
+    foreach lib $libs {
+        lappend ::auto_path $lib
+    }
+} else {
+    set appdir [file dirname [info script]]
+}
+
 package require Tcl 8.6
 package require cmdline
 package require logger
 
-set iswrapped [expr {[lindex [file system [info script]] 0] ne "native"}]
-if {$iswrapped} {
-    set top [file join $::starkit::topdir lib application]
-} else {
-    set top [file dirname [info script]]
-}
-
 # Pull in the common code
-source [file join $top aweb.tcl]
+source [file join $appdir aweb.tcl]
 
 namespace eval ::aweave {
     namespace export main
@@ -70,7 +80,7 @@ namespace eval ::aweave {
     namespace import ::ral::*
     namespace import ::ralutil::*
 
-    variable version 1.3
+    variable version 1.4.1
 
     variable optlist {
         {version {Print version and license, then exit}}
@@ -141,7 +151,7 @@ proc ::aweave::versionInfo {} {
     variable version
     puts "aweave: version: $version"
     puts {
-This software is copyrighted 2013 by G. Andrew Mangogna.
+This software is copyrighted 2013-2015 by G. Andrew Mangogna.
 The following terms apply to all files associated with the software unless
 explicitly disclaimed in individual files.
 

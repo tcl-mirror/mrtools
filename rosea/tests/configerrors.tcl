@@ -120,4 +120,19 @@ rosea configure {
         }
         association R1 X +--+ Y -associator A
     }
+
+    domain d8 {
+        association R1 Personality *--1 Human
+
+        class Human {
+            attribute id string -id 1
+            attribute ego string -id 2
+        }
+
+        class Personality {
+            attribute ego string -id 1
+            attribute type string -id 1
+            reference R1 Human -link id
+        }
+    }
 }

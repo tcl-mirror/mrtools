@@ -63,18 +63,28 @@
 #*--
 #
 
+set iswrapped [expr {[lindex [file system [info script]] 0] ne "native"}]
+if {$iswrapped} {
+    set libdir [file join $::starkit::topdir lib]
+    set appdir [file join $libdir application]
+    set libs [list]
+    if {$::tcl_platform(os) eq "Linux"} {
+        set libs [glob -nocomplain -directory $libdir P-linux*]
+    } elseif {$::tcl_platform(os) eq "Darwin"} {
+        set libs [glob -nocomplain -directory $libdir P-macosx*]
+    }
+    foreach lib $libs {
+        lappend ::auto_path $lib
+    }
+} else {
+    set appdir [file dirname [info script]]
+}
+
 package require Tcl 8.6
 package require cmdline
 package require logger
 
-set iswrapped [expr {[lindex [file system [info script]] 0] ne "native"}]
-if {$iswrapped} {
-    set top [file join $::starkit::topdir lib application]
-} else {
-    set top [file dirname [info script]]
-}
-
-source [file join $top aweb.tcl]
+source [file join $appdir aweb.tcl]
 
 namespace eval ::atangle {
     namespace export main
@@ -83,7 +93,7 @@ namespace eval ::atangle {
     namespace import ::ral::*
     namespace import ::ralutil::*
 
-    variable version 1.2
+    variable version 1.3.1
 
     variable optlist {
         {version {Print version and license, then exit}}
@@ -156,7 +166,7 @@ proc ::atangle::versionInfo {} {
     variable version
     puts "atangle: version: $version"
     puts {
-This software is copyrighted 2013 by G. Andrew Mangogna.
+This software is copyrighted 2013-2015 by G. Andrew Mangogna.
 The following terms apply to all files associated with the software unless
 explicitly disclaimed in individual files.
 
@@ -234,14 +244,16 @@ terms specified in this license.
                     <<$chunk>>"
         }
         relation foreach part $parts -ascending {BlockLineNum Offset} {
-            relation assign $part Content BlockLineNum Offset
+            # log::debug "\n[relformat $part "Chunk Parts"]"
+            relation assign $part Content BlockLineNum Offset FileName
             set refs [pipe {
                 relvar set ChunkRef |
                 relation semijoin $part ~\
-                    -using {BlockLineNum ChunkLineNum Offset ChunkOffset}
+                    -using {FileName FileName BlockLineNum ChunkLineNum Offset ChunkOffset}
             }]
-            #log::debug "\n[relformat $refs "Refs in $chunk"]"
-            set linectrl [my LineDirective [expr {$BlockLineNum + $Offset +1}]]
+            # log::debug "\n[relformat $refs "Refs in $chunk"]"
+            set linectrl [my LineDirective\
+                [expr {$BlockLineNum + $Offset +1}] $FileName]
             if {$linectrl ne {}} {
                 lappend gathered $linectrl
             }
@@ -270,9 +282,8 @@ terms specified in this license.
         return $gathered
     }
 
-    method LineDirective {linenum} {
+    method LineDirective {linenum filename} {
         namespace upvar ::atangle options(line) linedir
-        namespace upvar ::atangle infilename filename
         set result [regsub -all -- {%f%} $linedir $filename]
         set result [regsub -all -- {%l%} $result $linenum]
         return $result
