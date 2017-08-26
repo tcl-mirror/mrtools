@@ -2940,7 +2940,7 @@ R4 link $wm $wc
 ///////
 
 [float]
-===== Implementation
+===== Implementation [[simple-link]]
 
 The figure below shows the architectural relvars required to
 link instances.
@@ -3526,6 +3526,249 @@ test linkAssoc-1.0 {
             == 2}
 } -result {1}
 ----
+
+==== Updating Class Based Associations
+
+For class based asssociations,
+the references of the associator class can be updated.
+This is sometimes preferred over deleting and creating a new
+association class, especially if there is a state model associated
+with the class.
+
+*****
+_relationship_ +reference+ _assocref_ _instref_ ? _direction_ ?
+
+`assocref`::
+    An instance reference of the associator class of _relationship_.
+`instref`::
+    An instance reference of a class that participates in _relationship_.
+`direction`::
+    An optional argument used for reflexive associations which takes on
+    values of _forward_ or _reverse_.
+    The argument is used to resolve the ambiguity of reflexive relationships
+    and specifies the direction of reference that the update should make.
+*****
+
+///////
+----
+<<manual architecture relationship commands>>=
+[call [arg relationship] [cmd reference] [arg assocref] [arg instref]]
+
+For class based associations,
+the [cmd reference] command will update [arg assoref] so that it
+will refer to [arg instref].
+If the association is reflexive, then
+[arg direction] must be specified as [emph forward] or [emph backward].
+----
+///////
+
+[float]
+===== Implementation
+
+The implementation of the `reference` command is similar to that of the
+`link` command for <<simple-link,simple associations>>.
+
+(((rosea,RelCmds,referenceAssoc)))
+[source,tcl]
+----
+<<relationship commands>>=
+proc referenceAssoc {rname assocref instref {dir {}}} {
+    <<referenceAssoc: validate arguments>>
+    <<referenceAssoc: look up link info>>
+    <<referenceAssoc: determine reference direction>>
+    <<referenceAssoc: obtain referenced values>>
+    <<referenceAssoc: update referring values>>
+}
+----
+
+We will only deal with singular references in this command
+and, as usual, not permit cross domain linking.
+
+[source,tcl]
+----
+<<referenceAssoc: validate arguments>>=
+if {![isRefSingular $assocref]} {
+    tailcall DeclError SINGLE_REF_REQUIRED [refMultiplicity $assocref]
+}
+lassign $assocref assocrelvar associnst
+SplitRelvarName $assocrelvar assocdomain assocclass
+
+if {![isRefSingular $instref]} {
+    tailcall DeclError SINGLE_REF_REQUIRED [refMultiplicity $instref]
+}
+lassign $instref instrelvar inst
+SplitRelvarName $instrelvar instdomain instclass
+
+if {$assocdomain ne $instdomain} {
+    tailcall DeclError NO_CROSS_DOMAIN $domain1 $domain2
+}
+----
+
+The architectural relvar for associative references has the information
+about which attributes are used to realize the relationship.
+
+[source,tcl]
+----
+<<referenceAssoc: look up link info>>=
+set assocref [relvar restrictone ${instdomain}::__Arch_AssocRef\
+        Relationship $rname]
+if {[relation isempty $assocref]} {
+    tailcall DeclError UNKNOWN_RELATIONSHIP $rname
+}
+
+relation assign $assocref\
+    {AssocClass assocClass}\
+    {References references}
+
+if {$assocClass ne $assocclass} {
+    tailcall DeclError NOT_IN_ASSOCIATION $assocclass $rname
+}
+----
+
+Now we must check to see if we are dealing with a reflexive association
+and resolve that ambiguity using the _direction_ argument.
+
+[source,tcl]
+----
+<<referenceAssoc: determine reference direction>>=
+set ref [relation restrictwith $references {$Participant eq $instclass}]
+set refcard [relation cardinality $ref]
+if {$refcard == 2} {
+    switch -exact -- $dir {
+        forward {
+            set role target
+        }
+        backward {
+            set role source
+        }
+        default {
+            tailcall DeclError DIRECTION_REQUIRED $dir
+        }
+    }
+    set ref [relation restrictwith $ref {$Role eq $role}]
+} elseif {$refcard == 0} {
+    tailcall DeclError NOT_IN_ASSOCIATION $instclass $rname
+}
+----
+
+(((error code,DIRECTION_REQUIRED)))
+[source,tcl]
+----
+<<error code formats>>=
+DIRECTION_REQUIRED  {direction argument is required: got "%s"}
+----
+
+The update strategy is the same as that used for simple associations.
+We extend the relation holding the referring and referenced attribute
+names with the values from the referred to instance.
+We can then create a dictionary of attribute name / value pairs
+that provide the values needed to set the referring attributes.
+
+[source,tcl]
+----
+<<referenceAssoc: obtain referenced values>>=
+set referringAttrs [relation extract $ref ReferringAttrs]
+
+set refedvalue [relation semijoin $inst [relvar set $instrelvar]]
+
+set tovalues [pipe {
+    relation extend $referringAttrs rfa RefValue string {
+        [relation extract $refedvalue\
+            [tuple extract $rfa ReferencedAttribute]]} |
+    relation dict ~ ReferringAttribute RefValue
+}]
+----
+
+Finally,
+an update of the associator class relvar changes which instances is
+referenced by the associator class instance.
+
+[source,tcl]
+----
+<<referenceAssoc: update referring values>>=
+relvar updateone $assocrelvar assoctup [tuple get [relation tuple $associnst]] {
+    tuple update $assoctup {*}$tovalues
+}
+----
+
+[float]
+===== Tests
+[source,tcl]
+----
+<<class command tests>>=
+test referenceAssoc-1.0 {
+    Modify associative links.
+} -setup {
+    rosea configure {
+        domain assoc {
+            class Dog {
+                attribute Name string -id 1
+                attribute Breed string
+            }
+            class Owner {
+                attribute Name string -id 1
+                attribute Age int
+            }
+            class Ownership {
+                attribute DogName string -id 1
+                attribute OwnerName string -id 1
+                reference R1 Owner -link {OwnerName Name}
+                reference R1 Dog -link {DogName Name}
+            }
+
+            association R1 Owner 0..*--0..* Dog -associator Ownership
+        }
+    }
+    rosea generate
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::assoc
+} -body {
+    set d1 [assoc::Dog create Name Fluffy Breed Poodle]
+    set d2 [assoc::Dog create Name Tiger Breed Mut]
+    set owner [assoc::Owner create Name Fred Age 32]
+    set ownership [assoc::R1 link $d1 $owner]
+    assoc::R1 reference $ownership $d2
+    set owneddog [rosea::InstCmds::findRelated $owner R1]
+    rosea::InstCmds::readAttribute $owneddog Name
+} -result {Tiger}
+----
+
+[source,tcl]
+----
+<<class command tests>>=
+test referenceAssoc-2.0 {
+    Modify reflexive associative links.
+} -setup {
+    rosea configure {
+        domain assoc {
+            class A {
+                attribute prevP int -id 1
+                attribute nextP int -id 1
+                reference R1 P -link {prevP ID} -link {nextP ID}
+            }
+            class P {
+                attribute ID int -id 1
+            }
+
+            association R1 P 0..*--0..* P -associator A -path {prevP nextP}
+        }
+    }
+    rosea generate
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::assoc
+} -body {
+    set p1 [assoc::P create ID 1]
+    set p2 [assoc::P create ID 2]
+    set p3 [assoc::P create ID 3]
+    set a1 [assoc::R1 link $p1 $p2]
+    assoc::R1 reference $a1 $p3 forward
+    set related [rosea::InstCmds::findRelated $p1 R1]
+    rosea::InstCmds::readAttribute $related ID
+} -result {3}
+----
+
 
 ==== Unlinking Simple Associations
 
@@ -16465,6 +16708,7 @@ relation foreach bothref $bothrefs {
 
     set ensemblemap [dict create\
         link [list ::rosea::RelCmds::linkAssoc $relationship]\
+        reference [list ::rosea::RelCmds::referenceAssoc $relationship]\
         unlink [list ::rosea::RelCmds::unlinkAssoc $relationship]\
     ]
     # Determine if we have any assigners
@@ -17874,6 +18118,12 @@ it can be more convenient to use multiple [arg value] arguments.
         M[incr cnt]         PermPress\ 
         M[incr cnt]         Delicate\ 
 }]
+[para]
+The return value of the command is a list of the inserted tuple values.
+Each tuple value is also a list of attribute name / attribute value
+pairs ([emph i.e.] a dictionary, keyed by attribute name).
+The returned list gives the actual inserted values and can be used
+to access system generated or defaulted attribute values.
 ----
 ///////
 
@@ -17933,7 +18183,7 @@ proc class {class heading args} {
         }]
     }
 
-    return
+    return [relation body $insts]
 }
 ----
 
@@ -22837,7 +23087,7 @@ namespace eval ::rosea {
     <<rosea exports>>
     namespace ensemble create
 
-    variable version 1.6.5
+    variable version 1.7
 
     logger::initNamespace [namespace current]
 
@@ -22861,7 +23111,7 @@ We also provide a root chunk to extract a package index file.
 [source,tcl]
 ----
 <<pkgIndex.tcl>>=
-package ifneeded rosea 1.6.5 [list source [file join $dir rosea.tcl]]
+package ifneeded rosea 1.7 [list source [file join $dir rosea.tcl]]
 ----
 
 === Unit Tests
@@ -22975,14 +23225,14 @@ rosea populate {
 [source,tcl]
 ----
 <<rosea.man>>=
-[manpage_begin rosea n 1.6.5]
+[manpage_begin rosea n 1.7]
 [comment {
 <<copyright info>>
 }]
 [moddesc "XUML Data and Execution Architecture"]
 [titledesc "Relation Oriented Software Execution Architecture"]
 [copyright "2014-2015 by G. Andrew Mangogna"]
-[require rosea [opt 1.6.5]]
+[require rosea [opt 1.7]]
 [description]
 <<manual description>>
 [section "Package Commands"]
