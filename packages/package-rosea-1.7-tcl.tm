@@ -2,7 +2,7 @@
 # -- Tcl Module
 
 # @@ Meta Begin
-# Package rosea 1.6.5
+# Package rosea 1.7
 # Meta description Rosea is a data and execution architecture for
 # Meta description translating XUML models using Tcl as the implementation
 # Meta description language.
@@ -30,7 +30,7 @@ package require lambda
 
 # ACTIVESTATE TEAPOT-PKG BEGIN DECLARE
 
-package provide rosea 1.6.5
+package provide rosea 1.7
 
 # ACTIVESTATE TEAPOT-PKG END DECLARE
 # ACTIVESTATE TEAPOT-PKG END TM
@@ -113,7 +113,7 @@ namespace eval ::rosea {
     
     namespace ensemble create
 
-    variable version 1.6.5
+    variable version 1.7
 
     logger::initNamespace [namespace current]
 
@@ -890,6 +890,7 @@ namespace eval ::rosea {
             
                 set ensemblemap [dict create\
                     link [list ::rosea::RelCmds::linkAssoc $relationship]\
+                    reference [list ::rosea::RelCmds::referenceAssoc $relationship]\
                     unlink [list ::rosea::RelCmds::unlinkAssoc $relationship]\
                 ]
                 # Determine if we have any assigners
@@ -1333,6 +1334,7 @@ namespace eval ::rosea {
             MUST_BE_SINGULAR    {number of referred to instances for "%s" must be one,\
                                     got %d}
             NOT_IN_ASSOCIATION         {"%s" $relvar1 not a participant in "%s"}
+            DIRECTION_REQUIRED  {direction argument is required: got "%s"}
             AMBIGUOUS_UNLINK         {"%s" is reflexive and linking via "%s" is ambiguous}
             NO_SUBCLASS         {relationship "%s" does not have a "%s"}
             NO_ASSIGNER         {relationship, "%s", does not have an assigner}
@@ -2175,6 +2177,67 @@ namespace eval ::rosea {
                     [relvar insert ${domain1}::$assocClass {*}$assoctuples]]
                 CreateInInitialStateFromRef $domain1 $assocClass $ref ; # <1>
             return $ref
+        }
+        proc referenceAssoc {rname assocref instref {dir {}}} {
+            if {![isRefSingular $assocref]} {
+                tailcall DeclError SINGLE_REF_REQUIRED [refMultiplicity $assocref]
+            }
+            lassign $assocref assocrelvar associnst
+            SplitRelvarName $assocrelvar assocdomain assocclass
+            
+            if {![isRefSingular $instref]} {
+                tailcall DeclError SINGLE_REF_REQUIRED [refMultiplicity $instref]
+            }
+            lassign $instref instrelvar inst
+            SplitRelvarName $instrelvar instdomain instclass
+            
+            if {$assocdomain ne $instdomain} {
+                tailcall DeclError NO_CROSS_DOMAIN $domain1 $domain2
+            }
+            set assocref [relvar restrictone ${instdomain}::__Arch_AssocRef\
+                    Relationship $rname]
+            if {[relation isempty $assocref]} {
+                tailcall DeclError UNKNOWN_RELATIONSHIP $rname
+            }
+            
+            relation assign $assocref\
+                {AssocClass assocClass}\
+                {References references}
+            
+            if {$assocClass ne $assocclass} {
+                tailcall DeclError NOT_IN_ASSOCIATION $assocclass $rname
+            }
+            set ref [relation restrictwith $references {$Participant eq $instclass}]
+            set refcard [relation cardinality $ref]
+            if {$refcard == 2} {
+                switch -exact -- $dir {
+                    forward {
+                        set role target
+                    }
+                    backward {
+                        set role source
+                    }
+                    default {
+                        tailcall DeclError DIRECTION_REQUIRED $dir
+                    }
+                }
+                set ref [relation restrictwith $ref {$Role eq $role}]
+            } elseif {$refcard == 0} {
+                tailcall DeclError NOT_IN_ASSOCIATION $instclass $rname
+            }
+            set referringAttrs [relation extract $ref ReferringAttrs]
+            
+            set refedvalue [relation semijoin $inst [relvar set $instrelvar]]
+            
+            set tovalues [pipe {
+                relation extend $referringAttrs rfa RefValue string {
+                    [relation extract $refedvalue\
+                        [tuple extract $rfa ReferencedAttribute]]} |
+                relation dict ~ ReferringAttribute RefValue
+            }]
+            relvar updateone $assocrelvar assoctup [tuple get [relation tuple $associnst]] {
+                tuple update $assoctup {*}$tovalues
+            }
         }
         proc unlinkSimple {rname instref} {
             lassign $instref relvar inst
@@ -4795,7 +4858,7 @@ namespace eval ::rosea {
                     }]
                 }
             
-                return
+                return [relation body $insts]
             }
             proc assigner {rname heading args} {
                 # Determine if we have one big list or a bunch of values.

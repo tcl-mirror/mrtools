@@ -98,8 +98,8 @@ A2XOPTS =\
 	$(NULL)
 
 ATANGLEOPTS =\
-	-report\
 	$(NULL)
+#	-report\
 
 DBLATEX_PARAMS =\
 	bibliography.numbered=0\
@@ -182,7 +182,7 @@ $(DOCDIR)/%.pdf : %.aweb
 	a2x $(A2XOPTS) --doctype=book  --format=pdf\
 	    --destination-dir=$(DOCDIR)\
 	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) $<
-	$(RM) $(DOCDIR)/*__[0-9].pdf
+	$(RM) $(DOCDIR)/rosea__*
 
 %.tcl : %.aweb
 	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
