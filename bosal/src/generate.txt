@@ -1,6 +1,2047 @@
 // vim:set syntax=asciidoc:
 
-= Harness Code Generation
+== Domain Independent Code
 
-== Introduction
-Place holder.
+=== Introduction
+
+Give overview of the structure of a test harness.
+Need a diagram showing how a set of domains is harnessed together
+with the test harness code providing a communications interface.
+
+The test harness must provide a `main` function.
+After invoking `mrt_Initialize()`,
+then `bslInitialize()` must be invoked.
+Finally, `bsl_Run()` must be invoked to run the system.
+
+=== Running the Harness
+
+(((chunk,bosal external function declarations)))
+(((function,bsl_Run)))
+
+[source,c]
+----
+<<bosal external function declarations>>=
+extern void bsl_Run(void) ;
+----
+
+(((chunk,bosal external function definitions)))
+(((function,bsl_Run)))
+
+[source,c]
+----
+<<bosal external function definitions>>=
+void
+bsl_Run(void)
+{
+    if (!bslInitialize()) {
+        return ;
+    }
+
+    mrt_SetFatalErrorHandler(bslErrorHandler) ;
+
+    for (bslHarnessState = bslRunning ; bslHarnessState != bslTerminate ;) {
+        if (setjmp(bslFatalBuf) == 0) {
+            mrt_EventLoop() ;
+        }
+
+        while (bslHarnessState == bslHalted) {
+            bslReadAndEvalCommand(0) ;
+        }
+    }
+    bslClose() ;
+}
+----
+
+(((chunk,bosal static data)))
+(((data,bslHarnessState)))
+
+[source,c]
+----
+<<bosal static data>>=
+static enum {
+    bslHalted,
+    bslRunning,
+    bslTerminate,
+} bslHarnessState ;
+----
+
+(((chunk,bosal static data)))
+(((data,bslFatalBuf)))
+
+[source,c]
+----
+<<bosal static data>>=
+static jmp_buf bslFatalBuf ;
+----
+
+(((chunk,bosal forward function declarations)))
+(((function,bslErrorHandler)))
+
+[source,c]
+----
+<<bosal forward function declarations>>=
+static void bslErrorHandler(MRT_ErrorCode errNum, char const *fmt,
+        va_list alist) ;
+----
+
+(((chunk,bosal static functions)))
+(((function,bslErrorHandler)))
+
+[source,c]
+----
+<<bosal static functions>>=
+static void
+bslErrorHandler(
+    MRT_ErrorCode errNum,
+    char const *fmt,
+    va_list alist)
+{
+    static char buf[BUFSIZ] ;
+
+    vsnprintf(buf, sizeof(buf), fmt, alist) ;
+    bslTrimSpaceRight(buf) ;
+    fprintf(bslCmdStream, "fatal {%s}\n" , buf) ;
+
+    bslHarnessState = bslHalted ;
+    longjmp(bslFatalBuf, 1) ;
+}
+----
+
+=== Harness Initialization
+
+(((chunk,bosal forward function declarations)))
+(((function,bslInitialize)))
+
+[source,c]
+----
+<<bosal forward function declarations>>=
+static bool bslInitialize(void) ;
+----
+
+(((chunk,bosal static functions)))
+(((function,bslInitialize)))
+
+[source,c]
+----
+<<bosal static functions>>=
+static bool
+bslInitialize(void)
+{
+    <<bslInitialize: create socket>>
+    <<bslInitialize: bind socket>>
+    <<bslInitialize: listen on socket>>
+    <<bslInitialize: register signals>>
+
+    mrt_RegisterTraceHandler(NULL) ; // start with tracing off
+
+    return true ;
+}
+----
+
+(((chunk,bslInitialize: create socket)))
+
+[source,c]
+----
+<<bslInitialize: create socket>>=
+bslServiceSock = socket(AF_INET, SOCK_STREAM, 0) ;
+if (bslServiceSock == -1) {
+    perror("unable to obtain AF_INET stream socket") ;
+    return false ;
+}
+----
+
+[source,c]
+----
+<<bosal static data>>=
+static int bslServiceSock = -1 ;
+----
+
+(((chunk,bslInitialize: bind socket)))
+
+[source,c]
+----
+<<bslInitialize: bind socket>>=
+struct sockaddr_in hsrvAddr ;
+memset(&hsrvAddr, 0, sizeof(hsrvAddr)) ;
+#       ifdef __APPLE__
+hsrvAddr.sin_len = sizeof(hsrvAddr) ;
+#       endif /* __APPLE__ */
+hsrvAddr.sin_family = AF_INET ;
+hsrvAddr.sin_port = htons(HARNESS_PORT) ;
+
+static char const host[] = "localhost" ;
+struct hostent *hostAddr = gethostbyname(host) ;
+if (hostAddr == NULL) {
+    perror(host) ;
+    return false ;
+}
+assert(hostAddr->h_addrtype == AF_INET) ;
+memcpy(&hsrvAddr.sin_addr, hostAddr->h_addr_list[0], hostAddr->h_length) ;
+
+int err = bind(bslServiceSock, (struct sockaddr const *)&hsrvAddr,
+        sizeof(hsrvAddr)) ;
+if (err == -1) {
+    perror("bind()") ;
+    return false ;
+}
+----
+
+(((chunk,bslInitialize: listen on socket)))
+
+[source,c]
+----
+<<bslInitialize: listen on socket>>=
+mrt_RegisterFDService(bslServiceSock, bslAcceptConnection, NULL, NULL) ;
+err = listen(bslServiceSock, 1) ;
+if (err == -1) {
+    perror("listen()") ;
+    return false ;
+}
+----
+
+(((chunk,bslInitialize: register signals)))
+
+[source,c]
+----
+<<bslInitialize: register signals>>=
+mrt_RegisterSignal(SIGQUIT, bslExitOnSignal) ;
+mrt_RegisterSignal(SIGINT, bslExitOnSignal) ;
+mrt_RegisterSignal(SIGTERM, bslExitOnSignal) ;
+----
+
+=== Accepting Service Connections
+
+(((chunk,bosal forward function declarations)))
+(((function,bslAcceptConnection)))
+
+[source,c]
+----
+<<bosal forward function declarations>>=
+static void bslAcceptConnection(int sock) ;
+----
+
+(((chunk,bosal static functions)))
+(((function,bslAcceptConnection)))
+
+[source,c]
+----
+<<bosal static functions>>=
+static void
+bslAcceptConnection(
+    int sock)
+{
+    int fd = accept(sock, NULL, 0) ;
+
+    int err = shutdown(bslServiceSock, SHUT_RDWR) ;
+    if (err == -1) {
+        perror("shutdown()") ;
+        exit(EXIT_FAILURE) ;
+    }
+    mrt_UnregisterFDService(sock, true, false, false) ;
+    bslServiceSock = -1 ;
+
+    if (fd == -1) {
+        perror("accept()") ;
+        exit(EXIT_FAILURE) ;
+    }
+
+    mrt_RegisterFDService(fd, bslReadAndEvalCommand, NULL, NULL) ;
+    bslCmdStream = fdopen(fd, "w+") ;
+    err = setvbuf(bslCmdStream, NULL, _IOLBF, 0) ;
+}
+----
+
+(((chunk,bosal static data)))
+(((data,bslCmdStream)))
+
+[source,c]
+----
+<<bosal static data>>=
+static FILE *bslCmdStream ;
+----
+
+(((chunk,bosal forward function declarations)))
+(((function,bslReadAndEval)))
+
+[source,c]
+----
+<<bosal forward function declarations>>=
+static void bslReadAndEvalCommand(int rfd) ;
+----
+
+(((chunk,bosal static functions)))
+(((function,bslReadAndEvalCommand)))
+
+[source,c]
+----
+<<bosal static functions>>=
+static void
+bslReadAndEvalCommand(
+    int rfd)
+{
+    static char cmdBuffer[BUFSIZ] ;
+
+    char *cmd = fgets(cmdBuffer, sizeof(cmdBuffer), bslCmdStream) ;
+    if (cmd == NULL) {
+        if (feof(bslCmdStream)) {
+            dbgprintf("goodbye\n") ;
+            bslClose() ;
+            exit(EXIT_SUCCESS) ;
+        } else if (ferror(bslCmdStream)) {
+            if (errno == EINTR) {
+                clearerr(bslCmdStream) ;
+                return ;
+            }
+            perror("fgets()") ;
+            bslClose() ;
+            exit(EXIT_FAILURE) ;
+        } else {
+            printf("partial\n") ;
+            return ;
+        }
+    }
+    bslTrimSpaceRight(cmdBuffer) ;
+    dbgprintf("%s\n", cmdBuffer) ;
+
+    int argc = 0 ;
+    char *const *argv = NULL ;
+    static char parseBuffer[BUFSIZ] ;
+    strcpy(parseBuffer, cmdBuffer) ;
+
+    bslBeginResponse() ;
+    bslAddWord("cmd") ;
+    bslPushContext() ;
+
+    int err = bslParseCommand(parseBuffer, &argc, &argv) ;
+    if (err == -1) {
+        bslFormatToContext("name unknown return error result ") ;
+        bslPushContext() ;
+        bslFormatToContext("failed to parse command: \"%s\"", cmdBuffer) ;
+        bslPopContext() ;
+    } else if (argc != 0) {
+        bslExecCommand(argc, argv) ;
+    } else {
+        return ;
+    }
+
+    bslPopContext() ;
+    bslEndResponse() ;
+}
+----
+
+(((chunk,bosal forward function declarations)))
+(((function,bslExitOnSignal)))
+
+[source,c]
+----
+<<bosal forward function declarations>>=
+static void bslExitOnSignal(int signal) ;
+----
+
+(((chunk,bosal static functions)))
+(((function,bslExitOnSignal)))
+
+[source,c]
+----
+<<bosal static functions>>=
+static void
+bslExitOnSignal(
+    int signal)
+{
+    dbgprintf("caught signal %d\n", signal) ;
+    bslClose() ;
+    exit(EXIT_SUCCESS) ;
+}
+----
+
+(((chunk,bosal forward function declarations)))
+(((function,bslClose)))
+
+[source,c]
+----
+<<bosal forward function declarations>>=
+static void bslClose(void) ;
+----
+
+(((chunk,bosal static functions)))
+(((function,bslClose)))
+
+[source,c]
+----
+<<bosal static functions>>=
+static void
+bslClose(void)
+{
+    if (bslServiceSock != -1) {
+        shutdown(bslServiceSock, SHUT_RDWR) ;
+    }
+    if (bslCmdStream != NULL) {
+        fclose(bslCmdStream) ;
+    }
+}
+----
+
+=== Parsing Harness Commands
+
+(((chunk,bosal forward function declarations)))
+(((function,bslParseCommand)))
+
+[source,c]
+----
+<<bosal forward function declarations>>=
+static int bslParseCommand(char *line, int *pargc, char *const **pargv) ;
+----
+
+(((chunk,bosal static functions)))
+(((function,bslParseCommand)))
+
+[source,c]
+----
+<<bosal static functions>>=
+static int
+bslParseCommand(
+    char *line,
+    int *pargc,
+    char *const **pargv)
+{
+    #define MAX_ARGS    64
+    static char *args[MAX_ARGS] ;
+
+    char **pArgv = args ;
+    char **const argvEnd = pArgv + MAX_ARGS ;
+
+    int quoteCount = 0 ;
+    int parseState = OUTOFWORD ;
+    int parseStackStorage[2] ;
+    int *parseStackTop = parseStackStorage ;
+
+    char *pWord = line ;
+    for ( ; *line != ASCII_NUL ; line++) {
+        char c = *line ;
+        switch (parseState) {
+        case OUTOFWORD:
+            if (isgraph(c)) {
+                if (c == ESCAPE_CHAR) {
+                    *parseStackTop++ = INWORD ;
+                    parseState = INESCAPE ;
+                    if (pArgv < argvEnd) {
+                        *pArgv++ = ++pWord ;
+                    } else {
+                        return -1 ;
+                    }
+                } else if (c == BEGIN_QUOTE) {
+                    *parseStackTop++ = OUTOFWORD ;
+                    parseState = INQUOTE ;
+                    ++quoteCount ;
+                    if (pArgv < argvEnd) {
+                        *pArgv++ = ++pWord ;
+                    } else {
+                        return -1 ;
+                    }
+                } else {
+                    // new word beginning
+                    if (pArgv < argvEnd) {
+                        *pArgv++ = pWord ;
+                    } else {
+                        fprintf(stderr, "exceeded max arguments") ;
+                        return -1 ;
+                    }
+                    *pWord++ = c ;
+                    parseState = INWORD ;
+                }
+            } // else the character is just space to skip
+            break ;
+
+        case INWORD:
+            if (c == ESCAPE_CHAR) {
+                *parseStackTop++ = parseState ;
+                parseState = INESCAPE ;
+            } else if (c == BEGIN_QUOTE) {
+                *parseStackTop++ = parseState ;
+                parseState = INQUOTE ;
+                ++quoteCount ;
+            } else if (isspace(c)) {
+                // end of word
+                parseState = OUTOFWORD ;
+                *pWord++ = ASCII_NUL ;
+            } else {
+                *pWord++ = c ;
+            }
+            break ;
+
+        case INESCAPE:
+            switch (c) {
+                case 'a':
+                    *pWord++ = '\a' ;
+                    break ;
+                case 'b':
+                    *pWord++ = '\b' ;
+                    break ;
+                case 't':
+                    *pWord++ = '\t' ;
+                    break ;
+                case 'n':
+                    *pWord++ = '\n' ;
+                    break ;
+                case 'v':
+                    *pWord++ = '\v' ;
+                    break ;
+                case 'f':
+                    *pWord++ = '\f' ;
+                    break ;
+                case 'r':
+                    *pWord++ = '\r' ;
+                    break ;
+                default:
+                    *pWord++ = c ;
+                    break ;
+            }
+            parseState = *--parseStackTop ;
+            break ;
+
+        case INQUOTE:
+            if (c == BEGIN_QUOTE) {
+                ++quoteCount ;
+                *pWord++ = c ;
+            } else if (c == END_QUOTE) {
+                if (--quoteCount == 0) {
+                    parseState = *--parseStackTop ;
+                    // check if ending the quote also ended the word
+                    if (parseState == OUTOFWORD) {
+                        *pWord++ = ASCII_NUL ;
+                    }
+                } else {
+                    *pWord++ = c ;
+                }
+            } else if (c == ESCAPE_CHAR) {
+                *parseStackTop++ = parseState ;
+                parseState = INESCAPE ;
+            } else {
+                *pWord++ = c ;
+            }
+            break ;
+        }
+    }
+
+    *pWord = ASCII_NUL ;
+    *pArgv = NULL ;
+    if (quoteCount == 0 && parseState != INESCAPE) {
+        if (pargc) {
+            *pargc = pArgv - args ;
+        }
+        if (pargv) {
+            *pargv = args ;
+        }
+        return 0 ;
+    } else {
+        return -1 ;
+    }
+}
+----
+
+=== Executing Harness Commands
+
+(((chunk,bosal forward function declarations)))
+(((function,bslExecCommand)))
+
+[source,c]
+----
+<<bosal forward function declarations>>=
+static void bslExecCommand(int argc, char *const *argv) ;
+----
+
+(((chunk,bosal static functions)))
+(((function,bslExecCommand)))
+
+[source,c]
+----
+<<bosal static functions>>=
+static void
+bslExecCommand(
+    int argc,
+    char *const *argv)
+{
+    BSL_CommandMap key = {
+        .name = argv[0],
+        .commandFunc = NULL
+    } ;
+
+    BSL_CommandMap const *cmd =
+            bsearch(&key, commands, COUNTOF(commands), sizeof(commands[0]),
+            bslCommandMapCompare) ;
+
+    bslAddWord("name") ;
+    bslAddWord(argv[0]) ;
+    bslAddWord("result") ;
+    bslPushContext() ;
+
+    bool success ;
+    if (cmd != NULL) {
+        assert(cmd->commandFunc != NULL) ;
+        success = cmd->commandFunc(argc, argv) ;
+    } else {
+        bslFormatToContext("unknown command, \"%s\"", argv[0]) ;
+        success = false ;
+    }
+
+    bslPopContext() ;
+    bslAddWord("code") ;
+    bslAddWord(success ? "ok" : "error") ;
+}
+----
+
+[source,c]
+----
+<<bosal data types>>=
+typedef bool BSL_CommandFunc(int, char * const*) ;
+
+typedef struct bslcommandmap {
+    char const *name ;
+    BSL_CommandFunc *commandFunc ;
+} BSL_CommandMap ;
+----
+
+(((chunk,bosal forward function declarations)))
+(((function,bslCommandMapCompare)))
+
+[source,c]
+----
+<<bosal forward function declarations>>=
+static int bslCommandMapCompare(void const *m1, void const *m2) ;
+----
+
+(((chunk,bosal static functions)))
+(((function,bslCommandMapCompare)))
+
+[source,c]
+----
+<<bosal static functions>>=
+static int
+bslCommandMapCompare(
+    void const *m1,
+    void const *m2)
+{
+    BSL_CommandMap const *cm1 = m1 ;
+    BSL_CommandMap const *cm2 = m2 ;
+
+    return strcmp(cm1->name, cm2->name) ;
+}
+----
+
+(((chunk,bosal static data)))
+(((data.commands)))
+
+[source,c]
+----
+<<bosal static data>>=
+static BSL_CommandMap const commands[] = { // must be in ascending "name" order
+    {
+        .name = "cancel",
+        .commandFunc = NULL  //bslCancelCommand
+    },
+    {
+        .name = "delaysignal",
+        .commandFunc = NULL  //bslDelaySignalCommand
+    },
+    {
+        .name = "delete",
+        .commandFunc = NULL  //bslDeleteCommand
+    },
+    {
+        .name = "domainop",
+        .commandFunc = bslDopCommand
+    },
+    {
+        .name = "eloop",
+        .commandFunc = bslEloopCommand
+    },
+    {
+        .name = "instr",
+        .commandFunc = NULL  //bslInstrCommand
+    },
+    {
+        .name = "null",
+        .commandFunc = bslNullCommand
+    },
+    {
+        .name = "query",
+        .commandFunc = NULL  //bslQueryCommand
+    },
+    {
+        .name = "read",
+        .commandFunc = NULL  //bslReadCommand
+    },
+    {
+        .name = "remaining",
+        .commandFunc = NULL  //bslRemainingCommand
+    },
+    {
+        .name = "signal",
+        .commandFunc = bslSignalCommand
+    },
+    {
+        .name = "trace",
+        .commandFunc = bslTraceCommand
+    },
+    {
+        .name = "update",
+        .commandFunc = NULL  //bslUpdateCommand
+    },
+} ;
+----
+
+=== Locating Domain Objects
+
+==== Finding a Harness
+
+(((chunk,bosal forward function declarations)))
+(((function,bslFindHarness)))
+
+[source,c]
+----
+<<bosal forward function declarations>>=
+static BSL_DomainHarness const *const bslFindHarness(char const *domainName) ;
+----
+
+(((chunk,bosal static functions)))
+(((function,bslFindHarness)))
+
+[source,c]
+----
+<<bosal static functions>>=
+static BSL_DomainHarness const *const
+bslFindHarness(
+    char const *domainName)
+{
+    assert(domainName != NULL) ;
+
+    BSL_DomainHarness const *hiter = bslHarnesses ;
+    int hcount = bslHarnessCount ;
+    for ( ; hcount != 0 ; hcount--, hiter++) {
+        assert(hiter->portal != NULL) ;
+        assert(hiter->portal->name != NULL) ;
+        char const *trialName = mrt_PortalDomainName(hiter->portal) ;
+        if (strcmp(domainName, trialName) == 0) {
+            return hiter ;
+        }
+    }
+    bslFormatToContext("unknown domain, \"%s\"", domainName) ;
+    return NULL ;
+}
+----
+
+==== Finding a Domain Operation
+
+(((chunk,bosal forward function declarations)))
+(((function,bslFindOperation)))
+
+[source,c]
+----
+<<bosal forward function declarations>>=
+static BSL_OperationMap const *const bslFindOperation(
+    BSL_DomainHarness const *const harness, char const *opName) ;
+----
+
+(((chunk,bosal static functions)))
+(((function,bslFindOperation)))
+
+[source,c]
+----
+<<bosal static functions>>=
+static BSL_OperationMap const *const
+bslFindOperation(
+    BSL_DomainHarness const *const harness,
+    char const *opName)
+{
+    BSL_OperationMap key = {
+        .name = opName,
+        .func = NULL
+    } ;
+
+    BSL_OperationMap const *const opMap =
+            bsearch(&key, harness->operations, harness->operationCount,
+            sizeof(key), bslOperationMapCompare) ;
+    if (opMap == NULL) {
+        bslFormatToContext("unknown operation, \"%s\"", opName) ;
+    }
+
+    return opMap ;
+}
+----
+
+(((chunk,bosal forward function declarations)))
+(((function,bslOperationMapCompare)))
+
+[source,c]
+----
+<<bosal forward function declarations>>=
+static int bslOperationMapCompare(void const *m1, void const *m2) ;
+----
+
+(((chunk,bosal static functions)))
+(((function,bslOperationMapCompare)))
+
+[source,c]
+----
+<<bosal static functions>>=
+static int
+bslOperationMapCompare(
+    void const *m1,
+    void const *m2)
+{
+    BSL_OperationMap const *cm1 = m1 ;
+    BSL_OperationMap const *cm2 = m2 ;
+
+    return strcmp(cm1->name, cm2->name) ;
+}
+----
+
+=== Generating Domain Mappings
+
+(((chunk,bosal static data)))
+
+[source,c]
+----
+<<bosal static data>>=
+<%generateInstMaps%>
+<%generateAttrMaps%>
+<%generateClassMaps%>
+<%generateOpMaps%>
+<%generateHarnesses%>
+----
+
+==== Generating the Domain Harness
+
+(((chunk,bosal data types)))
+(((type,BSL_DomainHarness)))
+
+[source,c]
+----
+<<bosal data types>>=
+typedef struct bsldomainharness {
+    MRT_DomainPortal const *portal ;
+    struct bsloperationmap const *const operations ;
+    unsigned operationCount ;
+    struct bslclassmap const *const classes ;
+    unsigned classCount ;
+} BSL_DomainHarness ;
+----
+
+(((chunk,bosal code generation commands)))
+(((proc,generateHarnesses)))
+
+[source,tcl]
+----
+<<bosal code generation commands>>=
+proc generateHarnesses {} {
+    set div [diverter new]
+
+    $div puts "static BSL_DomainHarness const bslHarnesses\[] = {"
+    $div push
+
+    forAllRefs domRef [Domain findAll] {
+        assignAttribute $domRef {Name domainName}
+        $div puts "{"
+        $div push
+        $div puts ".portal = &${domainName}__PORTAL,"
+
+        set opsRef [findRelated $domRef ~R5]
+        if {[isEmptyRef $opsRef]} {
+            set ops NULL
+            set opsCount 0
+        } else {
+            set ops ${domainName}__OPMAP
+            set opsCount COUNTOF($ops)
+        }
+        $div puts ".operations = $ops,"
+        $div puts ".operationCount = $opsCount,"
+
+        $div puts ".classes = ${domainName}__CLASSMAP,"
+        $div puts ".classCount = COUNTOF(${domainName}__CLASSMAP)"
+
+        $div pop
+        $div puts "},"
+    }
+
+    $div pop
+    $div puts "} ;"
+    $div puts "static int const bslHarnessCount = COUNTOF(bslHarnesses) ;"
+
+    $div return
+}
+----
+
+==== Generating the Operations Map
+
+(((chunk,bosal data types)))
+(((type,BSL_DomainOpFunc)))
+
+[source,c]
+----
+<<bosal data types>>=
+typedef bool BSL_DomainOpFunc(int, char *const *) ;
+----
+
+(((chunk,bosal data types)))
+(((type,BSL_OperationMap)))
+
+[source,c]
+----
+<<bosal data types>>=
+typedef struct bsloperationmap {
+    char const *name ;
+    BSL_DomainOpFunc *func ;
+} BSL_OperationMap ;
+----
+
+(((chunk,bosal code generation commands)))
+(((proc,generateOpMap)))
+
+[source,tcl]
+----
+<<bosal code generation commands>>=
+proc generateOpMaps {} {
+    set div [diverter new]
+
+    set ops [pipe {
+        DomainOperation findAll |
+        deRef ~ |
+        relation project ~ Domain Name |
+        relation group ~ Ops Name
+    }]
+
+    relation foreach op $ops {
+        relation assign $op
+        $div puts "static BSL_OperationMap const ${Domain}__OPMAP\[] = {"
+        $div push
+
+        relation foreach op $Ops -ascending Name {
+            set opName [relation extract $op Name]
+            $div puts "{\"$opName\", ${Domain}_${opName}__OPFUNC},"
+        }
+
+        $div pop
+        $div puts "} ;"
+    }
+
+    $div return
+}
+----
+
+(((chunk,bosal forward function declarations)))
+
+[source,c]
+----
+<<bosal forward function declarations>>=
+<%generateOpFuncDeclarations%>
+----
+
+(((chunk,bosal code generation commands)))
+(((proc,generateOpFuncDeclarations)))
+
+[source,tcl]
+----
+<<bosal code generation commands>>=
+proc generateOpFuncDeclarations {} {
+    set div [diverter new]
+
+    forAllRefs dopRef [DomainOperation findAll] {
+        assignAttribute $dopRef Domain Name
+        $div puts "static bool ${Domain}_${Name}__OPFUNC(int, char *const *) ;"
+    }
+
+    $div return
+}
+----
+
+(((chunk,bosal static functions)))
+
+[source,c]
+----
+<<bosal static functions>>=
+<%generateOpFuncDefinitions%>
+----
+
+(((chunk,bosal code generation commands)))
+(((proc,generateOpFuncDefinitions)))
+
+[source,tcl]
+----
+<<bosal code generation commands>>=
+proc generateOpFuncDefinitions {} {
+    set div [diverter new]
+
+    forAllRefs dopRef [DomainOperation findAll] {
+        assignAttribute $dopRef Domain Name ReturnDataType
+        $div puts "static bool ${Domain}_${Name}__OPFUNC("
+        $div puts "    int argc,"
+        $div puts "    char *const *argv)"
+        $div puts "{" ; $div push
+
+        set paramRefs [findRelated $dopRef ~R6]
+        set nparams [refMultiplicity $paramRefs]
+        $div puts "if (argc != $nparams) {" ; $div push
+        $div puts "bslFormatToContext(wrongNumArgsMsg, argc, $nparams) ;"
+        $div puts "return false ;"
+        $div pop ; $div puts "}"
+
+        set argIndex 0
+        set params [deRef $paramRefs]
+        relation foreach param $params -ascending Number {
+            relation assign $param {DataType type} {Name paramName}
+            $div puts "[typeCheck composeDeclaration $type $paramName] ;"
+
+            try {
+                set scnfmt [GetFormat $Domain $type Scan]
+            } on error {} {
+                set type int
+                set scnfmt \"i\"
+            }
+            if {$scnfmt ne {}} {
+                $div puts "if (sscanf(argv\[$argIndex\], \"%\" $scnfmt,\
+                    &$paramName) != 1) {" ; $div push
+                $div puts "bslFormatToContext(badParamMsg, argv\[$argIndex\]) ;"
+                $div puts "return false ;"
+                $div pop ; $div puts "}"
+            } else {
+                $div puts "$paramName = argv\[$argIndex\] ;"
+            }
+
+            incr argIndex
+        }
+
+        try {
+            set prifmt [GetFormat $Domain $ReturnDataType Print]
+        } on error {} {
+            set ReturnDataType int
+            set prifmt \"d\"
+        }
+
+        set invokeParams [pipe {
+            relation list $params Name -ascending Number |
+            join ~ {, }
+        }]
+        set invocation "${Domain}_${Name}($invokeParams) ;"
+
+        if {$ReturnDataType eq "void"} {
+            $div puts $invocation
+        } else {
+            $div puts -nonewline\
+                "[typeCheck composeDeclaration $ReturnDataType result__OP] = "
+            $div puts $invocation
+            $div puts "bslFormatToContext(\"%\" $prifmt, result__OP) ;"
+        }
+
+        $div puts "return true ;"
+        $div pop ; $div puts "}"
+    }
+
+    $div return
+}
+----
+
+(((chunk,bosal static data)))
+(((data,wrongNumArgsMsg)))
+(((data,badParamMsg)))
+
+[source,c]
+----
+<<bosal static data>>=
+static char const wrongNumArgsMsg[] = "wrong # arguments: got %d, expected %d" ;
+static char const badParamMsg[] = "bad parameter: \"%s\"" ;
+----
+
+==== Generating the Class Map
+
+(((chunk,bosal data types)))
+(((type,BSL_ClassMap)))
+
+[source,c]
+----
+<<bosal data types>>=
+typedef struct bslclassmap {
+    char const *name ;
+    MRT_ClassId id ;
+    struct bslattrmap const *attrs ;
+    unsigned attrCount ;
+    struct bslinstmap const *insts ;
+    unsigned instCount ;
+    struct bsleventmap const *events ;
+    unsigned eventCount ;
+} BSL_ClassMap ;
+----
+
+(((chunk,bosal code generation commands)))
+(((proc,generateClassMaps)))
+
+[source,tcl]
+----
+<<bosal code generation commands>>=
+proc generateClassMaps {} {
+    set div [diverter new]
+
+    set classGrps [pipe {
+        Class findAll |
+        deRef ~ |
+        relation group ~ Classes Name Number
+    }]
+
+    relation foreach classGrp $classGrps {
+        relation assign $classGrp {Domain domainName} Classes
+        $div puts "static BSL_ClassMap const ${domainName}__CLASSMAP\[] = {"
+        $div push
+
+        relation foreach class $Classes -ascending Name {
+            relation assign $class {Name className} Number
+            $div puts "{" ; $div push
+
+            $div puts ".name = \"$className\","
+            $div puts ".id = $Number,"
+
+            set attrRef [Attribute findWhere\
+                    {$Domain eq $domainName && $Class eq $className}]
+            if {[isEmptyRef $attrRef]} {
+                set attrMap NULL
+                set attrCount 0
+            } else {
+                set attrMap ${domainName}_${className}__ATTRMAP
+                set attrCount COUNTOF(${domainName}_${className}__ATTRMAP)
+            }
+            $div puts ".attrs = $attrMap,"
+            $div puts ".attrCount = $attrCount,"
+
+            set instRef [ClassInstance findWhere\
+                    {$Domain eq $domainName && $Class eq $className}]
+            if {[isEmptyRef $instRef]} {
+                set instMap NULL
+                set instCount 0
+            } else {
+                set instMap ${domainName}_${className}__INSTMAP
+                set instCount COUNTOF(${domainName}_${className}__INSTMAP)
+            }
+            $div puts ".insts = $instMap,"
+            $div puts ".instCount = $instCount,"
+
+            set eventRef [Event findWhere\
+                    {$Domain eq $domainName && $Model eq $className}]
+            if {[isEmptyRef $eventRef]} {
+                set eventMap NULL
+                set eventCount 0
+            } else {
+                set eventMap ${domainName}_${className}__EVENTMAP
+                set eventCount COUNTOF(${domainName}_${className}__EVENTMAP)
+            }
+            $div puts ".events = $eventMap,"
+            $div puts ".eventCount = $eventCount,"
+
+            $div pop ; $div puts "},"
+        }
+
+        $div pop ; $div puts "} ;"
+    }
+
+    $div return
+}
+----
+
+==== Generating the Attribute Map
+
+(((chunk,bosal data types)))
+(((type,BSL_AttrMap)))
+
+[source,c]
+----
+<<bosal data types>>=
+typedef bool BSL_AttrReadFunc(MRT_DomainPortal const *, MRT_ClassId,
+        MRT_InstId, MRT_AttrId) ;
+typedef bool BSL_AttrUpdateFunc(MRT_DomainPortal const *, MRT_ClassId,
+        MRT_InstId, MRT_AttrId, char const *) ;
+typedef struct bslattrmap {
+    char const *name ;
+    MRT_AttrId id ;
+    BSL_AttrReadFunc *readFunc ;
+    BSL_AttrUpdateFunc *updateFunc ;
+} BSL_AttrMap ;
+----
+
+(((chunk,bosal code generation commands)))
+(((proc,generateAttrMaps)))
+
+[source,tcl]
+----
+<<bosal code generation commands>>=
+proc generateAttrMaps {} {
+    set div [diverter new]
+
+    set attrGrps [pipe {
+        Attribute findAll |
+        deRef ~ |
+        relation project ~ Domain Class Name |
+        relation group ~ Attrs Name
+    }]
+
+    relation foreach attrGrp $attrGrps {
+        relation assign $attrGrp {Domain domainName} {Class className} Attrs
+        $div puts "static BSL_AttrMap const\
+                ${domainName}_${className}__ATTRMAP\[] = {"
+        $div push
+
+        set attrNum -1
+        relation foreach attr $Attrs -ascending Name {
+            relation assign $attr {Name attrName}
+            $div puts "{" ; $div push
+
+            $div puts ".name = \"$attrName\","
+            $div puts ".id = [incr attrNum],"
+            $div puts ".readFunc = ${domainName}_${className}_${attrName}__RD,"
+            $div puts ".updateFunc = ${domainName}_${className}_${attrName}__UP"
+
+            $div pop ; $div puts "},"
+            incr id
+        }
+
+        $div pop ; $div puts "} ;"
+    }
+
+    $div return
+}
+----
+
+==== Generating the Attribute Read Functions
+
+(((chunk,bosal forward function declarations)))
+
+[source,c]
+----
+<<bosal forward function declarations>>=
+<%generateAttrReadFuncDeclarations%>
+----
+
+(((chunk,bosal code generation commands)))
+(((proc,generateAttrReadFuncDeclarations)))
+
+[source,tcl]
+----
+<<bosal code generation commands>>=
+proc generateAttrReadFuncDeclarations {} {
+    set div [diverter new]
+
+    forAllRefs attrRef [Attribute findAll] {
+        assignAttribute $attrRef Domain Class Name
+        $div puts "static bool\
+            ${Domain}_${Class}_${Name}__RD(MRT_DomainPortal const *,\
+            MRT_ClassId, MRT_InstId, MRT_AttrId) ;"
+    }
+
+    $div return
+}
+----
+
+(((chunk,bosal static functions)))
+
+[source,c]
+----
+<<bosal static functions>>=
+<%generateAttrReadFuncDefinitions%>
+----
+
+(((chunk,bosal code generation commands)))
+(((proc,generateAttrReadFuncs)))
+
+[source,tcl]
+----
+<<bosal code generation commands>>=
+proc generateAttrReadFuncDefinitions {} {
+    set div [diverter new]
+
+    forAllRefs attrRef [Attribute findAll] {
+        assignAttribute $attrRef Domain Class Name DataType
+        $div puts "static bool ${Domain}_${Class}_${Name}__RD("
+        $div push
+        $div puts "MRT_DomainPortal const *portal,"
+        $div puts "MRT_ClassId classId,"
+        $div puts "MRT_InstId instId,"
+        $div puts "MRT_AttrId attrId)"
+        $div pop
+        $div puts "{" ; $div push
+
+        try {
+            set prifmt [GetFormat $Domain $DataType Print]
+        } on error {} {
+            set prifmt \"d\"
+        }
+
+        set attrVar [typeCheck composeDeclaration $DataType attrValue]
+        $div puts "$attrVar ;"
+
+        set asgnType [typeCheck assignmentType $DataType]
+        set varType [dict get $asgnType type]
+        if {$varType eq "scalar"} {
+            set pAttrVar attrValue
+        } else {
+            set pAttrVar &attrValue
+        }
+
+        $div puts "int pcode = mrt_PortalReadAttr(portal, classId, instId,\
+                attrId, $pAttrVar, sizeof(attrValue)) ;"
+        $div puts "if (pcode < 0) {" ; $div push
+        $div puts "bslFormatToContext(mrt_PortalErrorString(pcode)) ;"
+        $div puts "return false ;"
+        $div pop ; $div puts "}"
+
+        switch -exact -- $varType {
+            scalar {
+                $div puts "bslFormatToContext(\"%\" $prifmt, attrValue) ;"
+            }
+            string {
+                $div puts "bslFormatToContext(\"%s\", attrValue) ;"
+            }
+            array {
+                set dim [dict get $asgnType dimension]
+                $div puts "for (int index = 0 ; $index < $dim ; index++) {"
+                $div push
+                $div puts "bslFormatToContext(\"%\" $prifmt \" \",\
+                        attrValue\[index]) ;"
+                $div pop ; $div puts "}"
+            }
+            default {
+                error "unknown variable type, $varType"
+            }
+        }
+
+        $div puts "return true ;"
+
+        $div pop ; $div puts "}"
+    }
+
+    $div return
+}
+----
+
+==== Generate the Instance Map
+
+(((chunk,bosal data types)))
+(((type,BSL_InstMap)))
+
+[source,c]
+----
+<<bosal data types>>=
+typedef struct bslinstmap {
+    char const *name ;
+    MRT_InstId id ;
+} BSL_InstMap ;
+----
+
+(((chunk,bosal code generation commands)))
+(((proc,generateInstMaps)))
+
+[source,tcl]
+----
+<<bosal code generation commands>>=
+proc generateInstMaps {} {
+    set div [diverter new]
+
+    set instGrps [pipe {
+        ClassInstance findAll |
+        deRef ~ |
+        relation group ~ Insts Instance Number
+    }]
+
+    relation foreach instGrp $instGrps {
+        relation assign $instGrp {Domain domainName} {Class className} Insts
+        $div puts "static BSL_InstMap const\
+                ${domainName}_${className}__INSTMAP\[] = {"
+        $div push
+
+        relation foreach inst $Insts -ascending Instance {
+            relation assign $inst {Instance instName} {Number instNum}
+            $div puts "{" ; $div push
+
+            $div puts ".name = \"$instName\","
+            $div puts ".id = $instNum,"
+
+            $div pop ; $div puts "},"
+        }
+
+        $div pop ; $div puts "} ;"
+    }
+
+    $div return
+}
+----
+
+=== Harness Commands Implementation
+
+==== Null Command
+
+(((chunk,bosal forward function declarations)))
+(((function,bslNullCommand)))
+
+[source,c]
+----
+<<bosal forward function declarations>>=
+static bool bslNullCommand(int argc, char *const *argv) ;
+----
+
+(((chunk,bosal static functions)))
+(((function,bslNullCommand)))
+
+[source,c]
+----
+<<bosal static functions>>=
+static bool
+bslNullCommand(
+    int argc,
+    char *const *argv)
+{
+    return true ;
+}
+----
+
+==== Domain Operation Command
+
+(((chunk,bosal forward function declarations)))
+(((function,bslDopCommand)))
+
+[source,c]
+----
+<<bosal forward function declarations>>=
+static bool bslDopCommand(int argc, char *const *argv) ;
+----
+
+(((chunk,bosal static functions)))
+(((function,bslDopCommand)))
+
+[source,c]
+----
+<<bosal static functions>>=
+static bool
+bslDopCommand(
+    int argc,
+    char *const *argv)
+{
+    if (argc < 3) {
+        bslFormatToContext(
+            "wrong # of arguments, %d: expected, "
+            "domainop <domain> <operation> ?<arg1> <arg2> ...?",
+            argc) ;
+        return false ;
+    }
+
+    char *domainName = argv[1] ;
+    BSL_DomainHarness const *const harness = bslFindHarness(domainName) ;
+    if (harness == NULL) {
+        return false ;
+    }
+
+    char *opName = argv[2] ;
+    BSL_OperationMap const *const opMap = bslFindOperation(harness, opName) ;
+    if (opMap == NULL) {
+        return false ;
+    }
+    return opMap->func(argc - 3, argv + 3) ;
+}
+----
+
+==== Signal Command
+
+(((chunk,bosal forward function declarations)))
+(((function,bslSignalCommand)))
+
+[source,c]
+----
+<<bosal forward function declarations>>=
+static bool bslSignalCommand(int argc, char *const *argv) ;
+----
+
+(((chunk,bosal static functions)))
+(((function,bslSignalCommand)))
+
+[source,c]
+----
+<<bosal static functions>>=
+static bool
+bslSignalCommand(
+    int argc,
+    char *const *argv)
+{
+    if (argc < 5) {
+        bslFormatToContext(
+            "wrong # of arguments, %d: expected, "
+            "\"signal <domain> <class> <inst> <event> ?<arg1> <arg2> ...?\"",
+            argc) ;
+        return false ;
+    }
+
+    char *domainName = argv[1] ;
+    BSL_DomainHarness const *const harness = bslFindHarness(domainName) ;
+    if (harness == NULL) {
+        bslFormatToContext("unknown domain, \"%s\"", domainName) ;
+        return false ;
+    }
+    MRT_DomainPortal const *portal = harness->portal ;
+    assert(portal != NULL) ;
+
+    char *className = argv[2] ;
+    BSL_ClassMap const *const class = bslFindClass(harness, className) ;
+    if (class == NULL) {
+        return false ;
+    }
+    MRT_ClassId classId = class->id ;
+
+    char *instName = argv[3] ;
+    int instId = bslFindInst(class, instName) ;
+    if (instId < 0) {
+        return false ;
+    }
+
+    char *eventName = argv[4] ;
+    BSL_EventMap const *event = bslFindEvent(class, eventName) ;
+    if (event == NULL) {
+        return false ;
+    }
+
+    BSL_EventParamFunc *epfunc = event->paramFunc ;
+    MRT_EventCode eventNumber = event->number ;
+    int pcode ;
+    if (epfunc != NULL) {
+        MRT_EventParams params ;
+        bool pstatus = epfunc(argc - 5, argv + 5, params) ;
+        if (!pstatus) {
+            return false ;
+        }
+        pcode = mrt_PortalSignalEvent(portal, classId, instId, eventNumber,
+            params) ;
+    } else {
+        pcode = mrt_PortalSignalEvent(portal, classId, instId, eventNumber,
+            NULL) ;
+    }
+
+    if (pcode < 0) {
+        bslFormatToContext(mrt_PortalErrorString(pcode)) ;
+        return false ;
+    }
+
+    return true ;
+}
+----
+
+==== Trace Command
+
+(((chunk,bosal forward function declarations)))
+(((function,bslTraceCommand)))
+
+[source,c]
+----
+<<bosal forward function declarations>>=
+static bool bslTraceCommand(int argc, char *const *argv) ;
+----
+
+(((chunk,bosal static functions)))
+(((function,bslTraceCommand)))
+
+[source,c]
+----
+<<bosal static functions>>=
+static bool
+bslTraceCommand(
+    int argc,
+    char *const *argv)
+{
+    bool status = true ;
+
+    if (argc == 1) {
+        MRT_TraceHandler handler = mrt_RegisterTraceHandler(NULL) ;
+        mrt_RegisterTraceHandler(handler) ;
+        bslAddWord(handler == NULL ? "off" : "on") ;
+    } else if (argc == 2) {
+        if (strcmp(argv[1], "on") == 0) {
+            mrt_RegisterTraceHandler(bslTraceResponse) ;
+            bslAddWord("on") ;
+        } else if (strcmp(argv[1], "off") == 0) {
+            mrt_RegisterTraceHandler(NULL) ;
+            bslAddWord("off") ;
+        } else {
+            bslFormatToContext(
+                    "unknown trace option, \"%s\": expected, \"on | off\"",
+                    argv[1]) ;
+            status = false ;
+        }
+    } else {
+        bslFormatToContext(
+            "wrong # of arguments, %d: expected, \"trace ?on | off?\"", argc) ;
+        status = false ;
+    }
+
+    return status ;
+}
+----
+
+(((chunk,bosal forward function declarations)))
+(((function,bslTraceResponse)))
+
+[source,c]
+----
+<<bosal forward function declarations>>=
+static void bslTraceResponse(MRT_TraceInfo const *traceInfo) ;
+----
+
+(((chunk,bosal static functions)))
+(((function,bslTraceResponse)))
+
+[source,c]
+----
+<<bosal static functions>>=
+static void
+bslTraceResponse(
+    MRT_TraceInfo const *traceInfo)
+{
+    char const *sourceName ;
+    char const *sourceClassName ;
+    char sourceIdNum[32] ;
+
+    if (traceInfo->sourceInst == NULL) {
+        sourceName = "?" ;
+        sourceClassName = "?" ;
+    } else {
+        sourceClassName = traceInfo->sourceInst->classDesc->name ;
+        sourceName = traceInfo->sourceInst->name ;
+        if (sourceName == NULL) {
+            unsigned instid = mrt_InstanceIndex(traceInfo->sourceInst) ;
+            snprintf(sourceIdNum, sizeof(sourceIdNum), "%u", instid) ;
+            sourceName = sourceIdNum ;
+        }
+    }
+    
+    char const *targetName = traceInfo->targetInst->name ;
+    char targetIdNum[32] ;
+    if (targetName == NULL) {
+        unsigned instid = mrt_InstanceIndex(traceInfo->targetInst) ;
+        snprintf(targetIdNum, sizeof(targetIdNum), "%u", instid) ;
+        targetName = targetIdNum ;
+    }
+
+    switch (traceInfo->eventType) {
+    case mrtTransitionEvent: {
+        MRT_StateCode newState = traceInfo->info.transitionTrace.newState ;
+        char const *newStateName ;
+        if (newState == MRT_StateCode_IG) {
+            newStateName = "IG" ;
+        } else if (newState == MRT_StateCode_CH) {
+            newStateName = "CH" ;
+        } else {
+            newStateName = traceInfo->targetInst->classDesc->edb->stateNames[
+                traceInfo->info.transitionTrace.newState] ;
+        }
+
+        fprintf(bslCmdStream,
+                "trace {"
+                "type transition "
+                "event %s "
+                "source %s.%s "
+                "target %s.%s "
+                "currstate %s "
+                "newstate %s "
+                "time %s"
+                "}\n",
+            traceInfo->targetInst->classDesc->eventNames[traceInfo->eventNumber],
+            sourceClassName, sourceName,
+            traceInfo->targetInst->classDesc->name, targetName,
+            traceInfo->targetInst->classDesc->edb->stateNames[
+                traceInfo->info.transitionTrace.currentState],
+            newStateName,
+            bslTimestamp()) ;
+    }
+        break ;
+
+    case mrtPolymorphicEvent: {
+        MRT_Relationship const *rel = traceInfo->targetInst->classDesc->pdb->
+                genDispatch[traceInfo->info.polyTrace.genNumber].relship ;
+        MRT_Class const *subclass ;
+        char const *subname = NULL ;
+        if (rel->relType == mrtRefGeneralization) {
+            subclass = rel->relInfo.refGeneralization.
+                subclasses[traceInfo->info.polyTrace.subcode].classDesc ;
+            subname = subclass->name ;
+        } else if (rel->relType == mrtUnionGeneralization) {
+            subclass = rel->relInfo.unionGeneralization.
+                subclasses[traceInfo->info.polyTrace.subcode] ;
+            subname = subclass->name ;
+        } else {
+            printf("%s: bad relationship type in polymorphic event, %d\n",
+                bslTimestamp(), rel->relType) ;
+            break ;
+        }
+        fprintf(bslCmdStream,
+                "trace {"
+                "type polymorphic "
+                "event %s "
+                "source %s.%s "
+                "target %s.%s "
+                "relationship %s "
+                "newevent %s "
+                "subclass %s "
+                "time %s"
+                "}\n",
+            traceInfo->targetInst->classDesc->eventNames[traceInfo->eventNumber],
+            sourceClassName, sourceName,
+            traceInfo->targetInst->classDesc->name, targetName,
+            traceInfo->targetInst->classDesc->pdb->genNames[
+                traceInfo->info.polyTrace.genNumber],
+            subclass->eventNames[traceInfo->info.polyTrace.mappedEvent],
+            subname,
+            bslTimestamp()) ;
+    }
+        break ;
+
+    case mrtCreationEvent:
+        fprintf(bslCmdStream,
+                "trace {"
+                "type creation "
+                "event %s "
+                "source %s.%s "
+                "target %s.%s "
+                "time %s"
+                "}\n",
+            traceInfo->targetInst->classDesc->eventNames[traceInfo->eventNumber],
+            sourceClassName, sourceName,
+            traceInfo->info.creationTrace.targetClass->name, targetName,
+            bslTimestamp()) ;
+        break ;
+
+    default:
+        fprintf(bslCmdStream,
+                "trace {"
+                "type error "
+                "result {unknown trace event type, \"%u\"} "
+                "time %s"
+                "}\n",
+            traceInfo->eventType,
+            bslTimestamp()) ;
+        break ;
+    }
+}
+----
+
+(((chunk,bosal forward function declarations)))
+(((function,bslTimestamp)))
+
+[source,c]
+----
+<<bosal forward function declarations>>=
+static char const *bslTimestamp(void) ;
+----
+
+(((chunk,bosal static functions)))
+(((function,bslTimestamp)))
+
+[source,c]
+----
+<<bosal static functions>>=
+static char const *
+bslTimestamp(void)
+{
+    static char timestamp[128] ;
+
+    struct timeval now ;
+    if (gettimeofday(&now, NULL) != 0) {
+        return "unknown" ;
+    }
+
+    struct tm *ltime ;
+    ltime = localtime(&now.tv_sec) ;
+    if (ltime == NULL) {
+        return strerror(errno) ;
+    }
+
+    int tlen = strftime(timestamp, sizeof(timestamp), "%FT%T", ltime) ;
+    if (tlen == 0) {
+        return strerror(errno) ;
+    }
+
+    int flen = snprintf(timestamp + tlen, sizeof(timestamp) - tlen,
+            ".%03u.%03u", (unsigned)(now.tv_usec / 1000),
+            (unsigned)(now.tv_usec % 1000)) ;
+    if (flen > (sizeof(timestamp) - tlen)) {
+        return "too big" ;
+    }
+
+    return timestamp ;
+}
+----
+
+=== Event Loop Command
+
+(((chunk,bosal forward function declarations)))
+(((function,bslEloopCommand)))
+
+[source,c]
+----
+<<bosal forward function declarations>>=
+static bool bslEloopCommand(int argc, char *const *argv) ;
+----
+
+(((chunk,bosal static functions)))
+(((function,bslEloopCommand)))
+
+[source,c]
+----
+<<bosal static functions>>=
+static bool
+bslEloopCommand(
+    int argc,
+    char *const *argv)
+{
+    bool status = true ;
+
+    if (argc == 1) {
+        char const *state ;
+        switch (bslHarnessState) {
+        case bslHalted :
+            state = "halted" ;
+            break ;
+
+        case bslRunning:
+            state = "running" ;
+            break ;
+
+        case bslTerminate:
+        default:
+            state = "terminated" ;
+            break ;
+        }
+        bslAddWord(state) ;
+    } else if (argc == 2) {
+        if (strcmp(argv[1], "run") == 0) {
+            bslHarnessState = bslRunning ;
+            bslAddWord("running") ;
+        } else if (strcmp(argv[1], "halt") == 0) {
+            mrt_SyncToEventLoop() ;
+            bslHarnessState = bslHalted ;
+            bslAddWord("halted") ;
+        } else if (strcmp(argv[1], "terminate") == 0) {
+            mrt_SyncToEventLoop() ;
+            bslHarnessState = bslTerminate ;
+            bslAddWord("terminated") ;
+        } else if (strcmp(argv[1], "once") == 0) {
+            if (bslHarnessState != bslRunning) {
+                bool didEvent = mrt_DispatchSingleEvent() ;
+                bslAddWord(didEvent ? "true" : "false") ;
+            } else {
+                bslAddWord("event loop is running") ;
+                status = false ;
+            }
+        } else if (strcmp(argv[1], "toc") == 0) {
+            if (bslHarnessState != bslRunning) {
+                bool didEvent = mrt_DispatchThreadOfControl(true) ;
+                bslAddWord(didEvent ? "true" : "false") ;
+            } else {
+                bslAddWord("event loop is running") ;
+                status = false ;
+            }
+        } else {
+            bslFormatToContext(
+                "unknown eloop option, \"%s\": expected, "
+                "\"run | halt | once | toc | terminate\"",
+                argv[1]) ;
+            status = false ;
+        }
+    } else {
+        bslFormatToContext(
+            "wrong # of arguments, %d: expected, "
+            "\"eloop ?run | halt | once | terminate?\"",
+            argc) ;
+        status = false ;
+    }
+
+    return status ;
+}
+----
+
+== Bosal Header File
+
+(((chunk,bosal data)))
+(((data.headerFile)))
+
+[source,tcl]
+----
+<<bosal data>>=
+variable headerFile [textutil::adjust::undent {
+/*
+<<edit warning>>
+<<copyright info>>
+*/
+/*
+ * This file is the header file for bosal. A typical use case is to
+ * include it in the file which contains the "main" function. This
+ * file corresponds to:
+   <<version info>>
+ */
+
+#ifndef BOSAL_H_
+#define BOSAL_H_
+
+/*
+ * External Functions
+ */
+<<bosal external function declarations>>
+
+#endif /* BOSAL_H_ */}]
+----
+
+== Domain Dependent Code
+
+(((chunk,required packages)))
+
+[source,tcl]
+----
+<<required packages>>=
+package require textutil::expander
+----
+
+(((chunk,bosal commands)))
+(((command.generate)))
+
+[source,tcl]
+----
+<<bosal commands>>=
+proc generate {options} {
+    <<generate: set up template expansion>>
+    <<generate: generate code>>
+}
+----
+
+(((chunk,generate: set up template expansion)))
+
+[source,tcl]
+----
+<<generate: set up template expansion>>=
+textutil::expander expand
+expand setbrackets <% %>
+expand errmode [dict get $options expanderror]
+----
+
+(((chunk,generate: generate code)))
+
+[source,tcl]
+----
+<<generate: generate code>>=
+expand evalcmd "namespace eval [namespace current]::GenCode"
+try {
+    variable codeTemplate
+    return [expand expand $codeTemplate]
+} on error {result opts} {
+    # puts $::errorInfo
+    return -options $opts $result
+} finally {
+    rename expand {}
+}
+----
+
+(((chunk,bosal data)))
+(((data.codeTemplate)))
+
+[source,tcl]
+----
+<<bosal data>>=
+variable codeTemplate [textutil::adjust::undent {
+/*
+<<edit warning>>
+<<copyright info>>
+*/
+
+/*
+ * Include Files
+ */
+#define _POSIX_C_SOURCE 200809L
+#include "bosal.h"
+#include "micca_rt.h"
+#include "micca_rt_internal.h"
+/*
+ * Domain Header Files
+ */
+<%includeDomainHeaders%>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <errno.h>
+#include <signal.h>
+#include <unistd.h>
+#include <setjmp.h>
+#include <ctype.h>
+#include <time.h>
+
+/*
+ * Macros
+ */
+#ifndef NDEBUG
+#   define  dbgprintf(...)    printf(__VA_ARGS__)
+#else
+#   define  dbgprintf(...)
+#endif /* NDEBUG */
+
+#define ASCII_NUL       '\0'
+#define BEGIN_QUOTE     '{'
+#define END_QUOTE       '}'
+#define ESCAPE_CHAR     '\\'
+
+#define OUTOFWORD   0
+#define INWORD      1
+#define INESCAPE    2
+#define INQUOTE     3
+
+/*
+ * Constants
+ */
+#ifndef HARNESS_PORT
+#   define HARNESS_PORT 3906
+#endif /* HARNESS_PORT */
+#ifndef BSL_NESTLIMIT
+#   define  BSL_NESTLIMIT   4
+#endif /* BSL_NESTLIMIT */
+
+/*
+ * Data Types
+ */
+<<bosal data types>>
+
+/*
+ * Forward References
+ */
+<<bosal forward function declarations>>
+
+/*
+ * Static Data
+ */
+<<bosal static data>>
+
+/*
+ * Static Functions
+ */
+<<bosal static functions>>
+
+/*
+ * External Functions
+ */
+<<bosal external function definitions>>
+}]
+----
+
+(((chunk,bosal code generation commands)))
+(((proc,generateHarnesses)))
+
+[source,tcl]
+----
+<<bosal code generation commands>>=
+proc includeDomainHeaders {} {
+    set div [diverter new]
+
+    forAllRefs domainRef [Domain findAll] {
+        set domainName [readAttribute $domainRef Name]
+        $div puts "#include \"$domainName.h\""
+    }
+
+    $div return
+}
+----

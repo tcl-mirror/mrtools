@@ -34,8 +34,6 @@ CODEFILES =\
 
 DOCPARTS=\
 	intro.txt\
-	model.txt\
-	configure.txt\
 	generate.txt\
 	utils.txt\
 	codeorg.txt\
@@ -78,8 +76,8 @@ DBLATEX_PARAMS =\
 	index.numbered=0\
 	doc.publisher.show=0\
 	doc.lot.show=figure,table\
-	toc.section.depth=2\
-	doc.section.depth=0\
+	toc.section.depth=3\
+	doc.section.depth=1\
 	$(NULL)
 
 DOCINFO	=\
@@ -141,7 +139,7 @@ $(CODEDIR)/tcl/bosal_main.tcl : $(DOCSRC) $(DOCPARTS)
 $(TESTS) : $(DOCSRC) $(DOCPARTS)
 
 $(DOCDIR)/%.pdf : %.aweb
-	a2x $(A2XOPTS) --doctype=book  --format=pdf\
+	a2x $(A2XOPTS) --doctype=article  --format=pdf\
 	    --destination-dir=$(DOCDIR)\
 	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) $<
 	$(RM) $(DOCDIR)/*__[0-9].pdf

@@ -1,9 +1,219 @@
 // vim:set syntax=asciidoc:
 
-= Utility Procedures
+= Utility Code
 
 == Introduction
 Place holder.
+
+== Harness Utility Functions
+
+(((chunk,bosal forward function declarations)))
+(((function,bslTrimSpaceRight)))
+
+[source,c]
+----
+<<bosal forward function declarations>>=
+static void bslTrimSpaceRight(char *const buf) ;
+----
+
+(((chunk,bosal static functions)))
+(((function,bslTrimSpaceRight)))
+
+[source,c]
+----
+<<bosal static functions>>=
+static void
+bslTrimSpaceRight(
+    char *const buf)
+{
+    for (char *end = buf + strlen(buf) - 1 ;
+            end > buf && isspace(*end) ; end--) {
+        *end = ASCII_NUL ;
+    }
+}
+----
+
+=== Response Context
+
+[source,c]
+----
+<<bosal static data>>=
+static BSL_BufContext contextStack[BSL_NESTLIMIT] ;
+static BSL_BufContext *contextTOS ;
+----
+
+[source,c]
+----
+<<bosal data types>>=
+typedef struct mthbufcontext {
+    char buf[BUFSIZ] ;
+    char *location ;
+    size_t remaining ;
+} BSL_BufContext ;
+----
+
+(((chunk,bosal forward function declarations)))
+
+[source,c]
+----
+<<bosal forward function declarations>>=
+static void bslBeginResponse(void) ;
+static void bslEndResponse(void) ;
+static void bslPushContext(void) ;
+static void bslPopContext(void) ;
+static void bslInitBufContext(void) ;
+static int bslAddWord(char const *word) ;
+static void bslTrimBufContextRight(void) ;
+static char *bslContextGetBuf(void) ;
+static int bslFormatToContext(char const *format, ...) ;
+static bool bslQuoteWord(char const *pWord) ;
+----
+
+[source,c]
+----
+<<bosal static functions>>=
+static void
+bslBeginResponse(void)
+{
+    contextTOS = contextStack ;
+    bslInitBufContext() ;
+}
+static inline void
+bslEndResponse(void)
+{
+    fprintf(bslCmdStream, "%s\n", contextTOS->buf) ;
+}
+static void
+bslPushContext(void)
+{
+    assert(contextTOS != NULL) ;
+    assert(contextTOS < contextStack + COUNTOF(contextStack)) ;
+    if (contextTOS >= contextStack + COUNTOF(contextStack)) {
+        fprintf(stderr, "buffer context stack overflow\n") ;
+        abort() ;
+    }
+    contextTOS++ ;
+    bslInitBufContext() ;
+}
+static void
+bslPopContext(void)
+{
+    assert(contextTOS > contextStack) ;
+    if (contextTOS <= contextStack) {
+        fprintf(stderr, "buffer context stack underflow\n") ;
+        abort() ;
+    }
+
+    bslTrimBufContextRight() ;
+    char *prevBuf = bslContextGetBuf() ;
+    contextTOS -= 1 ;
+    bslAddWord(prevBuf) ;
+}
+static void
+bslInitBufContext(void)
+{
+    assert(contextTOS != NULL) ;
+    contextTOS->location = contextTOS->buf ;
+    *contextTOS->location = ASCII_NUL ;
+    contextTOS->remaining = sizeof(contextTOS->buf) ;
+}
+static int
+bslAddWord(
+    char const *word)
+{
+    int nbytes = snprintf(contextTOS->location, contextTOS->remaining,
+            bslQuoteWord(word) ? "{%s} " : "%s ", word) ;
+
+    if (nbytes < 0 || nbytes >= contextTOS->remaining) {
+        return -1 ;
+    } else {
+        contextTOS->remaining -= nbytes ;
+        contextTOS->location += nbytes ;
+    }
+
+    return nbytes ;
+}
+static void
+bslTrimBufContextRight(void)
+{
+    while (contextTOS->location > contextTOS->buf) {
+        if (isspace(*(contextTOS->location - 1))) {
+            *--contextTOS->location = ASCII_NUL ;
+        } else {
+            break ;
+        }
+    }
+}
+static inline char *
+bslContextGetBuf(void)
+{
+    return contextTOS->buf ;
+}
+static int
+bslFormatToContext(
+    char const *format,
+    ...)
+{
+    va_list params ;
+    va_start(params, format) ;
+    int nbytes = vsnprintf(contextTOS->location, contextTOS->remaining,
+            format, params) ;
+    va_end(params) ;
+
+    if (nbytes < 0 || nbytes >= contextTOS->remaining) {
+        return -1 ;
+    } else {
+        contextTOS->remaining -= nbytes ;
+        contextTOS->location += nbytes ;
+    }
+
+    return nbytes ;
+}
+static bool
+bslQuoteWord(
+    char const *pWord)
+{
+    assert(pWord != NULL) ;
+    if (strlen(pWord) == 0) {
+        return true ; // must quote the empty string
+    }
+
+    enum {
+        OutOfQuote,
+        InQuote
+    } quoteState = OutOfQuote ;
+    int quoteCount = 0 ;
+
+    for (char c = *pWord++ ; c != ASCII_NUL ; c = *pWord++) {
+        if (c == '\\') {
+            pWord++ ;
+            continue ;
+        }
+        switch (quoteState) {
+        case OutOfQuote:
+            if (isspace(c)) {
+                return true ;
+            } else if (c == BEGIN_QUOTE) {
+                quoteCount++ ;
+                quoteState = InQuote ;
+            }
+            break; 
+
+        case InQuote:
+            if (c == BEGIN_QUOTE) {
+                quoteCount++ ;
+            } else if (c == END_QUOTE) {
+                assert(quoteCount > 0) ;
+                if (--quoteCount == 0) {
+                    quoteState = OutOfQuote ;
+                }
+            }
+            break; 
+        }
+    }
+    return quoteCount == 0 ? false : true ;
+}
+----
 
 == Helper Commands
 
@@ -14,261 +224,150 @@ which is imported into most of the other package namespaces.
 
 [source,tcl]
 ----
-<<helper commands namespace>>=
-namespace eval Helpers {
-    logger::initNamespace [namespace current]
+<<bosal helper commands>>=
+package require tcl::chan::events
+package require tcl::chan::fifo
+package require struct::stack
+package require oo::util
+package require textutil::adjust
 
-    <<tclral imports>>
-    namespace import ::ral::relvar
-    namespace path {::bosal ::rosea::InstCmds}
-
-    <<helper data>>
-    <<helper commands>>
-}
-----
-
-=== DeclError
-
-All error notification in the package is consolidated in
-the `DeclError` procedure.
-
-[float]
-==== Implementation
-
-The `DeclError` procedure locates a format string based on the error code
-and applies its arguments to it.
-We use the `::throw` command to raise the error to insure that we have
-consistent error code information for the package.
-
-(((bosal,Helpers,DeclError)))
-[source,tcl]
-----
-<<helper commands>>=
-namespace export DeclError
-
-proc DeclError {errcode args} {
-    variable errFormats
-    set errmsg [format [dict get $errFormats $errcode] {*}$args]
-    tailcall throw [list MICCA $errcode {*}$args $errmsg] $errmsg
-}
-----
-
-The mapping of `errcode` values to format strings is held as
-package data in the helper namespace of the package.
-
-[source,tcl]
-----
-<<helper data>>=
-variable errFormats
-set errFormats [dict create {*}{
-    <<error code formats>>
-}]
-----
-
-=== Checking for Duplicates
-
-(((bosal,Helpers,CheckDuplicate)))
-[source,tcl]
-----
-<<helper commands>>=
-proc CheckDuplicate {class args} {
-    set ref [$class findById {*}$args]
-    if {[isNotEmptyRef $ref]} {
-        tailcall DeclError DUP_INSTANCE_NAME $class $args
+oo::class create diverter {
+    variable chan_stack
+    constructor {{prefix {    }}} {
+        my variable level_prefix
+        set level_prefix $prefix
+        classvariable stack_counter
+        set chan_stack [::struct::stack s_[incr stack_counter]]
+        $chan_stack push [::tcl::chan::fifo]
     }
-    return
-}
-----
-
-(((error code,DUP_ELEMENT_NAME)))
-[source,tcl]
-----
-<<error code formats>>=
-DUP_INSTANCE_NAME    {an element of class, "%s", already exists with\
-        attributes, "%s"}
-----
-
-=== Handling Configuration Errors
-
-One of the design elements of the configuration DSL is the use of
-the `bosal` platform model to hold the configuration information.
-This design approach allows us to encode the rules for what is a valid
-domain configuration into the constraints.
-Any attempt to define domain elements that violate those rules
-will be caught at the end of the relvar transaction that end
-the `configure` command.
-
-The problem with this approach is that the error messages the are
-returned refer to the classes of the platform model not those of
-the domain we were attempting to define.
-
-We will mitigate this problem by capturing the result returned by
-TclRAL and turning it into error messages that are more meaningful
-to the task of configuring a domain.
-Unfortunately,
-the messages produced by TclRAL are intended to be human readable,
-so we will have to parse them into a form that is easier to deal
-with programmatically.
-Fortunately, the messages are very regular in structure so
-the parsing code need not be very sophisticated.
-
-Our strategy is to extract only the essential information from the
-error message and then map the information onto a more meaningful error
-message.
-Part of what we want to include in the error message is the values
-from the tuples failing the constraint.
-These values contain information the user entered rather than the
-abstractions of the platform model.
-
-The essential information mapping is shown below.
-Naturally enough, we hold it in a relvar.
-
-[source,tcl]
-----
-<<config data>>=
-relvar create Config_DataError {
-    Relationship        string
-    RefClass            string
-    RefType             string
-    Format              string
-} {Relationship RefClass RefType}
-----
-
-The *Relationship* attribute is the name of the relationship in the
-platform model that failed the constraint check.
-The *RefClass* attribute is the platform model class that has the tuples
-that failed the constraint check.
-The *RefType* attribute defines the way in which the constraint failed.
-The *Format* attribute is a string that contains the text of the
-error message that we want to display.
-The text in the *Format* attribute may also contain variable references
-to attributes in the tuple of *RefClass* that failed.
-The variable references in the *Format* will be substituted
-with the values from the failing tuples in order to give specifics of
-the error back to the user.
-
-[float]
-===== Implementation
-
-The design of the `HandleConfigError` procedure is shown below.
-It is a nested iteration over the lines of the error result, pulling
-off the constraint violation details and then iterating over the
-tuples that were found in the violation.
-
-(((bosal,Config,HandleConfigError)))
-[source,tcl]
-----
-<<config commands>>=
-proc HandleConfigError {result} {
-    set lines [split [string trimright $result] \n]
-    set nlines [llength $lines]
-    set lineno 0
-    upvar #0 ::bosal::@Config@::errcount errcount
-    while {$lineno < $nlines} {
-        <<HandleConfigError: examine one failure>>
+    destructor {
+        foreach dchan [$chan_stack get] {
+            chan close $dchan
+        }
+        $chan_stack destroy
     }
-
-    return
-}
-----
-
-The information in the TclRAL error message is simple enough
-and well structured enough that a regular expression can be used
-to match and extract the interesting parts.
-
-[source,tcl]
-----
-<<HandleConfigError: examine one failure>>=
-set line [lindex $lines $lineno]
-incr lineno
-if {[regexp {^for[^:]+([^(]+)\(.+\), in relvar (.+)$} $line\
-        match rnum refclass]} {
-    set rnum [namespace tail $rnum]
-    set refclass [namespace tail $refclass]
-
-    # Now iterate over the "tuple" lines that follow the constraint message.
-    while {$lineno < $nlines} {
-        set tupline [lindex $lines $lineno]
-        if {[regexp {^tuple {(.+)} (.+)$} $tupline match tuple phrase]} {
-            incr lineno
-            incr errcount
-            <<HandleConfigError: examine one tuple>>
-            <<HandleConfigError: format error message>>
+    method puts {args} {
+        set nargs [llength $args]
+        set curr_chan [$chan_stack peek]
+        if {$nargs == 1} {
+            chan puts $curr_chan [lindex $args 0]
+        } elseif {$nargs == 2} {
+            lassign $args opt str
+            chan puts $opt $curr_chan $str
         } else {
-            break
+            error "wrong # of arguments: expected, \"puts ?-nonewline? string\""
         }
     }
-} elseif {[regexp {procedural contraint, "([^"]+)", failed} $line match\
-        constraint]} {
-    # There is only one procedural constraint, R74C.
-    # If an error is detected in the procedural constraint script,
-    # messages will be printed there.
-    log::error $result
-    incr errcount
-} else {
-    log::error $result
-    incr errcount
-}
-----
-
-We match the phrase in the tuple message to create an enumeration of
-the types of constraint violations.
-These are just a bit simpler to handle and look up.
-
-[source,tcl]
-----
-<<HandleConfigError: examine one tuple>>=
-if {[string match {is not referenced*} $phrase]} {
-    set reftype notrefed
-} elseif {[string match {references no*} $phrase]} {
-    set reftype refnone
-} elseif {[string match {is referenced by multiple*} $phrase]} {
-    set reftype refedmult
-} elseif {[string match {*to by multiple*} $phrase]} {
-    set reftype multrefed
-} elseif {[string match {is not referred to*} $phrase]} {
-    set reftype notrefto
-} else {
-    log::error "unknown constraint phrasing, \"$phrase\""
-    continue
-}
-----
-
-Finally, we look up the format information and generate an error message.
-Using the `dict with` command allows us to take the tuple value from the
-error message, treat it like a dictionary and get the values into
-Tcl variable.
-The `subst` command then will perform the variable substitutions in the
-format string.
-
-[source,tcl]
-----
-<<HandleConfigError: format error message>>=
-set cde [relvar restrictone Config_DataError Relationship $rnum RefClass\
-        $refclass RefType $reftype]
-if {[relation isnotempty $cde]} {
-    dict with tuple {
-        log::error [subst -nocommands [relation extract $cde Format]]
+    method push {} {
+        $chan_stack push [::tcl::chan::fifo]
     }
-} else {
-    log::error "$line\n$tupline"
+    method pop {} {
+        set top_chan [$chan_stack pop]
+        chan flush $top_chan
+
+        set curr_chan [$chan_stack peek]
+        my variable level_prefix
+        set diverted [::textutil::adjust::indent\
+                [chan read $top_chan] $level_prefix]
+        chan puts $curr_chan $diverted
+
+        chan close $top_chan
+    }
+    method undivert {} {
+        while {[$chan_stack size] > 1} {
+            my pop
+        }
+        set curr_chan [$chan_stack peek]
+        chan flush $curr_chan
+        return [chan read $curr_chan]
+    }
+    method return {} {
+        set result [my undivert]
+        my destroy
+        return -level 2 $result
+    }
 }
 ----
-
-We now need to enumerate all the platform model constraints that can be violated
-and supply messages that provide less abstract and more useful user error
-messages.
-Because of the way the configuration data is stored into the platform model
-classes,
-not all violations are even possible.
 
 [source,tcl]
 ----
-<<config data>>=
-relvar insert Config_DataError {
-    Relationship        R4
-    RefClass            Domain
-    RefType             notrefed
-    Format              {in harness, $Harness, domain, $Name, has no classes}
+<<bosal helper commands>>=
+proc GetFormat {domain implType which} {
+    set fmt [relvar restrictone FormatMap ImplType $implType]
+    if {[relation isempty $fmt]} {
+        set alias [TypeAlias findById Domain $domain TypeName $implType]
+        if {[isEmptyRef $alias]} {
+            error "unknown data type, $implType"
+        }
+        set tdef [readAttribute $alias TypeDefinition]
+        set fmt [relvar restrictone FormatMap ImplType $tdef]
+        if {[relation isempty $fmt]} {
+            error "unknown data type, $tdef"
+        }
+    }
+    return [relation extract $fmt $which]
 }
+----
+
+[source,tcl]
+----
+<<bosal helper data>>=
+# Create a simple map that maps "C" implementation types onto
+# printf/scanf format strings.
+relvar create FormatMap {
+    ImplType string
+    Print string
+    Scan string
+} ImplType
+
+relvar set FormatMap [relation table {
+    ImplType string             Print string         Scan  string   } {
+    int                         {"d"}                {"i"}              } {
+    unsigned                    {"u"}                {"i"}              } {
+    {unsigned int}              {"u"}                {"i"}              } {
+    short                       {"hd"}               {"hi"}             } {
+    {short int}                 {"hd"}               {"hi"}             } {
+    {unsigned short}            {"hu"}               {"hi"}             } {
+    {unsigned short int}        {"hu"}               {"hi"}             } {
+    long                        {"ld"}               {"li"}             } {
+    {long int}                  {"ld"}               {"li"}             } {
+    {unsigned long}             {"lu"}               {"li"}             } {
+    {unsigned long int}         {"lu"}               {"li"}             } {
+    size_t                      {"z"}                {"z"}              } {
+    {long long}                 {"lld"}              {"lli"}            } {
+    {long long int}             {"lld"}              {"lli"}            } {
+    {unsigned long long}        {"llu"}              {"lli"}            } {
+    {unsigned long long int}    {"llu"}              {"lli"}            } {
+    {char *}                    {"s"}                {}                 } {
+    {char const *}              {"s"}                {}                 } {
+    {const char *}              {"s"}                {}                 } {
+    {void *}                    {"p"}                {"p"}              } {
+    {const void *}              {"p"}                {"p"}              } {
+    {void const *}              {"p"}                {"p"}              } {
+    float                       {"g"}                {"g"}              } {
+    double                      {"lg"}               {"lg"}             } {
+    {long double}               {"Lg"}               {"Lg"}             } {
+    char                        {"hhd"}              {"hhi"}            } {
+    {unsigned char}             {"hhu"}              {"hhi"}            } {
+    void                        void                 {}                 } {
+    bool                        {"u"}                {"u"}              } {
+    uint8_t                     PRIu8                SCNi8              } {
+    uint16_t                    PRIu16               SCNi16             } {
+    uint32_t                    PRIu32               SCNi32             } {
+    uint64_t                    PRIu64               SCNi64             } {
+    int8_t                      PRId8                SCNi8              } {
+    int16_t                     PRId16               SCNi16             } {
+    int32_t                     PRId32               SCNi32             } {
+    int64_t                     PRId64               SCNi64             } {
+    intmax_t                    PRIdMAX              SCNiMAX            } {
+    uintmax_t                   PRIuMAX              SCNiMAX            } {
+    MRT_ClassId                 {"hu"}               {"hi"}             } {
+    MRT_AssignerId              {"hu"}               {"hi"}             } {
+    MRT_InstId                  {"hu"}               {"hi"}             } {
+    MRT_AttrId                  {"hu"}               {"hi"}             } {
+    MRT_AttrSize                {"z"}                {"z"}              } {
+    MRT_AttrOffset              {"lu"}               {"li"}             } {
+    MRT_DelayTime               PRIu32               SCNi32             } {
+    MRT_EventCode               PRIu8                SCNi8              } {
+    MRT_StateCode               PRId8                SCNi8              } ]
 ----
