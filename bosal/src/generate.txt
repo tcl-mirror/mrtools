@@ -641,7 +641,7 @@ static BSL_CommandMap const commands[] = { // must be in ascending "name" order
     },
     {
         .name = "delaysignal",
-        .commandFunc = NULL  //bslDelaySignalCommand
+        .commandFunc = bslDelaySignalCommand
     },
     {
         .name = "delete",
@@ -1177,6 +1177,103 @@ bslSignalCommand(
 }
 ----
 
+==== Delay Signal Command
+
+[literal]
+--
+delaysignal <domain> <class> <inst> <delay> <event> ?<arg1> <arg2> ...?
+--
+
+(((chunk,harness forward function declarations)))
+(((function,bslDelaySignalCommand)))
+
+[source,c]
+----
+<<harness forward function declarations>>=
+static bool bslDelaySignalCommand(int, char *const *) ;
+----
+
+(((chunk,harness static functions)))
+(((function,bslDelaySignalCommand)))
+
+[source,c]
+----
+<<harness static functions>>=
+static bool
+bslDelaySignalCommand(
+    int argc,
+    char *const *argv)
+{
+    if (argc < 6) {
+        bslFormatToContext(
+            "wrong # of arguments, %d: expected, "
+            "\"delaysignal <domain> <class> <inst> <delay> <event> "
+            "?<arg1> <arg2> ...?\"",
+            argc) ;
+        return false ;
+    }
+
+    char *domainName = argv[1] ;
+    BSL_DomainHarness const *const harness = bslFindHarness(domainName) ;
+    if (harness == NULL) {
+        bslFormatToContext("unknown domain, \"%s\"", domainName) ;
+        return false ;
+    }
+    MRT_DomainPortal const *portal = harness->portal ;
+    assert(portal != NULL) ;
+
+    char *className = argv[2] ;
+    BSL_ClassMap const *const class = bslFindClass(harness, className) ;
+    if (class == NULL) {
+        return false ;
+    }
+    MRT_ClassId classId = class->id ;
+
+    char *instName = argv[3] ;
+    int instId = bslFindInst(class, instName) ;
+    if (instId < 0) {
+        return false ;
+    }
+
+    char *delayTime = argv[4] ;
+    MRT_DelayTime delay ;
+    int converted = sscanf(delayTime, "%" SCNi32, &delay) ;
+    if (converted != 1) {
+        bslFormatToContext(failedConvertMsg, delayTime, SCNi32) ;
+        return false ;
+    }
+
+    char *eventName = argv[5] ;
+    BSL_EventMap const *event = bslFindEvent(class, eventName) ;
+    if (event == NULL) {
+        return false ;
+    }
+
+    BSL_EventParamFunc *epfunc = event->paramFunc ;
+    MRT_EventCode eventNumber = event->number ;
+    int pcode ;
+    if (epfunc != NULL) {
+        MRT_EventParams params ;
+        bool pstatus = epfunc(argc - 6, argv + 6, params) ;
+        if (!pstatus) {
+            return false ;
+        }
+        pcode = mrt_PortalSignalDelayedEvent(portal, classId, instId,
+                eventNumber, params, sizeof(params), delay) ;
+    } else {
+        pcode = mrt_PortalSignalDelayedEvent(portal, classId, instId,
+                eventNumber, NULL, 0, delay) ;
+    }
+
+    if (pcode < 0) {
+        bslFormatToContext(mrt_PortalErrorString(pcode)) ;
+        return false ;
+    }
+
+    return true ;
+}
+----
+
 ==== Trace Command
 
 (((chunk,harness forward function declarations)))
@@ -1595,6 +1692,7 @@ variable codeTemplate [textutil::adjust::undent {
 #include <setjmp.h>
 #include <ctype.h>
 #include <time.h>
+#include <strings.h>
 
 /*
  * Macros
@@ -2148,7 +2246,9 @@ proc generateAttrReadFuncDefinitions {} {
         set varType [dict get $typeinfo type]
         set prifmt [dict get $typeinfo print]
         switch -exact -- $varType {
-            scalar -
+            scalar {
+                $div puts "bslFormatToContext(\"%\" $prifmt, attrValue) ;"
+            }
             string {
                 $div puts "bslFormatToContext(\"%\" $prifmt, attrValue) ;"
             }
@@ -2237,11 +2337,17 @@ proc generateAttrUpdateFuncDefinitions {} {
         set typeinfo [GetTypeInfo $Domain $DataType convertedValue]
         switch -exact -- [dict get $typeinfo type] {
             scalar {
-                set cvtRef [dict get $typeinfo varref]
-                set scnfmt [dict get $typeinfo scan]
-
                 $div puts "[dict get $typeinfo declaration] ;"
-                $div puts "int nitems = sscanf(value, \"%\" $scnfmt, $cvtRef) ;"
+                set cvtRef [dict get $typeinfo varref]
+
+                if {[dict get $typeinfo basetype] eq "bool"} {
+                    $div puts "int nitems = bslScanBoolean(value, $cvtRef) ;"
+                    set scnfmt \"bool\"
+                } else {
+                    set scnfmt [dict get $typeinfo scan]
+                    $div puts "int nitems = sscanf(value, \"%\" $scnfmt,\
+                            $cvtRef) ;"
+                }
                 $div puts "if (nitems == 1) {" ; $div push
                 $div puts "pcode = mrt_PortalUpdateAttr(portal, classId,\
                     instId, attrId, $cvtRef, sizeof(convertedValue)) ;"
@@ -2483,8 +2589,15 @@ proc generateEventParamFuncDefinitions {} {
                     $div puts "int nitems ;"
                     set nitemsDefined true
                 }
-                $div puts "nitems = sscanf(paramv\[$pindex\], \"%\" $scnfmt,\
-                    [dict get $typeinfo varref]) ;"
+                set reftovar [dict get $typeinfo varref]
+                if {[dict get $typeinfo basetype] eq "bool"} {
+                    $div puts "nitems = bslScanBoolean(paramv\[$pindex\],\
+                            $reftovar) ;"
+                    set scnfmt \"bool\"
+                } else {
+                    $div puts "nitems = sscanf(paramv\[$pindex\],\
+                        \"%\" $scnfmt, $reftovar) ;"
+                }
                 $div puts "if (nitems != 1) {" ; $div push
                 $div puts "bslFormatToContext(failedConvertMsg,\
                         paramv\[$pindex\], $scnfmt) ;"
