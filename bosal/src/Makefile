@@ -10,7 +10,7 @@
 #
 
 DOCDIR	= ../doc
-TESTDIR = ../tests
+TESTDIR = ../test
 PKGDIR	= ../../packages
 IMAGEDIR = ./figures
 CODEDIR	= ../code
