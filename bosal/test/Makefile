@@ -23,7 +23,6 @@ MICCA	=\
 	$(NULL)
 
 MIFLAGS	=\
-	-stubexternalops\
 	$(NULL)
 
 GENSRCS =\
@@ -43,6 +42,9 @@ SRCS	=\
 	harness.c\
 	$(patsubst %.micca,%.c,$(MICCA))\
 	micca_rt.c\
+	lube_sio_bridge.c\
+	lube_stubs.c\
+	sio_stubs.c\
 	$(NULL)
 
 OBJS	=\
@@ -90,6 +92,12 @@ sio.o : sio.h sio.c micca_rt.h micca_rt_internal.h
 
 micca_rt.o : micca_rt.c micca_rt.h micca_rt_internal.h
 
+lube_sio_bridge.o : lube_sio_bridge.c lube.h sio.h
+
+lube_stubs.o : lube_stubs.c lube.h
+
+sio_stubs.o : sio_stubs.c sio.h
+
 bosal.h :
 	make -C ../src code
 	tclsh ../code/tcl/bosal_main.tcl -header
@@ -106,6 +114,9 @@ CLEANFILES	=\
 		harness.c\
 		micca_rt*\
 		bosal.h\
+		*.gcno\
+		*.gcda\
+		*.gcov\
 		$(NULL)
 
 .PHONY : clean
