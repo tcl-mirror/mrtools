@@ -1,5 +1,6 @@
 set types {
     {int (*)()}
+    {int (*)(void)}
     {char (*)(int, int)}
     {char *const}
     {char *const*}
@@ -13,7 +14,6 @@ set types {
     {const int *}
     {struct foo *}
     {MyType_t *}
-    {typename(foo_bar)}
     {void (*)(int, ...)}
     {struct foo * const (*)(void)}
     {enum b {foo = 1, bar, baz}}

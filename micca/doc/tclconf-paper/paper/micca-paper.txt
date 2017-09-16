@@ -1,0 +1,789 @@
+---
+title: Translating Executable Software Models with micca
+author: Andrew Mangogna
+date: Model Realization
+abstract: Micca is a program, written in Tcl, for translating executable
+    software models into "C" code. It accepts a domain specific language
+    formulated as a Tcl script that describes the data, dynamics and processing
+    for a software domain and produces "C" header and code files implementing
+    the model logic.  This paper explores the underlying Tcl technology that is
+    used to implement the translation.  Tcl features and extensions for
+    creating DSL's, handling relational-structured data, parsing using a PEG
+    and code generation using template expansion are discussed.  The source
+    code for micca is freely available and licensed in the same manner as Tcl.
+header-includes:
+    - \pagestyle{empty}
+    - \renewcommand{\familydefault}{\sfdefault}
+include-before:
+    - \thispagestyle{empty}
+geometry: margin=1in,bmargin=1.5in
+fontsize: 12pt
+---
+
+# Introduction
+
+`Micca` is a program, written Tcl, that aids in translating Executable
+UML domain models into "C" code.
+This paper is about how the factilities of Tcl are used to implement
+`micca`.
+
+**More introduction**
+
+# Example model
+
+**Briefly describe the example**
+
+# Domain specific languages in Tcl
+
+To illustrate the domain specific language defined by `micca`,
+consider the following class diagram fragment of the
+example.
+We use UML class diagram notation, but
+note that the semantics of Executable UML differ substantially from
+those of conventional UML and that only small subset of the many
+different UML diagram types are used in Executable UML.
+In particular, Executable UML does not use many of
+the the object oriented programming language concepts of UML.
+Experience has shown that it is easier to adjust the meaning a person applies
+to a graphical symbol than it is to introduce a new, unfamiliar notation.
+
+
+![Example Class Diagram](wm-classes.pdf)\ 
+
+This graphic translates into the following `micca` DSL:
+
+~~~~ {.tcl}
+domain wmctrl {
+    class WashingMachine {
+        attribute MachineID {char[32]}
+        statemodel {
+            transition Stopped - Start -> FillingToWash
+            transition FillingToWash - Full -> Washing
+            # ... and other transition commands
+            state Stopped {} {
+                // "C" code for the Stopped state
+            }
+            # ... and other state commands
+        }
+    }
+    class WashingCycle {
+        attribute CycleType {char[32]}
+        attribute WashWaterTemp WaterTemp_t
+        attribute RinseWaterTemp WaterTemp_t
+        attribute WashDuration unsigned
+        attribute RinseDuration unsigned
+        attribute SpinDuration unsigned
+        attribute AgitationSpeed WashSpeed_t
+        attribute SpinSpeed WashSpeed_t
+        # ... and other Washing Cycle class properties
+    }
+    association R4 WashingMachine 0..*--1 WashingCycle
+}
+~~~~
+
+The above is actually a valid Tcl script despite that it does not
+contain any readily identifiable core Tcl commands.
+The command oriented nature of Tcl along with its simple syntax
+can be used to construct a DSL that is declarative in its intent.
+
+## Use of namespaces
+
+The DSL script is executed in a set of namespaces where the commands resolve
+locally without additional syntactic decoration.
+The `domain` command is used to specify the characteristics of an
+executable domain model.
+The `class` and `association` commands are defined in the namespace where the
+body of the `domain` command is evaluated.
+The `attribute` command is defined in the namespace where the body of the
+`class` command is evaluated.
+`Micca` uses child namespaces to segregate the commands in the
+configuration DSL and to control command name resolution.
+The namespace where the configuration DSL is run appears as:
+
+~~~~ {.tcl}
+namespace eval @Config@ {
+    # The "domain" command is defined in this namespace.
+
+    namespace eval DomainDef {
+        # The "class" command is defined in this namespace.
+        # ...
+    }
+    namespace eval ClassDef {
+        # The "attribute" command is defined in this namespace.
+        # The "statemodel" command is defined in this namespace.
+        # ...
+    }
+    namespace eval StateModelDef {
+        # The "transition" command is defined in this namespace.
+        # The "state" command is defined in this namespace.
+        # ...
+    }
+
+    # ...
+}
+~~~~
+
+Each DSL command taking a script argument invokes `ConfigEvaluate`
+to execute the script in a given namespace.
+
+~~~~ {.tcl}
+proc ConfigEvaluate {ns body} {
+    variable evalLambda
+    tailcall ::apply [concat $evalLambda [list $ns]] $body
+}
+~~~~
+
+This command uses the ability of the `apply` command to execute
+a lambda function in a given namespace.
+For example, the `class` procedures uses `ConfigEvaluate` as follows:
+
+~~~~ {.tcl}
+ConfigEvaluate [namespace current]::ClassDef $body
+~~~~
+
+
+## Handling errors
+
+Using the `apply` command is a convenient way to execute a script in
+a given namespace.
+However,
+if any error is encountered,
+execution terminates immediately.
+For a user,
+this is annoying since it implies that you will discover the
+errors in the script one at a time.
+We would like the DSL processing to behave like a conventional
+language compiler an make a best effort to process
+the entire text and discover multiple errors in one pass.
+
+A close look at `evalLambda` shows how the complete script can be
+evaluated.
+
+~~~~ {.tcl .numberLines}
+variable evalLambda {{body} {
+    upvar #0 ::micca::@Config@::errcount errcount
+    upvar #0 ::micca::@Config@::configlineno configlineno
+    set lineno $configlineno
+    set command {}
+    foreach line [split $body \n] {
+        append command $line \n
+        incr lineno
+        if {[info complete $command]} {
+            try {
+                eval $command
+            } on error {result} {
+                set cleancmd [CleanUpCommand $command]
+                log::error "line $configlineno: \"$cleancmd\":\n\"$result\""
+                incr errcount
+            }
+            set command {}
+            set configlineno $lineno
+        }
+    }
+    if {$command ne {}} {
+        set cleancmd [CleanUpCommand $command]
+        log::error "line [expr {$lineno - 1}]: end of script reached in the\
+            middle of the command starting at line $configlineno: $cleancmd"
+        incr errcount
+    }
+    return $errcount
+}
+~~~~
+
+line 6
+: The strategy is to split the script `body` into lines.
+
+line 7
+: Lines are accumulated into a command.
+
+line 9
+: The `info complete` command is used to determine if the accumulated command
+is potentially complete.
+If so, then it is evaluated.
+If not, then the next line is appended and another try is made.
+
+line 10
+: Any errors that occur in the command evaluation are caught by the `try`
+command.
+After some bookkeeping, evaluation continues on the next line
+of the `body`.
+
+# Relational structured data
+
+The primary purpose of `micca` is to generate "C" code that implements
+the model specified by the DSL.
+The DSL is used as a text-based user interface to populate a platform specific
+model for the Executable UML execution rules.
+The following figure shows a small fragment of this platform model.
+
+![Micca Plaform Model Fragment](micca-model.pdf)\ 
+
+There are 86 classes and 78 relationships
+in all in the `micca` platform model.
+`Micca` uses the
+[`rosea` package](http://repos.modelrealization.com/cgi-bin/fossil/mrtools/wiki?name=RoseaPage)
+to manage the platform model.
+`Rosea` is similar in intent as `micca` except the translation is targeted
+at Tcl rather than "C".
+
+`Rosea` uses a DSL that is similar to that of `micca`.
+The differences arise from the use of Tcl as a target and
+that `rosea` is based on
+[`TclRAL`](http://repos.modelrealization.com/cgi-bin/fossil/tclral/index)
+which directly supports the referential integrity implied by the
+associations in the class diagram.
+The referential integrity checks provided by formalizing the
+`micca` platform model using `rosea` are an important part of the
+DSL processing.
+The DSL commands insert their data into the appropriate classes in
+the `micca` platform.
+The data is inserted during a transaction and any violations of
+the integrity of the data relationships are detected at the end of the
+transaction.
+This level of data checking,
+provided automatically by `TclRAL`,
+would otherwise have to be coded into the `micca` application itself.
+
+The class diagram fragment for the `micca` platform model
+can be transliterated into the following `rosea` script.
+
+~~~~ {.tcl .numberLines}
+class Domain {
+    attribute Name string -id 1\
+        -check {[::micca::@Config@::Helpers::isIdentifier $Name]}
+    attribute Interface string -default {}
+    attribute Prologue string -default {}
+    attribute Epilogue string -default {}
+}
+class DomainElement {
+    attribute Domain string -id 1
+    attribute Name string -id 1\
+        -check {[::micca::@Config@::Helpers::isIdentifier $Name] &&\
+            ![::regexp -- {__[A-Z]+\Z} $Name]}
+
+    reference R1 Domain -link {Domain Name}
+}
+association R1 DomainElement 0..*--1 Domain
+
+class Class {
+    attribute Domain string -id 1 -id 2
+    attribute Name string -id 1
+    attribute Number int -id 2
+
+    reference R2 DomainElement -link Domain -link Name
+    reference R104 ValueElement -link Domain -link Name
+}
+class Relationship {
+    attribute Domain string -id 1 -id 2
+    attribute Name string -id 1
+    attribute Number int -id 2 -system 0
+
+    reference R2 DomainElement -link Domain -link Name
+}
+class ExternalEntity {
+    attribute Domain string -id 1
+    attribute Name string -id 1\
+        -check {[::micca::@Config@::Helpers::isIdentifier $Name]}
+
+    reference R2 DomainElement -link Domain -link Name
+}
+generalization R2 DomainElement Class Relationship ExternalEntity
+~~~~
+
+For example,
+line 14 above describes the {R1} annotation on the
+Domain attribute of the Domain Element class found
+in the diagram.
+The `reference` command occurring within the
+definitiona of the `DomainElement` class
+states that `DomainElement`
+contains a referential attribute that realizes
+the `R1` association to `Domain` by "linking" the
+`Domain` attribute in `DomainElement` to the
+`Name` attribute in `Domain`.
+By linking, we mean that the value the `Domain` attribute
+of any instance of `DomainElement` must be equal to the
+value of the `Name` instance for some instance of the
+`Domain` class.
+`Rosea` uses TclRAL to enforce this constraint on the
+attribute values.
+
+# Parsing "C" type names
+
+It is necessary for `micca` to understand some aspects of "C" data
+types.
+It must be able to generate "C" code that declares variables and
+so must be able to parse a "C" data type name.
+
+For example,
+the `attribute` command we saw in the
+[washing machine control](# Domain specific languages in Tcl)
+section requires a "C" type name as an argument.
+`Micca` validates the argument as a proper "C" type name and uses
+that type name later in code generation.
+To accomplish parsing type names,
+`micca` uses the *Parser Tools* from `tcllib`.
+The parser tools use a *Parsing Expression Grammar* (PEG) to specify the
+generation of a parser.
+We do not describe the background of PEGs here,
+but note that PEGs are not able to represent left-recursive gramars
+and this will entail some transformation of the usual formulation of
+"C" as a left-recursive grammar (typically LR(1) that is used to
+generate a parse from `yacc` or `bison`).
+
+The PEG used by `micca` was derived from a full C99 PEG written by
+Ian Piumarta.
+Since `micca` only parses type names,
+the grammar was condensed to those portions used by `micca`
+and translated to the PEG syntax used by the Parser Tools.
+The grammar file is too long to present here in its entirety,
+so we discuss only select parts.
+
+The following is the first set of grammar productions for the
+type name parser.
+
+~~~~
+PEG datatype (type_name)
+type_name <-
+    specifier_qualifier_list abstract_declarator? EOF ;
+
+abstract_declarator <-
+    pointer? direct_abstract_declarator /
+    pointer ;
+
+direct_abstract_declarator <-
+    direct_abstract_declarator_head direct_abstract_declarator_tail* ;
+
+direct_abstract_declarator_head <-
+	LPAREN abstract_declarator RPAREN /
+ 	direct_abstract_declarator_tail ;
+
+direct_abstract_declarator_tail <-
+    array_declarator /
+    LPAREN parameter_type_list? RPAREN ;
+
+array_declarator <-
+    LBRACKET assignment_expression? RBRACKET /
+    LBRACKET STAR RBRACKET ;
+
+pointer <-
+    (STAR type_qualifier_list?)+ ;
+
+type_qualifier_list <-
+    type_qualifier+ ;
+
+declaration_specifiers <-
+    storage_class_specifier declaration_specifiers? /
+    type_specifier declaration_specifiers? /
+    type_qualifier declaration_specifiers? /
+    function_specifier declaration_specifiers? ;
+
+specifier_qualifier_list <-
+	(type_specifier / type_qualifier)+ ;
+
+# ... and many more grammar statements
+#
+#
+
+END ;
+~~~~
+
+Because of the peculiarities of "C" type names there is a fundamental
+ambiguity in "C".
+We can show the ambiguity as follows.
+
+~~~~ {.c}
+unsigned long var1 ;
+typedef unsigned long ulong ;
+ulong var2 ;
+~~~~
+
+The `typedef` statement in "C" can introduce a new name for a type.
+In this example,
+`var1` and `var2` have the same data type,
+but syntactically we must parse `ulong` as a type name.
+"C" uses syntax for variable declarations that
+is intended to remind you of the variable's type when it is used in
+an expression.
+In this example, when using `var1` in an expression you know its type
+is `unsigned long`.
+A "C" compiler usually deals with this ambiguity by augmenting the
+set of valid type names for the lexical analyzer when the `typedef`
+statement is recognized.
+
+Since `micca` does not parse the passed through "C" code for activities and
+since the internals of the parser generated from the PEG is not generally
+accessible,
+the usual compiler solution is not available to us.
+`Micca` resolves this by directly recognizing all the standardized
+type names (*e.g.* `int8_t`, `uint8_t`, etc.) and by using a naming convention.
+
+~~~~
+type_specifier <-
+    int8_t / int16_t / int32_t / int64_t / int_least8_t / int_least16_t /
+    int_least32_t / int_least64_t / int_fast8_t / int_fast16_t / int_fast32_t /
+    int_fast64_t / void / char / short / int / long / float / double /
+    signed / unsigned / _Bool / bool / _Complex / complex / _Imaginary /
+    imaginary /
+    uint8_t / uint16_t / uint32_t / uint64_t / uint_least8_t / uint_least16_t /
+    uint_least32_t / uint_least64_t / uint_fast8_t / uint_fast16_t /
+    uint_fast32_t / uint_fast64_t / intptr_t / uintptr_t / intmax_t /
+    uintmax_t / size_t / ptrdiff_t /
+    struct_or_union_specifier / enum_specifier / typedef_name ;
+
+typedef_name <-
+    <upper> <alnum>* '_t' WHITESPACE /
+    'MRT_' <alnum>+ WHITESPACE ;
+~~~~
+
+The naming convention recognizes the type names used by the `micca` run-time
+(those type names starting with `MRT_`)
+as well as any type names that start with an upper case character
+followed by alphanumeric characters and finally ending in an `_t` suffix.
+
+With this resolution of the ambiguity,
+the parser generated by the parser tools from the PEG can recognize
+even complicated "C" type specifications.
+For example,
+`int (*)(void)`
+specifies a pointer to a function accepting no arguments and
+returning an `int`.
+Parsing this type specification results in the following
+abstract syntax tree (AST).
+
+~~~~
+<type_name> :: 0 12
+    <specifier_qualifier_list> :: 0 3
+        <type_specifier> :: 0 3
+            <int> :: 0 3
+    <abstract_declarator> :: 4 12
+        <direct_abstract_declarator> :: 4 12
+            <direct_abstract_declarator_head> :: 4 6
+                <LPAREN> :: 4 4
+                <abstract_declarator> :: 5 5
+                    <pointer> :: 5 5
+                        <STAR> :: 5 5
+                <RPAREN> :: 6 6
+            <direct_abstract_declarator_tail> :: 7 12
+                <LPAREN> :: 7 7
+                <parameter_type_list> :: 8 11
+                    <parameter_list> :: 8 11
+                        <parameter_declaration> :: 8 11
+                            <declaration_specifiers> :: 8 11
+                                <type_specifier> :: 8 11
+                                    <void> :: 8 11
+                <RPAREN> :: 12 12
+~~~~
+
+In this representation of the AST,
+the token name is given followed by the starting
+and ending offsets into the parsed string.
+With the parsed AST,
+a variable of this type can be declared by walking the tree and
+finding the correct offset where the variable name must be inserted.
+In this example,
+inserting a variable name after the `<STAR>` token of the
+`<direct_abstract_declarator_head>` (*i.e.* after the character at offset 5)
+results in a valid variable declaration, *e.g.*
+`int (*funcptr)(void)`.
+
+# Code generation
+
+The code generated by `micca` falls into two broad categories:
+
+1. Declaration of data structures and initialized variables
+such as classes and state model transition tables.
+The code generated for this has no executable component,
+providing the run-time code with the data it needs to implement domain
+specific behavior.
+1. Activity code that respresents the processing performed by the model.
+This is typically code supplied by a user that is packaged into
+"C" functions.
+
+To accomplish the code generation,
+`micca` uses the `textutil::expander` package from `tcllib`.
+The expander package provides conventional template expansion functionality
+where ordinary text is passed to the output and embedded commands
+are executed, passing the result of the command to the output.
+A separate template is used for each of the categories of generated code
+described above.
+
+## Generating the domain header file
+
+For each domain,
+`micca` generates two files: a "C" header file containing interfacing
+information and a "C" code file containing the executable portion
+of the model translation.
+In this example,
+we show part of the header file generation to illustrate the use of
+template expansion.
+
+The following is the expansion template used to the generate "C" header file.
+
+~~~~ {.tcl .numberLines}
+set headerTemplate {
+    <%banner%>
+    #ifndef <%headerFileGuard%>
+    #define <%headerFileGuard%>
+    #include "micca_rt.h"
+    #include <assert.h>
+    <%interface%>
+    <%interfaceTypeAliases%>
+    <%domainOpDeclarations%>
+    <%externalOpDeclarations%>
+    <%eventParamDeclarations%>
+    <%portalIds%>
+    <%portalDeclaration%>
+    #endif /* <%headerFileGuard%> */
+}
+~~~~
+
+In this usage,
+the characters used to demark the beginning and end of
+a command have been set to `<%` and `%>`.
+A procedure is defined for each command in the template.
+As a language, "C" requires substantial type annotation and declarations
+before the definitions of the code and data.
+The ordering of the expansion commands in the header template
+is contrived to match the requirements of the "C" compiler to insure
+that components are declared before they are defined.
+
+The general pattern of the template expansion procedures is to query the
+underlying `micca` platform model and construct a string containing the
+required "C" language statements.
+That string is then returned as by the procedure and the template expansion
+code replaces the command in the template with the procedure result.
+
+As an example of this pattern,
+we examine the declaration of domain operations by the
+`domainOpDeclarations` procedure from line 9 of the header template.
+A *Domain Operation* is a "C" function provided by the domain model
+as the means to access some aspect of the domain.
+The set of domain operations forms the primary invocable interface to
+the domain.
+
+~~~~ {.tcl .numberLines}
+proc domainOpDeclarations {} {
+    variable domain
+    set result [comment "Domain Operations External Declarations"]
+
+    set opRefs [DomainOperation findWhere {$Domain eq $domain}]
+    set params [deRef [findRelated $opRefs ~R6]]
+    set ops [pipe {
+        deRef $opRefs |
+        relation project ~ Domain Name ReturnDataType Comment |
+        relation rename ~ Name Operation |
+        ralutil::rvajoin ~ $params Parameters
+    }]
+
+    relation foreach op $ops {
+        relation assign $op
+        if {$Comment ne {}} {
+            append result [comment [string trim $Comment \n]]
+        }
+        set plist [relation list $Parameters DataType -ascending Number]
+        set pdecl [expr {[llength $plist] == 0 ?\
+                "void" : [join $plist {, }]}]
+        append result "extern $ReturnDataType\
+                ${Domain}_${Operation}\($pdecl\) ;\n"
+    }
+
+    return $result
+}
+~~~~
+line 5
+: Find the *Domain Operations* for the domain whose code is currently
+begin generated (stored in the `domain` variable).
+
+line6
+: Find the parameters of the Domain Operation by traversing the
+`R6` relationship.
+In the `micca` platform model,
+`R6` associates a *Domain Operation* to zero or more formal
+*Domain Operation Parameters*.
+
+lines 7-12
+: This series of commands creates a relation having an attribute
+that is also a relation value.
+If the *Domain Operation* has no parameters, then the Parameters
+attribute will be the empty relation.
+Otherwise,
+it will be a relation value with a heading containing the
+Name, Number and Data Type of the parameter.
+Note, the `pipe` command rewrites the sequence of commands in such a way
+that the result of one command is used directly as an argument to the
+next command.
+
+line 19
+: Since "C" is a language that supplies function arguments positionally,
+the parameters are ordered by the number assigned to them when they were
+specified in the DSL.
+
+line 22
+: Note that we prepend the domain name to the operation name
+in order to avoid naming conflicts in the global namespace.
+Naming conventions are necessary for a a language like
+"C" which does not have support for sophisticated module or name segregation.
+
+For our example washing machine control domain,
+the following is the portion of the header file generated by
+the `domainOpDeclarations` procedure.
+
+~~~~ {.c}
+/*
+ * Domain Operations External Declarations
+ */
+extern int wmctrl_createWasher(char const *) ;
+extern bool wmctrl_deleteWasher(char const *) ;
+extern bool wmctrl_startWasher(char const *) ;
+extern void wmctrl_selectCycle(char const *, char const *) ;
+extern void wmctrl_init(void) ;
+~~~~
+
+## Generating state activity code
+
+In Executable UML,
+most of the executable processing happens as part of the actions
+associated with a state model.
+In our example model,
+part of the lifecycle of a washing machine is to fill the
+clothes tub with water before starting the washing agitation.
+This happens in the *Filling To Wash* state.
+
+There are many ways to express, in an implementation independent fashion,
+the computations that are required to fill the clothes tub.
+Here we use a pseudocode that expresses the model level processing.
+
+**Filling To Wash action language**
+
+~~~~
+# Fill the tub with wash water.
+wc .= /R4
+ct .= /R1
+Fill(temp <= wc{WashWaterTemp}) -> ct
+~~~~
+
+This pseudocode states:
+
+1. Traverse the `R4` association to find the related instance of
+*Washing Cycle* and call that instance `wc`.
+1. Traverse the `R1` association to find the related instance of
+*Clothes Tub* and call that instance `ct`.
+1. Signal the *Fill* event to the related *Clothes Tub* instance and
+use the value of the *WashWaterTemp* attribute in the related
+*Washing Cycle* as the argument to the *Fill* event which determines
+the temperature of the water that should be placed in the *Clothes Tub*.
+
+The platform independent action from above is translated into
+a platform specific action before it is passed to `micca`.
+State activities usually consist of model level actions, such as
+traversing relationship and signaling events, and conventional
+expression evaluation and control of the execution flow.
+`Micca` supplies an embedded command language to handle model
+level actions and relies on a programmer to transcribe action pseudocode
+into the embedded command language combined with "C" expressions
+and flow of control.
+For the *Filling To Wash* state,
+this transcription is as follows.
+
+**Filling To Wash micca source**
+
+~~~~ {.tcl .numberLines}
+state FillingToWash {} {
+    <%my findOneRelated wc R4%>
+    <%my findOneRelated ct ~R1%>
+    <%instance wc assign {WashWaterTemp washtemp}%>
+    <%instance ct signal Fill temp washtemp%>
+}
+~~~~
+
+The embedded commands, again demarked by `<%` and `%>` are
+expanded using the `textutil::expander` package to generate the
+code that is placed in the domain "C" code file.
+In this case a different instance of an expander is used that was used
+for the header and code expansions.
+In fact,
+the two expansions are proceeding at the same time since generating the
+code file for a domain involves generating the state activity functions
+to go into the code file.
+
+The result of the expansion is the following "C" function.
+
+**Filling To Wash generated "C" code**
+
+~~~~ {.c .numberLines}
+static void
+WashingMachine_FillingToWash__ACTIVITY(
+    void *const s__SELF,
+    void const *const p__PARAMS)
+// <%my findOneRelated wc R4%>
+// <%my findOneRelated ct ~R1%>
+// <%instance wc assign {WashWaterTemp washtemp}%>
+// <%instance ct signal Fill temp washtemp%>   // <1>
+{
+        #define MRT_STATENAME "FillingToWash"
+    MRT_INSTRUMENT_ENTRY
+    struct WashingMachine *const self = s__SELF ;
+#line 72 "wmctrl.micca"
+    // instance self findOneRelated wc R4
+    struct WashingCycle *wc ;
+    struct WashingCycle *t__T1 = self->R4 ; // R4
+    wc = t__T1 ;
+    // instance self findOneRelated ct ~R1
+    struct ClothesTub *ct ;
+    struct ClothesTub *t__T2 = self->R1__BACK ; // ~R1
+    ct = t__T2 ;
+    // instance wc assign {{WashWaterTemp washtemp}}
+    WaterTemp_t washtemp ;
+    washtemp = wc->WashWaterTemp ;
+    // instance ct signal Fill {temp washtemp}
+    MRT_ecb *t__T3 = mrt_NewEvent(2, ct, self) ; // Fill
+    struct wmctrl_ClothesTub_Fill__EPARAMS *const t__T4 =
+        (struct wmctrl_ClothesTub_Fill__EPARAMS *)t__T3->eventParameters ;
+    t__T4->temp = washtemp ;
+    mrt_PostEvent(t__T3) ;
+        #undef MRT_STATENAME
+}
+~~~~
+
+line 11
+: Macros are inserted to facilitate instrumenting the entry into a state
+action function.
+
+line 13
+: Optionally, `micca` will insert `#line` directives to reference any
+compiler messages back to the `micca` source.
+
+line 16
+: In a "C" based implementation, traversing an association (`R4` in this case),
+is implemented using a pointer stored in the class structure.
+
+lines 26-30
+: Signaling an event which passes an argument is implemented by requesting
+an event data structure from the run-time code,
+assigning the argument value into the data structure, and 
+requesting the run-time to post the event.
+
+Note that there may seem to be a number of variable declarations and
+assignments that are not strictly necessary.
+Any reasonable optimization levels for the "C" compiler will remove
+the superfluous variables and assignments.
+
+Space does not allow examining the expansion command procedures that
+generate code.
+They are considerably more complicated as they must track a symbol table
+of "C" variables.
+However, the interested reader can find the complete source code and
+descriptions of all the code generation procedures in the `micca`
+documentation.
+
+# Summary
+
+**Add summary**
+
+# Resources
+
+`Micca` is freely available from either
+[Model Realization](http://repos.modelrealization.com/cgi-bin/fossil/mrtools/wiki?name=MiccaPage)
+or
+[chiselapp](http://chiselapp.com/user/mangoa01/repository/mrtools/wiki?name=MiccaPage).
