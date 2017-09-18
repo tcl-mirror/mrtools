@@ -450,17 +450,13 @@ mrt_EventLoop(void)
 {
     mrtExitEventLoop = false ;
 
-    mrtFinishThreadOfControl() ;                // <1>
-    if (mrtExitEventLoop) {
-        return ;
-    }
-
     for (;;) {
-        bool didtoc = mrtRunThreadOfControl() ; // <2>
-        if (!didtoc) {
-            mrtWait() ;                         // <3>
-        } else if (mrtExitEventLoop) {          // <4>
+        bool didtoc = mrtRunThreadOfControl() ; // <1>
+
+        if (mrtExitEventLoop) {                 // <2>
             break ;
+        } else if (!didtoc) {                   // <3>
+            mrtWait() ;
         }
         /*
          * Else we ran a thread of control and weren't requested to exit
@@ -469,15 +465,14 @@ mrt_EventLoop(void)
     }
 }
 ----
-<1> We must finish up any ongoing thread of control.
-This can happen since we provide an interface to allow event by event
-dispatch.
-Events can be dispatched singly and then the event loop can be entered
-which would leave us in the middle of a thread of control.
-<2> Run one thread of control, recording whether there was any work done.
-<3> If no thread of control actually ran, then wait for the next
-synchronization.
-<4> Check if we have been requested to exit the event loop.
+<1> Run one thread of control, recording whether there was any work done.
+<2> Check if we have been requested to exit the event loop.
+We do this first because it is possible that something took us out of
+`mrtWait()` and requested to exit the event loop without actually
+signaling an event.
+For example, this happens when domains are run under a test harness.
+<3> If no thread of control actually ran, then wait for something
+in the outside world to wake us up.
 
 As we see,
 the flow of control loops, processing one thread of control at a time as long
@@ -592,8 +587,6 @@ bool
 mrt_DispatchThreadOfControl(
     bool wait)
 {
-    mrtFinishThreadOfControl() ;            // <1>
-
     bool rantoc = mrtRunThreadOfControl() ;
     if (!rantoc && wait) {
         mrtWait() ;
@@ -602,9 +595,6 @@ mrt_DispatchThreadOfControl(
     return rantoc ;
 }
 ----
-<1> Again, since we can dispatch a single event,
-we will finish up any ongoing thread of control before considering
-a new one.
 
 We also provide an interface to dispatch one event and then return
 to the caller.
@@ -707,7 +697,7 @@ event queue.
 static bool
 mrtRunThreadOfControl(void)
 {
-    assert(mrtEventQueueEmpty(&eventQueue)) ;
+    mrtFinishThreadOfControl() ;                            // <1>
 
     bool startedtoc = mrtProcessOneEvent(&tocEventQueue) ;
     if (startedtoc) {
@@ -717,6 +707,7 @@ mrtRunThreadOfControl(void)
     return startedtoc ;
 }
 ----
+<1> It is possible for events to be lingering in the imminent dispatch queue.
 
 === Processing a Single Event
 
@@ -5028,6 +5019,10 @@ mrtDeleteLinks(
     void *inst)
 {
     assert(inst != NULL) ;
+    /*
+     * Mark the transaction since we are updating the reference pointers.
+     */
+    mrtMarkRelationship(classRels, relCount) ;
 
     MRT_Instance *instref = inst ;
     MRT_Class const *const instclass = instref->classDesc ;
@@ -5059,10 +5054,6 @@ mrtDeleteLinks(
             break ;
         }
     }
-    /*
-     * Mark the transaction since we are updating the reference pointers.
-     */
-    mrtMarkRelationship(classRels, relCount) ;
 }
 ----
 
