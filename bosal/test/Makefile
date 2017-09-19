@@ -38,7 +38,6 @@ SAVED	=\
 	$(NULL)
 
 SRCS	=\
-	main.c\
 	harness.c\
 	$(patsubst %.micca,%.c,$(MICCA))\
 	micca_rt.c\
@@ -77,15 +76,13 @@ runtests : $(PROG) bosal.test
 bosal.test : ../src/bosal.aweb ../src/*.txt
 	make -C ../src tests
 
-main.c : bosal.h micca_rt.h
-
-harness.o : harness.c micca_rt.h micca_rt_internal.h
+harness.o : harness.c micca_rt.h micca_rt_internal.h bosal.h
 
 harness.o : CFLAGS+=--coverage
 
 harness.c : $(SAVED) ../src/bosal.aweb ../src/*.txt
 	make -C ../src code
-	tclsh ../code/tcl/bosal_main.tcl -output $@ $(SAVED)
+	tclsh ../code/tcl/bosal_main.tcl -output $@ -main $(SAVED)
 
 lube.o : lube.h lube.c micca_rt.h micca_rt_internal.h
 

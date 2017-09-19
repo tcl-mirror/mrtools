@@ -41,8 +41,7 @@ DOCPARTS=\
 	$(NULL)
 
 DIAGRAMS =\
-	bosal-datatype-classes.uxf\
-	bosal-harness-classes.uxf\
+	harness-drawing.uxf\
 	$(NULL)
 
 IMAGES =\
@@ -146,9 +145,7 @@ $(DOCDIR)/%.pdf : %.aweb
 
 $(IMAGEDIR)/%.pdf : %.uxf
 	umlet -action=convert -format=pdf\
-		-filename=$< -output=$(basename $@)-cvt
-	pdftk $(basename $@)-cvt.pdf cat 1left output $@
-	$(RM) $(basename $@)-cvt.pdf
+		-filename=$< -output=$(basename $@)
 
 %.tcl : %.aweb
 	atangle $(ATANGLEOPTS) -root $@ -output $(CODEDIR)/tcl/$@ $<
