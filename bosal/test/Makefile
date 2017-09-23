@@ -115,6 +115,7 @@ CLEANFILES	=\
 		*.gcno\
 		*.gcda\
 		*.gcov\
+		core\
 		$(NULL)
 
 .PHONY : clean

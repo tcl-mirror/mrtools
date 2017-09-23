@@ -2,16 +2,49 @@
 
 == Domain independent code
 
+Much of the test harness code is independent of the specifics of any
+domain in the harness.
+One alternative design is to place the domain independent code in
+a separate file and compile that code into a library.
+Here,
+we have decided to put both domain independent and domain dependent code
+into the same file.
+This design reduces any dependency between an external libray code file and
+different versions of `bosal`.
+This the amount of domain independent code is relatively small,
+removing external dependencies was deemed beneficial.
+
 === Running the harness
+
+Normally,
+systems assembled from `micca` domains are run by invoking the
+`mrt_EventLoop()` function.
+This function manages all the state machine dispatch and execution
+sequencing.
+When running in a test harness,
+we want more control over the execution sequencing and must perform
+other initialization before allowing the domains to run.
+Consequently,
+test harness code is run by invoking `bsl_Run()`.
 
 (((chunk,harness external function declarations)))
 (((function,bsl_Run)))
 
+*******
 [source,c]
 ----
 <<harness external function declarations>>=
 extern void bsl_Run(void) ;
 ----
+
+Invoking `bsl_Run()` initializes and runs a `bosal` generated
+test harness.
+Before invoking this function,
+it is necessary to invoke `mrt_Initialize()`.
+*******
+
+The implementation of `bsl_Run` is as you might expect.
+It is an infinte loop that replaces the micca run-time event loop.
 
 (((chunk,harness external function definitions)))
 (((function,bsl_Run)))
@@ -22,24 +55,44 @@ extern void bsl_Run(void) ;
 void
 bsl_Run(void)
 {
-    if (!bslInitialize()) {
+    if (!bslInitialize()) {                                         // <1>
         return ;
     }
 
-    mrt_SetFatalErrorHandler(bslErrorHandler) ;
+    mrt_SetFatalErrorHandler(bslErrorHandler) ;                     // <2>
 
-    for (bslHarnessState = bslRunning ; bslHarnessState != bslTerminate ;) {
-        if (setjmp(bslFatalBuf) == 0) {
-            mrt_EventLoop() ;
+    for (bslHarnessState = bslRunning ; ;) {
+        if (setjmp(bslFatalBuf) == 0) {                             // <3>
+            mrt_EventLoop() ;                                       // <4>
         }
 
-        while (bslHarnessState == bslHalted) {
-            bslReadAndEvalCommand(0) ;
+        for (bslHarnessState = bslHalted ; bslHarnessState == bslHalted ;) {
+            bslReadAndEvalCommand(0) ;                              // <5>
         }
     }
-    bslClose() ;
 }
 ----
+<1> First, we must initialize the test harness infrastructure.
+<2> The default error handler for the `micca` run-time will
+invoke `abort()` when an error occurs.
+This would cause the test harness to stop.
+We want more control so we can see transitions and probe
+the cause of an error.
+<3> The test harness error handler uses `setjmp/longjmp` to transfer
+control back to here.
+<4> It is still `mrt_EventLoop` that causes everything to run.
+`mrt_EventLoop` will return if any action in the domain invokes
+`mrt_SyncToEventLoop`.
+We will also end up out of the event loop if the error handler is invoked
+as a result of a fatal error.
+In either case,
+we consider the test harness halted.
+<5> Once the event loop is halted,
+we still need to read and evaluate test harness commands off the communications
+link so that an external program can interact with the harness.
+
+The harness keeps track of whether or not it is in the `micca` run-time
+event loop and uses a variable to track that state.
 
 (((chunk,harness static data)))
 (((data,bslHarnessState)))
@@ -50,28 +103,40 @@ bsl_Run(void)
 static enum {
     bslHalted,
     bslRunning,
-    bslTerminate,
 } bslHarnessState ;
 ----
 
-(((chunk,harness static data)))
-(((data,bslFatalBuf)))
+=== Handling fatal system errors
 
-[source,c]
-----
-<<harness static data>>=
-static jmp_buf bslFatalBuf ;
-----
+The `micca` run-time code diagnoses several fatal system errors.
+These are essential ``panic'' conditions and, by default,
+invokes `abort()` to terminate the process.
+We need to do better than that in a test harness since we might want to
+inquire and probe to determine the circumstances of the failure.
+Fortunately, we can install our own error handler to prevent the
+harness from terminating.
 
 (((chunk,harness forward function declarations)))
 (((function,bslErrorHandler)))
 
+*****
 [source,c]
 ----
 <<harness forward function declarations>>=
-static void bslErrorHandler(MRT_ErrorCode errNum, char const *fmt,
-        va_list alist) ;
+static void
+bslErrorHandler(
+    MRT_ErrorCode errNum,
+    char const *fmt,
+    va_list alist) ;
 ----
+
+The error handler arguments are dictated by the `micca` run-time.
+
+[horizontal]
+errNum:: a number indicating the cause of the error.
+fmt:: a `printf` style format string.
+alist:: a variable length argument list for the items in the `fmt` string.
+*****
 
 (((chunk,harness static functions)))
 (((function,bslErrorHandler)))
@@ -85,15 +150,25 @@ bslErrorHandler(
     char const *fmt,
     va_list alist)
 {
-    static char buf[BUFSIZ] ;
+    bslBeginResponse() ;
+    bslAddWord("fatal") ;
+    bslPushContext() ;
+    bslVformatToContext(fmt, alist) ;
+    bslPopContext() ;
+    bslEndResponse() ;
 
-    vsnprintf(buf, sizeof(buf), fmt, alist) ;
-    bslTrimSpaceRight(buf) ;
-    fprintf(bslCmdStream, "fatal {%s}\n" , buf) ;
-
-    bslHarnessState = bslHalted ;
-    longjmp(bslFatalBuf, 1) ;
+    longjmp(bslFatalBuf, 1) ;                           // <1>
 }
+----
+<1> This transfers control back to `bsl_Run`.
+
+(((chunk,harness static data)))
+(((data,bslFatalBuf)))
+
+[source,c]
+----
+<<harness static data>>=
+static jmp_buf bslFatalBuf ;
 ----
 
 === Harness initialization
@@ -375,6 +450,7 @@ bslClose(void)
         shutdown(bslServiceSock, SHUT_RDWR) ;
     }
     if (bslCmdStream != NULL) {
+        mrt_UnregisterFDService(fileno(bslCmdStream), true, false, false) ;
         fclose(bslCmdStream) ;
     }
 }
@@ -1321,25 +1397,26 @@ bslEloopCommand(
     int argc,
     char *const *argv)
 {
+    static char const runMsg[] = "event loop is running" ;
+
     bool status = true ;
 
     if (argc == 1) {
-        char const *state ;
         switch (bslHarnessState) {
         case bslHalted :
-            state = "halted" ;
+            bslAddWord("halted") ;
             break ;
 
         case bslRunning:
-            state = "running" ;
+            bslAddWord("running") ;
             break ;
 
-        case bslTerminate:
         default:
-            state = "terminated" ;
+            bslFormatToContext("unknown harness state, \"%d\"",
+                    bslHarnessState) ;
+            status = false ;
             break ;
         }
-        bslAddWord(state) ;
     } else if (argc == 2) {
         if (strcmp(argv[1], "run") == 0) {
             bslHarnessState = bslRunning ;
@@ -1348,16 +1425,12 @@ bslEloopCommand(
             mrt_SyncToEventLoop() ;
             bslHarnessState = bslHalted ;
             bslAddWord("halted") ;
-        } else if (strcmp(argv[1], "terminate") == 0) {
-            mrt_SyncToEventLoop() ;
-            bslHarnessState = bslTerminate ;
-            bslAddWord("terminated") ;
         } else if (strcmp(argv[1], "once") == 0) {
             if (bslHarnessState != bslRunning) {
                 bool didEvent = mrt_DispatchSingleEvent() ;
                 bslAddWord(didEvent ? "true" : "false") ;
             } else {
-                bslAddWord("event loop is running") ;
+                bslAddWord(runMsg) ;
                 status = false ;
             }
         } else if (strcmp(argv[1], "toc") == 0) {
@@ -1365,20 +1438,46 @@ bslEloopCommand(
                 bool didEvent = mrt_DispatchThreadOfControl(true) ;
                 bslAddWord(didEvent ? "true" : "false") ;
             } else {
-                bslAddWord("event loop is running") ;
+                bslAddWord(runMsg) ;
                 status = false ;
             }
         } else {
             bslFormatToContext(
                 "unknown eloop option, \"%s\": expected, "
-                "\"run | halt | once | toc | terminate\"",
+                "\"run | halt | once | toc\"",
+                argv[1]) ;
+            status = false ;
+        }
+    } else if (argc == 3) {
+        if (strcmp(argv[1], "toc") == 0) {
+            if (bslHarnessState == bslRunning) {
+                bslAddWord(runMsg) ;
+                status = false ;
+            } else {
+                if (strcmp(argv[2], "wait") == 0) {
+                    bool didEvent = mrt_DispatchThreadOfControl(true) ;
+                    bslAddWord(didEvent ? "true" : "false") ;
+                } else if (strcmp(argv[2], "nowait") == 0) {
+                    bool didEvent = mrt_DispatchThreadOfControl(false) ;
+                    bslAddWord(didEvent ? "true" : "false") ;
+                } else {
+                    bslFormatToContext(
+                        "unknown toc option, \"%s\": expected, "
+                        "\"toc wait | nowait\"", argv[2]) ;
+                    status = false ;
+                }
+            }
+        } else {
+            bslFormatToContext(
+                "bad eloop command format, \"%s\": expected, "
+                "\"toc ?wait | nowait?\"",
                 argv[1]) ;
             status = false ;
         }
     } else {
         bslFormatToContext(
             "wrong # of arguments: %d: expected, "
-            "\"eloop ?run | halt | once | toc | terminate?\"",
+            "\"eloop ?run | halt | once | toc ?wait | nowait?\"",
             argc) ;
         status = false ;
     }
@@ -3264,18 +3363,14 @@ proc generateMain {} {
         set div [diverter new]
 
         $div puts int
-        $div puts main(
-        $div push
+        $div puts main( ; $div push
         $div puts "int argc,"
-        $div puts "char **argv)"
-        $div pop
-        $div puts "{"
-        $div push
+        $div puts "char **argv)" ; $div pop
+        $div puts "{" ; $div push
         $div puts "mrt_Initialize() ;"
         $div puts "bsl_Run() ;"
         $div puts "return 0 ;"
-        $div pop
-        $div puts "}"
+        $div pop ; $div puts "}"
 
         $div return
     }
@@ -3383,11 +3478,17 @@ variable codeTemplate [textutil::adjust::undent {
 #   define  dbgprintf(...)
 #endif /* NDEBUG */
 
+/*
+ * Special characters used in parsing commands.
+ */
 #define ASCII_NUL       '\0'
 #define BEGIN_QUOTE     '{'
 #define END_QUOTE       '}'
 #define ESCAPE_CHAR     '\\'
 
+/*
+ * The state of the command parser.
+ */
 #define OUTOFWORD   0
 #define INWORD      1
 #define INESCAPE    2
@@ -3397,10 +3498,10 @@ variable codeTemplate [textutil::adjust::undent {
  * Constants
  */
 #ifndef HARNESS_PORT
-#   define HARNESS_PORT 3906
+#   define HARNESS_PORT 3906    /* default port number for TCP connection */
 #endif /* HARNESS_PORT */
 #ifndef BSL_NESTLIMIT
-#   define  BSL_NESTLIMIT   4
+#   define  BSL_NESTLIMIT   4   /* maximum depth of text diversions */
 #endif /* BSL_NESTLIMIT */
 
 /*
@@ -3438,6 +3539,15 @@ variable codeTemplate [textutil::adjust::undent {
 }]
 ----
 
+In the following sections,
+we show the Tcl code that is executed during the template expansion.
+
+=== Including the domain header files
+
+The domain header files are derived from the name of a domain.
+This matches the naming convension used by `micca` in producing
+the header file.
+
 (((chunk,bosal code template commands)))
 (((proc,generateHarnesses)))
 
@@ -3458,7 +3568,26 @@ proc includeDomainHeaders {} {
 
 === Generating domain mappings
 
+A major part of the link between the domain independent code and
+the harnessed domains is a set of mapping tables.
+The mapping tables typically map string values to some internal
+reference to the domain.
+For example,
+knowing how to execute a domain operation involves mapping the
+name of the operation to a function that ultimately invokes the
+``C'' function that is the domain operation.
+
+The mapping tables are ordered alphabetically by the string key.
+This allows us to use `bsearch` to find an entry.
+The tables are not very large, so binary search is sufficient
+for our purposes and easier to manage that a hash table.
+
 ==== Generating the domain harness
+
+The top level mapping locates information about a domain and is a mapping
+from the name of the domain to its descriptive data.
+
+The following data structure describes an harnessed domain.
 
 (((chunk,harness data types)))
 (((type,BSL_DomainHarness)))
@@ -3484,13 +3613,11 @@ typedef struct bsldomainharness {
 proc generateHarnesses {} {
     set div [diverter new]
 
-    $div puts "static BSL_DomainHarness const bslHarnesses\[] = {"
-    $div push
+    $div puts "static BSL_DomainHarness const bslHarnesses\[] = {" ; $div push
 
     forAllRefs domRef [Domain findAll] {
         assignAttribute $domRef {Name domainName}
-        $div puts "{"
-        $div push
+        $div puts "{" ; $div push
         $div puts ".portal = &${domainName}__PORTAL,"
 
         set opsRef [findRelated $domRef ~R5]
@@ -3507,12 +3634,11 @@ proc generateHarnesses {} {
         $div puts ".classes = ${domainName}__CLASSMAP,"
         $div puts ".classCount = COUNTOF(${domainName}__CLASSMAP)"
 
-        $div pop
-        $div puts "},"
+        $div pop ; $div puts "},"
     }
 
-    $div pop
-    $div puts "} ;"
+    $div pop ; $div puts "} ;"
+
     $div puts "static int const bslHarnessCount = COUNTOF(bslHarnesses) ;"
 
     $div return
