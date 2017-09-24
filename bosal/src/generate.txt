@@ -11,14 +11,14 @@ we have decided to put both domain independent and domain dependent code
 into the same file.
 This design reduces any dependency between an external libray code file and
 different versions of `bosal`.
-This the amount of domain independent code is relatively small,
+Since the amount of domain independent code is relatively small,
 removing external dependencies was deemed beneficial.
 
 === Running the harness
 
 Normally,
-systems assembled from `micca` domains are run by invoking the
-`mrt_EventLoop()` function.
+systems build from `micca` domains are run by invoking the
+`mrt_EventLoop()` run-time function.
 This function manages all the state machine dispatch and execution
 sequencing.
 When running in a test harness,
@@ -79,14 +79,13 @@ This would cause the test harness to stop.
 We want more control so we can see transitions and probe
 the cause of an error.
 <3> The test harness error handler uses `setjmp/longjmp` to transfer
-control back to here.
+control back to here if a fatal error occurs.
 <4> It is still `mrt_EventLoop` that causes everything to run.
 `mrt_EventLoop` will return if any action in the domain invokes
-`mrt_SyncToEventLoop`.
-We will also end up out of the event loop if the error handler is invoked
+`mrt_SyncToEventLoop` or if the harness error handler is invoked
 as a result of a fatal error.
 In either case,
-we consider the test harness halted.
+we consider the state of the event loop as halted.
 <5> Once the event loop is halted,
 we still need to read and evaluate test harness commands off the communications
 link so that an external program can interact with the harness.
@@ -132,7 +131,6 @@ bslErrorHandler(
 
 The error handler arguments are dictated by the `micca` run-time.
 
-[horizontal]
 errNum:: a number indicating the cause of the error.
 fmt:: a `printf` style format string.
 alist:: a variable length argument list for the items in the `fmt` string.
@@ -165,6 +163,9 @@ bslErrorHandler(
 (((chunk,harness static data)))
 (((data,bslFatalBuf)))
 
+The `setjmp/longjmp` combination that performs the non-local goto needs
+a variable to hold the context.
+
 [source,c]
 ----
 <<harness static data>>=
@@ -173,13 +174,19 @@ static jmp_buf bslFatalBuf ;
 
 === Harness initialization
 
+The `bslInitialize` function sets up the communications and command
+infrastructure for the test harness.
+Most of the initialization work is involved in setting up the
+TCP / IP communications socket.
+
 (((chunk,harness forward function declarations)))
 (((function,bslInitialize)))
 
 [source,c]
 ----
 <<harness forward function declarations>>=
-static bool bslInitialize(void) ;
+static bool
+bslInitialize(void) ;
 ----
 
 (((chunk,harness static functions)))
@@ -203,6 +210,9 @@ bslInitialize(void)
 }
 ----
 
+Setting up the communications socket is standard POSIX systems
+programming.
+
 (((chunk,bslInitialize: create socket)))
 
 [source,c]
@@ -220,6 +230,9 @@ if (bslServiceSock == -1) {
 <<harness static data>>=
 static int bslServiceSock = -1 ;
 ----
+
+The socket will ultimately be used to listen for connections,
+so we must bind to a port that clients will know.
 
 (((chunk,bslInitialize: bind socket)))
 
@@ -251,6 +264,11 @@ if (err == -1) {
 }
 ----
 
+In addition to listening on the socket,
+we register the file descriptor with the `micca` run-time.
+The POSIX version of the `micca` run-time will perform callbacks
+when file descriptors change state.
+
 (((chunk,bslInitialize: listen on socket)))
 
 [source,c]
@@ -264,6 +282,12 @@ if (err == -1) {
 }
 ----
 
+We also want to handle the usual signals that indicate the harness
+should be shut down.
+Again the `micca` run-time for POSIX supplies functions to interface
+signals to the event loop and obtain a callback when the signal
+occurs.
+
 (((chunk,bslInitialize: register signals)))
 
 [source,c]
@@ -273,6 +297,10 @@ mrt_RegisterSignal(SIGQUIT, bslExitOnSignal) ;
 mrt_RegisterSignal(SIGINT, bslExitOnSignal) ;
 mrt_RegisterSignal(SIGTERM, bslExitOnSignal) ;
 ----
+
+The `micca` run-time has a default trace handler
+and we want to store that away when it is replaced by the
+harness specific trace handler.
 
 (((chunk,harness static data)))
 (((data,bslDefaultTraceHandler)))
@@ -285,6 +313,10 @@ void (*bslDefaultTraceHandler)(MRT_TraceInfo const *traceInfo) ;
 
 === Accepting service connections
 
+When a connection attempt occurs on the test harness socket,
+control is transferred by the event loop to the `bslAcceptConnection`
+function.
+
 (((chunk,harness forward function declarations)))
 (((function,bslAcceptConnection)))
 
@@ -293,6 +325,14 @@ void (*bslDefaultTraceHandler)(MRT_TraceInfo const *traceInfo) ;
 <<harness forward function declarations>>=
 static void bslAcceptConnection(int sock) ;
 ----
+
+The implementation is a bit different than is usually used for a server
+program.
+First, a test harness is run for only a single session.
+It does *not* service multiple clients, so the passive listening
+socket is closed after the client connection is accepted.
+Once the client connection is established,
+it is also registered with the `micca` run-time to receive commands.
 
 (((chunk,harness static functions)))
 (((function,bslAcceptConnection)))
@@ -320,10 +360,18 @@ bslAcceptConnection(
     }
 
     mrt_RegisterFDService(fd, bslReadAndEvalCommand, NULL, NULL) ;
-    bslCmdStream = fdopen(fd, "w+") ;
-    err = setvbuf(bslCmdStream, NULL, _IOLBF, 0) ;
+    bslCmdStream = fdopen(fd, "w+") ;                               // <1>
+    err = setvbuf(bslCmdStream, NULL, _IOLBF, 0) ;                  // <2>
 }
 ----
+<1> It is easiest just to deal with the communications connection
+as a standard stream.
+<2> We want line buffering so that the response is sent on an ASCII record
+basis.
+
+The command stream is stored in a file scoped variable so that the
+I/O functions can just use it directly.
+Only handling a single client makes all this much simpler.
 
 (((chunk,harness static data)))
 (((data,bslCmdStream)))
@@ -333,6 +381,8 @@ bslAcceptConnection(
 <<harness static data>>=
 static FILE *bslCmdStream ;
 ----
+
+=== Evaluating command input
 
 (((chunk,harness forward function declarations)))
 (((function,bslReadAndEval)))
@@ -388,7 +438,10 @@ bslReadAndEvalCommand(
 
     int err = bslParseCommand(parseBuffer, &argc, &argv) ;
     if (err == -1) {
-        bslFormatToContext("name unknown return error result ") ;
+        bslAddWord("name") ;
+        bslAddWord("unknown") ;
+        bslAddWord("return") ;
+        bslAddWord("error") ;
         bslPushContext() ;
         bslFormatToContext("failed to parse command: \"%s\"", cmdBuffer) ;
         bslPopContext() ;
@@ -448,6 +501,7 @@ bslClose(void)
 {
     if (bslServiceSock != -1) {
         shutdown(bslServiceSock, SHUT_RDWR) ;
+        bslServiceSock = -1 ;
     }
     if (bslCmdStream != NULL) {
         mrt_UnregisterFDService(fileno(bslCmdStream), true, false, false) ;
