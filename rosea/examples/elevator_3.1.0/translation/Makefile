@@ -20,6 +20,7 @@ PDF 	=\
 
 ROOTS	=\
 	elevator.tcl\
+	elevator_main.tcl\
 	$(NULL)
 
 TESTS	=\
@@ -103,6 +104,9 @@ clean :
 $(PDF) : $(DOCSRC) $(EXTRAS) $(LOGS) $(PDFDIAGS)
 
 elevator.tcl : $(DOCSRC)
+	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
+
+elevator_main.tcl : $(DOCSRC)
 	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
 
 elevator_population.tcl : $(DOCSRC)
