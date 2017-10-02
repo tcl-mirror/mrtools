@@ -76,7 +76,7 @@ DBLATEX_PARAMS =\
 	doc.publisher.show=0\
 	doc.lot.show=figure,table\
 	toc.section.depth=3\
-	doc.section.depth=1\
+	doc.section.depth=0\
 	$(NULL)
 
 DOCINFO	=\
