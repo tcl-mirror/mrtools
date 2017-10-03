@@ -4,6 +4,9 @@ set types {
     {char (*)(int, int)}
     {char *const}
     {char *const*}
+    {unsigned}
+    {unsigned long}
+    {signed short}
     {int **}
     {enum a}
     {struct a}
