@@ -14,6 +14,8 @@ different versions of `bosal`.
 Since the amount of domain independent code is relatively small,
 removing external dependencies was deemed beneficial.
 
+== External harness functions
+
 === Running the harness
 
 Normally,
@@ -102,7 +104,101 @@ event loop and uses a variable to track that state.
 static enum {
     bslHalted,
     bslRunning,
-} bslHarnessState ;
+} bslHarnessState = bslHalted ;
+----
+
+=== Harness instrumentation
+
+(((chunk,harness external function declarations)))
+(((function,bsl_Vprintf)))
+
+*****
+[source,c]
+----
+<<harness external function declarations>>=
+extern int
+bsl_Vprintf(
+    char const *format,
+    va_list args) ;
+----
+
+format::
+    a `printf`-style format string describing the output.
+args::
+    a variable argument list supplying parameters according to `format`.
+*****
+
+(((chunk,harness external function definitions)))
+(((function,bsl_Vprintf)))
+
+[source,c]
+----
+<<harness external function definitions>>=
+int
+bsl_Vprintf(
+    char const *format,
+    va_list args)
+{
+    if (!instrOn || bslCmdStream == NULL) {
+        return 0 ;
+    }
+
+    static char resultBuf[BUFSIZ] ;
+    int n = vsnprintf(resultBuf, sizeof(resultBuf), format, args) ;
+
+    if (n < 0) {
+        strncpy(resultBuf, "error formating response", sizeof(resultBuf)) ;
+    } else if (n >= sizeof(resultBuf)) {
+        strncpy(resultBuf, "instrumentation output truncated",
+            sizeof(resultBuf)) ;
+    } else {
+        // trim off any whitespace
+        bslTrimSpaceRight(resultBuf) ;
+    }
+
+    return fprintf(bslCmdStream, "instr {%s}\n", resultBuf) ;
+}
+----
+
+(((chunk,harness external function declarations)))
+(((function,bsl_Printf)))
+
+*****
+[source,c]
+----
+<<harness external function declarations>>=
+extern int
+bsl_Printf(
+    char const *format,
+    ...) ;
+----
+
+format::
+    A `printf`-style format string.
+...::
+    A variable number of function arguments matching the `format`
+    specification.
+*****
+
+(((chunk,harness external function definitions)))
+(((function,bsl_Printf)))
+
+[source,c]
+----
+<<harness external function definitions>>=
+int
+bsl_Printf(
+    char const *format,
+    ...)
+{
+    va_list args ;
+
+    va_start(args, format) ;
+    int n = bsl_Vprintf(format, args) ;
+    va_end(args) ;
+
+    return n ;
+}
 ----
 
 === Handling fatal system errors
@@ -114,27 +210,17 @@ We need to do better than that in a test harness since we might want to
 inquire and probe to determine the circumstances of the failure.
 Fortunately, we can install our own error handler to prevent the
 harness from terminating.
+The error handler arguments are dictated by the `micca` run-time.
 
 (((chunk,harness forward function declarations)))
 (((function,bslErrorHandler)))
 
-*****
 [source,c]
 ----
 <<harness forward function declarations>>=
-static void
-bslErrorHandler(
-    MRT_ErrorCode errNum,
-    char const *fmt,
-    va_list alist) ;
+static void bslErrorHandler(MRT_ErrorCode errNum, char const *fmt,
+        va_list alist) ;
 ----
-
-The error handler arguments are dictated by the `micca` run-time.
-
-errNum:: a number indicating the cause of the error.
-fmt:: a `printf` style format string.
-alist:: a variable length argument list for the items in the `fmt` string.
-*****
 
 (((chunk,harness static functions)))
 (((function,bslErrorHandler)))
@@ -384,6 +470,9 @@ static FILE *bslCmdStream ;
 
 === Evaluating command input
 
+The `bslReadAndEvalCommand` function was registered as the callback for
+read activity on the communications connection.
+
 (((chunk,harness forward function declarations)))
 (((function,bslReadAndEval)))
 
@@ -392,6 +481,12 @@ static FILE *bslCmdStream ;
 <<harness forward function declarations>>=
 static void bslReadAndEvalCommand(int rfd) ;
 ----
+
+The `micca` run-time code arranges for this function to be called whenever
+there is data to be read on the connection.
+The function reads a line of input and treats it as a command,
+parsing the command arguments, executing the command,
+and formulating a response.
 
 (((chunk,harness static functions)))
 (((function,bslReadAndEvalCommand)))
@@ -403,57 +498,106 @@ static void
 bslReadAndEvalCommand(
     int rfd)
 {
-    static char cmdBuffer[BUFSIZ] ;
+    <<blsReadAndEvalCommand: read command>>
+    <<blsReadAndEvalCommand: initialize response>>
+    <<blsReadAndEvalCommand: parse and execute command>>
+    <<blsReadAndEvalCommand: finish response>>
+}
+----
 
-    char *cmd = fgets(cmdBuffer, sizeof(cmdBuffer), bslCmdStream) ;
-    if (cmd == NULL) {
-        if (feof(bslCmdStream)) {
-            dbgprintf("goodbye\n") ;
-            bslClose() ;
-            exit(EXIT_SUCCESS) ;
-        } else if (ferror(bslCmdStream)) {
-            if (errno == EINTR) {
-                clearerr(bslCmdStream) ;
-                return ;
-            }
-            perror("fgets()") ;
-            bslClose() ;
-            exit(EXIT_FAILURE) ;
-        } else {
-            printf("partial\n") ;
+The command is read using `fgets`.
+There is some additional code to handle end of file and read errors.
+
+(((chunk,blsReadAndEvalCommand: read command)))
+
+[source,c]
+----
+<<blsReadAndEvalCommand: read command>>=
+static char cmdBuffer[BUFSIZ] ;
+
+char *cmd = fgets(cmdBuffer, sizeof(cmdBuffer), bslCmdStream) ;
+if (cmd == NULL) {
+    if (feof(bslCmdStream)) {
+        dbgprintf("goodbye\n") ;
+        bslClose() ;
+        exit(EXIT_SUCCESS) ;
+    } else if (ferror(bslCmdStream)) {
+        if (errno == EINTR) {           // <1>
+            clearerr(bslCmdStream) ;
             return ;
         }
-    }
-    bslTrimSpaceRight(cmdBuffer) ;
-    dbgprintf("%s\n", cmdBuffer) ;
-
-    int argc = 0 ;
-    char *const *argv = NULL ;
-    static char parseBuffer[BUFSIZ] ;
-    strcpy(parseBuffer, cmdBuffer) ;
-
-    bslBeginResponse() ;
-    bslAddWord("cmd") ;
-    bslPushContext() ;
-
-    int err = bslParseCommand(parseBuffer, &argc, &argv) ;
-    if (err == -1) {
-        bslAddWord("name") ;
-        bslAddWord("unknown") ;
-        bslAddWord("return") ;
-        bslAddWord("error") ;
-        bslPushContext() ;
-        bslFormatToContext("failed to parse command: \"%s\"", cmdBuffer) ;
-        bslPopContext() ;
-    } else if (argc != 0) {
-        bslExecCommand(argc, argv) ;
+        perror("fgets()") ;
+        bslClose() ;
+        exit(EXIT_FAILURE) ;
     } else {
+        dbgprintf("partial\n") ;
         return ;
     }
-
-    bslPopContext() ;
-    bslEndResponse() ;
 }
+bslTrimSpaceRight(cmdBuffer) ;          // <2>
+dbgprintf("%s\n", cmdBuffer) ;
+----
+<1> Allow for interrupted reads on the socket.
+<2> Remove any trailing whitespace.
+
+The response to a command is built up word by word and a
+set of buffered contexts is used to hold a word as it it
+being generated.
+We discuss these functions in another section.
+
+
+(((chunk,blsReadAndEvalCommand: initialize response)))
+
+[source,c]
+----
+<<blsReadAndEvalCommand: initialize response>>=
+bslBeginResponse() ;
+bslAddWord("cmd") ;
+bslPushContext() ;
+----
+
+The parsing strategy is to accumlate an array of pointers to the
+character strings that are the words in the command.
+The parsing is done, _in situ_, by writing `NUL` characters over
+the whitespace separators in the command and recording the
+addresses of where words begin.
+
+(((chunk,blsReadAndEvalCommand: parse command)))
+
+[source,c]
+----
+<<blsReadAndEvalCommand: parse and execute command>>=
+static char parseBuffer[BUFSIZ] ;
+strcpy(parseBuffer, cmdBuffer) ;                            // <1>
+
+int argc = 0 ;
+char *const *argv = NULL ;
+int err = bslParseCommand(parseBuffer, &argc, &argv) ;
+
+if (err == -1) {
+    bslAddWord("name") ;
+    bslAddWord("unknown") ;
+    bslAddWord("return") ;
+    bslAddWord("error") ;
+    bslPushContext() ;
+    bslFormatToContext("failed to parse command: \"%s\"", cmdBuffer) ;
+    bslPopContext() ;
+} else if (argc != 0) {
+    bslExecCommand(argc, argv) ;
+} else {
+    return ;
+}
+----
+<1> We copy the command before parsing it so that we can have
+the original string to use in case of an error.
+
+(((chunk,blsReadAndEvalCommand: finish response)))
+
+[source,c]
+----
+<<blsReadAndEvalCommand: finish response>>=
+bslPopContext() ;
+bslEndResponse() ;
 ----
 
 (((chunk,harness forward function declarations)))
@@ -507,79 +651,6 @@ bslClose(void)
         mrt_UnregisterFDService(fileno(bslCmdStream), true, false, false) ;
         fclose(bslCmdStream) ;
     }
-}
-----
-
-=== Harness instrumentation
-
-(((chunk,harness external function declarations)))
-(((function,bsl_Vprintf)))
-
-[source,c]
-----
-<<harness external function declarations>>=
-extern int bsl_Vprintf(char const *format, va_list args) ;
-----
-
-(((chunk,harness external function definitions)))
-(((function,bsl_Vprintf)))
-
-[source,c]
-----
-<<harness external function definitions>>=
-int
-bsl_Vprintf(
-    char const *format,
-    va_list args)
-{
-    if (!instrOn || bslCmdStream == NULL) {
-        return 0 ;
-    }
-
-    static char resultBuf[BUFSIZ] ;
-    int n = vsnprintf(resultBuf, sizeof(resultBuf), format, args) ;
-
-    if (n < 0) {
-        strncpy(resultBuf, "error formating response", sizeof(resultBuf)) ;
-    } else if (n >= sizeof(resultBuf)) {
-        strncpy(resultBuf, "instrumentation output truncated",
-            sizeof(resultBuf)) ;
-    } else {
-        // trim off any whitespace
-        bslTrimSpaceRight(resultBuf) ;
-    }
-
-    return fprintf(bslCmdStream, "instr {%s}\n", resultBuf) ;
-}
-----
-
-(((chunk,harness external function declarations)))
-(((function,bsl_Printf)))
-
-[source,c]
-----
-<<harness external function declarations>>=
-extern int bsl_Printf(char const *format, ...) ;
-----
-
-(((chunk,harness external function definitions)))
-(((function,bsl_Printf)))
-
-[source,c]
-----
-<<harness external function definitions>>=
-int
-bsl_Printf(
-    char const *format,
-    ...)
-{
-    va_list args ;
-
-    va_start(args, format) ;
-    int n = bsl_Vprintf(format, args) ;
-    va_end(args) ;
-
-    return n ;
 }
 ----
 
@@ -3516,6 +3587,7 @@ variable codeTemplate [textutil::adjust::undent {
  * Forward References
  */
 <<harness forward function declarations>>
+<%generateOpFuncDeclarations%>
 
 /*
  * Static Data
@@ -3533,6 +3605,7 @@ variable codeTemplate [textutil::adjust::undent {
  * Static Functions
  */
 <<harness static functions>>
+<%generateOpFuncDefinitions%>
 
 /*
  * External Functions
@@ -3708,14 +3781,6 @@ proc generateOpMaps {} {
 
 ==== Generating the domain operation functions
 
-(((chunk,harness forward function declarations)))
-
-[source,c]
-----
-<<harness forward function declarations>>=
-<%generateOpFuncDeclarations%>
-----
-
 (((chunk,bosal code template commands)))
 (((proc,generateOpFuncDeclarations)))
 
@@ -3734,14 +3799,6 @@ proc generateOpFuncDeclarations {} {
 }
 ----
 
-(((chunk,harness static functions)))
-
-[source,c]
-----
-<<harness static functions>>=
-<%generateOpFuncDefinitions%>
-----
-
 (((chunk,bosal code template commands)))
 (((proc,generateOpFuncDefinitions)))
 
@@ -3753,9 +3810,9 @@ proc generateOpFuncDefinitions {} {
 
     forAllRefs dopRef [DomainOperation findAll] {
         assignAttribute $dopRef Domain Name ReturnDataType
-        $div puts "static bool ${Domain}_${Name}__OPFUNC("
-        $div puts "    int argc,"
-        $div puts "    char *const *argv)"
+        $div puts "static bool ${Domain}_${Name}__OPFUNC(" ; $div push
+        $div puts "int argc,"
+        $div puts "char *const *argv)" ; $div pop
         $div puts "{" ; $div push
 
         set paramRefs [findRelated $dopRef ~R6]
@@ -3800,7 +3857,7 @@ proc generateOpFuncDefinitions {} {
             set decl [dict get $rettypeinfo declaration]
             $div puts "$decl = $invocation ;"
             $div puts "bslFormatToContext(\"%\" [dict get $rettypeinfo print],\
-                    [dict get $rettypeinfo varref]) ;"
+                    result__OP) ;"
         }
 
         $div puts "return true ;" ; $div pop
