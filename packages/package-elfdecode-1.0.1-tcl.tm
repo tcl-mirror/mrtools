@@ -2,14 +2,13 @@
 # -- Tcl Module
 
 # @@ Meta Begin
-# Package elfdecode 1.0
+# Package elfdecode 1.0.1
 # Meta description This package defines a TclOO class that converts an ELF
 # Meta description binary executable file into more useful data structures
 # Meta description that can be queried.
 # Meta platform    tcl
 # Meta require     {Tcl 8.6}
 # Meta require     logger
-# Meta require     oo::util
 # Meta require     ral
 # Meta require     ralutil
 # Meta summary     elfdecode -- decode binary ELF format files
@@ -20,7 +19,6 @@
 
 package require Tcl 8.6
 package require logger
-package require oo::util
 package require ral
 package require ralutil
 
@@ -28,7 +26,7 @@ package require ralutil
 
 # ACTIVESTATE TEAPOT-PKG BEGIN DECLARE
 
-package provide elfdecode 1.0
+package provide elfdecode 1.0.1
 
 # ACTIVESTATE TEAPOT-PKG END DECLARE
 # ACTIVESTATE TEAPOT-PKG END TM
@@ -75,7 +73,6 @@ package provide elfdecode 1.0
 # terms specified in this license.
 
 package require Tcl 8.6
-package require oo::util
 package require logger
 package require ral
 package require ralutil
@@ -86,7 +83,7 @@ namespace eval ::elfdecode {
 
     logger::initNamespace [namespace current]
 
-    variable version 1.0
+    variable version 1.0.1
 }
 
 proc ::oo::Helpers::classns {} {
