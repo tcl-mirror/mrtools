@@ -4,6 +4,9 @@ set types {
     {char (*)(int, int)}
     {char *const}
     {char *const*}
+    {unsigned}
+    {unsigned long}
+    {signed short}
     {int **}
     {enum a}
     {struct a}
@@ -11,6 +14,7 @@ set types {
     {uint64_t}
     {int32_t}
     {int_least64_t}
+    {typename(time_t)}
     {const int *}
     {struct foo *}
     {MyType_t *}
