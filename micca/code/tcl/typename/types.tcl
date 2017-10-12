@@ -14,6 +14,7 @@ set types {
     {uint64_t}
     {int32_t}
     {int_least64_t}
+    {typename(time_t)}
     {const int *}
     {struct foo *}
     {MyType_t *}
