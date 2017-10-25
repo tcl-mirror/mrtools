@@ -29,7 +29,7 @@ roseaTestUtil enableBreaks
 
 roseaTestUtil showClass elevator Shaft
 
-set door [roseaTestUtil sendCmd elevator::Door findById Shaft S1]
+set door [roseaTestUtil sendCmd elevator::Door findById Shaft 1]
 roseaTestUtil sendCmd [list rosea tunnel $door signal Unlock]
 chan puts [roseaTestUtil waitForBreak]
 
