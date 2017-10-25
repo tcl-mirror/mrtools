@@ -382,39 +382,6 @@ reference R53 Accessible_Shaft_Level -link {Destination_floor Floor} -link Shaft
 ----
 <<relationship definitions>>=
 association R53 Cabin 0..1--0..1 Accessible_Shaft_Level -associator Transfer
-
-assigner R53 {
-    identifyby Shaft
-
-    initialstate NO_TRANSFER
-    defaulttrans CH
-
-    transition NO_TRANSFER - Service_requested -> Searching_for_new_destination
-
-    transition Searching_for_new_destination - Transfer_created ->\
-            Searching_for_alternate_destination
-    transition Searching_for_new_destination - No_destination -> NO_TRANSFER
-
-    transition TRANSFER_IN_PROGRESS - Service_requested ->\
-            Searching_for_alternate_destination
-    transition TRANSFER_IN_PROGRESS - Transfer_completed ->\
-            Searching_for_new_destination
-
-    transition Searching_for_alternate_destination - Dest_change_evaluated ->\
-            TRANSFER_IN_PROGRESS
-
-    state NO_TRANSFER {} {
-    }
-
-    state Searching_for_new_destination {} {
-    }
-
-    state TRANSFER_IN_PROGRESS {} {
-    }
-
-    state Searching_for_alternate_destination {} {
-    }
-}
 ----
 
 == Population [[population]]
@@ -873,6 +840,31 @@ transition Cancel_open_delay - Open_delay_canceled -> HOLDING_OPEN
 transition Unlock_for_arrival - Open_on_arrival -> OPENING
 ----
 
+=== R53 Assigner State Model [[r53-assigner-state-model]]
+
+(((Dynamics Model,State Model,R53)))
+(((chunk,R53 state model definition)))
+[source,tcl]
+----
+<<R53 state model definition>>=
+initialstate NO_TRANSFER
+defaulttrans CH
+
+transition NO_TRANSFER - Service_requested -> Searching_for_new_destination
+
+transition Searching_for_new_destination - Transfer_created ->\
+        Searching_for_alternate_destination
+transition Searching_for_new_destination - No_destination -> NO_TRANSFER
+
+transition TRANSFER_IN_PROGRESS - Service_requested ->\
+        Searching_for_alternate_destination
+transition TRANSFER_IN_PROGRESS - Transfer_completed ->\
+        Searching_for_new_destination
+
+transition Searching_for_alternate_destination - Dest_change_evaluated ->\
+        TRANSFER_IN_PROGRESS
+----
+
 == Translating the Processing [[translating-processing]]
 
 === Door State Activities
@@ -1269,7 +1261,9 @@ state Are_we_already_there? {} {
 <<Cabin operations definition>>=
 # // Cabin.Ping( dir: Direction ) : Acessible Shaft Level
 
-# // Search in the indicated direction for a requesting shaft level
+# // Search ahead of the Cabin in the indicated direction
+# // return the nearest ASL with a stop request and/or a Floor Service calling
+# // in that direction. If none is found, return the empty set.
 
 # // Get all bank levels between cabin and end of shaft in the indicated
 # // direction
@@ -1285,6 +1279,7 @@ state Are_we_already_there? {} {
 #         /R3/R28/Floor.Number: < current floor number, Bank: Bank
 #     )
 # }
+# HERE !! -- don't understand the "Bank: Bank"
 
 # // Return the nearest floor ahead of the cabin with a stop requested or a
 # // floor service call in the specified direction
@@ -1292,18 +1287,22 @@ state Are_we_already_there? {} {
 #         -^Floor.distance(its.Floor) AND
 #         (Stop requested OR /R49/Floor Service.Direction : in.dir)
 #     )
+# HERE !! -- don't understand the "(its.Floor)"
 
 # // The Ordinal type's distance operation returns the absolute value of the
 # // difference
+
 instop Ping {dir} {
-    set current_floor [findRelated $self R43 R28]
-    set current_floor_number [readAttribute $current_floor Number]
+    set current_floor_number [pipe {
+        findRelated $self R43 R28 |
+        readAttribute ~ Number
+    }]
 
     set accessible_floors [pipe {
         Accessible_Shaft_Level findAll |
         deRef ~ |
         relation join ~ [deRef [Shaft_Level findAll]]\
-            [deRef [Floor findAll]] -using {Floor Number}
+            [deRef [Floor findAll]] -using {Floor Name}
     }]
     switch -exact -- $dir {
         up {
@@ -1324,7 +1323,7 @@ instop Ping {dir} {
         relation join $aslevs_ahead_of_cabin [deRef [Floor_Service findAll]] %
         relation restrictwith ~ {$Stop_requested || $Direction eq $dir} %
         relation project ~ Floor Shaft Bank Stop_requested %
-        ToRef ::elevator::Accessible_Shaft_Level ~
+        toRef Accessible_Shaft_Level ~
     } {} %~]
 }
 ----
@@ -1527,15 +1526,15 @@ instop Estimate_delay {calling_floor service_dir} {
     assignAttribute $cfloor {Number cabin_fnum} {Height cabin_height}
 
     set top_fnum [pipe {
-        findRelated R2 R28 |
+        findRelated $self R2 R28 |
         deRef ~ |
-        relation summarizeby ~ {} fs TopFloor int {[rmax $fs Number]} |
+        relation summarizeby ~ {} fs TopFloor int {rmax($fs, "Number")} |
         relation extract ~ TopFloor
     }]
     set bottom_fnum [pipe {
-        findRelated R2 R28 |
+        findRelated $self R2 R28 |
         deRef ~ |
-        relation summarizeby ~ {} fs BottomFloor int {[rmin $fs Number]} |
+        relation summarizeby ~ {} fs BottomFloor int {rmin($fs, "Number")} |
         relation extract ~ BottomFloor
     }]
     set floor_gap [pipe {
@@ -1565,7 +1564,7 @@ instop Estimate_delay {calling_floor service_dir} {
     set numbered_aslevs [pipe {
         findRelated $self R2 {R28 Shaft_Level} {R3 Accessible_Shaft_Level} |
         deRef ~ |
-        join ~ $floor_name_map
+        relation join ~ $floor_name_map
     }]
 
     set distance 0.0
@@ -1601,7 +1600,7 @@ instop Estimate_delay {calling_floor service_dir} {
             readAttribute ~ Height
         }]
         set distance [expr {$distance +\
-                abs($cabin_height, $turn_1_height) * 2. + $floor_gap}]
+                abs($cabin_height - $turn_1_height) * 2. + $floor_gap}]
 
         # 2b
         set countable_aslevs [relation restrictwith $numbered_aslevs\
@@ -1609,7 +1608,7 @@ instop Estimate_delay {calling_floor service_dir} {
 
         incr stops [instop $self Count_stops_oneway $countable_aslevs\
                 $opposite_travel_dir]
-        set distance [expr {$distance + abs($cabin_height, $calling_height)}]
+        set distance [expr {$distance + abs($cabin_height - $calling_height)}]
 
         # 2c
         set countable_aslevs [relation restrictwith $numbered_aslevs\
@@ -1619,7 +1618,7 @@ instop Estimate_delay {calling_floor service_dir} {
             Floor findWhere {$Number == $turn_2} |
             readAttribute ~ Height
         }]
-        set distance [expr {$distance + abs($cabin_height, $turn_2_height) * 2.}]
+        set distance [expr {$distance + abs($cabin_height - $turn_2_height) * 2.}]
     } elseif {!$dir_match && $behind_the_call_arrow} {
         # Case 3
 
@@ -1638,7 +1637,7 @@ instop Estimate_delay {calling_floor service_dir} {
             Floor findWhere {$Number == $turn} |
             readAttribute ~ Height
         }]
-        set distance [expr {$distance + abs($cabin_height, $turn_height) * 2.}]
+        set distance [expr {$distance + abs($cabin_height - $turn_height) * 2.}]
 
         # 3b
         set countable_aslevs [relation restrictwith $numbered_aslevs\
@@ -1670,12 +1669,13 @@ instop Estimate_delay {calling_floor service_dir} {
             Floor findWhere {$Number == $turn} |
             readAttribute ~ Height
         }]
-        set distance [expr {$distance + abs($cabin_height, $turn_height) * 2.}]
+        set distance [expr {$distance + abs($cabin_height - $turn_height) * 2.}]
     }
 
     set bankRef [findRelated $self R2 R1]
-    assignAttribute $bankRef Avg_cabin_speed Avg_stop_duration
-    return [expr {$distance / $Avg_cabin_speed + stops * $Avg_stop_duration}]
+    assignAttribute $bankRef Average_cabin_speed Average_stop_duration
+    return [expr {$distance / $Average_cabin_speed +\
+            $stops * $Average_stop_duration}]
 }
 ----
 
@@ -1703,22 +1703,21 @@ instop Estimate_delay {calling_floor service_dir} {
 # // In a projection predicate *I is shorthand for "select all primary ID attrs"
 
 instop Count_stops_oneway {aslevs search_dir} {
-    set sreqs [findWhere $aslevs {$Stop_requested}]
+    set sreqs [relation restrictwith $aslevs {$Stop_requested}]
 
     set nsreqs [pipe {
-        refMinus $aslevs $sreqs |
-        deRef ~ |
+        relation minus $aslevs $sreqs |
         relation project ~ Bank Floor Shaft
-    }
+    }]
     set fcalls [pipe {
         Floor_Service findWhere {$Direction eq $search_dir} |
         deRef ~ |
         relation project ~ Bank Floor Shaft |
-        relation join $nsreq ~
-    }
+        relation join $nsreqs ~
+    }]
 
     return [expr {
-        [refMultiplicity $sreqs] + [relation cardinality $fcalls]
+        [relation cardinality $sreqs] + [relation cardinality $fcalls]
     }]
 }
 ----
@@ -1748,13 +1747,12 @@ instop Count_stops_roundtrip {aslevs} {
     set floor_calls_either_dir [pipe {
         Floor_Service findAll |
         deRef ~ |
-        relation project ~ Bank Floor Shaft |
-        relation join [deRef $aslevs] ~
-    }
+        relation join $aslevs ~ |
+        relation project ~ Bank Floor Shaft
+    }]
 
     set stops_without_calls [pipe {
-        findWhere $aslevs {$Stop_requested} |
-        deRef ~ |
+        relation restrictwith $aslevs {$Stop_requested} |
         relation project ~ Floor Shaft Bank |
         relation minus ~ $floor_calls_either_dir
     }]
@@ -2036,7 +2034,7 @@ state COMPLETED {} {
 #   Top or bottom floor -> me
 
 state Check_bank_level_type {} {
-    set bl [findRelated ~R49 {~R38 Middle_Bank_Level}]
+    set bl [findRelated $self ~R49 {~R38 Middle_Bank_Level}]
     if {[isNotEmptyRef $bl]} {
         signal $self Middle_floor
     } else {
@@ -2097,7 +2095,7 @@ state Registering_stop {} {
 # Floor call registered -> me
 
 state Registering_floor_call {dir} {
-    set bank_level [findRelated R3]
+    set bank_level [findRelated $self R3]
     R49 link $bank_level $self Direction $dir
     signal $self Floor_call_registered
 }
@@ -2110,12 +2108,11 @@ state Registering_floor_call {dir} {
 [source,tcl]
 ----
 <<Accessible Shaft Level state model definition>>=
-# Service requested -> /R3/R28/Shaft
+# Service requested -> R53(Shaft)
 # Wait for service -> me
 
 state Requesting_service {} {
-    set shaft [findRelated $self ~R3 ~R28]
-    signal $shaft Service_requested
+    R53 signal [list ID [readAttribute $self Shaft]] Service_requested
     signal $self Wait_for_service
 }
 ----
@@ -2176,6 +2173,122 @@ state Clear_stop_request {} {
 }
 ----
 
+=== R53 Assigner State Activities
+
+==== NO TRANSFER
+
+(((Activity,R53 Assigner,NO TRANSFER)))
+(((chunk,R53 state model definition)))
+[source,tcl]
+----
+<<R53 state model definition>>=
+state NO_TRANSFER {} {
+}
+----
+
+==== Searching for new destination
+
+(((Activity,R53 Assigner,Searching for new destination)))
+(((chunk,R53 state model definition)))
+[source,tcl]
+----
+<<R53 state model definition>>=
+# // My Cabin is stationary and has no Transfer at the moment
+# destination aslev .= //Shaft/R2/Cabin.Ping( dir: Travel direction )
+# if (destination aslev) {
+#     Create transfer( floor: destination aslev.Floor ) -> *Transfer
+#     HERE !!! -- not sure if this is sync or async (what is *Transfer?)
+#     Transfer created -> me
+# } else
+#     No destination -> me
+
+state Searching_for_new_destination {} {
+    # HERE this is wrong, need way to get id class for multiple assigner.
+
+    set myID [readAttribute $self ID]
+    set cabin [pipe {
+        Shaft findById ID $myID |
+        findRelated % ~R2
+    } {} |%]
+    set destination_aslev\
+            [instop $cabin Ping [readAttribute $cabin Travel_direction]]
+    if {[isNotEmpty $destination_aslev]} {
+        set xfer [Transfer create\
+                Destination_floor [readAttribute $destination_aslev Floor]\
+                Shaft $myID]
+        signal $xfer Execute
+        signal $self Transfer_created
+    } else {
+        signal $self No_destination
+    }
+}
+----
+
+==== TRANSFER IN PROGRESS
+
+(((Activity,R53 Assigner,TRANSFER IN PROGRESS)))
+(((chunk,R53 state model definition)))
+[source,tcl]
+----
+<<R53 state model definition>>=
+state TRANSFER_IN_PROGRESS {} {
+}
+----
+
+=== Searching for alternate destination
+
+(((Activity,R53 Assigner,Searching for alternate destination)))
+(((chunk,R53 state model definition)))
+[source,tcl]
+----
+<<R53 state model definition>>=
+# my cabin .= //Shaft/R2/Cabin
+# xfer .= my cabin/R53/Transfer
+# call in progress .= xfer/R49/Floor Service( Direction: search dir )
+# fwd dest .= my cabin.Ping( dir: Travel direction )
+# if (fwd dest)
+#     destination aslev .= fwd dest
+# else if (not call in progress) {
+#     rev dest .= my cabin.Ping( dir: Travel direction.opposite )
+#     if (rev dest)
+#         my cabin.Travel direction.toggle
+#     destination aslev .= rev dest // may be empty
+# }
+# if (destination aslev and destination aslev.Floor != xfer.Destination floor )
+#     Dest change request( new dest: destination aslev.floor ) -> xfer
+# Dest change evaluated -> me
+
+state Searching_for_alternate_destination {} {
+    set my_cabin [pipe {
+        Shaft findById ID [readAttribute $self ID] |
+        findRelated % ~R2
+    } {} |%]
+    set xfer [findRelated $my_cabin {R53 Transfer}]
+    set call_in_progress [findRelated $xfer R53 {~R49 Floor_Service}]
+    assignAttribute $my_cabin Travel_direction
+    set fwd_dest [instop $my_cabin Ping $Travel_direction]
+    if {[isNotEmptyRef $fwd_dest]} {
+        set destination_aslev $fwd_dest
+    } elseif {[isEmptyRef $call_in_progress]} {
+        set opposite_dir [expr {$Travel_direction eq "up" ? "down" : "up"}]
+        set rev_dest [instop $my_cabin Ping $opposite_dir]
+        if {[isNotEmptyRef $rev_dest]} {
+            updateAttribute $my_cabin Travel_direction $opposite_dir
+        }
+        set destination_aslev $rev_dest
+    }
+
+    if {[isNotEmptyRef $destination_aslev] &&\
+            [readAttribute $destination_aslev Floor] ne\
+            [readAttribute $xfer Destination_floor]} {
+        signal $xfer\
+                Dest_change_request [readAttribute $destination_aslev Floor]
+    }
+
+    signal $self Dest_change_evaluated
+}
+----
+
 === Bank Level Class Methods
 
 ==== Choose shaft
@@ -2202,13 +2315,15 @@ instop Choose_shaft {calling_floor service_dir} {
     set cabins [findRelated $self ~R29 ~R1 ~R2]
     return [pipe {
         deRef $cabins |
-        relation extend ~ dtup Delay int {
+        relation extend ~ dtup Delay double {
             [instop\
-                [ToRef Cabin [tuple relation [tuple project $dtup Shaft]\
+                [toRef Cabin [tuple relation [tuple project $dtup Shaft]]]\
                 Estimate_delay $calling_floor $service_dir]
         } |
-        relation rank ~ -descending Delay DelayRank |
-        relation restrictwith ~ {$DelayRank == 0} |
+        relation rank ~ -ascending Delay DelayRank |
+        relation restrictwith ~ {$DelayRank == 1} |
+        relation tag ~ DelayTag |
+        relation restrictwith ~ {$DelayTag == 0} |
         relation extract ~ Shaft
     }]
 }
@@ -2265,10 +2380,10 @@ instop Choose_shaft {calling_floor service_dir} {
 instop Floor_request {dir} {
     set didSetDir [instop $self Set_calling_direction $dir true]
     if {$didSetDir} {
-        assignAttribute $self
-        set shaft [instop $self Choose_shaft $Floor $dir]
-        set aslev [Accessible_Shaft_Level findById Bank $Bank Floor $Floor\
-            Shaft $shaft]
+        assignAttribute $self {Bank myBank} {Floor myFloor}
+        set shaft [instop $self Choose_shaft $myFloor $dir]
+        set aslev [Accessible_Shaft_Level findWhere\
+            {$Bank eq $myBank && $Floor eq $myFloor && $Shaft eq $shaft}]
         signal $aslev Floor_calling $dir
     }
 
@@ -2314,6 +2429,9 @@ instop Clear_floor_request {dir} {
 ----
 
 ==== Set calling direction
+
+This class method contains common code factored from the Clear floor request
+and Floor request methods.
 
 (((Method,Bank Level,Set calling direction)))
 (((chunk,Bank Level operations definition)))
@@ -2394,19 +2512,22 @@ operation Arrived_at_floor {cabin} {
 ----
 <<domain operations>>=
 # //
-# // ELEV.Floor request( bank : Name, shaft : Nominal, dir : Direction ) :
+# // ELEV.Floor request( bank : Name, floor : Ordinal, dir : Direction ) :
 # //      ( new direction : Boolean, found : Boolean)
+
+# HERE !! -- perplexed as to why floor is ordinal? Bank Level.Floor is
+# of type Level Name
 
 # // Registers a floor service request and returns the success status
 
-# blev .= Bank Level( in.bank, in.shaft )
+# blev .= Bank Level( in.bank, in.floor )
 # if (blev)
 #     =>> ( new direction: blev.Floor request( in.dir ), Found: true )
 # else
 #     =>> ( new direction: false, found: false )
 
-operation Floor_request {bank shaft dir} {
-    set blev [Bank_Level findById Bank $bank Floor xxx] ; HERE, this is wrong
+operation Floor_request {bank floor dir} {
+    set blev [Bank_Level findById Bank $bank Floor $floor]
     if {[isNotEmptyRef $blev]} {
         set new_direction [instop $blev Floor_request $dir]
         set found true
@@ -2761,6 +2882,7 @@ rosea configure {
         <<Shaft class definition>>
         <<Shaft Level class definition>>
         <<Transfer class definition>>
+        <<R53 assigner definition>>
         <<relationship definitions>>
     }
 }
@@ -2770,6 +2892,12 @@ rosea generate elevator
 rosea populate {
     domain elevator {
         <<elevator population>>
+    }
+}
+
+namespace eval ::elevator {
+    proc toRef {relvar relvalue} {
+        tailcall ::rosea::Helpers::ToRef ::elevator::$relvar $relvalue
     }
 }
 
@@ -2945,6 +3073,17 @@ class Transfer {
     statemodel {
         <<Transfer state model definition>>
     }
+}
+----
+
+(((chunk,R53 assigner definition)))
+[source,tcl]
+----
+<<R53 assigner definition>>=
+assigner R53 {
+    identifyby Shaft
+
+    <<R53 state model definition>>
 }
 ----
 
