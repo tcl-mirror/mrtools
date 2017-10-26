@@ -2,7 +2,7 @@
 # -- Tcl Module
 
 # @@ Meta Begin
-# Package rosea 1.7
+# Package rosea 1.8
 # Meta description Rosea is a data and execution architecture for
 # Meta description translating XUML models using Tcl as the implementation
 # Meta description language.
@@ -30,7 +30,7 @@ package require lambda
 
 # ACTIVESTATE TEAPOT-PKG BEGIN DECLARE
 
-package provide rosea 1.7
+package provide rosea 1.8
 
 # ACTIVESTATE TEAPOT-PKG END DECLARE
 # ACTIVESTATE TEAPOT-PKG END TM
@@ -113,7 +113,7 @@ namespace eval ::rosea {
     
     namespace ensemble create
 
-    variable version 1.7
+    variable version 1.8
 
     logger::initNamespace [namespace current]
 
@@ -1897,6 +1897,26 @@ namespace eval ::rosea {
             lassign [FindRelatedInsts $instref semiminus {*}$rchain] relvar insts
             tailcall ToRef $relvar [uplevel 1\
                 [list ::ral relation restrictwith $insts $expr]]
+        }
+        proc idInstance {instref} {
+            lassign $instref relvar insts
+            SplitRelvarName $relvar domain relationship
+            set assignrelvar ${domain}::${relationship}__STATEINST
+            if {![relvar exists $assignrelvar]} {
+                tailcall DeclError NO_ASSIGNER $rname
+            }
+        
+            set idclass [pipe {
+                relvar restrictone [namespace parent]::Config::MultipleAssigner\
+                        Domain [string trim $domain :] Relationship $relationship |
+                relation extract ~ Class
+            }]
+        
+            return [pipe {
+                relvar set ${domain}::$idclass |
+                relation semijoin $insts ~ |
+                ToRef ${domain}::$idclass ~
+            }]
         }
         proc updateAttribute {instref args} {
             if {[llength $args] % 2 != 0} {
