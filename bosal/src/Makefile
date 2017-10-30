@@ -35,6 +35,7 @@ CODEFILES =\
 DOCPARTS=\
 	intro.txt\
 	generate.txt\
+	datatypes.txt\
 	utils.txt\
 	codeorg.txt\
 	litprog.txt\
@@ -143,6 +144,12 @@ $(DOCDIR)/%.pdf : %.aweb
 	    --destination-dir=$(DOCDIR)\
 	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) $<
 	$(RM) $(DOCDIR)/*__[0-9].pdf
+
+$(IMAGEDIR)/bosal-datatype-classes.pdf : bosal-datatype-classes.uxf
+	umlet -action=convert -format=pdf\
+		-filename=$< -output=$(basename $@)-cvt
+	pdftk $(basename $@)-cvt.pdf cat 1left output $@
+	$(RM) $(basename $@)-cvt.pdf
 
 $(IMAGEDIR)/%.pdf : %.uxf
 	umlet -action=convert -format=pdf\
