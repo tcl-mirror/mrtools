@@ -1888,12 +1888,15 @@ typedef struct mrtinstanceiterator MRT_InstIterator ;
 <<mrt internal aggregate types>>=
 struct mrtinstanceiterator {
     void *instance ;
+    MRT_Class const *classDesc ;
     MRT_iab *iab ;
 } ;
 ----
 
 `instance`::
     A pointer to the memory of the next instance in the iteration.
+`classDesc`::
+    A pointer to the class descriptor across which the iteration occurs.
 `iab`::
     A pointer to the Instance Allocation Block for the class across which
     the iteration is to be performed.
@@ -1929,8 +1932,9 @@ mrt_InstIteratorStart(
     MRT_InstIterator *iter,
     MRT_Class const *const classDesc)
 {
-    assert(classDesc != NULL) ;
     assert(iter != NULL) ;
+    assert(classDesc != NULL) ;
+    iter->classDesc = classDesc ;
 
     MRT_AttrOffset instanceOffset ;
     MRT_iab *iab = mrtGetStorageProperties(classDesc, &instanceOffset) ;
@@ -1938,7 +1942,8 @@ mrt_InstIteratorStart(
 
     iter->iab = iab ;
     iter->instance = (void *)((uintptr_t)iab->storageStart + instanceOffset) ;
-    if (((MRT_Instance *)iter->instance)->alloc <= 0) { // <1>
+    MRT_Instance *instref = iter->instance ;
+    if (instref->alloc <= 0 || instref->classDesc != iter->classDesc) { // <1>
         mrt_InstIteratorNext(iter) ;
     }
     return ;
@@ -2044,7 +2049,8 @@ mrt_InstIteratorNext(
 
     while (iter->instance < iab->storageFinish) { // <1>
         iter->instance = (void *)((uintptr_t)iter->instance + iab->instanceSize) ;
-        if (((MRT_Instance *)iter->instance)->alloc > 0) {
+        MRT_Instance *instref = iter->instance ;
+        if (instref->alloc > 0 && instref->classDesc == iter->classDesc) {// <2>
             break ;
         }
     }
@@ -2053,6 +2059,13 @@ mrt_InstIteratorNext(
 ----
 <1> Advancing the instance pointer to past the storage pool for the
 class indicates that we have visited all the instances.
+<2> It may seem strange to test that the class descriptor for the
+instance matches that of the class we are iterating across.
+However, we must handle the case of union based subtypes which can
+be reclassified.
+In that case,
+we are iterating across all potential subclass and only want to stop on
+the ones that match our original intent.
 
 === Instance Sets
 
@@ -3447,11 +3460,13 @@ mrtEndTransaction(void)
 {
     MRT_Relationship const **rships = mrtTransaction.relationships ;
     for (unsigned count = 0 ; count < mrtTransaction.count ; count++, rships++) {
-        if (!mrtCheckRelationship(*rships)) {
+        MRT_Relationship const *rel = *rships ;
+
+        if (!mrtCheckRelationship(rel)) {
             mrtTransaction.count -= count ;
             memmove(mrtTransaction.relationships, rships,
                 mrtTransaction.count * sizeof(*rships)) ; // <1>
-            mrtRefIntegrityError(*rships) ;
+            mrtRefIntegrityError(rel) ;
         }
     }
     mrtTransaction.count = 0 ;
