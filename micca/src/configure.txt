@@ -330,6 +330,7 @@ by missing a closing brace at the end of the configuration script.
 We clean up the command string so that we don't print an excessive
 amount of information.
 
+(((micca,Helpers,CleanUpCommand)))
 [source,tcl]
 ----
 <<helper commands>>=
@@ -2071,9 +2072,6 @@ proc attribute {name type args} {
     if {$name eq {}} {
         tailcall DeclError BAD_NAME [list $name] attribute
     }
-    if {[llength $args] % 2 != 0} {
-        tailcall DeclError ARG_FORMAT $args
-    }
 
     upvar #0\
             [namespace parent]::DomainName DomainName\
@@ -2083,16 +2081,37 @@ proc attribute {name type args} {
 
     set options [dict create]
     while {[llength $args] != 0} {
-        set args [lassign $args opt value]
-        if {$opt in {-default -dependent}} {
-            dict set options $opt $value
-        } else {
-            tailcall DeclError ATTR_OPTIONS $opt
+        set args [lassign $args opt]
+        switch -exact -- $opt {
+            -default {
+                if {[llength $args] != 0} {
+                    set args [lassign $args optValue]
+                    dict set options $opt $optValue
+                } else {
+                    tailcall DeclError ARG_FORMAT $opt
+                }
+            }
+            -dependent {
+                if {[llength $args] != 0} {
+                    set args [lassign $args optValue]
+                    dict set options $opt $optValue
+                } else {
+                    tailcall DeclError ARG_FORMAT $opt
+                }
+            }
+            -zeroinit {
+                dict set options $opt true
+            }
+            default {
+                tailcall DeclError ATTR_OPTIONS $opt
+            }
         }
     }
-    if {[dict exists $options -default] && [dict exists $options -dependent]} {
-        error "for attribute, $name, \"-default\" and \"-dependent\" options\
-            may not be specified for the same attribute"
+
+    # The attribute options are mutually exclusive. Make sure more than
+    # did not get set.
+    if {[dict size $options] > 1} {
+        tailcall DeclError ATTR_OPTIONS $options
     }
 
     set attrtuple [list\
@@ -2111,14 +2130,18 @@ proc attribute {name type args} {
             Line $configlineno
     } else {
         IndependentAttribute create {*}$attrtuple
-    }
-
-    if {[dict exists $options -default]} {
-        DefaultValue create\
-            Domain      $DomainName\
-            Class       $ClassName\
-            Attribute   $name\
-            Value       [dict get $options -default]
+        if {[dict exists $options -zeroinit]} {
+            ZeroInitializedAttribute create {*}$attrtuple
+        } else {
+            ValueInitializedAttribute create {*}$attrtuple
+            if {[dict exists $options -default]} {
+                DefaultValue create\
+                    Domain      $DomainName\
+                    Class       $ClassName\
+                    Attribute   $name\
+                    Value       [dict get $options -default]
+            }
+        }
     }
 }
 ----
@@ -2130,7 +2153,7 @@ proc attribute {name type args} {
 <<error code formats>>=
 ARG_FORMAT      {options and values must come in pairs, got "%s"}
 ATTR_OPTIONS    {attribute options error, expected\
-    "-default <value> or -dependent <formula>", got "%s"}
+    "-default <value> or -dependent <formula> or -zeroinit", got "%s"}
 ----
 
 ifdef::showtests[]
@@ -2168,9 +2191,6 @@ test attribute-1.0 {
 endif::showtests[]
 
 ifdef::showtests[]
-[float]
-==== Tests
-
 [source,tcl]
 ----
 <<config command tests>>=
@@ -2196,6 +2216,32 @@ test attribute-1.1 {
     testConditions\
         {[refMultiplicity [Attribute findAll]] == 3}\
         {[refMultiplicity [DependentAttribute findAll]] == 1}
+} -result {1}
+----
+endif::showtests[]
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<config command tests>>=
+test attribute-1.2 {
+    Define class with zero initialized attribute
+} -setup {
+} -cleanup {
+    micca clear
+} -body {
+    micca configure {
+        domain foo {
+            class c1 {
+                attribute a1 char
+                attribute a2 {int[3]} -zeroinit
+            }
+        }
+    }
+    log::debug [formatMiccaClass ZeroInitializedAttribute]
+    testConditions\
+        {[refMultiplicity [Attribute findAll]] == 2}\
+        {[refMultiplicity [ZeroInitializedAttribute findAll]] == 1}
 } -result {1}
 ----
 endif::showtests[]
@@ -2379,6 +2425,7 @@ So we find all *Superclass* instances that have no corresponding
 *Subclass* role and propagate any polymorphic events down the generalization
 hierarchy.
 
+(((micca,Helpers,FindUltimateSuperclasses)))
 [source,tcl]
 ----
 <<helper commands>>=
@@ -2739,6 +2786,7 @@ generalization,
 we have the entire hierarchy and can pass that off to compute the
 transitive closure.
 
+(((micca,Helpers,findSubclassesOf)))
 [source,tcl]
 ----
 <<helper commands>>=
@@ -4011,9 +4059,9 @@ proc statemodel {body} {
             $Model eq $ClassName && $Name in $Finals}]
     forAllRefs fstate $fstates {
         updateAttribute $fstate IsFinal true
-        ::struct::set subtract Finals [readAttribute $fstate Name]
+        struct::set subtract Finals [readAttribute $fstate Name]
     }
-    if {![::struct::set empty $Finals]} {
+    if {![struct::set empty $Finals]} {
         tailcall DeclError BAD_FINAL [join $Finals {, }]
     }
 
@@ -4506,6 +4554,7 @@ We create a relation value that contains the Position and DataType information
 that corresponds to the parameters.
 The grouping and comparing is similar.
 
+(((micca,Helpers,FindArgumentSignature)))
 [source,tcl]
 ----
 <<helper commands>>=
@@ -4922,7 +4971,7 @@ proc final {args} {
     if {"@" in $args} {
         tailcall DeclError BAD_STATE_NAME @
     }
-    ::struct::set add Finals $args
+    struct::set add Finals $args
     return
 }
 ----
@@ -5787,7 +5836,7 @@ proc instance {name args} {
     upvar #0 [namespace parent]::DomainName DomainName
     variable ClassName
 
-    <<instance: determine correct components>>
+    CheckPopAttrs $DomainName $ClassName [dict keys $args]
 
     set insttuple [list\
         Domain $DomainName\
@@ -5798,8 +5847,9 @@ proc instance {name args} {
     ClassInstance create {*}$insttuple\
         Number [GenNumber $DomainName ClassInstance [list $DomainName $ClassName]]
 
-    <<instance: set values from arguments>>
-    <<instance: set remaining defaulted values>>
+    CreateRequiredValues $DomainName $ClassName $name $args
+    CreateDefaultedValues $DomainName $ClassName $name $args
+    CreateZeroInitValues $DomainName $ClassName $name $args
 
     return
 }
@@ -5810,99 +5860,235 @@ we need to find those components that must be set,
 _i.e._ they have no reasonable default.
 That set component names must be a subset of those provided as arguments.
 
+All class attributes must be set to a value _except_ attributes that
+have a default value or are zero initialized.
+Dependent attributes cannot be given an initial value.
+
+(((micca,Helpers,CheckPopAttrs)))
 [source,tcl]
 ----
-<<instance: determine correct components>>=
-set compnames [FindRequiredComponents $DomainName $ClassName]
-set argcomps [dict keys $args]
-set compdiff [struct::set difference $compnames $argcomps]
-if {![struct::set empty $compdiff]} {
-    tailcall DeclError MISSING_VALUES $DomainName $ClassName $name\
-            [join $compdiff {, }]
+<<helper commands>>=
+proc CheckPopAttrs {domainName className attrNames} {
+    set reqcomps [FindRequiredPopComps $domainName $className]
+    set missing [struct::set difference $reqcomps $attrNames]
+    if {![struct::set empty $missing]} {
+        tailcall DeclError MISSING_VALUES $domainName $className $name\
+                [join $missing {, }]
+    }
+
+    set noinitattrs [FindNoInitializeAttrs $domainName $className]
+    set cantinit [struct::set intersect $noinitattrs $attrNames]
+    if {![struct::set empty $cantinit]} {
+        tailcall DeclError NOINIT_VALUES $domainName $className $name\
+                [join $cantinit {, }]
+    }
+
+    set allcomps [FindAllPopComps $domainName $className]
+    set extra [struct::set difference $attrNames $allcomps]
+    if {![struct::set empty $extra]} {
+        tailcall DeclError UNKNOWN_INIT $domainName $className $name\
+                [join $extra {, }]
+    }
+
+    return $reqcomps
 }
 ----
 
 (((error code,MISSING_VALUES)))
+(((error code,NOINIT_VALUES)))
+(((error code,UNKNOWN_INIT)))
 [source,tcl]
 ----
 <<error code formats>>=
 MISSING_VALUES  {for domain population, %s, class, %s,\
-        instance, %s, values for class component(s),\
-        "%s", is(are) not provided and have no default values}
-----
-
-All class components must be set to a value _except_ attributes that
-have a default value, association references that can be set to _nil_
-and dependent attributes.
-
-[source,tcl]
-----
-<<helper commands>>=
-proc FindRequiredComponents {domain class} {
-    # The attributes that have default values do not require population values
-    set defcomps [pipe {
-        DefaultValue findWhere {$Domain eq $domain && $Class eq $class} |
-        findRelated ~ R22 R29 R21
-    }]
-    # puts [relformat [deRef $defcomps] defcomps]
-
-    # Dependent attributes require no population values
-    set depattrs [pipe {
-        DependentAttribute findWhere {$Domain eq $domain && $Class eq $class} |
-        findRelated ~ R29 R21
-    }]
-
-    # Subtract from the set of populated components the components
-    # that can be need not be supplied.
-    return [pipe {
-        PopulatedComponent findWhere {$Domain eq $domain && $Class eq $class} |
-        refMinus ~ $defcomps |
-        refMinus ~ $depattrs |
-        deRef ~ |
-        relation project ~ Name |
-        relation list ~ Name
-    }]
-}
+        instance, %s, values for class attribute,\
+        "%s", are not provided and have no default values}
+NOINIT_VALUES  {for domain population, %s, class, %s,\
+        instance, %s, values for class attribute,\
+        "%s", may not have initial values specified}
+UNKNOWN_INIT  {for domain population, %s, class, %s,\
+        instance, %s, "%s" are not attributes of the class}
 ----
 
 Create a Class Component Value instance for all the provided component
 name / component values provided as arguments to the `instance` command.
 
-[source,tcl]
-----
-<<instance: set values from arguments>>=
-dict for {compname value} $args {
-    set value [ResolveInitialValue $DomainName $ClassName $compname $value]
-    ClassComponentValue create {*}$insttuple Component $compname Value $value
-}
-
-----
-
-The class components that remain are to be set to default values.
-So we specify "-" for those remaining components.
-
-[source,tcl]
-----
-<<instance: set remaining defaulted values>>=
-set defaultcomps [FindRemainingComponents $DomainName $ClassName $argcomps]
-foreach compname $defaultcomps {
-    set value [ResolveInitialValue $DomainName $ClassName $compname -]
-    ClassComponentValue create {*}$insttuple Component $compname Value $value
-}
-----
-
+(((micca,Helpers,CreateRequiredValues)))
 [source,tcl]
 ----
 <<helper commands>>=
-proc FindRemainingComponents {domain class except} {
-    set depattrs [pipe {
-        DependentAttribute findWhere {$Domain eq $domain && $Class eq $class} |
-        findRelated ~ R29 R21
-    }]
+proc CreateRequiredValues {domainName className instName namedValues} {
+    set comptuple [dict create\
+        Domain $domainName\
+        Class $className\
+        Instance $instName\
+    ]
+    foreach attrname [FindRequiredPopComps $domainName $className] {
+        dict set comptuple Component $attrname
+        set attrvalue [dict get $namedValues $attrname]
+        ClassComponentValue create {*}$comptuple
+        SpecifiedComponentValue create {*}$comptuple Value $attrvalue
+    }
+}
+----
+
+Attributes with default values may be overriden with a value,
+may be specified as ``-'', or have their value set as specified
+when the attributes was created.
+
+(((micca,Helpers,CreateDefaultedValues)))
+[source,tcl]
+----
+<<helper commands>>=
+proc CreateDefaultedValues {domainName className instName namedValues} {
+    set comptuple [dict create\
+        Domain $domainName\
+        Class $className\
+        Instance $instName\
+    ]
+    foreach attrname [FindDefaultableAttrs $domainName $className] {
+        dict set comptuple Component $attrname
+        if {[dict exists $namedValues $attrname]} {
+            set argvalue [dict get $namedValues $attrname]
+        } else {
+            set argvalue -
+        }
+        set attrvalue [ResolveInitialValue $domainName $className\
+                $attrname $argvalue]
+        ClassComponentValue create {*}$comptuple
+        SpecifiedComponentValue create {*}$comptuple Value $attrvalue
+    }
+}
+----
+
+Zero initialized attributes may be left unspecified, may be specified
+with an explicit value or may be specified as "-".
+In the last case, we want to treat it as if it were unspecified,
+_i.e._ we want to allow the compiler to do the initialization.
+
+(((micca,Helpers,CreateZeroInitValues)))
+[source,tcl]
+----
+<<helper commands>>=
+proc CreateZeroInitValues {domainName className instName namedValues} {
+    set comptuple [dict create\
+        Domain $domainName\
+        Class $className\
+        Instance $instName\
+    ]
+    foreach attrname [FindZeroInitAttrs $domainName $className] {
+        dict set comptuple Component $attrname
+        if {[dict exists $namedValues $attrname] &&\
+                [dict get $namedValues $attrname] ne "-"} {
+            set attrvalue [dict get $namedValues $attrname]
+            SpecifiedComponentValue create {*}$comptuple Value $attrvalue
+        } else {
+            UnspecifiedComponentValue create {*}$comptuple
+        }
+        ClassComponentValue create {*}$comptuple
+    }
+}
+----
+
+The projection of the Name attribute from the Populated Component
+class gives the set of all components that must be populated.
+
+(((micca,Helpers,FindAllPopComps)))
+[source,tcl]
+----
+<<helper commands>>=
+proc FindAllPopComps {domain class} {
     return [pipe {
-        PopulatedComponent findWhere {$Domain eq $domain && $Class eq $class\
-                && $Name ni $except} |
-        refMinus ~ $depattrs |
+        PopulatedComponent findWhere {$Domain eq $domain && $Class eq $class} |
+        deRef ~ |
+        relation list ~ Name
+    }]
+}
+----
+
+The components that are required to be populated when they are created
+are those whose values cannot otherwise be determined.
+These are the Reference components and those attributes without a
+default value.
+
+(((micca,Helpers,FindRequiredPopComps)))
+[source,tcl]
+----
+<<helper commands>>=
+proc FindRequiredPopComps {domain class} {
+    # The attributes having NO default values must be specified
+    set defattrs [pipe {
+        DefaultValue findWhere {$Domain eq $domain && $Class eq $class} |
+        deRef ~ |
+        relation list ~ Attribute
+    }]
+    set valueattrs [pipe {
+        ValueInitializedAttribute findWhere\
+                {$Domain eq $domain && $Class eq $class} |
+        deRef ~ |
+        relation list ~ Name
+    }]
+    set popattrs [struct::set difference $valueattrs $defattrs]
+    # All Reference components must be specified
+    set refattrs [pipe {
+        Reference findWhere {$Domain eq $domain && $Class eq $class} |
+        deRef ~ |
+        relation list ~ Name
+    }]
+    return [struct::set union $popattrs $refattrs]
+}
+----
+
+The set of attributes with a default value is obtained from the Default Value
+class.
+
+(((micca,Helpers,FindDefaultableAttrs)))
+[source,tcl]
+----
+<<helper commands>>=
+proc FindDefaultableAttrs {domain class} {
+    # The attributes having a default value may be left unspecified or
+    # may be specified as "-".
+    return [pipe {
+        DefaultValue findWhere {$Domain eq $domain && $Class eq $class} |
+        deRef ~ |
+        relation list ~ Attribute
+    }]
+}
+----
+
+The set of attributes that are zero initialized are obtained from the
+Zero Initialized Attribute class.
+
+(((micca,Helpers,FindZeroInitAttrs)))
+[source,tcl]
+----
+<<helper commands>>=
+proc FindZeroInitAttrs {domain class} {
+    # The zero initialized attributes may be specified explicitly,
+    # may be specfied as "-", or may be left unspecified.
+    return [pipe {
+        ZeroInitializedAttribute findWhere\
+                {$Domain eq $domain && $Class eq $class} |
+        deRef ~ |
+        relation list ~ Name
+    }]
+}
+----
+
+The set of attributes for which a value may not be specified are the
+Dependent Attributes which are read only because their value is
+computed when accessed.
+
+(((micca,Helpers,FindNoInitializeAttrs)))
+[source,tcl]
+----
+<<helper commands>>=
+proc FindNoInitializeAttrs {domain class} {
+    # The dependent attributes may be not be initialized at all.
+    return [pipe {
+        DependentAttribute findWhere\
+                {$Domain eq $domain && $Class eq $class} |
         deRef ~ |
         relation list ~ Name
     }]
@@ -5917,6 +6103,7 @@ This procedure does the work of insuring that the component exists
 and if the default value was specified, makes sure such a default was defined
 for the attribute or is the _nil_ reference value.
 
+(((micca,Helpers,ResolveInitialValue)))
 [source,tcl]
 ----
 <<helper commands>>=
@@ -5932,7 +6119,8 @@ proc ResolveInitialValue {domain class component value} {
     if {$value eq "-"} {
         # Check for default attribute value
         set defref [findRelated $compref {~R21 Attribute}\
-                {~R29 IndependentAttribute} ~R22]
+                {~R29 IndependentAttribute} {~R19 ValueInitializedAttribute}\
+                ~R22]
         if {[isNotEmptyRef $defref]} {
             return [readAttribute $defref Value]
         }
@@ -6132,7 +6320,7 @@ proc table {heading args} {
     upvar #0 [namespace parent]::DomainName DomainName
     variable ClassName
 
-    <<table: determine correct components>>
+    CheckPopAttrs $DomainName $ClassName $heading
 
     set insttuple [list\
         Domain $DomainName\
@@ -6145,9 +6333,19 @@ proc table {heading args} {
                 [llength $compvalues] [llength $heading]
         }
         dict set insttuple Instance $instname ; # <2>
+        CheckDuplicate ClassInstance {class instance} {*}$insttuple
+        ClassInstance create {*}$insttuple\
+            Number [GenNumber $DomainName ClassInstance\
+            [list $DomainName $ClassName]]
 
-        <<table: set values from arguments>>
-        <<table: set remaining defaulted values>>
+        set namedValues [dict create] ; # <3>
+        foreach h $heading v $compvalues {
+            dict set namedValues $h $v
+        }
+
+        CreateRequiredValues $DomainName $ClassName $instname $namedValues
+        CreateDefaultedValues $DomainName $ClassName $instname $namedValues
+        CreateZeroInitValues $DomainName $ClassName $instname $namedValues
     }
 
     return
@@ -6156,6 +6354,9 @@ proc table {heading args} {
 <1> The number values associated with each instance have to match the
 heading.
 <2> Each time through the loop, set up a new instance name.
+<3> We weave together the heading and component values to get a dictionary
+keyed by attribute name containing the component value.
+This lets us reuse the procedures used by the `instance` command.
 
 (((error code,COMPONENT_MISMATCH)))
 [source,tcl]
@@ -6164,58 +6365,6 @@ heading.
 COMPONENT_MISMATCH  {for domain population, %s, class, %s,\
                     number of component values does not match heading:\
                     got %d values, expected %d values}
-----
-
-The `heading` argument must have all the component names that
-cannot be defaulted in some way.
-
-[source,tcl]
-----
-<<table: determine correct components>>=
-set compnames [FindRequiredComponents $DomainName $ClassName]
-set compdiff [struct::set difference $compnames $heading]
-if {![struct::set empty $compdiff]} {
-    tailcall DeclError COMPONENT_MISSING $DomainName $ClassName\
-            [join $compdiff {, }]
-}
-----
-
-(((error code,COMPONENT_MISSING)))
-[source,tcl]
-----
-<<error code formats>>=
-COMPONENT_MISSING   {for domain population, %s, class, %s,\
-                    values for class component(s),\
-                    "%s", is(are) not provided and have no default values}
-----
-
-We start by creating the Class Instance and setting up
-Class Component Values that match the arguments.
-
-[source,tcl]
-----
-<<table: set values from arguments>>=
-CheckDuplicate ClassInstance {class instance} {*}$insttuple
-ClassInstance create {*}$insttuple\
-    Number [GenNumber $DomainName ClassInstance [list $DomainName $ClassName]]
-foreach compname $heading compvalue $compvalues {
-    set compvalue [ResolveInitialValue $DomainName $ClassName $compname\
-            $compvalue]
-    ClassComponentValue create {*}$insttuple Component $compname Value $compvalue
-}
-----
-
-Finally, Class Component Value instances are created for any missing components
-that can have a default value.
-
-[source,tcl]
-----
-<<table: set remaining defaulted values>>=
-set defaultcomps [FindRemainingComponents $DomainName $ClassName $heading]
-foreach compname $defaultcomps {
-    set compvalue [ResolveInitialValue $DomainName $ClassName $compname -]
-    ClassComponentValue create {*}$insttuple Component $compname Value $compvalue
-}
 ----
 
 ifdef::showtests[]
@@ -6686,9 +6835,10 @@ set popinstrefs [ClassInstance findWhere {$Domain eq $domain}]
 set popinsts [deRef $popinstrefs]
 # puts [relformat $popinsts popinsts]
 set popvalues [pipe {
-    findRelated $popinstrefs {R103 ClassComponentValue} |
-    deRef ~
-}]
+    findRelated $popinstrefs {R103 ClassComponentValue}\
+            {~R109 SpecifiedComponentValue} |
+    deRef %
+} {} |%]
 
 # puts [relformat $popvalues popvalues]
 set usubClasses [pipe {
@@ -7308,7 +7458,7 @@ The class names must match the names of the association participants.
 [source,tcl]
 ----
 <<population: check associator references>>=
-set nonparts [relation restrictwith $nrassocs {![::struct::set equal\
+set nonparts [relation restrictwith $nrassocs {![struct::set equal\
         [list [lindex $Value 0] [lindex $Value 2]]\
         [list $SourceClass $TargetClass]]}]
 # puts [relformat $nonparts nonparts]
@@ -7324,7 +7474,7 @@ relation foreach nonpart $nonparts {
     } else {
         set refedclasses [list $SourceClass $TargetClass]
         foreach {class instance} $Value {
-            if {![::struct::set contains $refedclasses $class]} {
+            if {![struct::set contains $refedclasses $class]} {
                 log::error "for domain population, $Domain,\
                     associator instance, $AssocClass.$AssocInstance,\
                     references class instance, $class.$instance, across,\
@@ -8397,6 +8547,8 @@ set backrefs [pipe {
 # puts [relformat $backrefs backrefs]
 
 foreach backref [relation body $backrefs] {
+    SpecifiedComponentValue create {*}$backref
+    dict unset backref Value
     ClassComponentValue create {*}$backref
 }
 
@@ -8414,7 +8566,8 @@ proc CreateNilDestBackRefs {refedclasses backrefs} {
     set nilbackrefs [FindNilDestBackRefs $refedclasses $backrefs]
     # puts [relformat $nilbackrefs nilbackrefs]
     foreach nilbackref [relation body $nilbackrefs] {
-        ClassComponentValue create {*}$nilbackref Value @nil@
+        SpecifiedComponentValue create {*}$nilbackref Value @nil@
+        ClassComponentValue create {*}$nilbackref
     }
 }
 ----
@@ -8670,6 +8823,8 @@ it is a simple matter to create the necessary component values.
 ----
 <<population: set singular target class values>>=
 foreach backref [relation body $backrefs] {
+    SpecifiedComponentValue create {*}$backref
+    dict unset backref Value
     ClassComponentValue create {*}$backref
 }
 
@@ -8758,6 +8913,8 @@ Finally, the forward reference values are created.
 ----
 <<population: set singular source class values>>=
 foreach forwref [relation body $forwrefs] {
+    SpecifiedComponentValue create {*}$forwref
+    dict unset forwref Value
     ClassComponentValue create {*}$forwref
 }
 
@@ -8776,7 +8933,8 @@ proc CreateNilSourceForwRefs {srcclasses forwrefs} {
     set nilforwrefs [FindNilSourceForwRefs $srcclasses $forwrefs]
     # puts [relformat $nilforwrefs nilforwrefs]
     foreach nilforwref [relation body $nilforwrefs] {
-        ClassComponentValue create {*}$nilforwref Value @nil@
+        ClassComponentValue create {*}$nilforwref
+        SpecifiedComponentValue create {*}$nilforwref Value @nil@
     }
 }
 ----
@@ -8962,6 +9120,8 @@ set backrefs [pipe {
 # puts [relformat $backrefs backrefs]
 
 foreach backref [relation body $backrefs] {
+    SpecifiedComponentValue create {*}$backref
+    dict unset backref Value
     ClassComponentValue create {*}$backref
 }
 
@@ -9117,6 +9277,8 @@ set backrefs [pipe {
 # puts [relformat $backrefs backrefs]
 
 foreach backref [relation body $backrefs] {
+    SpecifiedComponentValue create {*}$backref
+    dict unset backref Value
     ClassComponentValue create {*}$backref
 }
 
@@ -9289,6 +9451,8 @@ set forwrefs [pipe {
 # puts [relformat $forwrefs forwrefs]
 
 foreach forwref [relation body $forwrefs] {
+    SpecifiedComponentValue create {*}$forwref
+    dict unset forwref Value
     ClassComponentValue create {*}$forwref
 }
 
@@ -9539,6 +9703,11 @@ proc CreateLinkedRefs {backrefs compname} {
             Domain [dict get $backref Domain]\
             Class [dict get $backref Class]\
             Instance [dict get $backref Instance]\
+            Component [dict get $backref Component]
+        SpecifiedComponentValue create\
+            Domain [dict get $backref Domain]\
+            Class [dict get $backref Class]\
+            Instance [dict get $backref Instance]\
             Component [dict get $backref Component]\
             Value [dict create next $next prev $prev]
 
@@ -9561,6 +9730,11 @@ proc CreateLinkedRefs {backrefs compname} {
                 set next $terminus
             }
             ClassComponentValue create\
+                Domain [dict get $backref Domain]\
+                Class $refing\
+                Instance $value\
+                Component ${relship}__$compname
+            SpecifiedComponentValue create\
                 Domain [dict get $backref Domain]\
                 Class $refing\
                 Instance $value\
@@ -9595,6 +9769,11 @@ proc CreateNilLinkedRefs {nilbackrefs} {
     relation foreach nilbackref $nilbackrefs {
         relation assign $nilbackref
         ClassComponentValue create\
+            Domain $Domain\
+            Class $Class\
+            Instance $Instance\
+            Component $Component
+        SpecifiedComponentValue create\
             Domain $Domain\
             Class $Class\
             Instance $Instance\
@@ -9940,7 +10119,8 @@ superclass.
 set rsupercomps [pipe {
     ReferringSubclass findWhere {$Domain eq $domain} |
     findRelated % R47 R40 R41 ~R20 {~R25 PopulatedComponent} {~R21 Reference}\
-        {~R23 SuperclassReference} R23 R21 R25 {~R103 ClassComponentValue} |
+        {~R23 SuperclassReference} R23 R21 R25 {~R103 ClassComponentValue}\
+        {~R109 SpecifiedComponentValue} |
     deRef % |
     relation join %\
         $::micca::ReferenceGeneralization -using {Domain Domain Component Name}\
@@ -9954,6 +10134,8 @@ set rsupercomps [pipe {
 # puts [relformat $rsupercomps rsupercomps]
 
 foreach subref [relation body $rsupercomps] {
+    SpecifiedComponentValue create {*}$subref
+    dict unset subref Value
     ClassComponentValue create {*}$subref
 }
 ----
@@ -10014,7 +10196,8 @@ We use similar query.
 set usupercomps [pipe {
     UnionSubclass findWhere {$Domain eq $domain} |
     findRelated % R47 R40 R41 ~R20 {~R25 PopulatedComponent} {~R21 Reference}\
-        {~R23 SuperclassReference} R23 R21 R25 {~R103 ClassComponentValue} |
+        {~R23 SuperclassReference} R23 R21 R25 {~R103 ClassComponentValue}\
+        {~R109 SpecifiedComponentValue} |
     deRef % |
     relation join %\
         $::micca::UnionGeneralization -using {Domain Domain Component Name}\
@@ -10028,6 +10211,8 @@ set usupercomps [pipe {
 # puts [relformat $usupercomps usupercomps]
 
 foreach subcont [relation body $usupercomps] {
+    SpecifiedComponentValue create {*}$subcont
+    dict unset subcont Value
     ClassComponentValue create {*}$subcont
 }
 ----
@@ -10054,7 +10239,8 @@ while {[isNotEmptyRef $usupers]} {
         deRef $usupers |
         relation eliminate ~ Role |
         relation rename ~ Relationship Component |
-        relation join ~ $::micca::ClassComponentValue $::micca::ClassInstance |
+        relation join ~ $::micca::SpecifiedComponentValue\
+                $::micca::ClassInstance |
         relation rename ~ Class Superclass Instance SuperInstance |
         relation extend ~ srtup\
             Class string {[lindex [tuple extract $srtup Value] 0]}\
@@ -10414,8 +10600,8 @@ relvar insert Config_DataError {
     RefClass            ClassInstance
     RefType             notrefed
     Format              {for domain population, $Domain, class, $Class,\
-                         instance, $Instance, does not have any class\
-                         components}
+                         instance, $Instance, does not have any values for\
+                         its class components}
 }
 ----
 
@@ -10754,6 +10940,7 @@ proc CheckDuplicate {class entity args} {
 DUPLICATE_ENTITY    {%s, identified by, "%s", already exists}
 ----
 
+(((micca,Helpers,EntityError)))
 ----
 <<helper commands>>=
 proc EntityError {entity error kvs} {

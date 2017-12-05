@@ -15,7 +15,7 @@ PKGDIR	= ../../packages
 IMAGEDIR = ./images
 CODEDIR	= ../code
 
-VERSION=1.0.2
+VERSION=1.1
 
 vpath %.pdf $(DOCDIR)
 vpath %.html $(DOCDIR)
@@ -36,6 +36,7 @@ DOCPARTS=\
 	codeorg.txt\
 	configure.txt\
 	example.txt\
+	wmctrl-trace.txt\
 	generate.txt\
 	litprog.txt\
 	platform.txt\
