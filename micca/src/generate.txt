@@ -4806,7 +4806,7 @@ proc FindClassPopulation {classRefs} {
     # Attribute Components
     set attrs [pipe {
         findRelated $popCompRefs {~R21 Attribute} {~R29 IndependentAttribute}\
-                R29 |
+                {~R19 ValueInitializedAttribute} R19 R29 |
         deRef % |
         relation rename % Name Component
     } {} |%]
@@ -4928,7 +4928,7 @@ proc FindClassPopulation {classRefs} {
             {~R105 ClassPopulation} ~R102 |
         deRef % |
         relation rename % Number InstNumber |
-        relation join % $classes $::micca::ClassComponentValue |
+        relation join % $classes $::micca::SpecifiedComponentValue |
         ralutil::rvajoin % $attrs Attributes |
         ralutil::rvajoin % $superrefs SuperRefs |
         ralutil::rvajoin % $atorrefs AssociatorRefs |
@@ -6414,6 +6414,7 @@ Instance sets also have a fixed set of subcommand operations.
 <<CreateActivityCommands: instance sets>>=
 set cmdmap [dict create\
     foreachInstance ${suppns}::InstanceSetForeachInstance\
+    selectOneInstance ${suppns}::InstanceSetSelectOneInstance\
     empty ${suppns}::InstanceSetEmpty\
     cardinality ${suppns}::InstanceSetCardinality\
     notempty ${suppns}::InstanceSetNotEmpty\
@@ -7316,7 +7317,7 @@ proc InstanceAssign {instref args} {
             append result "[typeCheck composeDeclaration $attrtype $varname] ;\n"
         }
 
-        set indepRef [IndependentAttribute findById\
+        set indepRef [ValueInitializedAttribute findById\
                 Domain $domain Class $className Name $attrname]
         if {[isNotEmptyRef $indepRef]} {
             append result [GenValueAssignment $domain $varname\
@@ -10032,6 +10033,7 @@ proc InstanceSetForeachInstance {set inst} {
     set iter [CreateTempSymbol Ctype MRT_InstSetIterator Type SetIterator\
             Class [dict get $setsym Class]]
     append result [IndentToBlock [string cat\
+        [linecomment "instset $set foreachInstance $inst"]\
         "MRT_InstSetIterator $iter ;\n"\
         "for (mrt_InstSetIterBegin(&$set, &$iter) ;\
         mrt_InstSetIterMore(&$iter) ; mrt_InstSetIterNext(&$iter)) \{\n"\
@@ -10048,6 +10050,91 @@ proc InstanceSetForeachInstance {set inst} {
     return $result
 }
 ----
+
+==== Selecting an Arbitrary Instance from an Instance Set
+
+*****
+`<%instset` _instsetvar_ `selectOneInstance` _instvar_ `%>`
+
+instsetvar::
+    The name of a ``C'' variable which holds an instance set.
+instvar::
+    The name of a ``C'' variable into which a reference to a class
+    instance is assigned.
+
+The `selectOneInstance` subcommand generates ``C'' statements to
+select an arbitrary instance from the instance
+set held in the variable named, _instsetvar_.
+A reference to the selected instance is assigned to _instvar_.
+If _instsetvar_ is empty, then _instvar_ is set to `NULL`.
+If _instsetvar_ contains more than one instance,
+the instance assigned to _instvar_ is chosen arbitrarily
+from the set.
+*****
+
+(((micca,Activity Generation,selectOneInstance)))
+[source,tcl]
+----
+<<generation support commands>>=
+proc InstanceSetSelectOneInstance {set inst} {
+    set setsym [CheckInstSetSymbol $set]
+    set iter [CreateTempSymbol Ctype MRT_InstSetIterator Type SetIterator\
+            Class [dict get $setsym Class]]
+
+    set result [IndentToBlock [string cat\
+        [linecomment "instset $set selectOneInstance $inst"]\
+        "MRT_InstSetIterator $iter ;\n"\
+        "mrt_InstSetIterBegin(&$set, &$iter) ;\n"\
+        [CreateInstRefSymbol [dict get $setsym Class] $inst]\
+        "$inst = mrt_InstSetIterMore(&$iter) ? mrt_InstSetIterGet(&$iter) :\
+                NULL ;\n"\
+    ]]
+
+    return $result
+}
+----
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-70.0 {
+    Select an instance from a set
+} -setup {
+} -cleanup {
+    micca clear
+} -setup {
+    validateutils genMiccaFile codegen70 {
+        domain codegen70 {
+            class X {
+                attribute color int -default 10
+
+                classop void getOne {} {
+                    <%X selectWhere xref {true} xset%>
+                    <%instset xset selectOneInstance xselected%>
+                }
+            }
+        }
+        population codegen70 {
+            class X {
+                instance x1
+            }
+        }
+    }
+} -cleanup {
+    micca clear
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen70.c
+    validateutils matchLines codegen70.c {
+        MRT_InstSetIterator t__T2 ;
+        mrt_InstSetIterBegin(&xset, &t__T2) ;
+        struct X *xselected ;
+        xselected = mrt_InstSetIterMore(&t__T2) ? mrt_InstSetIterGet(&t__T2) : NULL ;
+    }
+} -result {1}
+----
+endif::showtests[]
 
 ==== Testing for an Empty Set
 
@@ -10618,7 +10705,8 @@ proc AssignComponentValues {className instref suppliedvalues} {
 
     if {[dict size $suppliedvalues] != 0} {
         error "class, $Class, has no attribute(s) named,\
-            \"[join [dict keys $suppliedvalues] {, }]\""
+            \"[join [dict keys $suppliedvalues] {, }]\"\
+            or the attribute(s) is zero initialized"
     }
 
     return $result
@@ -10650,7 +10738,8 @@ proc GetPopComponents {className} {
     } {} |%]
 
     set typedcomps [pipe {
-        findRelated $popcomps {~R21 Attribute} {~R29 IndependentAttribute} |
+        findRelated $popcomps {~R21 Attribute} {~R29 IndependentAttribute}\
+                {~R19 ValueInitializedAttribute} |
         deRef % |
         relation extend % artup Type string {"attribute"} |
         relation union $typedcomps %
@@ -10698,13 +10787,12 @@ test codegen-26.0 {
     validateutils forgetFiles
 } -body {
     validateutils compileFiles codegen26.c
-    testConditions\
-        {[validateutils matchLines codegen26.c {
+    validateutils matchLines codegen26.c {
         struct X *newx ;
         newx = mrt_CreateInstance(&codegen26__CLASSES[0], MRT_StateCode_IG) ;
         newx->color = 30 ;
         newx->temp = 22 ;
-        }]}
+    }
 } -result {1}
 ----
 
@@ -10838,6 +10926,103 @@ test codegen-26.4 {
         newx->color[31] = '\0' ;
         newx->temp = 22 ;
         printf("%s\n", newx->color) ;
+    }
+} -result {1}
+----
+endif::showtests[]
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-26.5 {
+    Generated code with zero init attribute
+} -setup {
+    validateutils genMiccaFile codegen26_5 {
+        domain codegen26_5 {
+            class X {
+                attribute color int -zeroinit
+                attribute temp int
+            }
+            domainop void newX {} {
+                <%X create newx temp 22%>
+                printf("%d\n", <%instance newx attr color%>) ;
+            }
+        }
+        population codegen26_5 {
+            class X {
+                allocate 4
+            }
+        }
+    }
+} -cleanup {
+    micca clear
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen26_5.c
+    validateutils matchLines codegen26_5.c {
+        struct X *newx ;
+        newx = mrt_CreateInstance(&codegen26_5__CLASSES[0], MRT_StateCode_IG) ;
+        newx->temp = 22 ;
+    }
+} -result {1}
+----
+endif::showtests[]
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-26.6 {
+    Initialized instances with zero init attribute
+} -setup {
+    validateutils genMiccaFile codegen26_6 {
+        domain codegen26_6 {
+            class X {
+                attribute color int -zeroinit
+                attribute temp int
+            }
+            class Y {
+                attribute color int -zeroinit
+            }
+            association R11 Y 1--1 X
+        }
+        population codegen26_6 {
+            class X {
+                instance x1 temp 44
+                instance x2 temp 33
+                table   {temp}\
+                x3      55\
+                x4      66
+            }
+            class Y {
+                instance y1 R11 x1
+                instance y2 R11 x2
+                table   {R11}\
+                y3      x3\
+                y4      x4
+            }
+        }
+    }
+} -cleanup {
+    micca clear
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen26_6.c
+    validateutils matchLines codegen26_6.c {
+        { // x1
+            .base__INST = {
+                .classDesc = &codegen26_6__CLASSES[0],
+                .alloc = 1,
+                .currentState = MRT_StateCode_IG,
+                .refCount = 0,
+                    #ifndef MRT_NO_NAMES
+                .name = "x1"
+                    #endif /* MRT_NO_NAMES */
+             },
+            .temp = 44,
+            .R11__BACK = &Y__POOL[0],
+        },
     }
 } -result {1}
 ----
