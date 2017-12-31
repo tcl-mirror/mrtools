@@ -64,8 +64,6 @@ DBLATEX_PARAMS =\
 	doc.lot.show=figure,table\
 	toc.section.depth=2\
 	doc.section.depth=0\
-	draft.mode=yes\
-	draft.watermark=1\
 	$(NULL)
 
 # draft.mode=yes
