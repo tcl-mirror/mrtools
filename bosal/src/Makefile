@@ -43,7 +43,6 @@ DOCPARTS=\
 
 DIAGRAMS =\
 	harness-drawing.uxf\
-	bosal-datatype-classes.uxf\
 	$(NULL)
 
 IMAGES =\
