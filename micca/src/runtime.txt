@@ -10403,11 +10403,14 @@ mrtSyncQueueEmpty(void)
 ----
 
 We need to be able to add a sync function to the queue.
+Since the sync queue is shared between the background and foreground,
+the operations on the queue must be protected in a critical
+section.
 
 [source,c]
 ----
 <<mrt forward references>>=
-static MRT_SyncParams *mrtSyncQueuePut(MRT_SyncFunc f, bool fatal) ;
+static MRT_SyncParams *mrtSyncQueuePut(MRT_SyncFunc f) ;
 ----
 
 (((micca,Run Time Function,mrtSyncQueuePut)))
@@ -10416,32 +10419,35 @@ static MRT_SyncParams *mrtSyncQueuePut(MRT_SyncFunc f, bool fatal) ;
 <<mrt static functions>>=
 static MRT_SyncParams *
 mrtSyncQueuePut(
-    MRT_SyncFunc f,
-    bool fatal)
+    MRT_SyncFunc f)
 {
+    MRT_SyncParams *params = NULL ;
+
+    mrtBeginCriticalSection() ;
+
     MRT_SyncBlock *tail = mrtSyncQueue.tail ;
     if (++mrtSyncQueue.tail >=
             mrtSyncQueueStorage + MRT_SYNC_QUEUE_SIZE) {
         mrtSyncQueue.tail = mrtSyncQueueStorage ;
     }
     if (mrtSyncQueueEmpty()) {
-        if (fatal) {
-            mrtFatalError(mrtSyncOverflow) ;
-        } else if (--mrtSyncQueue.tail < mrtSyncQueueStorage) {         // <1>
+        if (--mrtSyncQueue.tail < mrtSyncQueueStorage) {         // <1>
             mrtSyncQueue.tail = mrtSyncQueueStorage + MRT_SYNC_QUEUE_SIZE - 1 ;
         }
-        return NULL ;
+    } else {
+        tail->function = f ;
+        params = &tail->params ;
     }
 
-    tail->function = f ;
-    return &tail->params ;
+    mrtEndCriticalSection() ;
+
+    return params ;
 }
 ----
-<1> Since we have already advanced the tail pointer, if we detect the
-overflow and don't want the overflow to be fatal,
-then we must restore the value of the tail pointer.
-This also needs to handle the wrapping around the boundary of the storage
-array.
+<1> Since we have already advanced the tail pointer,
+if we detect the overflow then we must restore the value of the tail pointer.
+Restoring the pointer needs to handle the wrapping around the boundary of the
+storage array.
 
 Insertion happens at the tail.
 Incrementing the tail pointer must account for wrapping around the array
@@ -10450,14 +10456,10 @@ Overflow is detected as the queue being empty after the insertion is made.
 This logic has the effect of consuming one of the queue storage slots 
 in order to detect overflow and
 this will need to be accounted for in sizing the sync queue storage.
-The `fatal` argument determines if queue overflow is a fatal system error
-or not.
-This allow for dealing with sync requests that can be ignored if it would
-cause a sync queue overflow.
 Note that the sync queue slot is not modified until after
 overflow is detected.
-This insures that should an error happen during development,
-the queue can be examined and will be in a consistent state.
+This insures that should an overflow error happen,
+the queue is left in a consistent state.
 
 The consumer of the sync queue entries is the main loop.
 
@@ -10540,25 +10542,36 @@ We return a value indicating if a function was called.
 static inline bool
 mrtInvokeOneSyncFunction(void)
 {
-    MRT_SyncBlock const *block = mrtSyncQueueGet() ;
+    bool didInvoke = false ;
+    do {
+        MRT_SyncBlock const *block = mrtSyncQueueGet() ;
 
-    if (block != NULL && block->function != NULL) {
-        block->function(&block->params) ;
-        return true ;
-    }
+        if (block == NULL) {
+            break ;                             // <1>
+        }
+        assert(block->function != NULL) ;       // <2>
+        if (block->function != NULL) {
+            block->function(&block->params) ;
+            didInvoke = true ;
+        }
+    } while (!didInvoke) ;
 
-    return false ;
+    return didInvoke ;
 }
 ----
+<1> The value of `didInvoke` should always be false at this statement.
+<2> There should be no `NULL` function pointers placed in the sync queue,
+but should it happen, we just skip that entry and go on to consider
+the next one.
 
 === Dispatching Synchronization Functions on ARM v7-M
 
 It turns out we can do something a bit better for the ARM v7-M
 architecture.
-This processor exception architecture is much more sophisticated than
+This processor's exception architecture is more sophisticated than
 that found on most micro-controllers.
 It allows for multiple priorities and includes exceptions specifically
-designed for dealing with foreground / background synchronization.
+designed for dealing with foreground / background interactions.
 
 Interrupts and system exceptions can be given priorities and higher
 priority exceptions can preempt lower priority ones.
@@ -10617,7 +10630,7 @@ Each time a sync function is queued,
 the *Pend SV* exception is marked as pending.
 This will cause the exception handler to be invoked and the sync function
 to be removed from the queue and executed.
-However, we do _not_ want the *Pend SV* exception handler to run while
+However, we *do not* want the *Pend SV* exception handler to run while
 a state activity is running.
 It is not safe to do so.
 Sync functions are allowed to modify domain state.
@@ -12254,7 +12267,11 @@ MRT_SyncParams *
 mrt_SyncRequest(
     MRT_SyncFunc f)
 {
-    return mrtSyncQueuePut(f, true) ;
+    MRT_SyncParams *params = mrtSyncQueuePut(f) ;
+    if (params == NULL) {
+        mrtFatalError(mrtSyncOverflow) ;
+    }
+    return params ;
 }
 ----
 
@@ -12267,7 +12284,7 @@ MRT_SyncParams *
 mrt_TrySyncRequest(
     MRT_SyncFunc f)
 {
-    return mrtSyncQueuePut(f, false) ;
+    return mrtSyncQueuePut(f) ;
 }
 ----
 
@@ -12957,9 +12974,11 @@ MRT_SyncParams *
 mrt_SyncRequest(
     MRT_SyncFunc f)
 {
-    mrtBeginCriticalSection() ;
-    MRT_SyncParams *params = mrtSyncQueuePut(f, true) ;
-    mrtEndCriticalSection() ;
+    MRT_SyncParams *params = mrtSyncQueuePut(f) ;
+    if (params == NULL) {
+        mrtFatalError(mrtSyncOverflow) ;
+    }
+
         #if (defined(__ARM_ARCH) &&  __ARM_ARCH == 7)
     SCB->ICSR = SCB_ICSR_PENDSVSET_Msk ;                // <1>
         #endif /* __ARM_ARCH */
@@ -12977,9 +12996,8 @@ MRT_SyncParams *
 mrt_TrySyncRequest(
     MRT_SyncFunc f)
 {
-    mrtBeginCriticalSection() ;
     MRT_SyncParams *params = mrtSyncQueuePut(f, false) ;
-    mrtEndCriticalSection() ;
+
         #if (defined(__ARM_ARCH) &&  __ARM_ARCH == 7)
     if (params != NULL) {
         SCB->ICSR = SCB_ICSR_PENDSVSET_Msk ;
@@ -13984,7 +14002,10 @@ MRT_SyncParams *
 mrt_SyncRequest(
     MRT_SyncFunc f)
 {
-    return mrtSyncQueuePut(f, true) ;
+    MRT_SyncParams *params = mrtSyncQueuePut(f) ;
+    if (params == NULL) {
+        mrtFatalError(mrtSyncOverflow) ;
+    }
 }
 ----
 
