@@ -470,7 +470,7 @@ mrt_EventLoop(void)
 <2> Check if we have been requested to exit the event loop.
 We do this first because it is possible that something took us out of
 `mrtWait()` and requested to exit the event loop without actually
-signaling an event.
+signaling an event (and so no thread of control actually ran).
 For example, this happens when domains are run under a test harness.
 <3> If no thread of control actually ran, then wait for something
 in the outside world to wake us up.
@@ -10403,11 +10403,14 @@ mrtSyncQueueEmpty(void)
 ----
 
 We need to be able to add a sync function to the queue.
+Since the sync queue is shared between the background and foreground,
+the operations on the queue must be protected in a critical
+section.
 
 [source,c]
 ----
 <<mrt forward references>>=
-static MRT_SyncParams *mrtSyncQueuePut(MRT_SyncFunc f, bool fatal) ;
+static MRT_SyncParams *mrtSyncQueuePut(MRT_SyncFunc f) ;
 ----
 
 (((micca,Run Time Function,mrtSyncQueuePut)))
@@ -10416,48 +10419,41 @@ static MRT_SyncParams *mrtSyncQueuePut(MRT_SyncFunc f, bool fatal) ;
 <<mrt static functions>>=
 static MRT_SyncParams *
 mrtSyncQueuePut(
-    MRT_SyncFunc f,
-    bool fatal)
+    MRT_SyncFunc f)
 {
-    MRT_SyncBlock *tail = mrtSyncQueue.tail ;
-    if (++mrtSyncQueue.tail >=
-            mrtSyncQueueStorage + MRT_SYNC_QUEUE_SIZE) {
-        mrtSyncQueue.tail = mrtSyncQueueStorage ;
-    }
-    if (mrtSyncQueueEmpty()) {
-        if (fatal) {
-            mrtFatalError(mrtSyncOverflow) ;
-        } else if (--mrtSyncQueue.tail < mrtSyncQueueStorage) {         // <1>
-            mrtSyncQueue.tail = mrtSyncQueueStorage + MRT_SYNC_QUEUE_SIZE - 1 ;
-        }
-        return NULL ;
+    MRT_SyncParams *params = NULL ;
+
+    mrtBeginCriticalSection() ;
+
+    MRT_SyncBlock *tail = mrtSyncQueue.tail ;                        // <1>
+    MRT_SyncBlock *newTail = tail + 1 ;
+    if (newTail >= mrtSyncQueueStorage + COUNTOF(mrtSyncQueueStorage)) {
+        newTail = mrtSyncQueueStorage ;
     }
 
-    tail->function = f ;
-    return &tail->params ;
+    if (newTail != mrtSyncQueue.head) {                              // <2>
+        mrtSyncQueue.tail = newTail ;
+        tail->function = f ;
+        params = &tail->params ;
+    }
+
+    mrtEndCriticalSection() ;
+
+    return params ;
 }
 ----
-<1> Since we have already advanced the tail pointer, if we detect the
-overflow and don't want the overflow to be fatal,
-then we must restore the value of the tail pointer.
-This also needs to handle the wrapping around the boundary of the storage
-array.
-
-Insertion happens at the tail.
+<1> The `tail` pointer points to the location where the next sync queue
+function was placed.
 Incrementing the tail pointer must account for wrapping around the array
 boundary.
-Overflow is detected as the queue being empty after the insertion is made.
-This logic has the effect of consuming one of the queue storage slots 
-in order to detect overflow and
-this will need to be accounted for in sizing the sync queue storage.
-The `fatal` argument determines if queue overflow is a fatal system error
-or not.
-This allow for dealing with sync requests that can be ignored if it would
-cause a sync queue overflow.
-Note that the sync queue slot is not modified until after
-overflow is detected.
-This insures that should an error happen during development,
-the queue can be examined and will be in a consistent state.
+<2> Overflow is detected as the queue being in the state where the next
+insertion location equals the head of the queue
+(_i.e._ the next insertion would overwrite the sync block on the head of
+the queue).
+Note the sync queue tail pointer is not modified until after we are
+assured there is no overflow.
+This insures that should an overflow error happen, the queue is left in a
+consistent state.
 
 The consumer of the sync queue entries is the main loop.
 
@@ -10474,31 +10470,33 @@ static MRT_SyncBlock *mrtSyncQueueGet(void) ;
 static MRT_SyncBlock *
 mrtSyncQueueGet(void)
 {
-    MRT_SyncBlock *block ;
+    MRT_SyncBlock *block = NULL ;
 
     mrtBeginCriticalSection() ;
-    if (mrtSyncQueueEmpty()) {
-        block = NULL ;
-    } else {
-        block = mrtSyncQueue.head ;
+
+    if (!mrtSyncQueueEmpty()) {
+        block = mrtSyncQueue.head ;                                     // <1>
         if (++mrtSyncQueue.head >=
-                mrtSyncQueueStorage + MRT_SYNC_QUEUE_SIZE) {      // <1>
+                mrtSyncQueueStorage + COUNTOF(mrtSyncQueueStorage)) {   // <2>
             mrtSyncQueue.head = mrtSyncQueueStorage ;
         }
     }
+
     mrtEndCriticalSection() ;
 
     return block ;
 }
 ----
-<1> Wrap around the end of the array as we advance the pointer
-to the next slot in the queue.
+<1> The `head` pointer points to the next sync queue block to consider.
+Fetch the current sync queue block and point to the next one.
+<2> Wrap around the end of the array if we have advanced the `head` pointer
+past the end of the storage array.
 
 Since the main loop runs with interrupts enabled,
 obtaining a sync queue entry must be done in a critical section.
 We remove entries from the head of the queue.
 Otherwise, the only complexity in the code is to account for
-the array storage wrap around.
+wrap around in the the array storage.
 
 === Dispatching Synchronization Functions
 
@@ -10540,25 +10538,36 @@ We return a value indicating if a function was called.
 static inline bool
 mrtInvokeOneSyncFunction(void)
 {
-    MRT_SyncBlock const *block = mrtSyncQueueGet() ;
+    bool didInvoke = false ;
+    do {
+        MRT_SyncBlock const *block = mrtSyncQueueGet() ;
 
-    if (block != NULL && block->function != NULL) {
-        block->function(&block->params) ;
-        return true ;
-    }
+        if (block == NULL) {
+            break ;                             // <1>
+        }
+        assert(block->function != NULL) ;       // <2>
+        if (block->function != NULL) {
+            block->function(&block->params) ;
+            didInvoke = true ;
+        }
+    } while (!didInvoke) ;
 
-    return false ;
+    return didInvoke ;
 }
 ----
+<1> The value of `didInvoke` should always be false at this statement.
+<2> There should be no `NULL` function pointers placed in the sync queue,
+but should it happen, we just skip that entry and go on to consider
+the next one.
 
 === Dispatching Synchronization Functions on ARM v7-M
 
 It turns out we can do something a bit better for the ARM v7-M
 architecture.
-This processor exception architecture is much more sophisticated than
+This processor's exception architecture is more sophisticated than
 that found on most micro-controllers.
 It allows for multiple priorities and includes exceptions specifically
-designed for dealing with foreground / background synchronization.
+designed for dealing with foreground / background interactions.
 
 Interrupts and system exceptions can be given priorities and higher
 priority exceptions can preempt lower priority ones.
@@ -10617,7 +10626,7 @@ Each time a sync function is queued,
 the *Pend SV* exception is marked as pending.
 This will cause the exception handler to be invoked and the sync function
 to be removed from the queue and executed.
-However, we do _not_ want the *Pend SV* exception handler to run while
+However, we *do not* want the *Pend SV* exception handler to run while
 a state activity is running.
 It is not safe to do so.
 Sync functions are allowed to modify domain state.
@@ -11986,19 +11995,6 @@ This is accomplished by filling the `sa_mask` member of the
 `sigaction` structure.
 This is simplifies keeping track of what is going on.
 
-It is necessary to initialize our managed signal mask to be empty.
-
-(((micca,Run Time POSIX Function,mrtInitCriticalSection)))
-[source,c]
-----
-<<posix static functions>>=
-static inline void
-mrtInitCriticalSection(void)
-{
-    sigemptyset(&mrtSigMask) ;
-}
-----
-
 Starting a critical section just means that we must block all the managed
 signals.
 
@@ -12254,7 +12250,11 @@ MRT_SyncParams *
 mrt_SyncRequest(
     MRT_SyncFunc f)
 {
-    return mrtSyncQueuePut(f, true) ;
+    MRT_SyncParams *params = mrtSyncQueuePut(f) ;
+    if (params == NULL) {
+        mrtFatalError(mrtSyncOverflow) ;
+    }
+    return params ;
 }
 ----
 
@@ -12267,7 +12267,7 @@ MRT_SyncParams *
 mrt_TrySyncRequest(
     MRT_SyncFunc f)
 {
-    return mrtSyncQueuePut(f, false) ;
+    return mrtSyncQueuePut(f) ;
 }
 ----
 
@@ -12727,14 +12727,25 @@ mrtTimestamp(void)
 
 Here we present the POSIX version of the required internal initialization.
 
+(((micca,Run Time POSIX Function,mrtPlatformInit)))
+[source,c]
+----
+<<posix static functions>>=
+static inline void
+mrtPlatformInit(void)
+{
+    sigemptyset(&mrtSigMask) ;
+}
+----
+
 [source,c]
 ----
 <<posix external functions>>=
 void
 mrt_Initialize(void)
 {
+    mrtPlatformInit() ;
     mrtECBPoolInit() ;
-    mrtInitCriticalSection() ;
     mrtInitSysTimer() ;
     mrtInitFDService() ;
     setvbuf(stdout, NULL, _IOLBF, 0) ; // <1>
@@ -12913,21 +12924,6 @@ and vendor specific code.
 ----
 <<arm7m static functions>>=
 static inline void
-mrtInitCriticalSection(void)
-{
-        #if (defined(__ARM_ARCH) &&  __ARM_ARCH == 7)
-    NVIC_SetPriority(PendSV_IRQn, MRT_PENDSV_PRIORITY) ;    // <1>
-        #endif /* __ARM_ARCH */
-}
-----
-<1> After reset, all exception priorities are at the highest level.
-We make sure the set the PendSV priority to our lowest level value
-so that the sync function dispatch works properly.
-
-[source,c]
-----
-<<arm7m static functions>>=
-static inline void
 mrtBeginCriticalSection(void)
 {
     __disable_irq() ;
@@ -12957,10 +12953,15 @@ MRT_SyncParams *
 mrt_SyncRequest(
     MRT_SyncFunc f)
 {
-    mrtBeginCriticalSection() ;
-    MRT_SyncParams *params = mrtSyncQueuePut(f, true) ;
-    mrtEndCriticalSection() ;
+    MRT_SyncParams *params = mrtSyncQueuePut(f) ;
+    if (params == NULL) {
+        mrtFatalError(mrtSyncOverflow) ;
+    }
+
+#       if (defined(__ARM_ARCH) &&  __ARM_ARCH == 7)
     SCB->ICSR = SCB_ICSR_PENDSVSET_Msk ;                // <1>
+#       endif /* __ARM_ARCH */
+
     return params ;
 }
 ----
@@ -12975,12 +12976,14 @@ MRT_SyncParams *
 mrt_TrySyncRequest(
     MRT_SyncFunc f)
 {
-    mrtBeginCriticalSection() ;
-    MRT_SyncParams *params = mrtSyncQueuePut(f, false) ;
-    mrtEndCriticalSection() ;
+    MRT_SyncParams *params = mrtSyncQueuePut(f) ;
+
+#       if (defined(__ARM_ARCH) &&  __ARM_ARCH == 7)
     if (params != NULL) {
         SCB->ICSR = SCB_ICSR_PENDSVSET_Msk ;
     }
+#       endif /* __ARM_ARCH */
+
     return params ;
 }
 ----
@@ -12995,7 +12998,6 @@ mrt_Initialize(void)
 {
     mrtPlatformInit() ;
     mrtECBPoolInit() ;
-    mrtInitCriticalSection() ;
     mrtInitSysTimer() ;
 #       if !(defined(MRT_NO_TRACE) || defined(MRT_NO_STDIO))
     mrt_RegisterTraceHandler(mrtPrintTraceInfo) ;
@@ -13018,8 +13020,7 @@ mrt_Initialize(void)
 #include "em_burtc.h"
 
 #ifdef MRT_SWO_OUTPUT
-#   include "em_dbg.h"
-#   include "retargetswo.h"
+#   include "bsp_trace.h"
 #endif /* MRT_SWO_OUTPUT */
 ----
 
@@ -13034,7 +13035,7 @@ mrt_Initialize(void)
  * max delay is 4,194,303 s == 69,905 min == 1,165 hr == 48.5 days
  */
 #define MRT_MAX_MSEC_DELAY\
-        ((MRT_MAX_CLOCK_TICKS / UINT32_C(MRT_TIMER_FREQUENCY)) * UINT32_C(1000))
+    ((MRT_MAX_CLOCK_TICKS / (uint32_t)(MRT_TIMER_FREQUENCY)) * (uint32_t)(1000))
 ----
 
 [source,c]
@@ -13050,8 +13051,8 @@ mrtMsecToTicks(
     /*
      * Use 64 bit arithmetic to avoid overflow.
      */
-    return ((uint64_t)msec * UINT64_C(MRT_TIMER_FREQUENCY) +
-            UINT64_C(1000 / 2)) / UINT64_C(1000) ;
+    return ((uint64_t)msec * (uint64_t)(MRT_TIMER_FREQUENCY) +
+            (uint64_t)(1000 / 2)) / (uint64_t)(1000) ;
 }
 ----
 
@@ -13246,13 +13247,15 @@ mrtPlatformInit(void)
      * Retarget instrumentation I/O to the SWO output so it will
      * show up in the debugger output console.
      */
-    if (DBG_Connected()) {
-        extern void setupSWOForPrinting() ;
-        setupSWOForPrinting() ;
-    }
+    BSP_TraceSwoSetup() ;
 #       endif /* MRT_SWO_OUTPUT */
+
+    NVIC_SetPriority(PendSV_IRQn, MRT_PENDSV_PRIORITY) ;    // <1>
 }
 ----
+<1> After reset, all exception priorities are at the highest level.
+We make sure the set the PendSV priority to our lowest level value
+so that the sync function dispatch works properly.
 
 === EFM32GG Suspending Execution
 
@@ -13298,10 +13301,12 @@ mrtTimestamp(void)
 
     uint32_t ts = BURTC_CounterGet() ;
 
-    snprintf(tsbuf, sizeof(tsbuf), "%03lu.%03lu", ts / 1000, ts % 1000) ;
+    snprintf(tsbuf, sizeof(tsbuf), "%03lu.%03lu", ts / 1000, ts % 1000) ; // <1>
     return tsbuf ;
 }
 ----
+<1> Recall that the `BURTC` was set up to be a free running 1 msec counter.
+The timestamp is split into a seconds portion and a milliseconds portion.
 
 === EFM32GG Files
 
@@ -13552,8 +13557,12 @@ T32_INT1_IRQHandler(void)
 static void
 mrtPlatformInit(void)
 {
+    NVIC_SetPriority(PendSV_IRQn, MRT_PENDSV_PRIORITY) ;    // <1>
 }
 ----
+<1> After reset, all exception priorities are at the highest level.
+We make sure the set the PendSV priority to our lowest level value
+so that the sync function dispatch works properly.
 
 === MSP432 Suspending Execution
 
@@ -13706,10 +13715,6 @@ mrtTimestamp(void)
 [source,c]
 ----
 <<msp430 static functions>>=
-static inline void
-mrtInitCriticalSection(void)
-{
-}
 static inline void
 mrtBeginCriticalSection(void)
 {
@@ -13982,7 +13987,10 @@ MRT_SyncParams *
 mrt_SyncRequest(
     MRT_SyncFunc f)
 {
-    return mrtSyncQueuePut(f, true) ;
+    MRT_SyncParams *params = mrtSyncQueuePut(f) ;
+    if (params == NULL) {
+        mrtFatalError(mrtSyncOverflow) ;
+    }
 }
 ----
 
@@ -13993,7 +14001,7 @@ MRT_SyncParams *
 mrt_TrySyncRequest(
     MRT_SyncFunc f)
 {
-    return mrtSyncQueuePut(f, false) ;
+    return mrtSyncQueuePut(f) ;
 }
 ----
 
@@ -14023,7 +14031,6 @@ void
 mrt_Initialize(void)
 {
     mrtECBPoolInit() ;
-    mrtInitCriticalSection() ;
     mrtInitSysTimer() ;
 }
 ----
