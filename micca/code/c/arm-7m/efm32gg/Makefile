@@ -11,12 +11,15 @@ CFLAGS	=\
 	 -march=armv7-m\
 	 -mthumb\
 	 $(NULL)
-SSTUDIO=/home/andrewm/opt/silabs/SimplicityStudio_v4/developer/sdks/exx32/v4.4.1
+SSTUDIO=/home/andrewm/opt/silabs/SimplicityStudio_v4/developer/sdks/exx32/v5.0.0.0
 CPPFLAGS =\
 	 -D_ISOC11_SOURCE\
-	 -I$(SSTUDIO)/CMSIS/Include\
-	 -I$(SSTUDIO)/Device/SiliconLabs/EFM32GG/Include\
-	 -I$(SSTUDIO)/emlib/inc\
+	 -DMRT_SWO_OUTPUT\
+	 -I$(SSTUDIO)/platform/CMSIS/Include\
+	 -I$(SSTUDIO)/platform/Device/SiliconLabs/EFM32GG/Include\
+	 -I$(SSTUDIO)/platform/emlib/inc\
+	 -I$(SSTUDIO)/hardware/kit/common/bsp\
+	 -I$(SSTUDIO)/hardware/kit/EFM32GG_STK3700/config\
 	 -DEFM32GG990F1024=1\
 	 $(NULL)
 
