@@ -32,6 +32,10 @@ DIAGRAMS =\
 	1to1-reflex.uxf\
 	0-1to0-1-reflex.uxf\
 	0-Mto1-reflex.uxf\
+	simple-gen.uxf\
+	repeat-gen.uxf\
+	multi-gen.uxf\
+	compound-gen.uxf\
 	$(NULL)
 
 IMAGES =\
