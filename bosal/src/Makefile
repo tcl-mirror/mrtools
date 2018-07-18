@@ -10,7 +10,6 @@
 #
 
 DOCDIR	= ../doc
-TESTDIR = ../test
 PKGDIR	= ../../packages
 IMAGEDIR = ./figures
 CODEDIR	= ../code
@@ -19,7 +18,6 @@ VERSION=0.1
 
 vpath %.pdf $(DOCDIR)
 vpath %.html $(DOCDIR)
-vpath %.test $(TESTDIR)
 vpath %.uxf $(IMAGEDIR)
 vpath %.tcl $(CODEDIR)/tcl
 
@@ -53,15 +51,10 @@ PDF 	=\
      	$(DOCDIR)/$(patsubst %.aweb,%.pdf,$(DOCSRC))\
      	$(NULL)
 
-TESTS	=\
-     	$(patsubst %.aweb,%.test,$(DOCSRC))\
-	$(NULL)
-
 CLEANFILES =\
 	$(TCLSRC)\
 	$(IMAGES)\
 	$(PDF)\
-	$(TESTDIR)/$(TESTS)\
 	$(NULL)
 
 A2XOPTS =\
@@ -93,7 +86,6 @@ ASCIIDOC_ATTRS =\
 	docinfo2\
 	$(NULL)
 
-
 DBLATEX_OPTS =\
 	--dblatex-opts="$(patsubst %,--param=%,$(DBLATEX_PARAMS))"\
 	--dblatex-opts="--fig-path=$(IMAGEDIR)"\
@@ -103,25 +95,15 @@ ASCIIDOC_OPTS =\
 	$(patsubst %,--attribute=%,$(ASCIIDOC_ATTRS))\
 	$(NULL)
 
-TESTOPTS =\
-	-verbose bet\
-	-level debug\
-	$(NULL)
-
 # -noconfig -nogenerate
 
-.PHONY : all code doc tests runtests
+.PHONY : all code doc
 
 all : doc code
 
 doc : $(PDF)
 
 code : $(CODEFILES)
-
-tests : code $(TESTS)
-
-runtests : tests
-	cd $(TESTDIR) ; tclsh $(TESTS) $(TESTOPTS)
 
 clean :
 	$(RM) $(CLEANFILES)
@@ -135,8 +117,6 @@ $(CODEDIR)/tcl/bosal.tcl : $(DOCSRC) $(DOCPARTS)
 
 $(CODEDIR)/tcl/bosal_main.tcl : $(DOCSRC) $(DOCPARTS)
 	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $@ $(DOCSRC)
-
-$(TESTS) : $(DOCSRC) $(DOCPARTS)
 
 $(DOCDIR)/%.pdf : %.aweb
 	a2x $(A2XOPTS) --doctype=article  --format=pdf\
@@ -156,9 +136,6 @@ $(IMAGEDIR)/%.pdf : %.uxf
 
 %.tcl : %.aweb
 	atangle $(ATANGLEOPTS) -root $@ -output $(CODEDIR)/tcl/$@ $<
-
-%.test : %.aweb
-	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $(TESTDIR)/$@ $<
 
 #
 # vim: set sw=8 ts=8 sts=8 noexpandtab:

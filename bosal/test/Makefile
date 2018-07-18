@@ -5,6 +5,11 @@
 #
 # Module:
 #*--
+
+DOCDIR	= ../doc
+
+vpath %.pdf $(DOCDIR)
+
 VPATH	=\
 	./domains\
 	$(NULL)
@@ -50,6 +55,14 @@ OBJS	=\
 	$(patsubst %.c,%.o,$(SRCS))\
 	$(NULL)
 
+TEST_SRC	=\
+	bosal-test.aweb\
+	$(NULL)
+
+TEST_SCRIPT	=\
+	$(patsubst %.aweb,%.test,$(TEST_SRC))\
+	$(NULL)
+
 CPPFLAGS=\
 	-DMRT_INSTRUMENT\
 	-DBOSAL\
@@ -63,18 +76,53 @@ CFLAGS	=\
 
 LDFLAGS = -g --coverage
 
-all : $(PROG) tests runtests
+PDF 	=\
+     	$(DOCDIR)/$(patsubst %.aweb,%.pdf,$(TEST_SRC))\
+     	$(NULL)
+
+DOCINFO	=\
+	$(patsubst %.aweb,%-docinfo.xml,$(TEST_SRC))\
+	docinfo.xml\
+	$(NULL)
+
+EXTRAS =\
+	$(DOCINFO)\
+	$(NULL)
+
+ASCIIDOC_ATTRS =\
+	docinfo2\
+	$(NULL)
+
+DBLATEX_PARAMS =\
+	bibliography.numbered=0\
+	index.numbered=0\
+	doc.publisher.show=0\
+	doc.lot.show=figure,table\
+	toc.section.depth=3\
+	doc.section.depth=0\
+	$(NULL)
+
+DBLATEX_OPTS =\
+	--dblatex-opts="$(patsubst %,--param=%,$(DBLATEX_PARAMS))"\
+	$(NULL)
+
+ASCIIDOC_OPTS =\
+	$(patsubst %,--attribute=%,$(ASCIIDOC_ATTRS))\
+	$(NULL)
+
+all : $(PROG) tests runtests doc
 
 $(PROG) : $(OBJS)
 	gcc -o $@ $(LDFLAGS) $(OBJS)
 
-tests : bosal.test
+tests : $(TEST_SCRIPT)
 
-runtests : $(PROG) bosal.test
-	tclsh bosal.test -verbose bet -level notice
+runtests : $(PROG) $(TEST_SCRIPT)
+	./$(TEST_SCRIPT) -verbose bet -level notice
 
-bosal.test : ../src/bosal.aweb ../src/*.txt
-	make -C ../src tests
+$(TEST_SCRIPT) : bosal-test.aweb
+	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $@ $<
+	chmod +x $@
 
 harness.o : harness.c micca_rt.h micca_rt_internal.h bosal.h
 
@@ -103,12 +151,17 @@ bosal.h :
 micca_rt.c micca_rt.h micca_rt_internal.h :
 	micca -posix
 
+doc : $(PDF)
+
+$(PDF) : $(TEST_SRC) $(EXTRAS)
+
 CLEANFILES	=\
 		$(PROG)\
 		$(OBJS)\
 		$(GENSRCS)\
 		$(GENHDRS)\
 		$(SAVED)\
+		$(TEST_SCRIPT)\
 		harness.c\
 		micca_rt*\
 		bosal.h\
@@ -124,5 +177,10 @@ clean :
 
 %.c %.h %.ral : %.micca
 	micca $(MIFLAGS) -save $(basename $(notdir $<)).ral $<
+
+$(DOCDIR)/%.pdf : %.aweb
+	a2x $(A2XOPTS) --doctype=article  --format=pdf\
+	    --destination-dir=$(DOCDIR)\
+	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) $<
 
 # vim:set ts=8 sw=8 sts=8 noexpandtab:
