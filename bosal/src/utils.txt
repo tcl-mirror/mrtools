@@ -63,18 +63,26 @@ typedef struct bslbufcontext {
 } BSL_BufContext ;
 ----
 
+[source,c]
+----
+<<harness data types>>=
+typedef enum {
+    CmdContext = 0,
+    TraceContext,
+    InstrContext,
+    FatalContext,
+    NUMContexts         // must be last
+} BSL_ContextId ;
+----
+
 We define an array of buffer context data structures to use as a stack of
 contexts.
-A simple pointer then defines the _current context_ as the top of the stack.
-For simplicity,
-the variables are declared as `static` as we will only ever have
-one context stack.
 
 [source,c]
 ----
 <<harness static data>>=
-static BSL_BufContext contextStack[BSL_NESTLIMIT] ;
-static BSL_BufContext *contextTOS ;
+static BSL_BufContext contextStack[NUMContexts][BSL_NESTLIMIT] ;
+static BSL_BufContext *contextTOS[NUMContexts] ;
 ----
 
 The `bslBeginResponse()` function is used to initialize the context
@@ -85,17 +93,18 @@ in preparation for generated a response.
 [source,c]
 ----
 <<harness forward function declarations>>=
-static void bslBeginResponse(void) ;
+static void bslBeginResponse(BSL_ContextId cntx) ;
 ----
 
 [source,c]
 ----
 <<harness static functions>>=
 static void
-bslBeginResponse(void)
+bslBeginResponse(BSL_ContextId cntx)
 {
-    contextTOS = contextStack ;     // <1>
-    bslInitBufContext() ;
+    assert(cntx < NUMContexts) ;
+    contextTOS[cntx] = &contextStack[cntx][0] ;     // <1>
+    bslInitBufContext(contextTOS[cntx]) ;
 }
 ----
 <1> Beginning a response causes any other partial response to be
@@ -106,19 +115,24 @@ abandoned.
 [source,c]
 ----
 <<harness forward function declarations>>=
-static int bslEndResponse(void) ;
+static int bslEndResponse(BSL_ContextId cntx) ;
 ----
 
 [source,c]
 ----
 <<harness static functions>>=
 static inline int
-bslEndResponse(void)
+bslEndResponse(BSL_ContextId cntx)
 {
-    while (contextTOS > contextStack) {
-        bslPopContext() ;
+    assert(cntx < NUMContexts) ;
+
+    BSL_BufContext *bottom = &contextStack[cntx][0] ;
+
+    for (BSL_BufContext *top = contextTOS[cntx] ; top > bottom ;
+            top = contextTOS[cntx]) {
+        bslPopContext(cntx) ;
     }
-    return fprintf(bslCmdStream, "%s\n", contextTOS->buf) ;
+    return fprintf(bslCmdStream, "%s\n", bslContextGetBuf(bottom)) ;
 }
 ----
 
@@ -127,23 +141,31 @@ bslEndResponse(void)
 [source,c]
 ----
 <<harness forward function declarations>>=
-static void bslPushContext(void) ;
+static void bslPushContext(BSL_ContextId cntx) ;
 ----
 
 [source,c]
 ----
 <<harness static functions>>=
 static void
-bslPushContext(void)
+bslPushContext(
+    BSL_ContextId cntx)
 {
-    assert(contextTOS != NULL) ;
-    assert(contextTOS < contextStack + COUNTOF(contextStack)) ;
-    if (contextTOS >= contextStack + COUNTOF(contextStack)) {
+    assert(cntx < NUMContexts) ;
+
+    BSL_BufContext *bottom = &contextStack[cntx][0] ;
+    BSL_BufContext *top = contextTOS[cntx] ;
+
+    assert(top != NULL) ;
+    assert(top < bottom + BSL_NESTLIMIT) ;
+
+    if (top >= bottom + BSL_NESTLIMIT) {
         fprintf(stderr, "buffer context stack overflow\n") ;
         abort() ;
     }
-    contextTOS += 1 ;
-    bslInitBufContext() ;
+    top += 1 ;
+    contextTOS[cntx] = top ;
+    bslInitBufContext(top) ;
 }
 ----
 
@@ -152,25 +174,33 @@ bslPushContext(void)
 [source,c]
 ----
 <<harness forward function declarations>>=
-static void bslPopContext(void) ;
+static void bslPopContext(BSL_ContextId cntx) ;
 ----
 
 [source,c]
 ----
 <<harness static functions>>=
 static void
-bslPopContext(void)
+bslPopContext(BSL_ContextId cntx)
 {
-    assert(contextTOS > contextStack) ;
-    if (contextTOS <= contextStack) {
+    assert(cntx < NUMContexts) ;
+
+    BSL_BufContext *bottom = &contextStack[cntx][0] ;
+    BSL_BufContext *top = contextTOS[cntx] ;
+
+    assert(top != NULL) ;
+    assert(top > bottom) ;
+
+    if (top <= bottom) {
         fprintf(stderr, "buffer context stack underflow\n") ;
         abort() ;
     }
 
-    bslTrimBufContextRight() ;
-    char *prevBuf = bslContextGetBuf() ;
-    contextTOS -= 1 ;
-    bslAddWord(prevBuf) ;
+    bslTrimBufContextRight(top) ;
+    char *currBuf = bslContextGetBuf(top) ;
+    top -= 1 ;
+    contextTOS[cntx] = top ;
+    bsl_AddWord(top, currBuf) ;
 }
 ----
 
@@ -179,19 +209,60 @@ bslPopContext(void)
 [source,c]
 ----
 <<harness forward function declarations>>=
-static void bslInitBufContext(void) ;
+static inline void bslResetContext(BSL_ContextId cntx) ;
+----
+
+[source,c]
+----
+<<harness static functions>>=
+static inline void
+bslResetContext(BSL_ContextId cntx)
+{
+    assert(cntx < NUMContexts) ;
+
+    bslInitBufContext(contextTOS[cntx]) ;
+}
+----
+
+(((chunk,harness forward function declarations)))
+
+[source,c]
+----
+<<harness forward function declarations>>=
+static inline void bslAddWordToContext(BSL_ContextId cntx, char const *word) ;
+----
+
+[source,c]
+----
+<<harness static functions>>=
+static inline void
+bslAddWordToContext(BSL_ContextId cntx, char const *word)
+{
+    assert(cntx < NUMContexts) ;
+
+    bsl_AddWord(contextTOS[cntx], word) ;
+}
+----
+
+(((chunk,harness forward function declarations)))
+
+[source,c]
+----
+<<harness forward function declarations>>=
+static void bslInitBufContext(BSL_BufContext *bufc) ;
 ----
 
 [source,c]
 ----
 <<harness static functions>>=
 static void
-bslInitBufContext(void)
+bslInitBufContext(BSL_BufContext *bufc)
 {
-    assert(contextTOS != NULL) ;
-    contextTOS->location = contextTOS->buf ;
-    *contextTOS->location = ASCII_NUL ;
-    contextTOS->remaining = sizeof(contextTOS->buf) ;
+    assert(bufc != NULL) ;
+
+    bufc->location = bufc->buf ;
+    *bufc->location = ASCII_NUL ;
+    bufc->remaining = sizeof(bufc->buf) ;
 }
 ----
 
@@ -200,24 +271,25 @@ bslInitBufContext(void)
 [source,c]
 ----
 <<harness forward function declarations>>=
-static int bslAddWord(char const *word) ;
+static int bsl_AddWord(BSL_BufContext *bufc, char const *word) ;
 ----
 
 [source,c]
 ----
 <<harness static functions>>=
 static int
-bslAddWord(
+bsl_AddWord(
+    BSL_BufContext *bufc,
     char const *word)
 {
-    int nbytes = snprintf(contextTOS->location, contextTOS->remaining,
+    int nbytes = snprintf(bufc->location, bufc->remaining,
             bslQuoteWord(word) ? "{%s} " : "%s ", word) ;
 
-    if (nbytes < 0 || nbytes >= contextTOS->remaining) {
+    if (nbytes < 0 || nbytes >= bufc->remaining) {
         return -1 ;
     } else {
-        contextTOS->remaining -= nbytes ;
-        contextTOS->location += nbytes ;
+        bufc->remaining -= nbytes ;
+        bufc->location += nbytes ;
     }
 
     return nbytes ;
@@ -229,18 +301,19 @@ bslAddWord(
 [source,c]
 ----
 <<harness forward function declarations>>=
-static void bslTrimBufContextRight(void) ;
+static void bslTrimBufContextRight(BSL_BufContext *bufc) ;
 ----
 
 [source,c]
 ----
 <<harness static functions>>=
 static void
-bslTrimBufContextRight(void)
+bslTrimBufContextRight(
+    BSL_BufContext *bufc)
 {
-    while (contextTOS->location > contextTOS->buf) {
-        if (isspace(*(contextTOS->location - 1))) {
-            *--contextTOS->location = ASCII_NUL ;
+    while (bufc->location > bufc->buf) {
+        if (isspace(*(bufc->location - 1))) {
+            *--bufc->location = ASCII_NUL ;
         } else {
             break ;
         }
@@ -253,16 +326,17 @@ bslTrimBufContextRight(void)
 [source,c]
 ----
 <<harness forward function declarations>>=
-static char *bslContextGetBuf(void) ;
+static char *bslContextGetBuf(BSL_BufContext *bufc) ;
 ----
 
 [source,c]
 ----
 <<harness static functions>>=
 static inline char *
-bslContextGetBuf(void)
+bslContextGetBuf(
+    BSL_BufContext *bufc)
 {
-    return contextTOS->buf ;
+    return bufc->buf ;
 }
 ----
 
@@ -271,7 +345,8 @@ bslContextGetBuf(void)
 [source,c]
 ----
 <<harness forward function declarations>>=
-static int bslVformatToContext(char const *format, va_list args) ;
+static int bslVformatToContext(BSL_ContextId cntx, char const *format,
+        va_list args) ;
 ----
 
 [source,c]
@@ -279,17 +354,21 @@ static int bslVformatToContext(char const *format, va_list args) ;
 <<harness static functions>>=
 static int
 bslVformatToContext(
+    BSL_ContextId cntx,
     char const *format,
     va_list args)
 {
-    int nbytes = vsnprintf(contextTOS->location, contextTOS->remaining,
-            format, args) ;
+    assert(cntx < NUMContexts) ;
 
-    if (nbytes < 0 || nbytes >= contextTOS->remaining) {
+    BSL_BufContext *bufc = contextTOS[cntx] ;
+
+    int nbytes = vsnprintf(bufc->location, bufc->remaining, format, args) ;
+
+    if (nbytes < 0 || nbytes >= bufc->remaining) {
         return -1 ;
     } else {
-        contextTOS->remaining -= nbytes ;
-        contextTOS->location += nbytes ;
+        bufc->remaining -= nbytes ;
+        bufc->location += nbytes ;
     }
 
     return nbytes ;
@@ -299,7 +378,7 @@ bslVformatToContext(
 [source,c]
 ----
 <<harness static functions>>=
-static int bslFormatToContext(char const *format, ...) ;
+static int bslFormatToContext(BSL_ContextId cntx, char const *format, ...) ;
 ----
 
 [source,c]
@@ -307,12 +386,13 @@ static int bslFormatToContext(char const *format, ...) ;
 <<harness static functions>>=
 static int
 bslFormatToContext(
+    BSL_ContextId cntx,
     char const *format,
     ...)
 {
     va_list params ;
     va_start(params, format) ;
-    int nbytes = bslVformatToContext(format, params) ;
+    int nbytes = bslVformatToContext(cntx, format, params) ;
     va_end(params) ;
 
     return nbytes ;
