@@ -1,0 +1,380 @@
+// vim:syntax=asciidoc:
+= Notes on a concurrency taxonomy for model execution domains
+
+[abstract]
+TBD
+
+== Problem Statement
+
+In
+https://en.wikipedia.org/wiki/Executable_UML[xUML],
+domain models describe subject matters in a platform independent
+manner yet with precise execution semantics.
+The modeling language accounts for potential concurrency of the
+model activities.
+
+When translating a model,
+all the necessary implementation technology required to achieve a running
+program must be supplied.
+One domain in particular, the Model Execution (MX) domain,
+is given the requirements to support the model execution rules to a
+scale and performance required by the application.
+Note that the qualities of the implementation, such as performance and
+the manner in which computing technology is applied, usually does _not_ derive
+from the application logic,
+_i.e._ such requirements are usually non-functional.
+
+One important aspect of the implementation is the degree to which
+processing can be concurrent.
+It is that quality we discuss here.
+
+== Fundamentals
+
+We start with some basic concepts.
+
+First, we distinguish between concurrency and parallelism.
+Concurrency is the ability to execute parts of a program in different
+orders without affecting the outcome.
+XUML model execution rules specify precise rules for concurrent execution.
+A translation must map those rules onto specific technology
+for concurrent computing.
+
+Parallelism is related to the employment of an actual computing device
+to concurrent computations.
+It is possible to specify concurrent computation and execute it on
+a single computing device which, of necessity, must be
+shared in some manner among the computations.
+
+In this paper,
+we do not discuss parallelism.
+It is assumed that computing environments where concurrent activities may be
+executed in parallel have the necessary operating system support to map
+concurrent aspects of a program onto physical computing devices.
+Often there is only one CPU core in a device and so the mapping is
+trivial and the concurrent activities are forced to be sequential.
+
+In the following,
+we discuss three of the simpler forms of concurrency concepts that
+can be used by a MX domain to implement model level execution rules.
+This discussion is _not_ intended to be comprehensive.
+There are many forms of concurrency we don't discuss,
+such a distributed computing or instruction level parallelism (_e.g._ SIMD),
+that may also be required by particular applications.
+
+Here we focus on:
+
+* Single threaded.
+* Multiple processes running in separate virtual address spaces.
+* Single process containing multiple threads of execution.
+
+== Single threading
+
+The simplest case is to map model execution onto a single processing thread.
+This thread might be the entire computing device,
+_e.g._ in the case of a micro-controller,
+or a single processfootnote:[For simplicity, we define a process as
+might be found in a POSIX environment.
+Other environments have similar concepts.]
+under an operating system.
+In either case,
+there is no parallelism and concurrency is simulated by sharing the
+physical CPU.
+
+This is the case supported by
+http://repos.modelrealization.com/cgi-bin/fossil/tcl-cm3/doc/trunk/mechs/doc/mechs.pdf[STSA]
+as used by `pycca` and described in _Models to Code_.
+
+There is a follow-on translation tool to `pycca` called,
+http://repos.modelrealization.com/cgi-bin/fossil/mrtools/doc/trunk/micca/doc/micca.pdf[`micca`].
+`Micca` is targeted at the same general class of applications as `pycca`,
+but contains a number of notable improvements.
+One important feature of the `micca` run-time,
+which is the MX domain implementation targeted by `micca`,
+is support for referential integrity checking.
+This implies that the `micca` MX domain performs transactions on the
+underlying class data model.
+The implications of this are discussed further below.
+
+By using only a single execution context,
+all the concurrently implied by a domain model is forced into sequential
+execution.
+Both STSA and `micca` allocate the single execution context to
+event dispatch.
+To insure run-to-completion semantics,
+events are queued and then dispatched.
+Any state machine activity is executed completely before the next
+event is considered.
+
+This simple arrangement has a number of distinct advantages:
+
+* There is no contention for data access and direct access to data in memory
+  (as opposed to some message based scheme) is directly supported and
+  very efficient.
+* There is no possibility for deadlock in accessing resources since
+  each state activity has access to the entire computing device while
+  it runs and will never be preempted.
+
+The simplicity of the arrangement also has its disadvantages.
+Long-running, compute-bound execution does not allow the system to
+respond to any external stimulus.
+For example,
+computing some transformation on a large digital image as part of a
+state machine activity implies the system is not responsive to
+other requests during the computation.
+This is very similar to typical GUI applications since they use
+an event callback execution scheme.
+There are sometimes ways to work around these limitations.
+For example, if there is only a few troubling computations,
+then it is possible to
+__yield__footnote:[For STSA and `micca` signaling a self-directed delayed event
+with a zero delay time accomplishes a yield to dispatch other events]
+the processor periodically to allow other events to be dispatched.
+However,
+performing such yields distorts the state model, usually adds additional
+attributes to keep track of progress,
+and determining an optimal yield frequency is difficult.
+The system works much better when it is strictly event driven.
+
+Despite what might be seen as severe limitations,
+the single threaded event dispatch execution scheme is appropriate for
+a large class of systems.
+Typically is is deployed in reactive systems
+where external stimulus evoke a computation that results
+in an immediate response back into the environment.
+The overall responsiveness of the system is limited by the timing
+of longer running computations,
+but for many classes of applications this limitation is not significant,
+and the simplicity and efficiency of the approach allow it to be
+applied by lower performing computing devices (_e.g._ micro-controllers).
+
+=== Domain boundary crossings
+
+If the only execution context is devoted to event dispatch,
+we still need some way to interact with the environment of the system.
+A domain (or set of domains) operating in isolation has no way of
+performing any computations that have side effects in the outside world.
+We must consider how happenings in the external world are realized
+in a domain and how they can influence the computations the system makes.
+
+Processors supply hardware capabilities in the form of
+interrupts to preempt ongoing computations,
+execute some code, and resume the interrupted program.
+The hardware architecture for interrupts and exception processing
+varies considerably between different processor architectures.
+For POSIX processes, _signals_ serve the same role as interrupts.
+It is necessary for MX domains to provide a means to have the effect
+of interrupts synchronize to event dispatch in a safe manner.
+For STSA and the `micca` run-time, synchronization is provided by allowing
+a function execution request to be queued.
+The function is then executed by the event dispatch code at the first
+_safe_ opportunity.
+It is safe to execute the synchronization functions only when state
+activities are _not_ executing.
+This mechanism is the _only_ means provided by STSA and the `micca` run-time
+for interrupts to indicate they have triggered.
+Clearly, the queue of functions is a data structure shared between
+different preemptive execution contexts and must be contained in a critical
+section.
+
+=== Multiple domains in a single threaded environment
+
+Most often, a system consists of multiple domains.
+In a single threaded environment,
+a choice must be made to allow execution of state activities of the domains to
+be interleaved or not.
+There may be overarching reasons to disallow execution of domain activities to
+be interleaved.
+For example,
+in medical devices once the decision to deliver treatment has been made,
+it is usually desired that the delivery proceed without the possibility of
+other activities intervening.
+Many systems have _point of no return_ decision points that once decided
+must be acted upon without interference.
+
+The STSA allows domain activities to be interleaved and the `micca`
+run-time does not.
+These choices represent different trade-offs for the two MX domains.
+STSA is oriented to systems with minimal computing capabilities.
+The `micca` run-time, however, performs referential integrity checks
+on the data model.
+This implies there are transactions on the domain data and those transaction
+introduce the idea of a _thread of control_.
+A thread of control is started when an event is dispatched that
+was signaled outside of
+a state machine contextfootnote:[This includes delayed signals.]
+and ends when that event and all subsequent
+events signaled by any state activities executed as a direct or indirect
+result of the original event are dispatched.
+
+For the `micca` run-time,
+a thread of control corresponds exactly to the transaction on a domain's data.
+When all the events in a thread of control are dispatched,
+referential integrity is checked before starting the next thread of control.
+This has the effect of preventing state activities of different domains
+from being interwoven.
+Thus a an event arising outside of the domain has its complete effect
+computed,
+including verifying referential integrity has been maintained,
+before a thread of control for another domain executes.
+
+Both schemes can work, but clearly the STSA execution scheme places
+other responsibilities on the domain code in that it must be able to handle
+the occasional interwoven execution of another domain.
+
+=== Bridging operations 
+
+From a model perspective,
+bridges are either synchronous or asynchronous.
+In synchronous bridging, the intent of the bridge operation is completed
+during the execution of the invoking state activity.
+For asynchronous bridging, there is an expectation of future completion
+notified by signaling an event.
+
+Bridging operations are simplified in a single threaded context.
+The operations implementing the bridges may be direct, ordinary
+function calls.
+The operations are typically composed of a mapping between the semantics of
+the two domains followed by a simple model-level operation or invocation
+of a domain operation.
+No particular consideration must be given to acquisition or disposal
+of resources in the single threaded case and, consequently, there is no
+chance of deadlock.
+
+== Multiple processes
+
+Graduating from simple bare-metal computing devices,
+most computing environments support operating systems that offer
+processes.
+For our purposes,
+a process is a separately scheduled computing context running
+in its own isolated virtual address space.
+Processes serve as a locus for system resource allocation.
+
+To make the examples specific,
+we consider processes in the POSIX context.
+Processes run in separate virtual address spaces and can only communicate
+via Inter-Process Communication (IPC) mechanisms controlled by the
+operating system.
+For a POSIX process, two triggers drive asynchronous execution:
+
+. the change of state of a file descriptor or
+. delivery of a signal.
+
+File descriptor state changes indicate I/O that must be processed and
+signals serve a similar role as interrupts in a bare-metal system.
+This logical correspondence allows both STSA and the `micca` run-time to
+supply POSIX versions that behave in much the same way as the bare-metal
+versions.
+Although the POSIX versions of these MX domains is normally used
+for simulation,
+it is reasonable to build small to medium scale applications using them.
+
+Many of the properties of a single threaded MX domain apply to a
+process oriented implementation.
+This is not surprising since one of the goals of the operating system
+concept of a process is to provide the illusion of controlling the
+entire computer.
+
+=== Bridging operations 
+
+Bridging between domains running in separate processes is the most
+significant difference between a process-oriented MX domain and
+a single threaded one.
+Because processes are run in separate address spaces,
+some form of IPC must be used to implement bridge operations.
+This can take the form of local message queues or pipes or
+Internet Protocol (IP) based network communications.
+Using IP based communications opens up the possibility of distributing
+domains across a network.footnote:[However, introducing an network and
+distributing computation onto different machines introduces a number
+of other difficult problems associated with latency and network failure.
+We do not discuss those difficulties here.]
+
+An interesting aside deals with testing domains in isolation
+for the purposes of integrating a system.
+Both `pycca` and `micca` have companion programs that generate a
+test harness for a translated domain or set of domains.
+The generated test harnesses use the POSIX version of the MX domain and the
+test harness generator (`tack` in the case of `pycca` and `bosal`
+in the case of `micca`) generates a server-type program with a
+TCP-based, localhost socket communications interface.
+Using the communication interface,
+messages may be sent to invoke domain operations,
+read and update class attributes, signal events to state machines,
+and other model level operations.
+The intent is to provide a means to automate testing of domains
+and integration of domains as part of building the complete system.
+However,
+the same principles used by the test harness generators could also
+be used to automate generating the bridge operations required
+by domains running in separate processes.
+This is a topic for further exploration.
+
+Although it is possible to run multiple domains in a single process context,
+once the decision has been made to separate at least one domain into a
+different process,
+there seems to be little compelling reason to have any more than one
+domain running in one process.
+
+== Multi-threaded, shared state
+
+Multi-threaded, shared state concurrency is the last common
+permutation of execution scenarios we consider.
+Modern operating systems allow multiple, scheduled execution contexts
+within the address space provided by a process.
+Note that the Real-Time Operating Systems (RTOS) common in the embedded
+world also fall into this category.
+For an RTOS, there is never more than one _process_ as we have defined
+that term and that process runs in the single physical address space
+provided by the processor.
+Both arrangements allow switching the sequence of execution preemptively
+between multiple execution contexts, yet access to data is freely available
+from program memory without requiring any extra computations.
+
+Much has been written on the difficulties of getting such programs to work
+correctly.
+Multi-threading in the same address space introduces an exponential
+increase in the non-determinism of a program due to the large number
+of interleaved execution paths.
+Common threading mechanism provide a programmer with only crude tools
+the force the execution into a deterministic, sequential manner.
+
+The difficulties center on how data is shared between threads and how
+devilishly difficult it is to do that properly.
+Inevitably, small windows of time are created where data consistency
+may be violated.
+The effects are highly non-deterministic and lead to applications that
+work 99% of the time but occasionally have strange bugs and hang ups.
+One particularly informative paper on this subject is that of
+https://docs.google.com/viewer?url=http%3A%2F%2Fwww2.eecs.berkeley.edu%2FPubs%2FTechRpts%2F2006%2FEECS-2006-1.pdf[Lee].
+There is a conjecturefootnote:[Unfortunately, I cannot at this time recall
+the reference to the conjecture] that:
+
+[quote]
+________________
+No non-trivial, multi-threaded, shared-state program operates correctly.
+________________
+
+Multi-threaded shared state programs also have notorious problems
+in resolving contention when accessing shared resources.
+This problems fall under the general umbrella of _deadlock_.
+The usual solutions of accessing resources in a particular order are
+too fragile to work well since it implies that you know from the start
+all the shared resources that a particular code segment may access.
+Requirements to detect deadlock and break deadlocks are the by-product
+of the approach.
+Again,
+the usual result in practice is to get programs that work 99% of the time and 
+mysteriously _hang_ at infrequent and apparently random occasions.
+
+Given the enormous problems with primitive thread based programming,
+basing the execution strategy of an xUML MX domain on it seem unwise.
+There are well know message passing strategies to deal multi-threaded
+situations.
+The definitive language for concurrency in this area is Hoare's
+http://www.usingcsp.com/cspbook.pdf[Communicating Sequential Processes].
+However, it is not clear that without significant language support
+(_e.g._ the http://golang.org/[Go] language or
+the http://www.erlang.org/[Erlang] language)
+that is approach offers any advantage over the multiple process
+MX domain discussed in the last section.
