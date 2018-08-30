@@ -3,9 +3,18 @@
 == Utility Code
 
 The code in this section implements a set of utility functions
-used `bosal` generated test harnesses.
+used by `bosal` generated test harnesses.
 
 === Trimming White Space
+
+Since responses in the communciations protocol are whitespace separated
+words,
+it is easier to generate a trailing space character at the end of each
+word added to a response.
+After adding the final word, this space can be trimmed off.
+This is simplier and avoids having to know which word added to a response
+is the first one.
+The following function performs the trimming.
 
 (((chunk,harness forward function declarations)))
 (((function,bslTrimSpaceRight)))
@@ -33,7 +42,7 @@ bslTrimSpaceRight(
 }
 ----
 
-=== Response Context
+=== Response Context [[response-context]]
 
 To help build up responses,
 we define the notion of a _response context_.
@@ -110,6 +119,8 @@ bslBeginResponse(BSL_ContextId cntx)
 <1> Beginning a response causes any other partial response to be
 abandoned.
 
+A response is ended by invoking `bslEndResponse()`.
+
 (((chunk,harness forward function declarations)))
 
 [source,c]
@@ -129,12 +140,20 @@ bslEndResponse(BSL_ContextId cntx)
     BSL_BufContext *bottom = &contextStack[cntx][0] ;
 
     for (BSL_BufContext *top = contextTOS[cntx] ; top > bottom ;
-            top = contextTOS[cntx]) {
+            top = contextTOS[cntx]) {                               // <1>
         bslPopContext(cntx) ;
     }
     return fprintf(bslCmdStream, "%s\n", bslContextGetBuf(bottom)) ;
 }
 ----
+<1> Ending a response performs an implicit `pop` of the entire
+context stack.
+
+When a new word is being formulated in a response,
+the context is pushed using `bslPushContext()`.
+Future response text is then placed in a new context so that it can
+be later evaluated to determine if it is necessary to quote the
+text to maintain word boundaries.
 
 (((chunk,harness forward function declarations)))
 
@@ -168,6 +187,12 @@ bslPushContext(
     bslInitBufContext(top) ;
 }
 ----
+
+When a word context is completed,
+it is popped using `bslPopContext()`.
+This adds any word accumulated in the context to the accumulated
+response,
+quoting things as necessary to adhere to the protocol.
 
 (((chunk,harness forward function declarations)))
 
@@ -204,6 +229,8 @@ bslPopContext(BSL_ContextId cntx)
 }
 ----
 
+A context may also be reset.
+
 (((chunk,harness forward function declarations)))
 
 [source,c]
@@ -224,6 +251,8 @@ bslResetContext(BSL_ContextId cntx)
 }
 ----
 
+Responses are built up by adding words to the context.
+
 (((chunk,harness forward function declarations)))
 
 [source,c]
@@ -243,6 +272,9 @@ bslAddWordToContext(BSL_ContextId cntx, char const *word)
     bsl_AddWord(contextTOS[cntx], word) ;
 }
 ----
+
+Initializing a buffer context sets all the bookkeeping back to the
+beginning of the buffer.
 
 (((chunk,harness forward function declarations)))
 
@@ -265,6 +297,10 @@ bslInitBufContext(BSL_BufContext *bufc)
     bufc->remaining = sizeof(bufc->buf) ;
 }
 ----
+
+Adding words means we must surround it by braces if it needs to be
+quoted.
+
 
 (((chunk,harness forward function declarations)))
 
@@ -295,6 +331,9 @@ bsl_AddWord(
     return nbytes ;
 }
 ----
+
+When a context is popped,
+trailing whitespace is removed.
 
 (((chunk,harness forward function declarations)))
 
@@ -339,6 +378,9 @@ bslContextGetBuf(
     return bufc->buf ;
 }
 ----
+
+Finally, the heavy lifting is done by the formatted I/O functions
+for a context.
 
 (((chunk,harness forward function declarations)))
 
@@ -399,6 +441,13 @@ bslFormatToContext(
 }
 ----
 
+The following function determines if a text string needs to be quoted
+in order to be considered a word.
+It accomplished this by scanning the string until it can resolve whether
+it contains embedded white space or embedded braces.
+If embedded brace characters are found,
+then scanning continues in an attempt to find matching pairs of braces.
+
 (((chunk,harness forward function declarations)))
 
 [source,c]
@@ -456,6 +505,10 @@ bslQuoteWord(
 }
 ----
 
+Scanning for boolean values we treat as special.
+We want to accept the usual _true_ and _false_, but also
+allow for numerical zero and one.
+
 [source,c]
 ----
 <<harness static functions>>=
@@ -504,6 +557,33 @@ used in a number of areas.
 These commands are placed in a separate namespace
 which is imported into most of the other package namespaces.
 
+==== Text diversion [[text-diversion]]
+
+The first time I encountered the idea of a text diversion was in
+the venerable `m4` macro processor on UNIX.
+The concept is to be able to have multiple streams being accumulated
+and then later bring the diverted text back into the desired order.
+
+For our usage here in generating code,
+we need a way to make code indentation easier to manage so that
+the generated code looks natural and as if hand coded.
+So, we employ the idea of a text diversion.
+When a new code block entered,
+we *push* the diversion as a stack.
+This causes subsequent text to be held separately.
+When the diversion is later *popped*,
+the text is placed into the next lowest stream, but indented to the
+proper level (given the number of previously occuring pushes).
+
+In Tcl, this is all rather easy to accomplish since _tcllib_ contains
+all the components we need.
+We will use in-memory FIFO channels to hold diverted text.
+We use a stack to keep track of the stack of file channel handles.
+Finally, indentation is handled by text utilities in _tcllib_.
+The code is formulated as a TclOO class called, `diverter`.
+
+(((class,diverter)))
+
 [source,tcl]
 ----
 <<bosal helper commands>>=
@@ -518,7 +598,7 @@ oo::class create diverter {
     constructor {{prefix {    }}} {
         my variable level_prefix
         set level_prefix $prefix
-        classvariable stack_counter
+        classvariable stack_counter                             ; # <1>
         set chan_stack [::struct::stack s_[incr stack_counter]]
         $chan_stack push [::tcl::chan::fifo]
     }
@@ -566,10 +646,28 @@ oo::class create diverter {
     method return {} {
         set result [my undivert]
         my destroy
-        return -level 2 $result
+        return -level 2 $result         ; # <2>
     }
 }
 ----
+<1> Used to make unique names for stack component of the diverter.
+<2> Note that the `return` method returns all the diverted text,
+destoys itself and returns out of the procedure.
+This is convenient since the diversions are used to end the
+procedures that are embedded in the template expansion and it results
+in all the accumulated output being placed into the expansion.
+
+==== Data type procedures
+
+We need some common code to process ``C'' data types from the
+`micca` domains.
+
+Usually, we need to know the base ``C'' type of something.
+Since it is possible to create a type alias for a type alias,
+a bit of recursion is needed to resolve down to the underlying
+``C'' data type.
+
+(((procedure,UnaliasType)))
 
 [source,tcl]
 ----
@@ -582,7 +680,16 @@ proc UnaliasType {domain typename} {
         return [UnaliasType $domain [readAttribute $aliasRef TypeDefinition]]
     }
 }
+----
 
+The code generator has to create conversion wrapper functions for
+``C'' data types.
+This procedure summarizes the information needed by code generation.
+This area may need additional work.
+
+[source,tcl]
+----
+<<bosal helper commands>>=
 # return a dictionary keyed by:
 # print -- format string
 # scan -- format string
@@ -633,6 +740,9 @@ proc GetTypeInfo {domain implType varName} {
     return $info
 }
 ----
+
+This is a simple mapping relation for how to format and scan ``C''
+basic data types.
 
 [source,tcl]
 ----
@@ -686,6 +796,7 @@ relvar set FormatMap [relation table {
     int64_t                     PRId64               SCNi64             } {
     intmax_t                    PRIdMAX              SCNiMAX            } {
     uintmax_t                   PRIuMAX              SCNiMAX            } {
+    typename(time_t)            {"ld"}               {"li"}             } {
     MRT_ClassId                 {"hu"}               {"hi"}             } {
     MRT_AssignerId              {"hu"}               {"hi"}             } {
     MRT_InstId                  {"hu"}               {"hi"}             } {
