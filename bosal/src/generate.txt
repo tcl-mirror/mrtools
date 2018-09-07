@@ -97,7 +97,7 @@ The harness keeps track of whether or not it is in the `micca` run-time
 event loop and uses a variable to track that state.
 
 (((chunk,harness static data)))
-(((data,bslHarnessState)))
+(((variable,bslHarnessState)))
 
 [source,c]
 ----
@@ -247,11 +247,11 @@ bslErrorHandler(
 ----
 <1> This transfers control back to `bsl_Run`.
 
-(((chunk,harness static data)))
-(((data,bslFatalBuf)))
-
 The `setjmp/longjmp` combination that performs the non-local goto needs
 a variable to hold the context.
+
+(((chunk,harness static data)))
+(((variable,bslFatalBuf)))
 
 [source,c]
 ----
@@ -357,6 +357,21 @@ if (err == -1) {
 <1> Note we bind to `localhost`. Remote communications to a test harness
 is not supported.
 
+By default we fix the port number on which the service receives
+connections.
+It is easiy enought to change on the command line if necessary.
+
+(((chunk,harness constants)))
+(((constant,HARNESS_PORT)))
+
+[source,c]
+----
+<<harness constants>>=
+#ifndef HARNESS_PORT
+#   define HARNESS_PORT 3906    /* default port number for TCP connection */
+#endif /* HARNESS_PORT */
+----
+
 In addition to listening on the socket,
 we register the file descriptor with the `micca` run-time.
 The POSIX version of the `micca` run-time will perform callbacks
@@ -396,7 +411,7 @@ and we want to store that away when it is replaced by the
 harness specific trace handler.
 
 (((chunk,harness static data)))
-(((data,bslDefaultTraceHandler)))
+(((variable,bslDefaultTraceHandler)))
 
 [source,c]
 ----
@@ -467,7 +482,7 @@ I/O functions can just use it directly.
 Only handling a single client makes all this much simpler.
 
 (((chunk,harness static data)))
-(((data,bslCmdStream)))
+(((variable,bslCmdStream)))
 
 [source,c]
 ----
@@ -888,6 +903,8 @@ bslExecCommand(
 The mapping from command name to command function pointer is accomplished
 by a simple structure containing both pieces of information.
 
+(((chunk,harness data types)))
+
 [source,c]
 ----
 <<harness data types>>=
@@ -937,7 +954,7 @@ The array entries must be in order of ascending alphabetic order of the
 command name.
 
 (((chunk,harness static data)))
-(((data.commands)))
+(((variable,commands)))
 
 [source,c]
 ----
@@ -1670,6 +1687,63 @@ The query command allows queries for a number of different entities
 in the test harness.
 The implementation delegates the queries for the different entities
 to different functions.
+The data structure below is used to map the query subcommand to the
+function that executes the query.
+
+(((chunk,harness static data)))
+(((variable,querySubCmdMap)))
+
+[source,c]
+----
+<<harness static data>>=
+static struct qsubMapEntry {
+    char const *subCmdName ;
+    bool (*subCmdFunc)(int, char *const *) ;
+} const querySubCmdMap[] = {
+    {"attributes", bslQueryAttrs},              // <1>
+    {"classes", bslQueryClasses},
+    {"current", bslQueryCurrent},
+    {"domains", bslQueryDomains},
+    {"doparams", bslQueryDomainOpParams},
+    {"events", bslQueryEvents},
+    {"evparams", bslQueryEventParams},
+    {"instances", bslQueryInsts},
+    {"operations", bslQueryDomainOps},
+    {"states", bslQueryStates},
+} ;
+----
+<1> Must be kept in alphabetical order! `bsearch()` is used
+to locate the query function.
+
+Since we intend to use `bsearch` to locate the sub command function,
+we must then supply a comparison function for the mapping entries.
+
+(((chunk,harness forward function declarations)))
+(((function,subMapEntryCompare)))
+
+[source,c]
+----
+<<harness forward function declarations>>=
+static int subMapEntryCompare(void const *m1, void const *m2) ;
+----
+
+(((chunk,harness static function definitions)))
+(((function,subMapEntryCompare)))
+
+[source,c]
+----
+<<harness static function definitions>>=
+static int
+subMapEntryCompare(
+    void const *m1,
+    void const *m2)
+{
+    struct qsubMapEntry const *sm1 = m1 ;
+    struct qsubMapEntry const *sm2 = m2 ;
+
+    return strcmp(sm1->subCmdName, sm2->subCmdName) ;
+}
+----
 
 (((chunk,harness static function definitions)))
 (((function,bslQueryCommand)))
@@ -1690,38 +1764,24 @@ bslQueryCommand(
         return false ;
     }
 
-    char *subcmdName = argv[1] ;
-    bool status ;
-    if (strcmp(subcmdName, "domains") == 0) {
-        status = bslQueryDomains(argc, argv) ;
-    } else if (strcmp(subcmdName, "operations") == 0) {
-        status = bslQueryDomainOps(argc, argv) ;
-    } else if (strcmp(subcmdName, "doparams") == 0) {
-        status = bslQueryDomainOpParams(argc, argv) ;
-    } else if (strcmp(subcmdName, "classes") == 0) {
-        status = bslQueryClasses(argc, argv) ;
-    } else if (strcmp(subcmdName, "attributes") == 0) {
-        status = bslQueryAttrs(argc, argv) ;
-    } else if (strcmp(subcmdName, "instances") == 0) {
-        status = bslQueryInsts(argc, argv) ;
-    } else if (strcmp(subcmdName, "states") == 0) {
-        status = bslQueryStates(argc, argv) ;
-    } else if (strcmp(subcmdName, "events") == 0) {
-        status = bslQueryEvents(argc, argv) ;
-    } else if (strcmp(subcmdName, "evparams") == 0) {
-        status = bslQueryEventParams(argc, argv) ;
-    } else if (strcmp(subcmdName, "current") == 0) {
-        status = bslQueryCurrent(argc, argv) ;
-    } else {
+    struct qsubMapEntry key = {
+        .subCmdName = argv[1],
+        .subCmdFunc = NULL
+    } ;
+
+    struct qsubMapEntry const *const subMapEntry =
+            bsearch(&key, querySubCmdMap, COUNTOF(querySubCmdMap),
+            sizeof(key), subMapEntryCompare) ;
+    if (subMapEntry == NULL) {
         bslFormatToContext(CmdContext,
             "unknown subcommand, \"%s\": expected, "
-            "\"domains | classes | attributes | instances | "
-            "states | events | current\"",
-            subcmdName) ;
-        status = false ;
+            "\"domains | classes | operations | doparams | attributes |"
+            " instances | states | events | evparams | current\"", argv[1]) ;
+        return false ;
     }
 
-    return status ;
+    assert(subMapEntry->subCmdFunc != NULL) ;
+    return subMapEntry->subCmdFunc(argc, argv) ;
 }
 ----
 
@@ -1908,8 +1968,10 @@ bslQueryClasses(
         char const *className = NULL ;
         int pcode = mrt_PortalClassName(portal, id, &className) ;
         if (pcode == 0) {
+            assert(className != NULL) ;
             bslAddWordToContext(CmdContext, className) ;
         } else {
+            bslResetContext(CmdContext) ;
             bslFormatToContext(CmdContext, mrt_PortalErrorString(pcode)) ;
             return false ;
         }
@@ -1918,7 +1980,7 @@ bslQueryClasses(
 }
 ----
 <1> Class numbers always run from 0 to `classCount - 1`.
-The code generation for the test harness guarantees that.
+The `micca` code generation for the domain guarantees that.
 In truth, the class id's are just array index values.
 
 ===== Query attributes
@@ -1980,8 +2042,10 @@ bslQueryAttrs(
         int pcode = mrt_PortalClassAttributeName(portal, classId, attrId,
                 &attrName) ;
         if (pcode == 0) {
+            assert(attrName != NULL) ;
             bslAddWordToContext(CmdContext, attrName) ;
         } else {
+            bslResetContext(CmdContext) ;
             bslFormatToContext(CmdContext, mrt_PortalErrorString(pcode)) ;
             return false ;
         }
@@ -2113,8 +2177,10 @@ bslQueryStates(
             int pcode = mrt_PortalClassStateName(portal, classId, stateId,
                     &stateName) ;
             if (pcode == 0) {
+                assert(stateName != NULL) ;
                 bslAddWordToContext(CmdContext, stateName) ;
             } else {
+                bslResetContext(CmdContext) ;
                 bslFormatToContext(CmdContext, mrt_PortalErrorString(pcode)) ;
                 return false ;
             }
@@ -2179,8 +2245,10 @@ bslQueryEvents(
             int pcode = mrt_PortalClassEventName(portal, classId, eventId,
                     &eventName) ;
             if (pcode == 0) {
+                assert(eventName != NULL) ;
                 bslAddWordToContext(CmdContext, eventName) ;
             } else {
+                bslResetContext(CmdContext) ;
                 bslFormatToContext(CmdContext, mrt_PortalErrorString(pcode)) ;
                 return false ;
             }
@@ -2659,30 +2727,17 @@ static void
 bslTraceResponse(
     MRT_TraceInfo const *traceInfo)
 {
-    char const *sourceName ;
-    char const *sourceClassName ;
-    char sourceIdNum[32] ;
-
-    if (traceInfo->sourceInst == NULL) {
-        sourceName = "?" ;
-        sourceClassName = "?" ;
-    } else {
-        sourceClassName = traceInfo->sourceInst->classDesc->name ;
-        sourceName = traceInfo->sourceInst->name ;
-        if (sourceName == NULL) {
-            unsigned instid = mrt_InstanceIndex(traceInfo->sourceInst) ;
-            snprintf(sourceIdNum, sizeof(sourceIdNum), "%u", instid) ;
-            sourceName = sourceIdNum ;
-        }
-    }
+    <<bslTraceResponse: resolve source instance name>>
     
-    char const *targetName = traceInfo->targetInst->name ;
-    char targetIdNum[32] ;
-    if (targetName == NULL) {
-        unsigned instid = mrt_InstanceIndex(traceInfo->targetInst) ;
-        snprintf(targetIdNum, sizeof(targetIdNum), "%u", instid) ;
-        targetName = targetIdNum ;
-    }
+    <<bslTraceResponse: resolve target instance name>>
+    
+    <<bslTraceResponse: resolve event name>>
+
+    bslBeginResponse(TraceContext) ;
+    bslAddWordToContext(TraceContext, "trace") ;
+    bslPushContext(TraceContext) ;
+
+    <<bslTraceResponse: common trace info>>
 
     switch (traceInfo->eventType) {
     case mrtTransitionEvent: {
@@ -2695,23 +2750,113 @@ bslTraceResponse(
     }
         break ;
 
-    case mrtCreationEvent:
+    case mrtCreationEvent: {
         <<bslTraceResponse: creation traces>>
+    }
         break ;
 
     default:
-        fprintf(bslCmdStream,
-                "trace {"
-                "type error "
-                "result {unknown trace event type, \"%u\"} "
-                "time %s"
-                "}\n",
-            traceInfo->eventType,
-            bslTimestamp()) ;
+        bslFormatToContext(TraceContext, "type unknown") ;
         break ;
+    }
+
+    bslEndResponse(TraceContext) ;
+}
+----
+
+It is possible for an event to arise from outside a domain.
+In that case,
+we don't know the instance name or class name.
+
+Note that we insist there there be naming information compiled
+into the domain and we make several assertions to effect in the code.
+Also note that for instances,
+only instance in the initial instance population have names.
+All others are only known by a number.
+
+(((chunk,bslTraceResponse: resolve source instance name)))
+
+[source,c]
+----
+<<bslTraceResponse: resolve source instance name>>=
+char const *sourceClassName ;
+char sourceIdNum[32] ;
+char const *sourceName ;
+
+if (traceInfo->sourceInst == NULL) {
+    sourceName = "?" ;
+    sourceClassName = "?" ;
+} else {
+    sourceClassName = traceInfo->sourceInst->classDesc->name ;
+    assert(sourceClassName != NULL) ;
+
+    sourceName = traceInfo->sourceInst->name ;
+    if (sourceName == NULL) {
+        unsigned instid = mrt_InstanceIndex(traceInfo->sourceInst) ;
+        snprintf(sourceIdNum, sizeof(sourceIdNum), "%u", instid) ;
+        sourceName = sourceIdNum ;
     }
 }
 ----
+
+For the target instance,
+we also have to handle the possiblity of there being no naming
+information for the instance and fall back to numbers if necessary.
+
+(((chunk,bslTraceResponse: resolve target instance name)))
+
+[source,c]
+----
+<<bslTraceResponse: resolve target instance name>>=
+char targetIdNum[32] ;
+char const *targetName = traceInfo->targetInst->name ;
+if (targetName == NULL) {
+    snprintf(targetIdNum, sizeof(targetIdNum), "%u", traceInfo->targetInst) ;
+    targetName = targetIdNum ;
+}
+----
+
+There should always be an event name since we are insisting
+on naming information being compiled in to the domain,
+and we assert that here.
+
+(((chunk,bslTraceResponse: resolve event name)))
+
+[source,c]
+----
+<<bslTraceResponse: resolve event name>>=
+char const *eventName ;
+
+assert(traceInfo->targetInst->classDesc->eventNames != NULL);
+eventName =
+        traceInfo->targetInst->classDesc->eventNames[traceInfo->eventNumber] ;
+----
+
+All types of traces have some common information associated with them.
+We add that to the response first.
+
+(((chunk,bslTraceResponse: common trace info)))
+
+[source,c]
+----
+<<bslTraceResponse: common trace info>>=
+bslFormatToContext(TraceContext,
+    "time %s "
+    "event %s "
+    "source %s.%s "
+    "target %s.%s ",
+
+    bslTimestamp(),
+    eventName,
+    sourceClassName, sourceName,
+    traceInfo->targetInst->classDesc->name, targetName) ;
+----
+
+Ordinary transition traces are the most common.
+They record the transition of a state machine from its current state
+to a new state.
+We have some special handling when the result of the transition
+is _ignored_ or _can't happen_.
 
 (((chunk,bslTraceResponse: transition traces)))
 
@@ -2729,24 +2874,21 @@ if (newState == MRT_StateCode_IG) {
         traceInfo->info.transitionTrace.newState] ;
 }
 
-fprintf(bslCmdStream,
-        "trace {"
-        "type transition "
-        "event %s "
-        "source %s.%s "
-        "target %s.%s "
-        "currstate %s "
-        "newstate %s "
-        "time %s"
-        "}\n",
-    traceInfo->targetInst->classDesc->eventNames[traceInfo->eventNumber],
-    sourceClassName, sourceName,
-    traceInfo->targetInst->classDesc->name, targetName,
+bslFormatToContext(TraceContext,
+    "type transition "
+    "currstate %s "
+    "newstate %s ",
+
     traceInfo->targetInst->classDesc->edb->stateNames[
         traceInfo->info.transitionTrace.currentState],
-    newStateName,
-    bslTimestamp()) ;
+    newStateName) ;
 ----
+
+Polymorphic event traces contain information about which generalization
+relationship is traversed and the new subclass type to which the
+event is directed.
+Polymorphic event traces are followed by zero or more additional
+polymorphic event traces and finally be an ordinary transition trace.
 
 (((chunk,bslTraceResponse: polymorphic traces)))
 
@@ -2766,48 +2908,33 @@ if (rel->relType == mrtRefGeneralization) {
         subclasses[traceInfo->info.polyTrace.subcode] ;
     subname = subclass->name ;
 } else {
-    printf("%s: bad relationship type in polymorphic event, %d\n",
-        bslTimestamp(), rel->relType) ;
+    subname = "unknown" ;
     break ;
 }
-fprintf(bslCmdStream,
-        "trace {"
-        "type polymorphic "
-        "event %s "
-        "source %s.%s "
-        "target %s.%s "
-        "relationship %s "
-        "newevent %s "
-        "subclass %s "
-        "time %s"
-        "}\n",
-    traceInfo->targetInst->classDesc->eventNames[traceInfo->eventNumber],
-    sourceClassName, sourceName,
-    traceInfo->targetInst->classDesc->name, targetName,
+
+bslFormatToContext(TraceContext,
+    "type polymorphic "
+    "relationship %s "
+    "newevent %s "
+    "subclass %s ",
+
     traceInfo->targetInst->classDesc->pdb->genNames[
         traceInfo->info.polyTrace.genNumber],
     subclass->eventNames[traceInfo->info.polyTrace.mappedEvent],
-    subname,
-    bslTimestamp()) ;
+    subname) ;
 ----
+
+Creation traces have no additional information.
+The target of the event is the newly created instance.
+The creation trace is followed by a transition trace as the
+newly created instance transitions from its pseudo-initial state.
 
 (((chunk,bslTraceResponse: creation traces)))
 
 [source,c]
 ----
 <<bslTraceResponse: creation traces>>=
-fprintf(bslCmdStream,
-        "trace {"
-        "type creation "
-        "event %s "
-        "source %s.%s "
-        "target %s.%s "
-        "time %s"
-        "}\n",
-    traceInfo->targetInst->classDesc->eventNames[traceInfo->eventNumber],
-    sourceClassName, sourceName,
-    traceInfo->info.creationTrace.targetClass->name, targetName,
-    bslTimestamp()) ;
+bslFormatToContext(TraceContext, "type creation") ;
 ----
 
 Traces are timestamped before sending to the test harness client.
@@ -3562,7 +3689,6 @@ This lets us insure that constructs are declared before they are
 defined as required by the language.
 
 (((chunk,bosal data)))
-(((data,codeTemplate)))
 
 [source,tcl]
 ----
@@ -3627,12 +3753,7 @@ This file generated by bosal version:
 /*
  * Constants
  */
-#ifndef HARNESS_PORT
-#   define HARNESS_PORT 3906    /* default port number for TCP connection */
-#endif /* HARNESS_PORT */
-#ifndef BSL_NESTLIMIT
-#   define  BSL_NESTLIMIT   4   /* maximum depth of text diversions */
-#endif /* BSL_NESTLIMIT */
+<<harness constants>>
 
 /*
  * Data Types
@@ -4293,8 +4414,8 @@ Many of the wrapper functions generated have the same error messages.
 So, we declare them once and use them in the wrappers.
 
 (((chunk,harness static data)))
-(((data,wrongNumArgsMsg)))
-(((data,badParamMsg)))
+(((variable,wrongNumArgsMsg)))
+(((variable,badParamMsg)))
 
 [source,c]
 ----
@@ -4663,6 +4784,7 @@ proc generateAttrReadFuncDefinitions {} {
         $div puts "int pcode = mrt_PortalReadAttr(portal, classId, instId,\
                 attrId, $pAttrVar, sizeof(attrValue)) ;"
         $div puts "if (pcode < 0) {" ; $div push
+        $div puts "bslResetContext(CmdContext) ;"
         $div puts "bslFormatToContext(CmdContext, mrt_PortalErrorString(pcode)) ;"
         $div puts "return false ;"
         $div pop ; $div puts "}"
@@ -4685,7 +4807,10 @@ proc generateAttrReadFuncDefinitions {} {
                 $div pop ; $div puts "}"
             }
             default {
-                error "unknown variable type, $varType"
+                $div puts "bslResetContext(CmdContext) ;"
+                $div puts "bslFormatToContext(CmdContext,
+                    \"unknown variable type, $varType\") ;"
+                $div puts "return false ;"
             }
         }
 
@@ -4781,7 +4906,7 @@ proc generateAttrUpdateFuncDefinitions {} {
 ----
 
 (((chunk,harness static data)))
-(((data,failedConvertMsg)))
+(((variable,failedConvertMsg)))
 
 [source,c]
 ----
@@ -4891,7 +5016,8 @@ maps.
 Since we need this set of events in several places,
 we create a helper function to do the query.
 
-(((procedure,GetMappedEvents)))
+(((chunk,bosal helper commands)))
+(((proc,GetMappedEvents)))
 
 [source,tcl]
 ----
@@ -4912,6 +5038,9 @@ proc GetMappedEvents {} {
     return [relation union $instevents $defevents]
 }
 ----
+
+(((chunk,bosal code template commands)))
+(((proc,generateEventMaps)))
 
 [source,tcl]
 ----
@@ -5233,7 +5362,6 @@ the `main()` function at the least.
 The `bosal` program accepts an option to create this header file.
 
 (((chunk,bosal data)))
-(((data.headerFile)))
 
 [source,tcl]
 ----

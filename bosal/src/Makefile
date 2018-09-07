@@ -33,7 +33,6 @@ CODEFILES =\
 DOCPARTS=\
 	intro.txt\
 	generate.txt\
-	datatypes.txt\
 	utils.txt\
 	codeorg.txt\
 	litprog.txt\
