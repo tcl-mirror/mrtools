@@ -2,7 +2,31 @@ source typeparser.tcl
 
 typeparser create tp
 
-source types.tcl
+set types {
+    {int (*)()}
+    {char (*)(int, int)}
+    {char *const}
+    {char *const*}
+    {int **}
+    {enum a}
+    {struct a}
+    {uint8_t}
+    {const int *}
+    {struct foo *}
+    {MyType_t *}
+    {int (*)(int, int)}
+    {void (*)(int, ...)}
+    {struct foo * const (*)(void)}
+    {enum b {foo = 1, bar, baz}}
+    {enum {foo, bar} *}
+    {char []}
+    {char [*]}
+    {char [32]}
+    {char [sizeof(char)]}
+    {struct a {int *a ;} *}
+    {struct a {int a ;}}
+    {int * int (*)()}
+}
 
 proc top {ast} {
     lassign $ast type start end children

@@ -1,0 +1,811 @@
+// vim:set syntax=asciidoc:
+
+== Harnessing micca generated domains
+
+This document is about a program named `bosal`.
+This document is also a
+http://www.literateprogramming.com/[literate program]
+and contains all the design information and code for the `bosal` program.
+Readers unfamiliar with literate programs should consult the
+<<literate-programming,appendix>> for more details.
+
+=== Bosal harness concepts
+
+When
+http://repos.modelrealization.com/cgi-bin/fossil/mrtools/wiki?name=MiccaPage[`micca`]
+is used to translate an xUML domain into code,
+the resulting ``C'' file can be combined with a `main` function
+and any necessary external entity stubsfootnote:[`micca` can also
+generate the external entity stubs] to build an executable program for the
+domain.
+The resulting executable, unfortunately, does not do very much.
+A domain in isolation, without being bridged to other service domains,
+doesn't have any way of being triggered to execute.
+We need the ability to invoke domain operations, signal events,
+and perform other model level actions on the domain and
+to observe its execution.
+We would like to do all this in a controlled environment that does not
+necessarily include the entire set of domains in an application.
+
+The `micca` run-time is capable of executing in a POSIX environment.
+This is intended primarily to simulate and integrate
+a system that is ultimately targeted for a micro-controller.
+A POSIX environment has more capability for testing and introspection and a
+substantial amount of the integration and testing for an application can be
+accomplished there.
+To support this important activity,
+`bosal` is used to automatically generate a test harness in which one or
+more domains may be run in a POSIX environment under the control of the harness.
+
+=== Test harness structure
+
+The intended workflow is for the set of domains for an application
+to be tested individually and then integrated together,
+adding one additional domain at a time,
+until the complete application can be tested together.
+
+The following figure shows schematically how a `bosal` generated
+harness is structured.
+
+image::harness-drawing.pdf[title="Test Harness Structure Overview"]
+
+The `bosal` generated test harness contains code that creates a
+localhost TCP/IP server.
+Communication is across an ordinary TCP socket.
+The protocol is ASCII text, record oriented, and formulated as commands.
+It is possible, although not very convenient,
+to interact with a test harness using `telnet(1)`.
+
+A test harness can be generated that contains multiple domains.
+Any external operations of the harnessed domains must be resolved.
+This can be done using separate code files or by requesting micca
+to generate the stubs.
+In the multiple domain case,
+usually there are bridge code files that take the place of some of the
+external operations stubs.
+By compiling and linking the `bosal` generated harness code, the
+`micca` generated domain code, and any other required bridges or stubs,
+a program is obtained that can control the domain execution
+via commands received across the communications interface.
+
+By reading the files saved by `micca`,
+`bosal` can generate the code that maps the command protocol onto
+the specifics of a domain.
+For example,
+domain operations can be invoked using the `domainop` command.
+This command takes arguments of which domain the operation refers to,
+the name of the operation, and any arguments the operation requires.
+The test harness code then arranges to invoke the ``C'' function
+that is the named domain operation.
+
+=== Building a test harness
+
+To complete building a test harness,
+a `main` function must be provided.
+The `main` function must invoke
+`mrt_Initialize()` before any domain or harness
+functions are invoked.
+The test harness is started by invoking `bsl_Run()`.
+Other initialization may be done in `main`.
+For example,
+interacting with other systems or programs or invoking domain
+initialization functions are candidates for placing in `main`.
+The code below shows a minimal `main` function necessary to run
+a test harness.
+Upon request,
+`bosal` will generate a minimal `main` function directly into the
+harness code file.
+
+[source,c]
+----
+#include "bosal.h"
+#include "micca_rt.h"
+
+int
+main(
+    int argc,
+    char **argv)
+{
+    /*
+     * Initializing the micca run time must be done before any other
+     * domain or harness functions are invoked.
+     */
+    mrt_Initialize() ;
+
+    /*
+     * It may be necessary to initialize domains or bridges. This can
+     * be specific to the needs of a particular situation.
+     */
+
+    /*
+     * Finally, the harness is set to run. The harness code will take
+     * over handling the micca event loop.
+     */
+    bsl_Run() ;
+}
+----
+
+=== Invoking `bosal`
+
+*****
+`bosal` _options_ _savefile1 savefile2 ..._
+
+where options are:
+
+-version::
+    Print out version information and exit.
+-header::
+    Output a copy of the header file, `bosal.h`, and exit.
+-doc::
+    Output a copy of the manual documentation and exit.
+-output _filename_::
+    Name of the output file. If this option is not supplied, then `bosal`
+    writes the test harness code to the standard output.
+-main::
+    include a minimal `main` function in harness output.
+-nogenerate::
+    Don't generate any output.
+-level _loglevel_::
+    Logger print level. If this option is not supplied, then the logging
+    level is set to `warn`.
+
+_savefileN_::
+    The names of the files, saved by `micca`, for the domains
+    that are to be configured into the test harness.
+
+*****
+
+=== Harness communications protocol
+
+Once a test harness is executing,
+clients can connect to TCP port 3906, by default, on localhost to access the
+test harness.
+Only one client may access a test harness.
+Any further connection attempts are refused.
+After a client has connected,
+terminating the connection causes the test harness to terminate.
+
+The protocol accepted on the communications socket of the
+test harness is ASCII record oriented.
+Each command is sent as a sequence of whitespace separated words
+terminated by `CR/LF`.
+Words that contain embedded whitespace must be quoted by enclosing
+them in braces (`{}`).
+Words that contain an unmatched set of braces must precede the
+unmatched brace character by a backslash (`\`), _e.g._ `{\{}`.
+
+Responses from the test harness are of four types:
+
+Command responses::
+    are of the form `cmd {<command response>}`.
+Fatal run-time errors::
+    are of the form `fatal {<error message>}`.
+State machine traces::
+    are of the form `trace {<state trace record>}`.
+Execution instrumentation::
+    are of the form `instr {<instrumentation record>}`.
+
+Commands sent to the test harness always receive a response
+and client should not send another command until a response has been received.
+However,
+if tracing or instrumentation is turned on,
+state machine trace records and execution instrumentation are
+sent asynchronously to any command / response sequence.
+Also, any fatal errors are sent asynchronously.
+Client connections to the test harness must be prepared to receive
+trace and execution records if they enable these functions.
+At start up, tracing and instrumentation are tuned off
+and initial interaction with a test harness is strictly command / response
+in nature with the possibility of a fatal error.
+
+==== Command responses
+
+A command response consists of two words: `cmd` followed by
+a `<command response>` word.
+The syntax of a `<command response>` is a set of whitespace
+separated words that form name / value pairs.
+A command response consists of three name / value pairs:
+
+`name <command name>`::
+    The name of the command is returned in its response.
+`result <command execution result>`::
+    The result of the command is returned.
+    The format of the `<command execution result>` depends upon the nature
+    of the command and is described below for each command.
+`status <command execution status>`::
+    The execution status of the command is returned.
+    If `<command execution status>` is the string, *ok*, then the command
+    executed successfully.
+    If it is, *error*, then the command failed and the `result` value
+    is a human readable error message.
+
+==== Fatal errors
+
+A fatal error response consists of two words: `fatal` followed by
+an `<error message>` word.
+Fatal errors indicate a _panic_ condition in the execution of the domain.
+The `<error message>` contains a human readable string indicating the cause of
+the error.
+
+Normally,
+such panic conditions would cause the program to terminate.
+By default the `micca` run-time code invokes the standard library
+function, `abort()`, when a fatal error occurs.
+However,
+a test harness installs its own fatal error handler to insure it does not
+terminate and the communications interface continues to operate.
+This allows additional queries to attempt to determine the cause of the
+error or to inquire as the to state of other components.
+
+==== State trace records
+
+When tracing in turned on,
+the test harness will send a `trace` record each time an event is
+dispatched to a class instance or an assigner.
+A trace response consists of two words: `trace` followed by
+a `<state trace record>` word.
+The state trace record, simular to a command response, consists of a
+set of name / value pairs.
+
+`type <transition type>`::
+    The type of the transition. `<transition type>` will be one of the
+    following strings.
+    - *transition*
+    - *polymorphic*
+    - *creation*
+
+The *type* of the transition determines the set of name / value pairs
+that included in the trace record.
+For all trace records,
+the following is included in the trace record.
+
+`event <event name>`::
+    The name of the event.
+
+`source <event signaler>`::
+    The class instance that signaled the event.
+
+`target <event recipient>`::
+    The class instance that received the event.
+
+`time <event dispatch time>`::
+    A timestamp of when the dispatch occurred.
+
+For *transition* type traces,
+the trace record additionally contains:
+
+`currstate <recipient current state>`::
+    The current state of the receiving class instance before the event
+    transition takes place.
+
+`newstate <recipient new state>`::
+    The new state of the receiving class instance after the transition
+    has happened.
+
+For *polymorphic* type traces,
+the trace record additionally contains:
+
+`relationship <relationship name>`::
+    The name of the generalization across which the polymorphic event
+    is signaled.
+
+`newevent <event name>`::
+    The name of the polymorphic event when mapped to an event for the
+    target class.
+
+`subclass <class name>`::
+    The name of the subclass that is to receive the polymorphic event.
+    The is the subclass to which the superclass instance is related
+    at the time the polymorphic event is dispatched.
+
+For *creation* type traces,
+no additional information is provided.
+
+==== Instrumentation records
+
+Instrumentation records contain traces of functions that are executed.
+`Micca` will generate, by default, execution traces if the
+`MRT_INSTRUMENT` preprocessor symbol is defined when the domain
+code is compiled.
+If the preprocessor symbol `BOSAL` also is defined when the domain is
+compiled, the automatically generated instrumentation output will be sent
+on the communications interface as an instrumentation response.
+An instrumentation response consists of two words: `instr` followed by
+a `<instrumentation record>` word.
+The format of the instrumentation response is a simple string the
+contents of which are specific to the way the instrumentation was
+generated.
+Instrumentation also can be added in state activities or external
+entity stubs as desired.
+
+=== Command protocol details
+
+The following sections describe each command accepted by a test harness.
+The commands are listed in alphabetical order.
+The *->* symbol is used to indicate the text sent to the test harness.
+The *<-* symbol is used to indicate the response.
+Note that only successful responses are shown below.
+Any error occurring during execution of the command results in the
+response containing the `code error` field and the result is a
+diagnostic error string.
+
+==== Cancel command
+
+The `cancel` command cancels a delayed signal.
+
+*****
+[horizontal]
+->:: `cancel` _domain_ _class_ _inst_ _event_
+<-:: `cmd {name cancel result {} status ok}`
+
+_domain_:: is the name of a domain.
+_class_:: is the name of a class within _domain_.
+_inst_:: is the name or number of an instance.
+    Pre-existing instances have names given by the domain population.
+    All instances can be referred to by an instance number.
+_event_:: is the name of an event in the state model of the _class_.
+*****
+
+==== Create command
+
+The `create` command creates a class instance.
+Note that creating an instance in a test harness often
+result in a violation of referential integrity since most classes
+participate in unconditional relationships and it is not possible
+to relate instances together using the test harness commands.
+
+*****
+[horizontal]
+->:: `create` _domain_ _class_
+<-:: `cmd {name delete result` _inst_number_ `status ok}`
+
+_domain_:: is the name of a domain.
+_class_:: is the name of a class within _domain_.
+_inst_number_:: is the number of the class instance that was created.
+    This number can be used to refer to the instance in other commands.
+*****
+
+==== Createasync command
+
+The `createasync` command sends a creation event.
+
+*****
+[horizontal]
+->:: `createasync` _domain_ _class_ _event_ ? _arg1 arg2 ..._ ?
+<-:: `cmd {name createasync result` _inst_id_ `status ok}`
+
+_domain_:: is the name of a domain.
+_class_:: is the name of a class within _domain_.
+_event_ is the name of an event in the state model of the _class_.
+_argN_:: arguments to the event.
+    The order of the arguments must be the same as the order given in
+    the state model definition.
+_inst_id_:: is the number of an instance.
+    The newly created instance can be referred to by this number in other
+    commands.
+*****
+
+==== Delaysignal command
+
+The `delaysignal` command sends a signal at a time in the future.
+
+*****
+[horizontal]
+->:: `delaysignal` _domain_ _class_ _inst_ _delay_ _event_ ? _arg1 arg2 ..._ ?
+<-:: `cmd {name signal result {} status ok}`
+
+_domain_:: is the name of a domain.
+_class_:: is the name of a class within _domain_.
+_inst_:: is the name or number of an instance.
+    Pre-existing instances have names given by the domain population.
+    All instances can be referred to by an instance number.
+_delay_:: is the minimum number of milliseconds that will elapse before
+    the signal is delivered.
+    A _delay_ value of 0 implies that the event is delivered immediately.
+_event_:: is the name of an event in the state model of the _class_.
+_argN_:: arguments to the event.
+    The order of the arguments must be the same as the order given in
+    the state model definition.
+*****
+
+==== Delete command
+
+The `delete` command deletes a class instance.
+
+*****
+[horizontal]
+->:: `delete` _domain_ _class_ _inst_
+<-:: `cmd {name delete result {} status ok}`
+
+_domain_:: is the name of a domain.
+_class_:: is the name of a class within _domain_.
+_inst_:: is the name or number of the class instance to delete.
+*****
+
+==== Domainop command
+
+The `domainop` command executes a domain operation.
+
+*****
+[horizontal]
+->:: `domainop` _domain_ _operation_ ? _arg1 arg2 ..._ ?
+<-:: `cmd {name domainop result` _operation_result_ `status ok}`
+
+_domain_:: is the name of a domain.
+_operation_:: the name of an operation in the domain.
+    The operation name is the same as that given in the domain definition.
+_argN_:: arguments to the domain operation.
+    The order of the arguments must be the same as the order given in
+    the domain definition.
+_operation_result_::
+    The result of the domain operation is dependent upon the return
+    value of the domain operation.
+*****
+
+==== Event loop command
+
+The `eloop` command gives control over event dispatching and how the
+test harness is allowed to execute.
+It is possible to halt event dispatch and also to dispatch events
+one by one or as an entire thread of control.
+
+*****
+[horizontal]
+->:: `eloop` ? _operation_ ?
+<-:: `cmd {name eloop result` _eloop result_ `status ok}`
+
+_operation_:: event loop operation.
+The _operation_ argument is optional.
+If present, it must be one of the following strings:
+    - *run* => run the event loop to dispatch events.
+    - *halt* => halt the event loop. No further events are dispatched.
+    - *once* => dispatch one event from the event loop.
+    - *toc* => dispatch one thread of control from the event loop.
+      The *toc* operation can be specified optionally with either a
+      *wait* or *nowait* argument.
+      If *wait* is specified (or by default if no *toc* option is specified),
+      then the event loop will wait until a thread of control event
+      arrives.
+      If *nowait* is specified, the command will return immediately
+      if no thread of control is ready to dispatch.
+      This option is useful if the event that starts the thread of control
+      is issued via a delayed signal.
+
+_eloop result_::
+    is the current run state of the event loop,
+    either *running* or *halted*, if the _operation_ argument is missing,
+    or if the _operation_ argument is given as *run* or *halt*.
+    The _eloop result_ is either *true* or *false* if the _operation_ is
+    *once* or *toc* and indicates if any event or thread of control was
+    actually dispatched.
+    It is an error to attempt to execute the *once* or *toc* operations if
+    the event loop is currently *running*.
+*****
+
+==== Null command
+
+The `null` command performs no action, successfully.
+It can be used to insure that the test harness is running and responsive.
+
+*****
+[horizontal]
+->:: `null`
+<-:: `cmd {name null result {} status ok}`
+*****
+
+==== Instrument command
+
+The `instr` command controls whether instrumentation records are
+send on the communications connection.
+Clients may use it to change the amount of execution trace instrumentation
+coming from the test harness.
+
+*****
+[horizontal]
+->:: `instr` ? _on_ | _off_?
+<-:: `cmd {name instr result` _instr_result_ `status ok}`
+
+_instr_result_::
+    The current state of the instrumentation record output,
+    either *on* or *off*.
+*****
+
+==== Query command
+
+The `query` command returns information about the model components
+in the test harness.
+
+*****
+[horizontal]
+->:: `query` _query_subcommand_ _subcommand_args_
+<-:: `cmd {name query result` _query_result_ `status ok}`
+*****
+
+The `query` command has subcommands to retrieve information about
+specific model components.
+The following sections describe each subcommand and its response.
+
+===== Query domains
+
+The `query domains` subcommand obtains the domain names in test harness.
+
+*****
+[horizontal]
+->:: `query domains`
+<-:: `cmd {name query result` _domain_list_ `status ok}`
+
+_domain_list_:: a series of whitespace separated domain names that included
+    in the test harness.
+*****
+
+===== Query domain operations
+
+The `query operations` subcommand obtains the names of the
+domain operations for a given domain.
+
+*****
+[horizontal]
+->:: `query operations` _domain_
+<-:: `cmd {name query result` _op_list_ `status ok}`
+
+_op_list_:: a series of whitespace separated domain operation names
+    for the given _domain_.
+*****
+
+===== Query domain operation parameters
+
+The `query doparams` subcommand obtains the names and data types
+of the parameters for the given domain operation.
+
+*****
+[horizontal]
+->:: `query doparams` _domain_ _operation_
+<-:: `cmd {name query result` _param_list_ `status ok}`
+
+_param_list_:: a series of whitespace separated parameter name /
+    parameter data type word pairs. The length of _param_list_ is always
+    even with the even index words giving a parameter name and the
+    odd indexed word giving its corresponding data type.
+    The length of _param_list_ is 0, if the operation requires no
+    parameters.
+*****
+
+===== Query classes
+
+The `query classes` subcommand obtains the names of the classes in a
+domain.
+
+*****
+[horizontal]
+->:: `query classes` _domain_
+<-:: `cmd {name query result` _class_list_ `status ok}`
+
+_domain_:: the name of a domain in the test harness.
+_class_list_:: a series of whitespace separated class names that are
+    part of _domain_.
+*****
+
+===== Query attributes
+
+The `query attributes` subcommand obtains the names of the attributes
+of a class.
+
+*****
+[horizontal]
+->:: `query attributes` _domain_ _class_
+<-:: `cmd {name query result` _attribute_list_ `status ok}`
+
+_domain_:: the name of a domain in the test harness.
+_class_:: the name of a class in _domain_ .
+_attribute_list_:: a series of whitespace separated attribute names that are
+    part of _class_.
+
+Note that only attributes that may be read and updated are returned.
+*****
+
+===== Query instances
+
+The `query instances` subcommand obtains the number and names of the instances
+of a class.
+
+*****
+[horizontal]
+->:: `query instances` _domain_ _class_
+<-:: `cmd {name query result` _instance_result_ `status ok}`
+
+_domain_:: the name of a domain in the test harness.
+_class_:: the name of a class in _domain_ .
+_instance_result_:: a set of two name / value pairs of the form
+    - *total* _instance_count_
+        instance_count;;
+            is the maximum number of instances of _class_ that
+            can exist.
+    - *named* _instance_list_
+        instance_list;;
+            a series of whitespace separated instance names.
+            Instances that are part of the initial instance population have
+            names.
+*****
+
+===== Query states
+
+The `query states` subcommand obtains the names of the states in the
+state model of a class.
+
+*****
+[horizontal]
+->:: `query states` _domain_ _class_
+<-:: `cmd {name query result` _state_list_ `status ok}`
+
+_domain_:: the name of a domain in the test harness.
+_class_:: the name of a class in _domain_ .
+_state_list_:: a series of whitespace separated state names that are
+    in the state model of _class_.
+
+Note it is an error to query the states of a class that has no state model.
+*****
+
+===== Query events
+
+The `query events` subcommand obtains the names of the events in the
+state model of a class.
+
+*****
+[horizontal]
+->:: `query events` _domain_ _class_
+<-:: `cmd {name query result` _event_list_ `status ok}`
+
+_domain_:: the name of a domain in the test harness.
+_class_:: the name of a class in _domain_ .
+_event_list_:: a series of whitespace separated event names that are
+    in the state model of _class_.
+
+Note it is an error to query the events of a class that has no state model.
+*****
+
+===== Query event parameters
+
+The `query evarams` subcommand obtains the names and data types
+of the supplimental parameters for the given class event.
+
+*****
+[horizontal]
+->:: `query evparams` _domain_ _class_ _event_
+<-:: `cmd {name query result` _param_list_ `status ok}`
+
+_param_list_:: a series of whitespace separated event parameter name /
+    event parameter data type word pairs.
+    The length of _param_list_ is always
+    even with the even index words giving a parameter name and the
+    odd indexed word giving its corresponding data type.
+    The length of _param_list_ is 0, if the event requires no
+    parameters.
+*****
+
+===== Query current
+
+The `query current` subcommand obtains the name of the current state
+of an instance of a class.
+
+*****
+[horizontal]
+->:: `query current` _domain_ _class_ _instance_
+<-:: `cmd {name query result` _current_state_ `status ok}`
+
+_domain_:: the name of a domain in the test harness.
+_class_:: the name of a class in _domain_ .
+_inst_:: is the name or number of an instance of _class_.
+_current_state_:: the name of the current state of _instance_.
+
+Note it is an error to query the current state of a class that
+has no state model.
+*****
+
+==== Read command
+
+The `read` command is used to obtain the values of one or more attributes.
+
+*****
+[horizontal]
+->:: `read` _domain_ _class_ _inst_ ? `_attr1 attr2 ...` ?
+<-:: `cmd {name read result` _value_result_ `status ok}`
+
+_domain_:: is the name of a domain.
+_class_:: is the name of a class within _domain_.
+_inst_:: is the name or number of an instance of _class_.
+_attrN_:: an optional series of names of attributes of _class_.
+    If no _attrN_ arguments are given, then the values of all the attributes
+    of the instance are returned.
+    Otherwise, the values of the given _attrN_ attributes are returned.
+_value_result_:: a series of white space separated attribute name /
+    attribute value pairs.
+*****
+
+==== Remaining command
+
+The `remaining` command obtains the number of milliseconds remaining
+before a delayed event is dispatched.
+
+*****
+[horizontal]
+->:: `remaining` _domain_ _class_ _inst_ _event_
+<-:: `cmd {name cancel result` _remaining_time_ `status ok}`
+
+_domain_:: is the name of a domain.
+_class_:: is the name of a class within _domain_.
+_inst_:: is the name or number of an instance.
+    Pre-existing instances have names given by the domain population.
+    All instances can be referred to by an instance number.
+_event_:: is the name of an event in the state model of the _class_.
+_remaining_time_:: the number of milliseconds in the future when
+    _event_ is to be dispatched. A _remaining_time_ of 0 implies that
+    the event has already been dispatched or was never signaled.
+*****
+
+==== Signal command
+
+The `signal` command signals an event to a class instance.
+
+*****
+[horizontal]
+->:: `signal` _domain_ _class_ _inst_ _event_ ? _arg1 arg2 ..._ ?
+<-:: `cmd {name signal result {} status ok}`
+
+_domain_:: is the name of a domain.
+_class_:: is the name of a class within _domain_.
+_inst_:: is the name or number of an instance.
+    Pre-existing instances have names given by the domain population.
+    All instances can be referred to by an instance number.
+_event_ is the name of an event in the state model of the _class_.
+_argN_:: arguments to the event.
+    The order of the arguments must be the same as the order given in
+    the state model definition.
+*****
+
+==== Trace command
+
+The `trace` command controls whether event dispatch trace records are
+send on the communications connection.
+
+*****
+[horizontal]
+->:: `trace` ? _on_ | _off_?
+<-:: `cmd {name trace result` _trace_result_ `status ok}`
+
+_trace_result_::
+    The current state of the trace record output, either *on* or *off*.
+*****
+
+==== Update command
+
+The `update` command is used to update the values of one or more attributes.
+
+*****
+[horizontal]
+->:: `update` _domain_ _class_ _inst_ ? `_attr1 value1 attr2 value2 ...` ?
+<-:: `cmd {name read result` _value_result_ `status ok}`
+
+_domain_:: is the name of a domain.
+_class_:: is the name of a class within _domain_.
+_inst_:: is the name or number of an instance of _class_.
+_attrN valueN_:: an optional series of attribute name / attribute value
+    pairs.
+    If no _attrN valueN_ arguments are given,
+    then no updates occur.
+    Otherwise, the values of the given _attrN_ attributes are updated.
+_value_result_:: a series of white space separated attribute name /
+    attribute value pairs reflecting the current values of the attributes.
+*****
+
+==== Version command
+
+The `version` command performs returns the version number of `bosal`
+used to create the test harness code.
+
+*****
+[horizontal]
+->:: `version`
+<-:: `cmd {name version result` _version_number_ `status ok}`
+
+_version_number_:: the version `bosal` that created the test harness.
+*****
