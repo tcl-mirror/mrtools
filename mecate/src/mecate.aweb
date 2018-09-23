@@ -1,14 +1,4 @@
 // vim: set syntax=asciidoc:
-////////
- *++
- * PROJECT:
- *  mrtools
- * MODULE:
- *  mecate.tcl -- interfacing to bosal generated harnesses
- * ABSTRACT:
- *
- *--
-////////
 = The Mecate Package
 
 == Introduction
@@ -116,11 +106,14 @@ constructor {args} {
 
     log::debug "-timeout option = \"$timeout\""
 
-    variable tracesReceived
+    my variable tracesReceived
     set tracesReceived [::struct::queue]
 
-    variable instrReceived
+    my variable instrReceived
     set instrReceived [::struct::queue]
+
+    my variable fatalReceived
+    set fatalReceived [::struct::queue]
 
     namespace import ::ral::*
     namespace import ::ralutil::*
@@ -173,15 +166,18 @@ the harnessed application.
 destructor {
     my disconnect
 
-    variable tracesReceived
+    my variable tracesReceived
     $tracesReceived destroy
 
-    variable instrReceived
+    my variable instrReceived
     $instrReceived destroy
+
+    my variable fatalReceived
+    $fatalReceived destroy
 
     relvar constraint delete R1
     relvar unset Trace TransitionTrace PolymorphicTrace CreationTrace\
-            Instrumentation
+            Instrumentation Fatal
 }
 ----
 
@@ -376,12 +372,12 @@ Throws an error if the connection cannot be established.
 method connect {{port 3906}} {
     log::info "connecting to localhost:$port"
 
-    set tries 0                             ; # <1>
+    set tries 0                                                             ; # <1>
     while {true} {
         try {
             set connection [socket localhost $port]
             chan configure $connection -blocking true -buffering line
-            chan event $connection readable [mymethod HandleHarnessInput]
+            chan event $connection readable [mymethod HandleHarnessInput]   ; # <2>
             return
         } on error {result opts} {
             incr tries
@@ -389,13 +385,15 @@ method connect {{port 3906}} {
                 log::error "connection failure after $tries attempts"
                 return -options $opts $result
             }
-            log::info "connection attempt failed, waiting 500 ms to try again"
+            log::notice "connection attempt failed, waiting 500 ms to try again"
             after 500
         }
     }
 }
 ----
 <1> We intend to try the connection 3 times, pausing between any failures.
+<2> All the input is received by file `readable` events.
+This is described <<harness-io,below>>.
 
 [source,tcl]
 .Tests
@@ -502,7 +500,7 @@ test version-1.0 {
 } -cleanup {
 } -body {
     ::apptest version
-} -result {1.1}
+} -result {1.2}
 ----
 
 == Harness Introspection
@@ -1137,7 +1135,7 @@ test eloop-3.0 {
 
 == State Machine Traces
 
-For programs that use state machines that operate in a callback manner,
+For programs using state machines that are implemented in a callback manner,
 a chronological trace of the dispatched events is essential to
 effective debugging.
 The `micca` run-time code can produce this trace and the `bosal`
@@ -1309,8 +1307,8 @@ If a fatal error occurs, then the string `FATAL` is returned.
 ----
 <<rein configuration>>=
 method waitForEventTrace {args} {
-    variable tracesReceived
-    variable traceSyncVar
+    my variable tracesReceived
+    my variable traceSyncVar
 
     set expect $args
     while {true} {
@@ -1325,8 +1323,10 @@ method waitForEventTrace {args} {
             }
         }
 
-        set timer [after $timeout [mymethod TraceTimeout]]
-        vwait [self namespace]::traceSyncVar
+        set resolvedVarName [my varname traceSyncVar]
+        set timer [after $timeout [list set $resolvedVarName TIMEOUT]]
+        vwait $resolvedVarName
+
         if {$traceSyncVar eq "TIMEOUT"} {
             error "timed out on receiving event traces"
         } elseif {$traceSyncVar eq "FATAL"} {
@@ -1335,6 +1335,32 @@ method waitForEventTrace {args} {
             after cancel $timer
         }
     }
+}
+----
+
+(((rein,method,MatchTrace)))
+
+The `MatchTrace` method compares a trace against a pattern and
+determines if there is a match.
+The matches performed on traces can be applied to all types of traces
+and so is factored out here.
+Since the traces are actually dictionaries,
+the code is quite generic.
+
+[source,tcl]
+.Implementation
+----
+<<rein configuration>>=
+method MatchTrace {trace pattern} {
+    set matchCount 0
+    dict for {key value} $pattern {
+        if {[dict exists $trace $key] &&\
+                [string match $value [dict get $trace $key]]} {
+            incr matchCount
+        }
+    }
+
+    return [expr {$matchCount == [dict size $pattern] ? "true" : "false"}]
 }
 ----
 
@@ -1356,7 +1382,7 @@ those traces received after this method was invoked.
 ----
 <<rein configuration>>=
 method clearEventTraceCache {} {
-    variable tracesReceived
+    my variable tracesReceived
     while {[$tracesReceived size] != 0} {
         $tracesReceived get
     }
@@ -1369,7 +1395,7 @@ method clearEventTraceCache {} {
 (((rein,method,formatEventTraces)))
 
 *****
-_reinobj_ `formatEventTraces` _?begin finish?_
+_reinobj_ `formatEventTraces` _?begin?_ _?finish?_
 
 `begin`::
     An optional number giving the starting trace to include in the output.
@@ -1387,19 +1413,14 @@ print out of the received traces.
 ----
 <<rein configuration>>=
 method formatEventTraces {{begin 1} {finish end}} {
-    if {$begin == 1 && $finish eq "end"} {                  ; #  <1>
-        set traces [relvar set Trace]
-    } else {
-        set traces [relation restrictwith $Trace\
-                {$TraceId >= $begin && $TraceId <= $finish}]
-    }
     set traces [pipe {
-        rvajoin $traces [relvar set TransitionTrace] Transition |
+        my RestrictTraces $begin $finish Trace |
+        rvajoin ~ [relvar set TransitionTrace] Transition |
         rvajoin ~ [relvar set PolymorphicTrace] Polymorphic |
         rvajoin ~ [relvar set CreationTrace] Creation
-    }]                                                      ; # <2>
+    }]                                                      ; # <1>
 
-    set listing [list]                                      ; # <3>
+    set listing [list]                                      ; # <2>
     relation foreach trace $traces -ascending TraceId {
         relation assign $trace
         set line {}
@@ -1431,10 +1452,7 @@ method formatEventTraces {{begin 1} {finish end}} {
     return [join $listing "\n"]
 }
 ----
-<1> First, we need to select the traces that have been requested.
-The default arguments select all of the traces.
-Otherwise, we need to find the requested subset.
-<2> This query joins the selected traces with the three subclasses of
+<1> This query joins the selected traces with the three subclasses of
 traces based on the trace type.
 Because of the properties of a _partition constraint_ exactly one
 of the relation valued attributes from the `rvajoin` operations
@@ -1442,8 +1460,36 @@ of the relation valued attributes from the `rvajoin` operations
 will be non-empty and the non-empty attribute will contain exactly one tuple.
 This is just a convenient way to deal with the navigation of the
 partition constraint.
-<3> The strategy is to accumulate each formatted trace into a list and
+<2> The strategy is to accumulate each formatted trace into a list and
 then join the list elements to create a printable string.
+
+We will find other uses for a general method to select a subset of
+trace information to handle.
+So it is factored out here.
+
+[source,tcl]
+----
+<<rein configuration>>=
+method RestrictTraces {begin finish which} {
+    if {$begin == 1 && $finish eq "end"} {                  ; #  <1>
+        set traces [relvar set $which]
+    } else {
+        if {$finish eq "end"} {
+            set finish [relation cardinality [relvar set $which]]
+        } elseif {![string is integer $finish]} {
+            error "bad finish value, \"$finish\""
+        }
+        set traces [relation restrictwith [relvar set $which]\
+                {$TraceId >= $begin && $TraceId <= $finish}]
+    }
+    return $traces
+}
+----
+<1> First, we need to select the traces that have been requested.
+The default arguments select all of the traces.
+Otherwise, we need to find the requested subset.
+To save iterating over all the traces, we check if the default
+arguments have been passed.
 
 === Discard Event Traces
 
@@ -1497,8 +1543,16 @@ can be applied to instrumentation traces.
 
 (((rein,method,instr)))
 
+*****
+_reinobj_ `instr` _?on | off?_
+
+`on | off`::
+    Turn tracing either *on* or *off*. If neither *on* or *off* is given,
+    then the command returns the current state of tracing.
+
 The `instr` method controls whether instrumentation traces
 are output from the test harness and accumulated.
+*****
 
 [source,tcl]
 .Implementation
@@ -1526,16 +1580,31 @@ test instr-1.0 {
 
 (((rein,method,waitForInstrTrace)))
 
+*****
+_reinobj_ `waitForInstrTrace` _?field1 pattern1 field2 pattern2?_
+
+`fieldN`::
+    The name of a field of the instrumentation trace. Valid field names are:
+    `time`:::
+        A timestamp of when the trace was generated.
+    `message`:::
+        The text of the instrumentation trace message.
+
+`patternN`::
+    The corresponding pattern to match for the given key.
+    Patterns may be of any form accepted by the `string match` command.
+
 The `waitForInstrTrace` method suspends execution until a instrumentation
 trace matches the given parameters or a timeout occurs.
+*****
 
 [source,tcl]
 .Implementation
 ----
 <<rein configuration>>=
 method waitForInstrTrace {args} {
-    variable instrReceived
-    variable instrSyncVar
+    my variable instrReceived
+    my variable instrSyncVar
 
     set expect $args
     while {true} {
@@ -1550,8 +1619,10 @@ method waitForInstrTrace {args} {
             }
         }
 
-        set timer [after $timeout [mymethod InstrTimeout]]
-        vwait [self namespace]::instrSyncVar
+        set resolvedVarName [my varname instrSyncVar]
+        set timer [after $timeout [list set $resolvedVarName TIMEOUT]]
+        vwait $resolvedVarName
+
         if {$instrSyncVar eq "TIMEOUT"} {
             error "timed out on receiving event traces"
         } elseif {$instrSyncVar eq "FATAL"} {
@@ -1567,15 +1638,21 @@ method waitForInstrTrace {args} {
 
 (((rein,method,clearInstrTraceCache)))
 
-The `clearInstrTraceCache` method deletes any accumulated state machine
-event traces.
+*****
+_reinobj_ `clearInstrTraceCache`
+
+The `clearInstrTraceCache` method deletes any accumulated instrumentation
+traces contained in the instrumentation trace cache.
+All future attempts to match an instrumentation trace will operate only against
+those traces received after this method was invoked.
+*****
 
 [source,tcl]
 .Implementation
 ----
 <<rein configuration>>=
 method clearInstrTraceCache {} {
-    variable instrReceived
+    my variable instrReceived
     while {[$instrReceived size] != 0} {
         $instrReceived get
     }
@@ -1586,25 +1663,31 @@ method clearInstrTraceCache {} {
 
 (((rein,method,formatInstrTraces)))
 
+*****
+_reinobj_ `formatInstrTraces` _?begin?_ _?finish?_
+
+`begin`::
+    An optional number giving the starting trace to include in the output.
+    If missing, then `begin` is taken as 1, the first trace accumulated.
+`finish`::
+    An optional number giving the last trace to include in the output.
+    If missing, then `finish` is taken as the last trace accumulated.
+
 The `formatInstrTraces` method returns a string containing a human readable
 print out of the received traces.
+*****
 
 [source,tcl]
 .Implementation
 ----
 <<rein configuration>>=
 method formatInstrTraces {{begin 0} {finish end}} {
-    if {$begin == 0 && $finish eq "end"} {
-        set instrs [relvar set Instrumentation]
-    } else {
-        set instrs [relation restrictwith $Instrumentation\
-                {$InstrId >= $begin && $InstrId <= $finish}]
-    }
-
     set listing [list]
-    relation foreach instr $instrs -ascending InstrId {
+    set instrs [my RestrictTraces $begin $finish Instrumentation]
+
+    relation foreach instr $instrs -ascending TraceId {
         relation assign $instr
-        lappend listing [format "% 3u %s: %s" $InstrId $Time $Message]
+        lappend listing [format "% 3u %s: %s" $TraceId $Time $Message]
     }
 
     return [join $listing "\n"]
@@ -1615,17 +1698,201 @@ method formatInstrTraces {{begin 0} {finish end}} {
 
 (((rein,method,discardInstrTraces)))
 
-The `discardInstrTraces` method ...
+*****
+_reinobj_ `discardInstrTraces`
+
+The `discardInstrTraces` method deletes the set of accumulated instrumentation
+traces.
+*****
 
 [source,tcl]
 .Implementation
 ----
 <<rein configuration>>=
 method discardInstrTraces {} {
-    variable instrId
+    my variable instrId
     set instrId 0
     relvar eval {
         relvar set Instrumentation [relation empty [relvar set Instrumentation]]
+    }
+    return
+}
+----
+
+== Fatal Error Traces
+
+The `micca` run-time code detects several fatal errors.
+These errors can range from exhaustion of resources to a _can't happen_
+state transition.
+By default,
+the `micca` run-time invokes the `abort` function from the ``C'' standard
+library.
+Most implementation of `abort` cause the process to terminate and
+dump core for debugging.
+
+When running as a test harness,
+terminating the process is not desirable.
+We would like to be able to examine the state of things after the
+fatal error has happened.
+So,
+`bosal` generates code to install its own fatal error handler and
+this handler allows the test harness communication socket to remain open.
+The fatal error handle also emits a fatal error message
+with the details.
+Note that the fatal error messages are sent asynchronously to any
+command / response sequence and cannot be tuned off.
+
+=== Wait for Fatal Trace
+
+(((rein,method,waitForFatalTrace)))
+
+*****
+_reinobj_ `waitForFatalTrace` _?field1 pattern1 field2 pattern2?_
+
+`fieldN`::
+    The name of a field of the fatal error trace. Valid field names are:
+    `time`:::
+        A timestamp of when the trace was generated.
+    `message`:::
+        The text of the fatal error trace message.
+
+`patternN`::
+    The corresponding pattern to match for the given key.
+    Patterns may be of any form accepted by the `string match` command.
+
+The `waitForFatalTrace` method suspends execution until a fatal error
+trace matches the given parameters or a timeout occurs.
+*****
+
+[source,tcl]
+.Implementation
+----
+<<rein configuration>>=
+method waitForFatalTrace {args} {
+    my variable fatalReceived
+    my variable fatalSyncVar
+
+    set expect $args
+    while {true} {
+        while {[$fatalReceived size] != 0} {
+            set actual [$fatalReceived get]
+
+            if {[my MatchTrace $actual $expect]} {
+                return $actual
+            } else {
+                log::notice "discarding trace, \"$actual\":\
+                        failed to match, \"$expect\""
+            }
+        }
+
+        set resolvedVarName [my varname fatalSyncVar]
+        set timer [after $timeout [list set $resolvedVarName TIMEOUT]]
+        vwait $resolvedVarName
+
+        if {$fatalSyncVar eq "TIMEOUT"} {
+            error "timed out on receiving event traces"
+        } else {
+            after cancel $timer
+        }
+    }
+}
+----
+
+[source,tcl]
+.Tests
+----
+<<exported tests>>=
+test fatal-1.0 {
+    Cause a can't happen transition and await the trace
+} -setup {
+} -cleanup {
+} -body {
+    catch {::apptest signal bookstore ShippingClerk fs booksSelected}
+    set err [::apptest waitForFatalTrace message *]
+    return [dict get $err message]
+} -result {*CH*} -match glob
+----
+
+=== Clear the Fatal Trace Cache
+
+(((rein,method,clearFatalTraceCache)))
+
+*****
+_reinobj_ `clearFatalTraceCache`
+
+The `clearFatalTraceCache` method deletes any accumulated fatal error
+traces contained in the fatal error trace cache.
+All future attempts to match an fatal error trace will operate only against
+those traces received after this method was invoked.
+*****
+
+[source,tcl]
+.Implementation
+----
+<<rein configuration>>=
+method clearFatalTraceCache {} {
+    my variable fatalReceived
+    while {[$fatalReceived size] != 0} {
+        $fatalReceived get
+    }
+}
+----
+
+=== Format Fatal Traces
+
+(((rein,method,formatFatalTraces)))
+
+*****
+_reinobj_ `formatFatalTraces` _?begin?_ _?finish?_
+
+`begin`::
+    An optional number giving the starting trace to include in the output.
+    If missing, then `begin` is taken as 1, the first trace accumulated.
+`finish`::
+    An optional number giving the last trace to include in the output.
+    If missing, then `finish` is taken as the last trace accumulated.
+
+The `formatFatalTraces` method returns a string containing a human readable
+print out of the received traces.
+*****
+
+[source,tcl]
+.Implementation
+----
+<<rein configuration>>=
+method formatFatalTraces {{begin 0} {finish end}} {
+    set listing [list]
+    set fatals [my RestrictTraces $begin $finish Fatal]
+
+    relation foreach fatal $fatals -ascending TraceId {
+        relation assign $fatal
+        lappend listing [format "% 3u %s: %s" $TraceId $Time $Message]
+    }
+
+    return [join $listing "\n"]
+}
+----
+
+=== Discard Fatal Traces
+
+(((rein,method,discardFatalTraces)))
+
+*****
+_reinobj_ `discardFatalTraces`
+
+The `discardFatalTraces` method deletes the set of accumulated fatal error
+traces.
+*****
+
+[source,tcl]
+.Implementation
+----
+<<rein configuration>>=
+method discardFatalTraces {} {
+    variable fatalId
+    set fatalId 0
+    relvar eval {
+        relvar set Fatal [relation empty [relvar set Fatal]]
     }
     return
 }
@@ -1635,7 +1902,21 @@ method discardInstrTraces {} {
 
 (((rein,method,saveTraces)))
 
-The `saveTraces` method ...
+*****
+_reinobj_ `saveTraces` _file_ _?ral | sqlite?_
+
+`file`::
+    The name of the file to which trace data is stored.
+`ral | sqlite`::
+    A string to designate the type of file to which trace data is stored.
+    If `ral` is given or the option is missing,
+    trace data is stored in the native serialization format of TclRAL.
+    If `sqlite` is given,
+    then trace data is stored in SQLite database.
+
+The `saveTraces` method stores any accumlated event, instrumentation
+and fatal traces to a file.
+*****
 
 [source,tcl]
 .Implementation
@@ -1657,75 +1938,46 @@ method saveTraces {file {how ral}} {
 }
 ----
 
-== Unexported Methods
+== Handling Harness I/O [[harness-io]]
 
-=== Command [[command-method]]
+In this section,
+we show the methods of the `rein` class used to deal with communicating to the
+test harness program.
+Since we can enable event and instrument traces,
+and since those traces can occur asynchronously to any command / response
+sequence with the test harness,
+this design runs all the communications in a non-blocking asynchronous
+manner.
+This is easily accomplished in Tcl by setting the channel to
+be non-blocking and use a file event handle arriving input.
+The format of the responses coming from a test harness have,
+as their first word, the type of the response.
+This tells us how to handle that particular input.
 
-(((rein,method,command)))
+The asynchronous nature of the I/O to the test harness does cause
+some jumping around in the execution flow of the code.
+That makes things more difficult to explain.
+Consider, for example,
+dealing with a command / response to / from the test harness.
+After the command is send,
+the script waits on a variable, entering the Tcl event loop.
+When input arrives,
+a callback happens (at the global interpreter level) to the script
+registered on the communication channel.
+That script then reads the input from the channel, decides what to do
+and then writes a value to the variable upon which the script
+had previously waited.
+The callback finishes and control then returns from waiting on the
+variable to the next command in the script.
+This is generally how callbacks happen in Tcl,
+so there is nothing special about the way the `rein` class operates.
+It just requires a little tracking round to see the execution flow.
 
-The `command` method sends the harness program a `harness` command
-and waits for the response.
+Sending commands to a test harness is simple.
+The protocol is ASCII record oriented and the core `puts` command
+does what is needed.
 
-.Implementation
-----
-<<rein configuration>>=
-method Command {args} {
-    variable cmdPattern
-    variable timeout
-    set cmdPattern [dict create\
-        name [lindex $args 0]\
-        timer [after $timeout [mymethod CmdTimeout]]
-    ]
-    my Puts $args
-
-    set response [my WaitForCmdResponse]
-    set result [dict get $response result]
-    if {[dict get $response status] eq "error"} {
-        error $result
-    }
-    return $result
-}
-method HandleCmdResponse {respValue} {
-    variable cmdPattern
-
-    set expectedName [dict get $cmdPattern name]
-    set recvdName [dict get $respValue name]
-
-    if {[string match $expectedName $recvdName]} {
-        my SignalCmdResponse $respValue
-    } else {
-        log::error "expected response to $expectedName command,\
-                got response to $recvdName command"
-        my SignalCmdResponse ERROR
-    }
-}
-method CmdTimeout {} {
-    set [self namespace]::cmdSyncVar TIMEOUT
-}
-method SignalCmdResponse {value} {
-    set [self namespace]::cmdSyncVar $value
-}
-method WaitForCmdResponse {} {
-    variable cmdPattern
-    variable cmdSyncVar
-    vwait [self namespace]::cmdSyncVar
-
-    if {$cmdSyncVar eq "TIMEOUT"} {
-        error "timeout for command, \"[dict get $cmdPattern name]\""
-    } elseif {$cmdSyncVar eq "FATAL"} {
-        error "fatal run-time error while executing,\
-                \"[dict get $cmdPattern name]\""
-    } else {
-        after cancel [dict get $cmdPattern timer]
-    }
-
-    if {[dict get $cmdSyncVar name] ne [dict get $cmdPattern name]} {
-        error "expected response for command, \"[dict get $cmdPattern name]\",\
-                got, \"[dict get $cmdSyncVar name]\""
-    }
-    return $cmdSyncVar
-}
-----
+(((rein,method,Puts)))
 
 [source,tcl]
 ----
@@ -1734,96 +1986,157 @@ method Puts {cmd} {
     log::debug "harness command: \"$cmd\""
     puts $connection $cmd
 }
+----
 
+Handling input is more complicated.
+The `connect` registers a file readable event on the communication socket
+so that the `HandleHarnessInput` method is invoked when input has
+arrived.
+Handling the input is a two step process:
+
+. Obtain a valid response
+. Invoke a method to handle the response based on its type.
+
+[source,tcl]
+----
+<<rein configuration>>=
 method HandleHarnessInput {} {
-    set line {}
-    for {set gotline false} {!$gotline} {set gotline [string is list $line]} {
-        set llen [chan gets $connection input]
-        if {$llen == -1} {
-            if {[chan eof $connection]} {
-                log::warn "EOF on harness input -- closing \"$connection\""
-                chan close $connection
-                unset -nocomplain connection
-                return
-            } elseif {[chan blocked $connection]} {
-                log::notice "partial line received"
-            }
-        } else {
-            append line $input
+    <<HandleHarnessInput: get input line>>
+    <<HandleHarnessInput: handle different response types>>
+}
+----
+
+The only complication with obtaining a valid response deals with the
+possiblity of receiving a partial response which might contain a
+newline character.
+We use the `chan gets` procedure to read in a line of input.
+All valid reponses from a test harness are in the form of a proper
+Tcl list (not my accident).
+So we let the `string is list` command determine if we have obtain a
+line that could be a response.
+We continue to read input until we do get a proper Tcl list and then
+consider that as a test harness response.
+
+[source,tcl]
+----
+<<HandleHarnessInput: get input line>>=
+set line {}
+for {set gotline false} {!$gotline} {set gotline [string is list $line]} {
+    set llen [chan gets $connection input]
+    if {$llen == -1} {
+        if {[chan eof $connection]} {
+            log::warn "EOF on harness input -- closing \"$connection\""
+            chan close $connection
+            unset -nocomplain connection
+            return
+        } elseif {[chan blocked $connection]} {
+            log::notice "partial line received"
         }
+    } else {
+        append line $input
     }
+}
+----
 
-    if {[string length $line] != 0} {
-        log::debug "harness response: \"$line\""
+Once we have a valid Tcl list,
+then we look at the first word of the list to obtain the type of
+the response.
+Actions on the response are delegated to separate methods based on
+the response type.
 
-        lassign $line resp_type resp_value
+[source,tcl]
+----
+<<HandleHarnessInput: handle different response types>>=
+if {[string length $line] != 0} {
+    log::debug "harness response: \"$line\""
 
-        switch -exact -- $resp_type {
-            cmd {
-                my HandleCmdResponse $resp_value
-            }
-            trace {
-                my HandleTraceResponse $resp_value
-            }
-            fatal {
-                my HandleFatalResponse $resp_value
-            }
-            instr {
-                my HandleInstrResponse $resp_value
-            }
-            default {
-                error "unknown response type, \"$resp_value\""
-            }
+    lassign $line resp_type resp_value
+
+    switch -exact -- $resp_type {
+        cmd {
+            my HandleCmdResponse $resp_value
+        }
+        trace {
+            my HandleTraceResponse $resp_value
+        }
+        fatal {
+            my HandleFatalResponse $resp_value
+        }
+        instr {
+            my HandleInstrResponse $resp_value
+        }
+        default {
+            error "unknown response type, \"$resp_value\""
         }
     }
 }
 ----
 
+=== Handling Responses
+
+The `rein` class methods provide for suspending execution to await
+responses from the test harness.
+Those responses will arrive via a file read event,
+so we must enter the Tcl event loop to receive the responses.
+The core command to accomplish that is `vwait`.
+
+Code to handle the various types of responses follows a similar pattern.
+A distinct variable is used for wait for each type of response.
+The response handling methods for each response type write to the
+variable to effect the synchronization.
+Of course there is some different processing that also goes on for
+each distinct response type.
+
+For command response,
+we make sure that the response received is for the command last sent.
+This is just minor protection against sending additional commands before
+receiving a previous response.
+We want only a single outstanding command in order to abide by the
+test harness communcation protocol.
+
 [source,tcl]
 ----
-<<rein data structures>>=
-relvar create Trace {
-    TraceId     int
-    Time        string
-    Event       string
-    Source      string
-    Target      string
-} TraceId
+<<rein configuration>>=
+method HandleCmdResponse {respValue} {
+    my variable cmdPattern
 
-relvar create TransitionTrace {
-    TraceId     int
-    Current     string
-    New         string
-} TraceId
+    set expectedName [dict get $cmdPattern name]            ; # <1>
+    set recvdName [dict get $respValue name]
 
-relvar create PolymorphicTrace {
-    TraceId         int
-    Relationship    string
-    NewEvent        string
-    Subclass        string
-} TraceId
+    if {[string match $expectedName $recvdName]} {
+        set wakeup $respValue
+    } else {
+        log::error "expected response to $expectedName command,\
+                got response to $recvdName command"
+        set wakeup ERROR
+    }
 
-relvar create CreationTrace {
-    TraceId         int
-} TraceId
-
-relvar partition R1 Trace TraceId\
-    TransitionTrace TraceId\
-    PolymorphicTrace TraceId\
-    CreationTrace TraceId
+    set [my varname cmdSyncVar] $wakeup
+    return
+}
 ----
+<1> The `cmdPattern` variable is set as part of initiating a
+<<command-method,command>>
+to a test harness.
+
+Event traces are more complicated.
+Here we have two additional concerns.
+
+. We need to keep a queue of the traces that can be examined later should
+the client wish to wait for a particular trace.
+Traces can be emitted at almost any time, we can't just drop them
+if no one is waiting at that moment.
+. We want to save all the event traces that occur so we can
+save them at the end of a test session.
 
 [source,tcl]
 ----
 <<rein configuration>>=
 method HandleTraceResponse {respValue} {
-    variable tracesReceived
-
+    my variable tracesReceived
     $tracesReceived put $respValue
-    set [namespace current]::traceSyncVar TRACE
 
-    variable traceId
-
+    my variable traceId
     relvar eval {
         incr traceId
         relvar insert Trace [list\
@@ -1861,91 +2174,249 @@ method HandleTraceResponse {respValue} {
             }
         }
     }
+
+    set [my varname traceSyncVar] TRACE
+
+    return
 }
 ----
 
-[source,tcl]
+The event dispatch traces are saved away in TclRAL relvars.
+For event traces, we need some schema to account for the various
+subtypes of trace data that arise from the different types of events.
+
+["aafigure"]
 ----
-<<rein configuration>>=
-method TraceTimeout {} {
-    set [self namespace]::traceSyncVar TIMEOUT
-}
+                    +-------------+
+                    |    Trace    |
+                    +-------------+
+                    |"TraceId {I}"|
+                    |"Time"       |
+                    |"Event"      |
+                    |"Source"     |
+                    |"Target"     |
+                    +------+------+
+                           ^
+                           |"R1"
+        +------------------+--------------------+
+        |                  |                    |
++-------+-------+   +------+----------+  +------+------+
+|TransitionTrace|   |PolymorphicTrace |  |CreationTrace|
++---------------+   +-----------------+  +-------------+
+|"TraceId {I}"  |   |"TraceId {I}"    |  |"TraceId {I}"|
+|"Current"      |   |"Relationship"   |  +-------------+
+|"New"          |   |"NewEvent"       |
++---------------+   |"Subclass"       |
+                    +-----------------+
 ----
+
+The schema is represented as TclRAL `relvar create` commands.
 
 [source,tcl]
 ----
 <<rein data structures>>=
-relvar create Instrumentation {
-    InstrId     int
+relvar create Trace {
+    TraceId     int
     Time        string
-    Message     string
-} InstrId
+    Event       string
+    Source      string
+    Target      string
+} TraceId
+
+relvar create TransitionTrace {
+    TraceId     int
+    Current     string
+    New         string
+} TraceId
+
+relvar create PolymorphicTrace {
+    TraceId         int
+    Relationship    string
+    NewEvent        string
+    Subclass        string
+} TraceId
+
+relvar create CreationTrace {
+    TraceId         int
+} TraceId
+
+relvar partition R1 Trace TraceId\
+    TransitionTrace TraceId\
+    PolymorphicTrace TraceId\
+    CreationTrace TraceId
 ----
+
+Handling instrumentation traces follows a similar pattern.
+Like event traces, we must keep a queue of instrumentation traces
+that can be searched later.
+We also store away the traces so they can all be saved later.
 
 [source,tcl]
 ----
 <<rein configuration>>=
 method HandleInstrResponse {respValue} {
     variable instrReceived
-
     $instrReceived put $respValue
-    set [self namespace]::instrSyncVar INSTR
 
     variable instrId
     incr instrId
-
     relvar insert Instrumentation [list\
-        InstrId     $instrId\
+        TraceId     $instrId\
         Time        [dict get $respValue time]\
         Message     [dict get $respValue message]\
     ]
+
+    set [my varname instrSyncVar] INSTR
+    return
 }
 ----
+
+The storage for instrumentation traces is much simpler.
+A single relvar will suffice.
 
 [source,tcl]
 ----
-<<rein configuration>>=
-method InstrTimeout {} {
-    set [self namespace]::instrSyncVar TIMEOUT
-}
+<<rein data structures>>=
+relvar create Instrumentation {
+    TraceId     int
+    Time        string
+    Message     string
+} TraceId
 ----
 
-=== Matching Trace Data
-
-(((rein,method,MatchTrace)))
-
-The `MatchTrace` method compares a trace against a pattern and
-determines if there is a match.
-
-[source,tcl]
-.Implementation
-----
-<<rein configuration>>=
-method MatchTrace {trace pattern} {
-    set matchCount 0
-    dict for {key value} $pattern {
-        if {[dict exists $trace $key] &&\
-                [string match $value [dict get $trace $key]]} {
-            incr matchCount
-        }
-    }
-
-    return [expr {$matchCount == [dict size $pattern] ? "true" : "false"}]
-}
-----
+Finally,
+the fatal error traces follow the same pattern.
+A queue is kept as a cache for later searching and
+the fatal messages are kept for later storage.
+Note however, that fatal error messages do have one twist to them.
+After a fatal response is received,
+there will not be any other responses forthcoming from the test harness
+until another command is sent.
+Since we don't know which variable might be used for waiting,
+a fatal response must wake up any waiting script.
+This is accomplished by simply writing to each of the three
+synchronization variables.
 
 [source,tcl]
 ----
 <<rein configuration>>=
 method HandleFatalResponse {respValue} {
-    log::error "fatal error response, \"$respValue\""
-    set [self namespace]::cmdSyncVar FATAL
-    set [self namespace]::traceSyncVar FATAL
-    error $respValue
+    my variable fatalReceived
+    $fatalReceived put $respValue
+
+    variable fatalId
+    incr fatalId
+    relvar insert Fatal [list\
+        TraceId     $fatalId\
+        Time        [dict get $respValue time]\
+        Message     [dict get $respValue message]\
+    ]
+
+    log::error "received fatal error response, \"$respValue\""
+    set [my varname fatalSyncVar] FATAL
+    set [my varname cmdSyncVar] FATAL
+    set [my varname traceSyncVar] FATAL
 }
 ----
 
+Again, a simple relvar is all that is necessary to save fatal error
+responses.
+
+[source,tcl]
+----
+<<rein data structures>>=
+relvar create Fatal {
+    TraceId     int
+    Time        string
+    Message     string
+} TraceId
+----
+
+=== Command [[command-method]]
+
+(((rein,method,Command)))
+
+Finally, we have enough background to show the `Command` method.
+The `Command` method sends the harness program a `harness` command
+and waits for the response.
+All the methods that represent commands to the test harness
+are just thin veneers, using the `Command` method to do most of the work.
+
+.Implementation
+----
+<<rein configuration>>=
+method Command {args} {
+    my variable cmdPattern
+    my variable timeout
+    set cmdPattern [dict create\
+        name [lindex $args 0]\
+        timer [after $timeout [list set [my varname cmdSyncVar] TIMEOUT]]\
+    ]                                               ; # <1>
+    my Puts $args                                   ; # <2>
+
+    set response [my WaitForCmdResponse]            ; # <3>
+    set result [dict get $response result]
+    if {[dict get $response status] eq "error"} {
+        error $result
+    }
+    return $result
+}
+----
+<1> We leave behind some information needed for when the response arrives.
+The name of the command is checked against any command response.
+A timer is used to issue a timeout if no response is received.
+We will need to cancel that timer if a response is actually received.
+<2> Send the command to the test harness.
+<3> Wait for the response. Note we only return the `result` field of
+the response as the return value of the command.
+
+[source,tcl]
+----
+<<rein configuration>>=
+method WaitForCmdResponse {} {
+    my variable cmdPattern
+    my variable cmdSyncVar
+
+    vwait [my varname cmdSyncVar]                   ; # <1>
+
+    if {$cmdSyncVar eq "TIMEOUT"} {
+        error "timeout for command, \"[dict get $cmdPattern name]\""
+    } elseif {$cmdSyncVar eq "FATAL"} {
+        error "fatal run-time error while executing,\
+                \"[dict get $cmdPattern name]\""
+    } else {
+        after cancel [dict get $cmdPattern timer]
+    }
+
+    if {[dict get $cmdSyncVar name] ne [dict get $cmdPattern name]} {
+        error "expected response for command, \"[dict get $cmdPattern name]\",\
+                got, \"[dict get $cmdSyncVar name]\""
+    }
+    return $cmdSyncVar
+}
+----
+<1> Here, the Tcl event loop is entered and execution is suspended until
+the `HandleCmdResponse` method is run.
+That method will write to the `cmdSyncVar` variable, causing execution
+to resume here.
+
 == Bookstore Execution Scenarios
+
+In this section,
+a set of test cases is presented that execute the Mellor/Balcer
+simple bookstore model.
+This model was translated to micca and that translation can be found
+http://repos.modelrealization.com/cgi-bin/fossil/mrtools/doc/trunk/micca/code/c/mellor-balcer/simplebookstore.pdf[here].
+The execution scenarios in that translation were accomplished by directly
+coding the interactions with the domain as part of the `main()` function.
+Here we have removed that `main` function and create a test harness
+using `bosal` which supplied only a simple `main`.
+The same scenarios are then executed using `mecate` and the `bosal`
+generated test harness.
+The results are the same, however, now the execution scenarios can
+be changed or extended without having to modify the `main` function
+or any other parts of the test harness.
+This represents the added flexiblity that a test harness provides.
 
 [source,tcl]
 ----
@@ -1956,8 +2427,16 @@ test scenario-0.1 {
 } -cleanup {
 } -body {
     ::apptest disconnect
+
     ::apptest clearEventTraceCache
+    ::apptest discardEventTraces
+
     ::apptest clearInstrTraceCache
+    ::apptest discardInstrTraces
+
+    ::apptest clearFatalTraceCache
+    ::apptest discardFatalTraces
+
     after 500
     ::apptest start ./bstore_harness
     ::apptest connect
@@ -2150,6 +2629,11 @@ test scenario-5.1 {
     puts "*** Instrumentation Traces"
     puts "***"
     puts [::apptest formatInstrTraces]
+
+    puts "***"
+    puts "*** Fatal Error Traces"
+    puts "***"
+    puts [::apptest formatFatalTraces]
 } -result {}
 ----
 
@@ -2179,6 +2663,19 @@ test scenario-5.3 {
 } -result {}
 ----
 
+[source,tcl]
+----
+<<scenario tests>>=
+test scenario-5.4 {
+    Discard fatal error traces
+} -setup {
+} -cleanup {
+} -body {
+    ::apptest discardFatalTraces
+    ::apptest formatFatalTraces
+} -result {}
+----
+
 == Code Organization
 
 This section shows how the literate program chunks are organized into
@@ -2192,8 +2689,8 @@ The source code for the `mecate` package is shown below.
 
 ----
 <<mecate.tcl>>=
-# DO NOT EDIT THIS FILE!
-# THIS FILE IS AUTOMATICALLY GENERATED FROM A LITERATE PROGRAM SOURCE FILE.
+<<edit warning>>
+#
 <<copyright info>>
 #
 
@@ -2210,7 +2707,7 @@ namespace eval ::mecate {
 
     logger::initNamespace [namespace current]
 
-    variable version 0.2
+    variable version 1.0
 }
 
 <<mecate commands>>
@@ -2226,8 +2723,8 @@ test file.
 ----
 <<mecate.test>>=
 #!/usr/bin/env tclsh
-# DO NOT EDIT THIS FILE!
-# THIS FILE IS AUTOMATICALLY GENERATED FROM A LITERATE PROGRAM SOURCE FILE.
+#
+<<edit warning>>
 #
 <<copyright info>>
 #
@@ -2284,7 +2781,7 @@ We also provide a root chunk to extract a package index file.
 
 ----
 <<pkgIndex.tcl>>=
-package ifneeded mecate 0.2 [list source [file join $dir mecate.tcl]]
+package ifneeded mecate 1.0 [list source [file join $dir mecate.tcl]]
 ----
 
 === Template
@@ -2294,10 +2791,6 @@ that uses `mecate`.
 
 ----
 <<template-mecate.test>>=
-# DO NOT EDIT THIS FILE!
-# THIS FILE IS AUTOMATICALLY GENERATED FROM A LITERATE PROGRAM SOURCE FILE.
-#
-<<copyright info>>
 #  *++
 # MODULE:
 #	unit test template
@@ -2336,8 +2829,7 @@ namespace eval ::$options(program)::test {
         apptest start
     }
 
-    # Here you can set up any traces that are needed to keep track of the
-    # state of instances or the values of variables.
+    # Here you can turn on any traces that are needed.
     #
     # For example:
     #
@@ -2365,7 +2857,7 @@ namespace eval ::$options(program)::test {
 
 if 0 {
     # This is just a template for additional tests.
-    # You can copy it into your test set to save some typing.
+    # You can paste it into your test set to save some typing.
 
     test X-1.0 {
     } -setup {
@@ -2417,4 +2909,11 @@ if 0 {
 # the authors grant the U.S. Government and others acting in its behalf
 # permission to use and distribute the software in accordance with the
 # terms specified in this license.
+----
+
+[source,tcl]
+----
+<<edit warning>>=
+# DO NOT EDIT THIS FILE!
+# THIS FILE IS AUTOMATICALLY GENERATED FROM A LITERATE PROGRAM SOURCE FILE.
 ----

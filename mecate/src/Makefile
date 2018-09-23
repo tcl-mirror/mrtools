@@ -9,7 +9,7 @@
 #*--
 #
 
-VERSION = 0.2
+VERSION = 1.0
 
 DOCDIR	= ../doc
 CODEDIR	= ../code/tcl
@@ -116,6 +116,7 @@ $(MAN) : $(DOCSRC)
 	a2x $(A2XOPTS) --doctype=article  --format=pdf\
 	    --destination-dir=$(DOCDIR)\
 	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) $<
+	rm -f $(DOCDIR)/mecate__*.*
 
 %.tcl : %.aweb
 	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $(CODEDIR)/$@ $<
