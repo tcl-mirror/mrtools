@@ -74,7 +74,7 @@ test version-1.0 {
     set version [harnessCmdResp version]
     log::info "testing harness created by bosal $version"
     return $version
-} -result {1.1}
+} -result {1.2}
 ----
 
 == Query Domains
@@ -735,6 +735,26 @@ test instr-1.0 {
 } -result {sio: Continuous_Point_readPoint:*} -match glob
 ----
 
+== Fatal Error Traces
+
+(((chunk,bosal harness tests)))
+(((test,instr-1.0)))
+
+[source,tcl]
+----
+<<bosal harness tests>>=
+test fatal-1.0 {
+    Fatal error traces
+} -setup {
+} -cleanup {
+} -body {
+    harnessCmdResp signal lube Injector in3 Good_injection
+    catch {harnessCmdResp eloop once}
+    set match [waitForFatalTrace message *]
+    return [dict get $match message]
+} -result {*CH*} -match glob
+----
+
 == Signal Event
 
 (((chunk,bosal harness tests)))
@@ -1109,6 +1129,8 @@ proc waitForCmdResponse {} {
 
     if {$cmdSyncVar eq "TIMEOUT"} {
         error "timeout for command, \"[dict get $cmdPattern name]\""
+    } elseif {$cmdSyncVar eq "FATAL"} {
+        error "fatal error while executing, \"[dict get $cmdPattern name]\""
     } else {
         after cancel [dict get $cmdPattern timer]
     }
@@ -1197,7 +1219,7 @@ proc traceTimeout {} {
 }
 ----
 
-(((chunk,test utility procs)))
+(((chunk,test utility variables)))
 
 [source,tcl]
 ----
@@ -1255,8 +1277,10 @@ proc waitForInstrTrace {args} {
 
         set timer [after $instrTimeout [namespace code instrTimeout]]
         vwait [namespace current]::instrSyncVar
-        if {$traceSyncVar eq "TIMEOUT"} {
-            error "timed out on receiving event traces"
+        if {$instrSyncVar eq "TIMEOUT"} {
+            error "timed out on receiving instrumentation traces"
+        } elseif {$instrSyncVar eq "FATAL"} {
+            error "fatal error while waiting for instrumentation trace"
         } else {
             after cancel $timer
         }
@@ -1275,6 +1299,16 @@ proc instrTimeout {} {
 }
 ----
 
+(((chunk,test utility variables)))
+
+[source,tcl]
+----
+<<test utility variables>>=
+variable fatalSyncVar {}
+variable fatalReceived [::struct::queue]
+variable fatalTimeout 3000
+----
+
 (((chunk,test utility procs)))
 (((proc,handleFatalResponse)))
 
@@ -1282,8 +1316,66 @@ proc instrTimeout {} {
 ----
 <<test utility procs>>=
 proc handleFatalResponse {respValue} {
-    log::error "fatal error response, \"$respValue\""
-    error $respValue
+    variable fatalReceived
+
+    $fatalReceived put $respValue
+
+    set [namespace current]::fatalSyncVar FATAL
+    set [namespace current]::cmdSyncVar FATAL
+    set [namespace current]::instrSyncVar FATAL
+}
+----
+
+(((chunk,test utility procs)))
+(((proc,waitForFatalTrace)))
+
+[source,tcl]
+----
+<<test utility procs>>=
+proc waitForFatalTrace {args} {
+    variable fatalReceived
+    variable fatalSyncVar
+    variable fatalTimeout
+
+    set expect $args
+    while {true} {
+        while {[$fatalReceived size] != 0} {
+            set actual [$fatalReceived get]
+
+            set fatalMatched 0
+            dict for {key value} $expect {
+                if {[dict exists $actual $key] &&\
+                        [string match $value [dict get $actual $key]]} {
+                    incr fatalMatched
+                }
+            }
+            if {$fatalMatched == [dict size $expect]} {
+                return $actual
+            } else {
+                log::notice "discarding fatal, \"$actual\":\
+                        failed to match, \"$expect\""
+            }
+        }
+
+        set timer [after $fatalTimeout [namespace code fatalTimeout]]
+        vwait [namespace current]::fatalSyncVar
+        if {$fatalSyncVar eq "TIMEOUT"} {
+            error "timed out on receiving fatal error response"
+        } else {
+            after cancel $timer
+        }
+    }
+}
+----
+
+(((chunk,test utility procs)))
+(((proc,fatalTimeout)))
+
+[source,tcl]
+----
+<<test utility procs>>=
+proc fatalTimeout {} {
+    set [namespace current]::fatalSyncVar TIMEOUT
 }
 ----
 
