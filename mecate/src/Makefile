@@ -102,7 +102,7 @@ clean :
 $(PDF) : $(DOCSRC) $(EXTRAS) ../tests/scenario-seq.txt
 
 ../tests/scenario-seq.txt :
-	make -c ../tests runtests
+	make -C ../tests runtests
 
 $(TCLSRC) : $(DOCSRC)
 

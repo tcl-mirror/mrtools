@@ -115,7 +115,9 @@ CLEANFILES	=\
 		micca_rt*\
 		bosal.h\
 		scenarios.*\
+		scenario-seq.*\
 		bookstore_results.info\
+		mecate.test\
 		*.gcno\
 		*.gcda\
 		*.gcov\
