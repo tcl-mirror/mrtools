@@ -9,7 +9,7 @@
 #*--
 #
 
-VERSION = 0.2
+VERSION = 1.0
 
 DOCDIR	= ../doc
 CODEDIR	= ../code/tcl
@@ -99,7 +99,10 @@ template : $(TEMPLATE)
 clean :
 	$(RM) $(CLEANFILES)
 
-$(PDF) : $(DOCSRC) $(EXTRAS)
+$(PDF) : $(DOCSRC) $(EXTRAS) ../tests/scenario-seq.txt
+
+../tests/scenario-seq.txt :
+	make -C ../tests runtests
 
 $(TCLSRC) : $(DOCSRC)
 
@@ -116,6 +119,7 @@ $(MAN) : $(DOCSRC)
 	a2x $(A2XOPTS) --doctype=article  --format=pdf\
 	    --destination-dir=$(DOCDIR)\
 	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) $<
+	rm -f $(DOCDIR)/mecate__*.*
 
 %.tcl : %.aweb
 	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $(CODEDIR)/$@ $<

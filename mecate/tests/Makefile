@@ -69,11 +69,17 @@ CFLAGS	=\
 
 LDFLAGS = -g --coverage
 
-all : $(PROG) runtests
+all : $(PROG) runtests coverage
 
-runtests : 
+runtests :  $(PROG)
 	make -C ../src tests
 	tclsh mecate.test -verbose bet
+
+coverage : runtests
+	lcov --quiet --capture --directory .\
+	    --output-file bookstore_results.info
+	genhtml --quiet --title 'bookstore test coverage'\
+	    --output-directory bookstore_results bookstore_results.info
 
 $(PROG) : $(OBJS)
 	gcc -o $@ $(LDFLAGS) $(OBJS)
@@ -109,6 +115,9 @@ CLEANFILES	=\
 		micca_rt*\
 		bosal.h\
 		scenarios.*\
+		scenario-seq.*\
+		bookstore_results.info\
+		mecate.test\
 		*.gcno\
 		*.gcda\
 		*.gcov\
