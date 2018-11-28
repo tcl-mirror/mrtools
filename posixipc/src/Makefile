@@ -12,14 +12,10 @@
 DOCDIR	= ../doc
 IMAGEDIR = ./images
 CODEDIR	= ../tea/generic
+BUILDDIR = ../tea/build
 TESTDIR = ../test
 
 VERSION=1.0
-
-vpath %.pdf $(DOCDIR)
-vpath %.html $(DOCDIR)
-vpath %.uxf $(IMAGEDIR)
-vpath %.test $(TESTDIR)
 
 DOCSRC 	=\
 	posixipc.aweb\
@@ -34,7 +30,7 @@ CODEFILE =\
 	  $(NULL)
 
 LIBFILE =\
-	  ../tea/build/$(patsubst %.aweb,lib%$(VERSION).so,$(DOCSRC))\
+	  $(BUILDDIR)/$(patsubst %.aweb,lib%$(VERSION).so,$(DOCSRC))\
 	  $(NULL)
 
 TESTFILE =\
@@ -87,7 +83,7 @@ DBLATEX_PARAMS =\
 	bibliography.numbered=0\
 	index.numbered=0\
 	doc.publisher.show=0\
-	doc.lot.show=figure,table\
+	doc.lot.show=figure,table,example\
 	toc.section.depth=2\
 	doc.section.depth=0\
 	$(NULL)
@@ -134,7 +130,7 @@ code : $(CODEFILE)
 lib : $(LIBFILE)
 
 $(LIBFILE) : $(CODEFILE)
-	cd ../tea/build ; make binaries
+	cd $(BUILDDIR) ; make --quiet binaries
 
 test : $(TESTFILE) $(LIBFILE)
 	cd $(TESTDIR) ; tclsh $(patsubst %.aweb,%.test,$(DOCSRC))
@@ -144,16 +140,16 @@ clean :
 
 $(DOCSRC) : $(DOCPARTS)
 
-$(DOCFILE) : $(DOCSRC) $(EXTRAS) $(IMAGES)
+$(DOCFILE) : $(DOCSRC) $(DOCPARTS) $(EXTRAS) $(IMAGES)
 	a2x $(A2XOPTS) --doctype=article  --format=pdf\
 	    --destination-dir=$(DOCDIR)\
 	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) $<
 	$(RM) $(DOCDIR)/*__[0-9].pdf
 
-$(CODEFILE) : $(DOCSRC)
+$(CODEFILE) : $(DOCSRC) $(DOCPARTS)
 	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $@ $(DOCSRC)
 
-$(TESTFILE) : $(DOCSRC)
+$(TESTFILE) : $(DOCSRC) $(DOCPARTS)
 	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $@ $(DOCSRC)
 
 
