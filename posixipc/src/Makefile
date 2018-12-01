@@ -76,8 +76,9 @@ A2XOPTS =\
 # --verbose\
 
 ATANGLEOPTS =\
-	-line '\#line %l% "%f%"'\
 	$(NULL)
+
+# -line '\#line %l% "%f%"'
 
 DBLATEX_PARAMS =\
 	bibliography.numbered=0\
@@ -133,7 +134,7 @@ $(LIBFILE) : $(CODEFILE)
 	cd $(BUILDDIR) ; make --quiet binaries
 
 test : $(TESTFILE) $(LIBFILE)
-	cd $(TESTDIR) ; tclsh $(patsubst %.aweb,%.test,$(DOCSRC))
+	cd $(TESTDIR) ; tclsh $(patsubst %.aweb,%.test,$(DOCSRC)) -verbose bet -level debug
 
 clean :
 	$(RM) $(CLEANFILES)
