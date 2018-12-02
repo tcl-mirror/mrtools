@@ -26,8 +26,8 @@ Of course,
 POSIX message queue semantics do not exactly match those of Tcl channels.
 In particular, there are two areas that require further attention.
 
-1. Messages posted to message queues have a priority.
-1. Message queues are named and potentially have persistence beyond the
+. Messages posted to message queues have a priority.
+. Message queues are named and potentially have persistence beyond the
     lifetime of the creating process.
     Removing a message queue requires a special action.
 
@@ -197,7 +197,7 @@ the state of an individual message queue channel.
 typedef struct {
     Tcl_Channel channel ;       // <1>
     mqd_t mqdes ;               // <2>
-    int opmask ;                // <3>
+    int tclMask ;                // <3>
     unsigned lastpriority ;     // <4>
     unsigned defpriority ;      // <5>
 } MqState ;
@@ -361,8 +361,8 @@ message queue,
 we build some supporting data structures to look up option names.
 The options fall into two categories:
 
-1. Options that can only be set on open.
-1. Options that can be set at any time.
+. Options that can only be set on open.
+. Options that can be set at any time.
 
 Note that all options may be read.
 The restrictions only apply to setting options and those restrictions
@@ -573,6 +573,8 @@ format the option value.
 struct mq_attr attrs ;                      // retrieved mq attributes
 char buf[TCL_INTEGER_SPACE + 16] ;          // formated option values
 
+static char const getAttrFailedMsg[] = "get option: mq_getattr() failed" ;
+
 size_t whichOpt = optProp - mqOptions ;
 switch (whichOpt) {
     case 0:         // curmsgs
@@ -624,7 +626,7 @@ Each case sorts things out as necessary.
 <<mqGetOptionProc: format curmsgs value>>=
 int err = mq_getattr(mqPtr->mqdes, &attrs) ;
 if (err < 0) {
-    return mqFailure(interp, "get option: mq_getattr() failed") ;
+    return mqFailure(interp, getAttrFailedMsg) ;
 }
 snprintf(buf, sizeof(buf), "%ld", attrs.mq_curmsgs) ;
 ----
@@ -640,7 +642,7 @@ snprintf(buf, sizeof(buf), "%u", mqPtr->lastpriority) ;
 <<mqGetOptionProc: format maxmsg value>>=
 int err = mq_getattr(mqPtr->mqdes, &attrs) ;
 if (err < 0) {
-    return mqFailure(interp, "get option: mq_getattr() failed") ;
+    return mqFailure(interp, getAttrFailedMsg) ;
 }
 snprintf(buf, sizeof(buf), "%ld", attrs.mq_maxmsg) ;
 ----
@@ -650,7 +652,7 @@ snprintf(buf, sizeof(buf), "%ld", attrs.mq_maxmsg) ;
 <<mqGetOptionProc: format msgsize value>>=
 int err = mq_getattr(mqPtr->mqdes, &attrs) ;
 if (err < 0) {
-    return mqFailure(interp, "get option: mq_getattr() failed") ;
+    return mqFailure(interp, getAttrFailedMsg) ;
 }
 snprintf(buf, sizeof(buf), "%ld", attrs.mq_msgsize) ;
 ----
@@ -671,6 +673,65 @@ Since we are getting all the options,
 we can start by getting the message queue attributes available
 in the system call, `mq_getattr()`.
 Then the resulting list can be constructed.
+
+.Tests
+[source,tcl]
+----
+<<mq tests>>=
+test get-option-1.0 {
+    Get all message queue options one at a time
+} -setup {
+    set queueName mqtest-gopt1
+} -cleanup {
+    chan close $mqchan
+    file delete [file join $qFSMount $queueName]
+} -body {
+    set mqchan [posixipc mq open /$queueName w+]
+    log::debug "mq channel = $mqchan"
+
+    set optionNames {-curmsgs -lastpriority -maxmsg -msgsize -priority}
+    foreach opt $optionNames {
+        set optValue($opt) [chan configure $mqchan $opt]
+        log::debug "$opt = $optValue($opt)"
+    }
+
+    array set optExpected {
+        -curmsgs 0
+        -lastpriority 0
+        -maxmsg 10
+        -msgsize 8192
+        -priority 0
+    }
+
+    foreach opt $optionNames {
+        if {$optValue($opt) != $optExpected($opt)} {
+            return 0 ;
+        }
+    }
+    return 1
+} -result {1}
+----
+
+[source,tcl]
+----
+<<mq tests>>=
+test get-option-2.0 {
+    Bad option name
+} -setup {
+    set queueName mqtest-gopt2
+} -cleanup {
+    chan close $mqchan
+    file delete [file join $qFSMount $queueName]
+} -body {
+    set mqchan [posixipc mq open /$queueName w+]
+    log::debug "mq channel = $mqchan"
+
+    chan configure $mqchan -foo
+} -result {bad option "-foo": should be one of -blocking, -buffering,\
+        -buffersize, -encoding, -eofchar, -translation, -curmsgs,\
+        -lastpriority, -maxmsg, -msgsize, or -priority}\
+    -returnCodes error
+----
 
 .Getting all options
 [source,c]
@@ -770,6 +831,27 @@ a single code statement.
 
 We need a failure function for when message queue system calls
 don't work.
+
+.Tests
+[source,tcl]
+----
+<<mq tests>>=
+test get-option-3.0 {
+    Get all options for a message queue
+} -setup {
+    set queueName mqtest-gopt3
+} -cleanup {
+    chan close $mqchan
+    file delete [file join $qFSMount $queueName]
+} -body {
+    set mqchan [posixipc mq open /$queueName w+]
+    log::debug "mq channel = $mqchan"
+
+    set opts [chan configure $mqchan]
+    log::debug "option = $opts"
+    return [dict get $opts -msgsize]
+} -result {8192}
+----
 
 [source,c]
 ----
@@ -915,7 +997,7 @@ mqWatchProc(
 {
     MqState *mqPtr = instanceData ;
 
-    mask &= mqPtr->opmask ;
+    mask &= mqPtr->tclMask ;
     if (mask != 0) {
         Tcl_CreateFileHandler(mqPtr->mqdes, mask,
                 (Tcl_FileProc *)Tcl_NotifyChannel, mqPtr->channel) ;
@@ -948,7 +1030,7 @@ mqGetHandleProc(
 {
     MqState *mqPtr = instanceData ;
 
-    if ((direction & mqPtr->opmask) == 0) {
+    if ((direction & mqPtr->tclMask) == 0) {
         return TCL_ERROR ;
     }
 
@@ -972,7 +1054,7 @@ We provide an external function that may be called by a ``C'' based
 extension to open an message queue channel.
 We don't expect that to be a common use case,
 but it is convenient when necessary and we will use the same function
-to provide the Tcl script level command to open an MQ channel.
+to provide the Tcl script level command to open a message queue channel.
 This function is patterned off of the Tcl ``C'' library function,
 `Tcl_FSOpenFileChannel()`.
 So it accepts arguments that are the same as the `mq open` command,
@@ -980,7 +1062,7 @@ parses them and creates the message queue channel.
 
 Most of the work in this function deals with parsing the _mode_
 argument.
-Again, patterned after the Tcl `::open` command,
+Again, patterned after the Tcl `::open` core command,
 it accepts two different forms for the access mode of the message queue.
 The first form is like `fopen(3)` modes and the second form is like
 `open(2)` flags.
@@ -999,7 +1081,7 @@ PosixIPC_OpenMQChannel(
     unsigned priority)
 {
     int flags = 0 ;
-    int opmask = 0 ;
+    int tclMask = 0 ;
     int bintrans = false ;
 
     if (islower(*mode)) {
@@ -1008,114 +1090,111 @@ PosixIPC_OpenMQChannel(
         <<OpenMQChannel: parse open style mode>>
     }
 
-    char const *qname = Tcl_GetString(name) ;
-    mqd_t mqdes ;
-    if ((flags & O_CREAT) != 0) {
-        struct mq_attr attrs = {
-            .mq_flags = 0,
-            .mq_maxmsg = maxmsg,
-            .mq_msgsize = msgsize,
-            .mq_curmsgs = 0
-        } ;
-        mqdes = mq_open(qname, flags, permissions, &attrs) ;
-    } else {
-        mqdes = mq_open(qname, flags) ;
-    }
-    if (mqdes < 0) {
-        mqFailure(interp, "failed to open message queue") ;
-        return NULL ;
-    }
+    <<OpenMQChannel: open message queue>>
 
+    Tcl_Channel mqChan ;
+    <<OpenMQChannel: create message queue channel>>
 
-    char chanName[TCL_INTEGER_SPACE + 16] ;
-    snprintf(chanName, sizeof(chanName), "posixmq%d", mqdes) ;
+    <<OpenMQChannel: set translation option>>
 
-    MqState *mqdata = ckalloc(sizeof(MqState)) ;
-    mqdata->mqdes = mqdes ;
-    mqdata->opmask = opmask ;
-    mqdata->lastpriority = 0 ;
-    mqdata->defpriority = priority ;
-
-    mqdata->channel = Tcl_CreateChannel(&MqChannelType, chanName, mqdata,
-            opmask) ;
-
-    if (bintrans) {
-        if (Tcl_SetChannelOption(interp, mqdata->channel, "-translation",
-                "binary") != TCL_OK) {
-            Tcl_Close(NULL, mqdata->channel) ;
-            return NULL ;
-        }
-    }
-
-    return mqdata->channel ;
+    return mqChan ;
 }
 ----
+
+=== Parsing fopen style modes
+
+First,
+we deal with parsing mode arguments that are patterned after `fopen(3)`.
+We use a data driven approach.
+All possible values of the mode are put into a table that is used to
+map mode name to the flags and other information used in the opening
+of the message queue.
+Parsing in this case implies searching for the mode argument.
+
+We define a data structure to hold the mode name string and its associated
+data.
 
 [source,c]
 ----
 <<mq data types>>=
 struct mqModeDes {
-    char const *modeName ;
-    int oFlags ;
-    int tclMask ;
-    bool isBinary ;
+    char const *modeName ;          // <1>
+    int oFlags ;                    // <2>
+    int tclMask ;                   // <3>
+    bool isBinary ;                 // <4>
 } ;
 ----
+<1> The string value to indicate the opening mode.
+<2> The flags implied by the mode string. These are the `O_*` flags
+    used for opening the message queue.
+<3> A corresponding set of flags as used by Tcl. We will need to check
+    whether the message is readable or writable.
+<4> Indicates whether the message queue is opened in binary mode.
+    We need to know this so the translation configuration on the channel
+    can be properly set.
+
+We use an initialized array variable to hold the set of possible open
+modes.
+Note there are no _append_ modes since this is not a concept supported
+by message queue.
+Also note, the array must be ordered by ascending `modeName`.
 
 [source,c]
 ----
 <<OpenMQChannel: parse fopen style mode>>=
-static struct mqModeDes const mqModes[] = {
+static struct mqModeDes const mqModes[] = { // ordered by ascending modeName!
     {
         .modeName = "r",
         .oFlags = O_RDONLY,
         .tclMask = TCL_READABLE,
         .isBinary = false,
-    },
-    {
+    }, {
         .modeName = "r+",
         .oFlags = O_RDWR,
         .tclMask = TCL_READABLE | TCL_WRITABLE,
         .isBinary = false,
-    },
-    {
+    }, {
         .modeName = "rb",
         .oFlags = O_RDONLY,
         .tclMask = TCL_READABLE,
         .isBinary = true,
-    },
-    {
+    }, {
         .modeName = "rb+",
         .oFlags = O_RDWR,
         .tclMask = TCL_READABLE | TCL_WRITABLE,
         .isBinary = true,
-    },
-    {
+    }, {
         .modeName = "w",
         .oFlags = O_WRONLY | O_CREAT,
         .tclMask = TCL_WRITABLE,
         .isBinary = false,
-    },
-    {
+    }, {
         .modeName = "w+",
         .oFlags = O_RDWR | O_CREAT,
         .tclMask = TCL_READABLE | TCL_WRITABLE,
         .isBinary = false,
-    },
-    {
+    }, {
         .modeName = "wb",
         .oFlags = O_WRONLY | O_CREAT,
         .tclMask = TCL_WRITABLE,
         .isBinary = true,
-    },
-    {
+    }, {
         .modeName = "wb+",
         .oFlags = O_RDWR | O_CREAT,
         .tclMask = TCL_READABLE | TCL_WRITABLE,
         .isBinary = true,
     },
 } ;
+----
 
+We search the initialized array using standard library `bsearch(3)` function.
+Upon finding the mode string,
+we have the information required to perform the open operation on the message
+queue.
+
+[source,c]
+----
+<<OpenMQChannel: parse fopen style mode>>=
 struct mqModeDes key = {
     .modeName = mode,
 } ;
@@ -1125,20 +1204,31 @@ struct mqModeDes const *modeSpec =
         mqModeCompare) ;
 
 if (modeSpec == NULL) {
-    Tcl_SetObjResult(interp, Tcl_ObjPrintf("unknown open mode, %s", mode)) ;
+    Tcl_SetObjResult(interp, Tcl_ObjPrintf("unknown open mode, \"%s\": "
+            "should be one of %s, %s %s, %s, %s, %s, %s, or %s",
+            mode,
+            mqModes[0].modeName, mqModes[1].modeName, mqModes[2].modeName,
+            mqModes[3].modeName, mqModes[4].modeName, mqModes[5].modeName,
+            mqModes[6].modeName, mqModes[7].modeName)) ;
     return NULL ;
 } else {
     flags = modeSpec->oFlags ;
-    opmask = modeSpec->tclMask ;
+    tclMask = modeSpec->tclMask ;
     bintrans = modeSpec->isBinary ;
 }
 ----
+
+As required when using `bsearch(3)`,
+we must supply a comparison function.
 
 [source,c]
 ----
 <<mq forward function declarations>>=
 static int mqModeCompare(void const *m1, void const *m2) ;
 ----
+
+Since we are searching based on string values,
+`strcmp(3)` provides the correct interface.
 
 [source,c]
 ----
@@ -1155,65 +1245,109 @@ mqModeCompare(
 }
 ----
 
+=== Parsing open style modes
+
+The open style modes use a list of key strings to indicate the mode.
+We use the same strategy for parsing as we did previously.
+A mapping structure is built to map the mode name string to the
+set of properties we need to open a message queue in the specified mode.
+We can structure the data in the same manner as with the fopen style
+modes and use the same `mqModeDes` structure definition.
+This also allows us to use the same `bsearch(3)` comparison function.
+
+Note the mode names follow those used in Tcl and are restricted to
+modes that apply to message queues.
+Again,
+the initializers for the array must be ordered by ascending
+`modeName` element value.
+
 [source,c]
 ----
 <<mq data types>>=
 struct mqFlagDes {
-    char const *flagName ;
-    int oFlags ;
-    int tclMask ;
-    bool isBinary ;
+    char const *modeName ;          // <1>
+    int oFlags ;                    // <2>
+    int tclMask ;                   // <3>
+    bool isBinary ;                 // <4>
+    bool isAccessMode ;             // <5>
 } ;
 ----
+<1> The string value to indicate the opening mode.
+<2> The flags implied by the mode string. These are the `O_*` flags
+    used for opening the message queue.
+<3> A corresponding set of flags as used by Tcl. We will need to check
+    whether the message is readable or writable.
+<4> Indicates whether the message queue is opened in binary mode.
+    We need to know this so the translation configuration on the channel
+    can be properly set.
+<5> Indicates whether this flag controls the access mode when opening
+    the message queue.
+    The reason we need this member is because O_RDONLY is actually
+    defined to be zero.
+    So we can't test the value of the `oFlags` member for non-zero to
+    indicate that the RDONLY flag was specified.
+    Bother!
 
 [source,c]
 ----
 <<OpenMQChannel: parse open style mode>>=
-static struct mqFlagDes const mqFlags[] = {
+static struct mqFlagDes const mqFlags[] = { // order by ascending modeName!
     {
-        .flagName = "BINARY",
-        .oFlags = O_CREAT,
+        .modeName = "BINARY",
+        .oFlags = 0,        // BINARY does not affect the open flags.
         .tclMask = 0,
         .isBinary = true,
-    },
-    {
-        .flagName = "CREAT",
+        .isAccessMode = false,
+    }, {
+        .modeName = "CREAT",
         .oFlags = O_CREAT,
         .tclMask = 0,
         .isBinary = false,
-    },
-    {
-        .flagName = "EXCL",
+        .isAccessMode = false,
+    }, {
+        .modeName = "EXCL",
         .oFlags = O_EXCL,
         .tclMask = 0,
         .isBinary = false,
-    },
-    {
-        .flagName = "NONBLOCK",
+        .isAccessMode = false,
+    }, {
+        .modeName = "NONBLOCK",
         .oFlags = O_NONBLOCK,
         .tclMask = 0,
         .isBinary = false,
-    },
-    {
-        .flagName = "RDONLY",
+        .isAccessMode = false,
+    }, {
+        .modeName = "RDONLY",
         .oFlags = O_RDONLY,
         .tclMask = TCL_READABLE,
         .isBinary = false,
-    },
-    {
-        .flagName = "RDWR",
+        .isAccessMode = true,
+    }, {
+        .modeName = "RDWR",
         .oFlags = O_RDWR,
         .tclMask = TCL_READABLE | TCL_WRITABLE,
         .isBinary = false,
-    },
-    {
-        .flagName = "WRONLY",
+        .isAccessMode = true,
+    }, {
+        .modeName = "WRONLY",
         .oFlags = O_WRONLY,
         .tclMask = TCL_WRITABLE,
         .isBinary = false,
+        .isAccessMode = true,
     },
 } ;
+----
 
+The mode argument is a list of flags names to use for opening.
+We must split up the list and then iterate across it to gather
+the set of specified flags.
+The implication of the list is that the various flags implied by
+the list elements are **OR**'ed together.
+
+[source,c]
+----
+<<OpenMQChannel: parse open style mode>>=
+int accessFlagCount = 0 ;
 int modeCount ;
 char const **modeItems ;
 
@@ -1221,56 +1355,62 @@ if (Tcl_SplitList(interp, mode, &modeCount, &modeItems) != TCL_OK) {
     return NULL ;
 }
 
+<<OpenMQChannel: iterate over mode items>>
+
+<<OpenMQChannel: check access direction>>
+----
+
+Iterating over each item in the list,
+we search the flags table for a match.
+Finding a match,
+the associated data is **OR**'ed into the variables used to accumulate
+the bit encoded flags.
+
+[source,c]
+----
+<<OpenMQChannel: iterate over mode items>>=
 for (int itemIndex = 0 ; itemIndex < modeCount ; itemIndex++) {
     struct mqFlagDes key = {
-        .flagName = modeItems[itemIndex],
+        .modeName = modeItems[itemIndex],
     } ;
 
-    struct mqFlagDes const *flag =
-            bsearch(&key, mqFlags, COUNTOF(mqFlags), sizeof(struct mqFlagDes),
+    struct mqFlagDes const *flagSpec =
+            bsearch(&key, mqFlags, COUNTOF(mqFlags), sizeof(struct mqModeDes),
             mqFlagCompare) ;
 
-    if (flag == NULL) {
+    if (flagSpec == NULL) {
         Tcl_SetObjResult(interp,
                 Tcl_ObjPrintf("invalid access mode \"%s\": must be "
                 "%s, %s, %s, %s, %s, %s, or %s", modeItems[itemIndex],
-                mqFlags[0].flagName, mqFlags[1].flagName, mqFlags[2].flagName,
-                mqFlags[3].flagName, mqFlags[4].flagName, mqFlags[5].flagName,
-                mqFlags[6].flagName)) ;
-        ckfree(modeItems) ;
+                mqFlags[0].modeName, mqFlags[1].modeName, mqFlags[2].modeName,
+                mqFlags[3].modeName, mqFlags[4].modeName, mqFlags[5].modeName,
+                mqFlags[6].modeName)) ;
+        ckfree(modeItems) ;     // <1>
         return NULL ;
     } else {
-        flags |= flag->oFlags ;
-        opmask |= flag->tclMask ;
-        bintrans = bintrans || flag->isBinary ;
+        flags |= flagSpec->oFlags ;
+        tclMask |= flagSpec->tclMask ;
+        bintrans = bintrans || flagSpec->isBinary ;
+        accessFlagCount += flagSpec->isAccessMode ;
     }
 }
 
 ckfree(modeItems) ;
-
-bool gotAccessDir = false ;
-static const char accessErrorMsg[] =
-            "access mode must specify exactly one of RDONLY, WRONLY, or RDWR" ;
-if ((flags & O_RDONLY) != 0) {
-    gotAccessDir = true ;
-}
-if ((flags & O_WRONLY) != 0 && gotAccessDir) {
-    Tcl_SetObjResult(interp, Tcl_NewStringObj(accessErrorMsg, -1)) ;
-} else {
-    gotAccessDir = true ;
-}
-if ((flags & O_RDWR) != 0 && gotAccessDir) {
-    Tcl_SetObjResult(interp, Tcl_NewStringObj(accessErrorMsg, -1)) ;
-} else {
-    gotAccessDir = true ;
-}
 ----
+<1> Spliting the list causes memory to be allocated which must be returned.
+Don't bleed memory on an error.
+
+As required when using `bsearch(3)`,
+we must supply a comparison function.
 
 [source,c]
 ----
 <<mq forward function declarations>>=
 static int mqFlagCompare(void const *m1, void const *m2) ;
 ----
+
+Since we are searching based on string values,
+`strcmp(3)` provides the correct interface.
 
 [source,c]
 ----
@@ -1280,14 +1420,259 @@ mqFlagCompare(
     void const *m1,
     void const *m2)
 {
-    struct mqFlagDes const *o1 = m1 ;
-    struct mqFlagDes const *o2 = m2 ;
+    struct mqFlagDes const *f1 = m1 ;
+    struct mqFlagDes const *f2 = m2 ;
 
-    return strcmp(o1->flagName, o2->flagName) ;
+    return strcmp(f1->modeName, f2->modeName) ;
 }
 ----
 
+One of the restrictions for message queue is that some access direction,
+read, write or both, must be specified.
+This is not a problem in the `fopen(3)` style mode string, since an access
+direction is implied by the mode string value.
+However,
+when specifying individual flags, we need to perform the check.
+The rules are that exactly on of read only, write only, or read / write
+must be specified.
+For this reason,
+we have summed the number flags that specify access modes as we iterated
+across the list of flag names.
+Now it is a simple test against one.
+
+[source,c]
+----
+<<OpenMQChannel: check access direction>>=
+if (accessFlagCount != 1) {
+    Tcl_SetObjResult(interp, Tcl_NewStringObj(
+            "access mode must specify exactly one of RDONLY, WRONLY, or RDWR",
+            -1)) ;
+    return NULL ;
+}
+----
+
+Once all the options are parsed and the flag values indicated by the options
+are known,
+we can actually open the message queue.
+The only rule here is that if the flags indicate that the message queue
+is to be created,
+then `mq_open(3)` requires two additional arguments to specify the
+file permissions and the properties of the message queue.
+Note that message queue properties of maximum number of messages in the
+queue and message size can only be set when the message queue is created
+and cannot be changed afterwards.
+
+[source,c]
+----
+<<OpenMQChannel: open message queue>>=
+char const *qname = Tcl_GetString(name) ;
+mqd_t mqdes ;
+if ((flags & O_CREAT) != 0) {
+    struct mq_attr attrs = {
+        .mq_flags = 0,
+        .mq_maxmsg = maxmsg,
+        .mq_msgsize = msgsize,
+        .mq_curmsgs = 0
+    } ;
+    mqdes = mq_open(qname, flags, permissions, &attrs) ;
+} else {
+    mqdes = mq_open(qname, flags) ;
+}
+if (mqdes < 0) {
+    mqFailure(interp, qname) ;
+    return NULL ;
+}
+----
+
+Now that the message queue is open,
+we can create the Tcl channel associated with the message queue.
+After creating the channel,
+we store the data needed to manage the channel in the instance
+data associated to it.
+
+[source,c]
+----
+<<OpenMQChannel: create message queue channel>>=
+char chanName[TCL_INTEGER_SPACE + 16] ;
+snprintf(chanName, sizeof(chanName), "posixmq%d", mqdes) ;
+MqState *mqdata = ckalloc(sizeof(MqState)) ;
+mqChan = Tcl_CreateChannel(&MqChannelType, chanName, mqdata, tclMask) ;
+
+mqdata->channel = mqChan ;
+mqdata->mqdes = mqdes ;
+mqdata->tclMask = tclMask ;
+mqdata->lastpriority = 0 ;
+mqdata->defpriority = priority ;
+----
+
+Finally,
+we need to determine if the channel was opened in binary mode.
+If so,
+we need to instruct the Tcl channel system to set the translation
+properly.
+
+[source,c]
+----
+<<OpenMQChannel: set translation option>>=
+if (bintrans) {
+    if (Tcl_SetChannelOption(interp, mqChan, "-translation", "binary") !=
+            TCL_OK) {
+        Tcl_Close(interp, mqdata->channel) ;
+        return NULL ;
+    }
+}
+----
+
+==== Fopen style mode testing
+
+The following are tests to verify the parsing of the fopen style modes.
+
+[source,tcl]
+----
+<<mq tests>>=
+test fopen-mode-1.0 {
+    Open the message queue in "w" mode
+} -setup {
+    set queueName mqtest-wmode
+    set queueFile [file join $qFSMount $queueName]
+} -cleanup {
+    chan close $mqchan
+    file delete $queueFile
+} -body {
+    set mqchan [posixipc mq open /$queueName w]
+    log::debug "mq channel = $mqchan"
+
+    set fattrs [file attributes $queueFile]
+    log::debug "mq file attributes = $fattrs"
+    set rightUser [expr {[dict get $fattrs -owner] eq $::tcl_platform(user)}]
+
+    set exists [file exists $queueFile]
+
+    return [expr {$rightUser && $exists}]
+} -result {1}
+----
+
+[source,tcl]
+----
+<<mq tests>>=
+test fopen-mode-1.1 {
+    Open the message queue in "wb+" mode
+} -setup {
+    set queueName mqtest-wbppmode
+    set queueFile [file join $qFSMount $queueName]
+} -cleanup {
+    chan close $mqchan
+    file delete $queueFile
+} -body {
+    set mqchan [posixipc mq open /$queueName wb+]
+    log::debug "mq channel = $mqchan"
+
+    set fattrs [file attributes $queueFile]
+    log::debug "mq file attributes = $fattrs"
+    set rightUser [expr {[dict get $fattrs -owner] eq $::tcl_platform(user)}]
+
+    set exists [file exists $queueFile]
+
+    set trans [chan configure $mqchan -translation]
+    log::debug "translation = \"$trans\""
+    set isBinary [expr {$trans eq "lf lf"}]
+
+    return [expr {$rightUser && $exists && $isBinary}]
+} -result {1}
+----
+
+[source,tcl]
+----
+<<mq tests>>=
+test fopen-mode-2.0 {
+    Open the message queue with bad mode
+} -setup {
+    set queueName mqtest-badmode
+} -cleanup {
+} -body {
+    posixipc mq open /$queueName a
+} -result {unknown open mode, "a": should be one of r, r+ rb, rb+, w, w+, wb,\
+        or wb+}\
+    -returnCodes error
+----
+
+==== Open style mode testing
+
+The following are tests to verify the parsing of the open style modes.
+
+[source,tcl]
+----
+<<mq tests>>=
+test open-mode-1.0 {
+    Open the message queue for writing and create if necessary
+} -setup {
+    set queueName mqtest-wrmode
+    set queueFile [file join $qFSMount $queueName]
+} -cleanup {
+    chan close $mqchan
+    file delete $queueFile
+} -body {
+    set mqchan [posixipc mq open /$queueName {WRONLY CREAT}]
+    log::debug "mq channel = $mqchan"
+
+    set fattrs [file attributes $queueFile]
+    log::debug "mq file attributes = $fattrs"
+    set rightUser [expr {[dict get $fattrs -owner] eq $::tcl_platform(user)}]
+
+    set exists [file exists $queueFile]
+
+    return [expr {$rightUser && $exists}]
+} -result {1}
+----
+
+[source,tcl]
+----
+<<mq tests>>=
+test open-mode-2.0 {
+    Attempt to open with a bad flag name.
+} -setup {
+    set queueName mqtest-openerr
+} -cleanup {
+} -body {
+    posixipc mq open /$queueName FOO
+} -result {invalid access mode "FOO": must be BINARY, CREAT, EXCL,\
+        NONBLOCK, RDONLY, RDWR, or WRONLY}\
+    -returnCodes error
+----
+
+[source,tcl]
+----
+<<mq tests>>=
+test open-mode-3.0 {
+    Attempt to open with no access mode flag
+} -setup {
+    set queueName mqtest-openerr
+} -cleanup {
+} -body {
+    posixipc mq open /$queueName CREAT
+} -result {access mode must specify exactly one of RDONLY, WRONLY, or RDWR}\
+    -returnCodes error
+----
+
+[source,tcl]
+----
+<<mq tests>>=
+test open-mode-3.1 {
+    Attempt to open with multiple access mode flags
+} -setup {
+    set queueName mqtest-openerr
+} -cleanup {
+} -body {
+    posixipc mq open /$queueName {RDONLY RDWR}
+} -result {access mode must specify exactly one of RDONLY, WRONLY, or RDWR}\
+    -returnCodes error
+----
+
 == Message Queue Commands
+
+In this section,
+we show the functions that implement the script level commands for
+message queues.
 
 === mq open command
 
@@ -1384,36 +1769,6 @@ permissions::
     _Permissions_ defaults to 0666.
 *******
 
-/////
-posixipc mq open ?options? name
-posixipc mq open ?options? name access
-posixipc mq open ?options? name access permissions
-
-options ==> mq option strings
--maxmsg -- max number of messages on the queue
--msgsize -- max message size
-
-for get options ==> above options plus
--curmsgs -- number of messages currently in queue
-
-access ==> using letters
-r -- read only, file must exist
-r+ -- read/write, file must exist
-w -- write only, create if not exist
-w+ -- read/write, create if not exist
-can add "b" to get binary mode translation
-
-access ==> using flags
-RDONLY
-WRONLY
-RDWR
-CREAT
-EXCL
-NONBLOCK
-
-permissions ==> file permissions, just a number
-/////
-
 [source,c]
 ----
 <<mq forward function declarations>>=
@@ -1431,99 +1786,122 @@ mqOpenCmd(
     int objc,
     Tcl_Obj *const objv[])
 {
-    if (objc < 3) {
+    if (objc < 2) {
         Tcl_WrongNumArgs(interp, 1, objv,
                 "filename ?options? ?access? ?permissions?") ;
         return TCL_ERROR ;
     }
 
-    int maxmsg = 10 ;
-    int msgsize = 8192 ;
-    int priority = 0 ;
+    <<mqOpenCmd: establish default option values>>
 
-    int objindex = 1 ;
-    while (objindex < objc) {
-        char const *optionName = Tcl_GetString(objv[objindex]) ;
-        struct MqConfigOpt const *optProp = lookUpMqOpt(optionName) ;
-        if (optProp == NULL) {
-            break ;
-        }
-        if (!optProp->setOnOpen) {
-            Tcl_SetObjResult(interp,
-                    Tcl_ObjPrintf("option, %s, cannot be set on open",
-                    optProp->optName)) ;
-            return TCL_ERROR ;
-        }
-        if (objindex < objc) {
-            objindex++ ;
-        } else {
-            Tcl_WrongNumArgs(interp, 1, objv,
-                    "filename ?options? ?access? ?permissions?") ;
-            return TCL_ERROR ;
-        }
-        size_t whichOpt = optProp - mqOptions ;
-        switch (whichOpt) {
-            case 2:             // -maxmsg
-                if (Tcl_GetIntFromObj(interp, objv[objindex], &maxmsg) !=
-                        TCL_OK) {
-                    return TCL_ERROR ;
-                }
-                break ;
-            case 3:             // msgsize
-                if (Tcl_GetIntFromObj(interp, objv[objindex], &msgsize) !=
-                        TCL_OK) {
-                    return TCL_ERROR ;
-                }
-                break ;
-            case 4:             // -priority
-                if (Tcl_GetIntFromObj(interp, objv[objindex], &priority) !=
-                        TCL_OK) {
-                    return TCL_ERROR ;
-                }
-                if (priority < 0) {
-                    priority = 0 ;
-                }
-                break ;
-            default:
-                Tcl_Panic("posixipc mq: open option failure: "
-                        "found option named, "
-                        "\"%s\", but no code to process the option",
-                        optionName) ;
-                break ;
-        }
+    <<mqOpenCmd: parse options argument>>
 
-        objindex++ ;
+    <<mqOpenCmd: gather remaining arguments>>
+
+    <<mqOpenCmd: create channel>>
+
+    return TCL_OK ;
+}
+----
+
+[source,c]
+----
+<<mqOpenCmd: establish default option values>>=
+int maxmsg = 10 ;
+int msgsize = 8192 ;
+int priority = 0 ;
+mode_t permissions = 0666 ;
+----
+
+[source,c]
+----
+<<mqOpenCmd: parse options argument>>=
+int objindex = 1 ;
+while (objindex < objc) {
+    char const *optionName = Tcl_GetString(objv[objindex]) ;
+    struct MqConfigOpt const *optProp = lookUpMqOpt(optionName) ;
+    if (optProp == NULL) {
+        break ;
     }
-
-    int remain = objc - objindex ;
-    if (remain < 1) {
-        Tcl_WrongNumArgs(interp, objindex, objv,
+    if (!optProp->setOnOpen) {
+        Tcl_SetObjResult(interp,
+                Tcl_ObjPrintf("option, %s, cannot be set on open",
+                optProp->optName)) ;
+        return TCL_ERROR ;
+    }
+    if (objindex < objc) {
+        objindex++ ;
+    } else {
+        Tcl_WrongNumArgs(interp, 1, objv,
                 "filename ?options? ?access? ?permissions?") ;
         return TCL_ERROR ;
     }
-
-    char const *mode = remain == 1 ? "r" : Tcl_GetString(objv[objindex + 1]) ;
-    mode_t permissions ;
-    if (remain == 3) {
-        int permArgValue ;
-        if (Tcl_GetIntFromObj(interp, objv[objindex + 2], &permArgValue)
-                != TCL_OK) {
-            return TCL_ERROR ;
-        }
-        permissions = permArgValue ;
-    } else {
-        permissions = 0666 ;
+    size_t whichOpt = optProp - mqOptions ;
+    switch (whichOpt) {
+        case 2:             // -maxmsg
+            if (Tcl_GetIntFromObj(interp, objv[objindex], &maxmsg) !=
+                    TCL_OK) {
+                return TCL_ERROR ;
+            }
+            break ;
+        case 3:             // msgsize
+            if (Tcl_GetIntFromObj(interp, objv[objindex], &msgsize) !=
+                    TCL_OK) {
+                return TCL_ERROR ;
+            }
+            break ;
+        case 4:             // -priority
+            if (Tcl_GetIntFromObj(interp, objv[objindex], &priority) !=
+                    TCL_OK) {
+                return TCL_ERROR ;
+            }
+            if (priority < 0) {
+                priority = 0 ;
+            }
+            break ;
+        default:
+            Tcl_Panic("posixipc mq: open option failure: "
+                    "found option named, "
+                    "\"%s\", but no code to process the option",
+                    optionName) ;
+            break ;
     }
 
-    Tcl_Channel chan = PosixIPC_OpenMQChannel(interp, objv[objindex], mode,
-            permissions, maxmsg, msgsize, priority) ;
-    if (chan == NULL) {
+    objindex++ ;
+}
+----
+
+[source,c]
+----
+<<mqOpenCmd: gather remaining arguments>>=
+int remain = objc - objindex ;
+if (remain < 1) {
+    Tcl_WrongNumArgs(interp, objindex, objv,
+            "filename ?options? ?access? ?permissions?") ;
+    return TCL_ERROR ;
+}
+
+char const *mode = remain == 1 ? "r" : Tcl_GetString(objv[objindex + 1]) ;
+if (remain == 3) {
+    int permArgValue ;
+    if (Tcl_GetIntFromObj(interp, objv[objindex + 2], &permArgValue)
+            != TCL_OK) {
         return TCL_ERROR ;
     }
-    Tcl_RegisterChannel(interp, chan) ;
-    Tcl_SetObjResult(interp, Tcl_NewStringObj(Tcl_GetChannelName(chan), -1)) ;
-    return TCL_OK ;
+    permissions = permArgValue ;
 }
+----
+
+[source,c]
+----
+<<mqOpenCmd: create channel>>=
+Tcl_Channel chan = PosixIPC_OpenMQChannel(interp, objv[objindex], mode,
+        permissions, maxmsg, msgsize, priority) ;
+if (chan == NULL) {
+    return TCL_ERROR ;
+}
+Tcl_RegisterChannel(interp, chan) ;
+Tcl_SetObjResult(interp, Tcl_NewStringObj(Tcl_GetChannelName(chan), -1)) ;
 ----
 
 .Tests
@@ -1542,6 +1920,7 @@ test mq-1.0 {
     return $mqchan
 } -result {posixmq[0-9]*} -match glob
 ----
+
 [source,tcl]
 ----
 <<mq tests>>=

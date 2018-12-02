@@ -133,8 +133,12 @@ lib : $(LIBFILE)
 $(LIBFILE) : $(CODEFILE)
 	cd $(BUILDDIR) ; make --quiet binaries
 
+# cd $(BUILDDIR) ; make CFLAGS+=--coverage CFLAGS+=-fPIC --quiet binaries
+
 test : $(TESTFILE) $(LIBFILE)
 	cd $(TESTDIR) ; tclsh $(patsubst %.aweb,%.test,$(DOCSRC)) -verbose bet -level debug
+
+# cd $(BUILDDIR) ; gcov $(patsubst %.aweb,%.c,$(DOCSRC))\
 
 clean :
 	$(RM) $(CLEANFILES)
