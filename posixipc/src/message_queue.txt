@@ -12,24 +12,25 @@ by providing an implementation of a channel driver.
 
 By making a message queue appear as a Tcl channel,
 we can use all the existing Tcl channel infrastructure.
-For example (here we use the `::chan` command rather than individual
-channel oriented commands):
+For example (for simplicity, we use the `::chan` command rather than the
+older style individual channel oriented commands):
 
 * `::chan puts` can be used to place a message onto a message queue.
 * `::chan read` or `::chan gets` can be used to obtain a message from a message
   queue.
 * Blocking, buffering, and translation via `::chan configure`
   operate correctly.
-* Event driven I/O via `::chan event` work properly.
+* Event driven I/O via `::chan event` works correctly.
 
 Of course,
 POSIX message queue semantics do not exactly match those of Tcl channels.
-In particular, there are two areas that require further attention.
+In particular, there are several areas that require further attention.
 
 . Messages posted to message queues have a priority.
 . Message queues are named and potentially have persistence beyond the
     lifetime of the creating process.
     Removing a message queue requires a special action.
+. There is no notion of ``end of file'' for a message queue.
 
 === Message Priority
 
@@ -42,14 +43,14 @@ However, this arrangement is clumsy for use cases that need frequently to use
 differing priorities.
 Consequently, a `mq send` command is also provided which will post a message
 to a message queue with the priority provided as an argument.
-We also provide `ms recieve` to receive a message and the priority at which
-it was posted in one command.
+We also provide `ms receive` to receive both a message and the priority at
+which it was posted in one command.
 Both these commands operate outside of the Tcl channel driver arrangement.
 
 === Removing Message Queues
 
 POSIX message queues have names and in the Linux implementation these
-names show up in the filesystem that is usually mounted at `/dev/mqueue'.
+names show up in the filesystem that is usually mounted at `/dev/mqueue`.
 The names in the filesystem have kernel level persistence and remain
 until explicitly removed or the system is rebooted.
 As a convenience,
@@ -59,6 +60,193 @@ Note is is also possible to remove the message queue using the conventional
 `::file delete` command, but in that case it is necessary to know the
 fully qualified path name to the message queue (_i.e._ `/dev/mqueue/name`
 rather than just `name`).
+Depending upon how the system is configured,
+the message queue file system might be mounted in some place other
+than `/dev/mqueue`.
+
+=== Message Queues and Buffering
+
+Messages have distinct boundaries.
+This is a different semantic than streams of bytes and so our
+mapping of a message queue to the abstraction of a Tcl channel is
+not perfect.
+In particular,
+there can be an interaction between Tcl channel buffering and buffer sizes
+and the requirements of a message channel.
+Two properties of message queue need to be understood:
+
+. Each low level read from a message queue requires a buffer that is at least
+as big as the maximum message size.
+To avoid I/O errors when reading,
+we must make sure the buffer size is adequate to hold the maximum size that a
+message might be.
+. Each low level write to a message channel constitutes a message and both the
+channel buffering mode and the channel buffer size affects when low level
+writes happen.
+
+The easiest way to have the proper buffer size is to configure the
+channel after it is opened.
+For example:
+
+[source,tcl]
+----
+set chan [posixipc mq open /myqueue]
+chan configure $chan -buffersize [chan configure $chan -msgsize]
+----
+
+will insure that the Tcl channel buffer size matches the size of
+a message on the message queue.
+
+The following sections show some example scripts that demonstrate the
+interactions between Tcl channel buffering properties and POSIX
+message queue.
+The scripts show do double duty.
+Not only are they examples,
+but we use them as test cases for the package tests.
+
+==== Simple text example
+
+In this example,
+we demonstrate a simple client / server arrangement
+where plain text messages are passed between them.
+We want one text record to constitute a message.
+The client simply runs `eval` on whatever it receives.
+This gives the server complete control over the execution of the client.
+
+In body of the test,
+the server requests the client to echo three text records that consist of
+just a simple decimal number.
+The server receives the echoed response and accumulates a total of the
+received numbers.
+After the arithmetic,
+the client is commanded to exit.
+
+[source,tcl]
+----
+<<mq examples>>=
+test text-record-messages-1.0 {
+    Pass simple text records as messages.
+} -body {
+    set total 0
+    foreach num {1 2 3} {
+        chan puts $clientChan "chan puts $num"
+        set response [gets $serverChan]
+        log::debug "server: received, \"$response\""
+
+        set total [expr {$total + $response}]
+    }
+
+    chan puts $clientChan {exit}
+    return $total
+} -setup {
+    set serverQueue /mqtest_txt_server
+    <<trm1: create server message queue>>
+
+    set clientQueue /mqtest_txt_client
+    <<trm1: create client message queue>>
+
+    <<trm1: create client script file>>
+
+    <<trm1: run client script>>
+} -cleanup {
+    chan close $serverChan
+    chan close $clientChan
+
+    file delete /dev/mqueue/$clientQueue
+    file delete /dev/mqueue/$serverQueue
+} -result {6}
+----
+
+The test setup has more interesting details.
+First, we create a message queue for the server.
+The server will only read from it.
+The `EXCL` flag is used to insure that the queue doesn't exist
+meaning that things got cleaned up from the last test run.
+The `-buffering line` buffer mode means that each completed text record is
+immediately sent as a message.
+Also note the use of our idiom for insuring the channel buffer size meets
+the message queue requirements.
+
+[source,c]
+----
+<<trm1: create server message queue>>=
+set serverChan [mq open $serverQueue {CREAT EXCL RDONLY}]
+chan configure $serverChan -buffering line\
+        -buffersize [chan configure $serverChan -msgsize]
+log::debug "server queue, \"$serverQueue\", open"
+----
+
+Similarly,
+we create the client message queue.
+From the server's perspective,
+the queue is write only for sending commands to the client.
+
+[source,c]
+----
+<<trm1: create client message queue>>=
+set clientChan [mq open $clientQueue {CREAT EXCL WRONLY}]
+chan configure $clientChan -buffering line\
+        -buffersize [chan configure $clientChan -msgsize]
+log::debug "client queue, \"$clientQueue\", open"
+----
+
+The client script must also open both queues.
+But from the clients perspective,
+the client queue is only read and the server queue is only written.
+After getting everything opened,
+the client loops evaluating each record it receives from the server.
+
+[source,c]
+----
+<<trm1: create client script file>>=
+makeFile {
+    load ../tea/build/libposixipc1.0.so
+
+    namespace import ::posixipc::mq
+
+    set clientQueue /mqtest_txt_client
+    set clientChan [mq open $clientQueue RDONLY]
+    chan configure $clientChan -buffering line\
+            -buffersize [chan configure $clientChan -msgsize]
+
+    set serverQueue /mqtest_txt_server
+    chan close stdout                               ; # <1>
+    set serverChan [mq open $serverQueue WRONLY]
+    chan configure $serverChan -buffering line\
+            -buffersize [chan configure $serverChan -msgsize]
+
+    while {[gets $clientChan line] != -1} {
+        try {
+            eval $line
+        } on error {result} {
+            chan puts "error: $result"
+            break
+        }
+    }
+
+    chan close $serverChan
+    chan close $clientChan
+} txt-client.tcl
+----
+<1> This is a bit of trickery here.
+By closing `stdout` before opening the server queue, the Tcl channel
+system will insure that the newly open channel is used as `stdout`.
+This behavior follows the usual behavior for UNIX file descriptors.
+UNIX file descriptors are assigned the lowest number possible.
+This behavior of taking over the `stdout` channel since it was
+closed means the server can send a `chan puts` command without
+a channel specifier and insure that the response is echoed back to the
+server's message queue.
+
+The client is run in the background.
+The server sends an `exit` command to kill the client.
+
+[source,c]
+----
+<<trm1: run client script>>=
+exec tclsh txt-client.tcl &
+log::debug "client started in the background"
+----
 
 === Channel Driver Components
 
@@ -1678,8 +1866,8 @@ message queues.
 
 *******
 `posixipc mq open` ?options? mqname +
-`posixipc mq open` ?options? mqname access +
-`posixipc mq open` ?options? mqname access permissions
+`posixipc mq open` ?options? mqname ?access? +
+`posixipc mq open` ?options? mqname ?access? ?permissions?
 
 options::
     The following options are write only and must be supplied to the `open`
@@ -1776,6 +1964,10 @@ static int mqOpenCmd(ClientData clientData, Tcl_Interp *interp, int objc,
         Tcl_Obj *const objv[]) ;
 ----
 
+Like much of the ``C'' code for Tcl commands,
+we spend a good deal of effort just to parse and validate the input
+arguments.
+
 [source,c]
 ----
 <<mq static function definitions>>=
@@ -1786,15 +1978,15 @@ mqOpenCmd(
     int objc,
     Tcl_Obj *const objv[])
 {
+    static char const usage[] = "?options? filename ?access? ?permissions?" ;
     if (objc < 2) {
-        Tcl_WrongNumArgs(interp, 1, objv,
-                "filename ?options? ?access? ?permissions?") ;
+        Tcl_WrongNumArgs(interp, 1, objv, usage) ;
         return TCL_ERROR ;
     }
 
     <<mqOpenCmd: establish default option values>>
 
-    <<mqOpenCmd: parse options argument>>
+    <<mqOpenCmd: parse options arguments>>
 
     <<mqOpenCmd: gather remaining arguments>>
 
@@ -1804,84 +1996,169 @@ mqOpenCmd(
 }
 ----
 
+We assign the argument defaults to variables.
+These variables are then overwritten as matching arguments are found.
+For the maximum number of messages (`maxmsg`) and message size (`msgsize`)
+arguments,
+the values are the default for many Linux installations.
+
 [source,c]
 ----
 <<mqOpenCmd: establish default option values>>=
 int maxmsg = 10 ;
 int msgsize = 8192 ;
 int priority = 0 ;
+char const *mode = "r" ;
 mode_t permissions = 0666 ;
 ----
 
+Because some properties of a message queue can only be specified when
+the queue is created,
+it is necessary for the `mq open` command to accept these arguments.
+The arguments are just the ones we have seen before when dealing
+with the configuration procedures.
+
+We will deal with these open options in the same way as for the configurtion
+procedures, namely, look them up in our table and then convert the
+option value into an internal representation.
+
+There are two minor issues to be handled:
+
+. _Options_ must be specified as option name / option value pairs.
+. The _options_ are optional. They may not be specified and so we must
+to be able to skip them to find the required arguments.
+
+To handle these issues,
+this design uses an `objindex` as a cursor to track our current location in
+the command argument handling.
+The index is incremented as we iterate across the arguments to the command
+and can then be used to locate option values.
+
 [source,c]
 ----
-<<mqOpenCmd: parse options argument>>=
-int objindex = 1 ;
-while (objindex < objc) {
-    char const *optionName = Tcl_GetString(objv[objindex]) ;
-    struct MqConfigOpt const *optProp = lookUpMqOpt(optionName) ;
-    if (optProp == NULL) {
-        break ;
-    }
-    if (!optProp->setOnOpen) {
-        Tcl_SetObjResult(interp,
-                Tcl_ObjPrintf("option, %s, cannot be set on open",
-                optProp->optName)) ;
-        return TCL_ERROR ;
-    }
-    if (objindex < objc) {
-        objindex++ ;
-    } else {
-        Tcl_WrongNumArgs(interp, 1, objv,
-                "filename ?options? ?access? ?permissions?") ;
-        return TCL_ERROR ;
-    }
-    size_t whichOpt = optProp - mqOptions ;
-    switch (whichOpt) {
-        case 2:             // -maxmsg
-            if (Tcl_GetIntFromObj(interp, objv[objindex], &maxmsg) !=
-                    TCL_OK) {
-                return TCL_ERROR ;
-            }
-            break ;
-        case 3:             // msgsize
-            if (Tcl_GetIntFromObj(interp, objv[objindex], &msgsize) !=
-                    TCL_OK) {
-                return TCL_ERROR ;
-            }
-            break ;
-        case 4:             // -priority
-            if (Tcl_GetIntFromObj(interp, objv[objindex], &priority) !=
-                    TCL_OK) {
-                return TCL_ERROR ;
-            }
-            if (priority < 0) {
-                priority = 0 ;
-            }
-            break ;
-        default:
-            Tcl_Panic("posixipc mq: open option failure: "
-                    "found option named, "
-                    "\"%s\", but no code to process the option",
-                    optionName) ;
-            break ;
-    }
+<<mqOpenCmd: parse options arguments>>=
+int objindex = 1 ;                                      // <1>
+for ( ; objindex < objc ; objindex++) {
+    <<mqOpenCmd: look up the option name>>
 
-    objindex++ ;
+    <<mqOpenCmd: index the option value>>
+
+    <<mqOpenCmd: convert the option value>>
 }
 ----
+<1> Skip the command name and refer to the first real argument.
+Also, we need `objindex` later, so it must be declared outside
+of the `for` statement.
+
+To look up the option name,
+we use `lookUpMqOpt()` that was described previously.
+
+[source,c]
+----
+<<mqOpenCmd: look up the option name>>=
+char const *optionName = Tcl_GetString(objv[objindex]) ;
+if (strcmp(optionName, "--") == 0) {                        // <1>
+    break ;
+}
+struct MqConfigOpt const *optProp = lookUpMqOpt(optionName) ;
+if (optProp == NULL) {     // <2>
+    break ;
+}
+if (!optProp->setOnOpen) {                                  // <3>
+    Tcl_SetObjResult(interp,
+            Tcl_ObjPrintf("option, %s, cannot be set on open: "
+            "should be one of: %s, %s, or %s",
+            optProp->optName, mqOptions[2].optName, mqOptions[3].optName,
+            mqOptions[4].optName)) ;
+    return TCL_ERROR ;
+}
+----
+<1> Using the usual convention, "--" stops option process so that
+the next argument could start with a dash character.
+<2> The first command argument that doesn't look like a valid option
+halts option processing.
+<3> Options that can't be set on an open call are in error.
+
+Having found the option to be allowed,
+we increment `objindex` to index its value.
+We must not increment off the end of the argument array.
+
+[source,c]
+----
+<<mqOpenCmd: index the option value>>=
+if (++objindex >= objc) {
+    Tcl_WrongNumArgs(interp, 1, objv, usage) ;
+    return TCL_ERROR ;
+}
+----
+
+There is specific code required to convert the option value into
+the proper internal form.
+Again we will fall back on our previous stategy by computing the
+array index of the option in the option table and using that
+as an integer encoding in a `switch` statement.
+
+[source,c]
+----
+<<mqOpenCmd: convert the option value>>=
+size_t whichOpt = optProp - mqOptions ;
+switch (whichOpt) {
+    case 2:             // -maxmsg
+        if (Tcl_GetIntFromObj(interp, objv[objindex], &maxmsg) !=
+                TCL_OK) {
+            return TCL_ERROR ;
+        }
+        break ;
+    case 3:             // -msgsize
+        if (Tcl_GetIntFromObj(interp, objv[objindex], &msgsize) !=
+                TCL_OK) {
+            return TCL_ERROR ;
+        }
+        break ;
+    case 4:             // -priority
+        if (Tcl_GetIntFromObj(interp, objv[objindex], &priority) !=
+                TCL_OK) {
+            return TCL_ERROR ;
+        }
+        if (priority < 0) {                                 // <1>
+            Tcl_SetObjResult(interp,
+                    Tcl_ObjPrintf("negative values for option, \"%s\", "
+                    "are not allowed: got %d",
+                    optionName, priority)) ;
+            return TCL_ERROR ;
+        }
+        break ;
+    default:
+        Tcl_Panic("posixipc mq: open option failure: "
+                "found option named, "
+                "\"%s\", but no code to process the option",
+                optionName) ;
+        break ;
+}
+----
+<1> Negative priorities are not allowed.
+
+Having dealt with options that might affect the message creation,
+we need to gather up the message queue name and any access mode
+or creation permission arguments that were specified.
+We start by computing the number of remaining arguments.
+From there, we can decide if there were enough arguments and
+which of the optional arguments that come after the message queue
+name are present.
 
 [source,c]
 ----
 <<mqOpenCmd: gather remaining arguments>>=
 int remain = objc - objindex ;
-if (remain < 1) {
-    Tcl_WrongNumArgs(interp, objindex, objv,
-            "filename ?options? ?access? ?permissions?") ;
+if (remain < 1 || remain > 3) {
+    Tcl_WrongNumArgs(interp, 1, objv, usage) ;
     return TCL_ERROR ;
 }
 
-char const *mode = remain == 1 ? "r" : Tcl_GetString(objv[objindex + 1]) ;
+if (remain > 1) {
+    mode = Tcl_GetString(objv[objindex + 1]) ;
+}
+
 if (remain == 3) {
     int permArgValue ;
     if (Tcl_GetIntFromObj(interp, objv[objindex + 2], &permArgValue)
@@ -1892,6 +2169,10 @@ if (remain == 3) {
 }
 ----
 
+Finally,
+we can invoke `PosixIPC_OpenMQChannel()` to create the message queue
+channel.
+
 [source,c]
 ----
 <<mqOpenCmd: create channel>>=
@@ -1900,9 +2181,11 @@ Tcl_Channel chan = PosixIPC_OpenMQChannel(interp, objv[objindex], mode,
 if (chan == NULL) {
     return TCL_ERROR ;
 }
-Tcl_RegisterChannel(interp, chan) ;
+Tcl_RegisterChannel(interp, chan) ;                             // <1>
 Tcl_SetObjResult(interp, Tcl_NewStringObj(Tcl_GetChannelName(chan), -1)) ;
 ----
+<1> Newly created channels must be registered to be used in the
+interpreter.
 
 .Tests
 [source,tcl]
