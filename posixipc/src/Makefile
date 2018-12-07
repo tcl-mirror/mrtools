@@ -29,6 +29,10 @@ CODEFILE =\
 	  $(CODEDIR)/$(patsubst %.aweb,%.c,$(DOCSRC))\
 	  $(NULL)
 
+OBJFILE =\
+	  $(BUILDDIR)/$(patsubst %.aweb,%.o,$(DOCSRC))\
+	  $(NULL)
+
 LIBFILE =\
 	  $(BUILDDIR)/$(patsubst %.aweb,lib%$(VERSION).so,$(DOCSRC))\
 	  $(NULL)
@@ -120,7 +124,7 @@ TESTOPTS =\
 	-level debug\
 	$(NULL)
 
-.PHONY : all doc code test
+.PHONY : all doc code test coverage
 
 all : doc code
 
@@ -128,20 +132,27 @@ doc : $(PDF)
 
 code : $(CODEFILE)
 
-lib : $(LIBFILE)
-
-$(LIBFILE) : $(CODEFILE)
-	cd $(BUILDDIR) ; make --quiet binaries
-
-# cd $(BUILDDIR) ; make CFLAGS+=--coverage CFLAGS+=-fPIC --quiet binaries
-
 test : $(TESTFILE) $(LIBFILE)
-	cd $(TESTDIR) ; tclsh $(patsubst %.aweb,%.test,$(DOCSRC)) -verbose bet -level debug
+	cd $(TESTDIR) ; tclsh $(notdir $(TESTFILE)) $(TESTOPTS)
 
-# cd $(BUILDDIR) ; gcov $(patsubst %.aweb,%.c,$(DOCSRC))\
+coverage :
+	$(RM) $(LIBFILE)
+	$(RM) $(OBJFILE)
+	$(RM) $(BUILDDIR)/*.gc*
+	cd $(BUILDDIR) ; make CFLAGS+=--coverage binaries
+	cd $(TESTDIR) ; tclsh $(notdir $(TESTFILE)) $(TESTOPTS)
+	cd $(BUILDDIR) ;\
+		mkdir --parents coverage ;\
+		lcov --quiet --capture --directory .\
+			--output-file capture_results.info ;\
+		genhtml --quiet --title 'posixipc test coverage'\
+			--output-directory coverage capture_results.info
 
 clean :
 	$(RM) $(CLEANFILES)
+
+$(LIBFILE) : $(CODEFILE)
+	cd $(BUILDDIR) ; make --quiet binaries
 
 $(DOCSRC) : $(DOCPARTS)
 

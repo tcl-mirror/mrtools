@@ -22,23 +22,33 @@ older style individual channel oriented commands):
   operate correctly.
 * Event driven I/O via `::chan event` works correctly.
 
+=== Message Queue Semantics
+
 Of course,
 POSIX message queue semantics do not exactly match those of Tcl channels.
 In particular, there are several areas that require further attention.
 
 . Messages posted to message queues have a priority.
-. Message queues are named and potentially have persistence beyond the
-    lifetime of the creating process.
+. Like files, message queues are named and potentially have persistence beyond
+    the lifetime of the creating process.
     Removing a message queue requires a special action.
 . There is no notion of ``end of file'' for a message queue.
+    A message queue exist until either:
+    .. the system is rebooted or
+    .. the message queue is unlinked and all open file descriptors that
+        reference the message queue are closed.
+        This last condition is just like that of an ordinary file.
 
-=== Message Priority
+==== Message Priority
 
 We will handle message priority in two ways.
 One of the configuration options for a message queue based channel
 is a default priority.
-This can be set via `::chan configure` and will be used when
+This can be set via `::chan configure -priority` command and will be used when
 I/O operations on the message queue come via the Tcl virtual channel interface.
+The priority of the last received message is also available as a
+read only configuration option, `-lastpriority`.
+
 However, this arrangement is clumsy for use cases that need frequently to use 
 differing priorities.
 Consequently, a `mq send` command is also provided which will post a message
@@ -47,7 +57,7 @@ We also provide `ms receive` to receive both a message and the priority at
 which it was posted in one command.
 Both these commands operate outside of the Tcl channel driver arrangement.
 
-=== Removing Message Queues
+==== Removing Message Queues
 
 POSIX message queues have names and in the Linux implementation these
 names show up in the filesystem that is usually mounted at `/dev/mqueue`.
@@ -64,7 +74,7 @@ Depending upon how the system is configured,
 the message queue file system might be mounted in some place other
 than `/dev/mqueue`.
 
-=== Message Queues and Buffering
+==== Message Queues and Buffering
 
 Messages have distinct boundaries.
 This is a different semantic than streams of bytes and so our
@@ -73,38 +83,32 @@ not perfect.
 In particular,
 there can be an interaction between Tcl channel buffering and buffer sizes
 and the requirements of a message channel.
-Two properties of message queue need to be understood:
+Two characteristics of message queues need to be understood:
 
 . Each low level read from a message queue requires a buffer that is at least
 as big as the maximum message size.
 To avoid I/O errors when reading,
 we must make sure the buffer size is adequate to hold the maximum size that a
-message might be.
+message might be and the maximum message size is determined when the
+message queue is created.
 . Each low level write to a message channel constitutes a message and both the
-channel buffering mode and the channel buffer size affects when low level
+channel buffering mode and the channel buffer size can affect when low level
 writes happen.
 
-The easiest way to have the proper buffer size is to configure the
-channel after it is opened.
-For example:
+To help in handling the buffering,
+opening a message queue channel automatically sets the channel buffer size
+to be the same size as the messages for the message queue.
+Note the buffer size is independent of the buffering mode.
 
-[source,tcl]
-----
-set chan [posixipc mq open /myqueue]
-chan configure $chan -buffersize [chan configure $chan -msgsize]
-----
-
-will insure that the Tcl channel buffer size matches the size of
-a message on the message queue.
-
-The following sections show some example scripts that demonstrate the
+The following sections,
+we show some example scripts that demonstrate the
 interactions between Tcl channel buffering properties and POSIX
 message queue.
-The scripts show do double duty.
+The scripts perform double duty.
 Not only are they examples,
 but we use them as test cases for the package tests.
 
-==== Simple text example
+===== Simple text example
 
 In this example,
 we demonstrate a simple client / server arrangement
@@ -113,13 +117,14 @@ We want one text record to constitute a message.
 The client simply runs `eval` on whatever it receives.
 This gives the server complete control over the execution of the client.
 
-In body of the test,
+In the body of the test,
 the server requests the client to echo three text records that consist of
 just a simple decimal number.
 The server receives the echoed response and accumulates a total of the
 received numbers.
 After the arithmetic,
-the client is commanded to exit.
+the client is commanded to break out of its loop resulting in the
+client exiting.
 
 [source,tcl]
 ----
@@ -136,7 +141,7 @@ test text-record-messages-1.0 {
         set total [expr {$total + $response}]
     }
 
-    chan puts $clientChan {exit}
+    chan puts $clientChan break
     return $total
 } -setup {
     set serverQueue /mqtest_txt_server
@@ -160,19 +165,17 @@ test text-record-messages-1.0 {
 The test setup has more interesting details.
 First, we create a message queue for the server.
 The server will only read from it.
-The `EXCL` flag is used to insure that the queue doesn't exist
-meaning that things got cleaned up from the last test run.
+The `EXCL` flag is used to insure that the queue doesn't exist when
+it is created.
+This insures things got cleaned up properly from the last test run.
 The `-buffering line` buffer mode means that each completed text record is
 immediately sent as a message.
-Also note the use of our idiom for insuring the channel buffer size meets
-the message queue requirements.
 
 [source,c]
 ----
 <<trm1: create server message queue>>=
 set serverChan [mq open $serverQueue {CREAT EXCL RDONLY}]
-chan configure $serverChan -buffering line\
-        -buffersize [chan configure $serverChan -msgsize]
+chan configure $serverChan -buffering line
 log::debug "server queue, \"$serverQueue\", open"
 ----
 
@@ -185,8 +188,7 @@ the queue is write only for sending commands to the client.
 ----
 <<trm1: create client message queue>>=
 set clientChan [mq open $clientQueue {CREAT EXCL WRONLY}]
-chan configure $clientChan -buffering line\
-        -buffersize [chan configure $clientChan -msgsize]
+chan configure $clientChan -buffering line
 log::debug "client queue, \"$clientQueue\", open"
 ----
 
@@ -206,14 +208,12 @@ makeFile {
 
     set clientQueue /mqtest_txt_client
     set clientChan [mq open $clientQueue RDONLY]
-    chan configure $clientChan -buffering line\
-            -buffersize [chan configure $clientChan -msgsize]
+    chan configure $clientChan -buffering line
 
     set serverQueue /mqtest_txt_server
     chan close stdout                               ; # <1>
     set serverChan [mq open $serverQueue WRONLY]
-    chan configure $serverChan -buffering line\
-            -buffersize [chan configure $serverChan -msgsize]
+    chan configure $serverChan -buffering line
 
     while {[gets $clientChan line] != -1} {
         try {
@@ -239,7 +239,7 @@ a channel specifier and insure that the response is echoed back to the
 server's message queue.
 
 The client is run in the background.
-The server sends an `exit` command to kill the client.
+The server sends an `break` command to force the client to exit.
 
 [source,c]
 ----
@@ -248,7 +248,250 @@ exec tclsh txt-client.tcl &
 log::debug "client started in the background"
 ----
 
-=== Channel Driver Components
+===== Multi-record text example
+
+This example is an extension of the previous example.
+Rather than each message being a single text record,
+we will group multiple records together into a message.
+You can think of the multiple records as a type of message header.
+
+We can accomplish sending multiple records in a message by changing the
+`-buffering` option to `full` and then performing a `flush`
+when we have buffered all the records for the message.
+On the receiving side,
+we can still use `line` buffering, since the Tcl channel code
+will read the message as a single block and then parcel it out
+line by line.
+So on the server side we set up the server message queue channel with
+`line` buffering and the client message queue channel with `full` buffering.
+On the client side, we invert the sense, setting the client message
+queue channel to `line` buffering and the server message queue channel
+to `full` buffering.
+
+[source,tcl]
+----
+<<mq examples>>=
+test text-record-messages-2.0 {
+    Pass multiple text records as a message.
+} -body {
+    foreach num {3 4 5} {
+        chan puts $clientChan "chan puts $num"
+    }
+    chan puts $clientChan break ; # causes client to break out of its loop
+    chan flush $clientChan
+
+    set total 0
+    for {set i 0} {$i < 3} {incr i} {
+        set response [gets $serverChan]
+        log::debug "server: received, \"$response\""
+        set total [expr {$total + $response}]
+    }
+
+    return $total
+} -setup {
+    set serverQueue /mqtest_mtxt_server
+    <<trm2: create server message queue>>
+
+    set clientQueue /mqtest_mtxt_client
+    <<trm2: create client message queue>>
+
+    <<trm2: create client script file>>
+
+    <<trm2: run client script>>
+} -cleanup {
+    chan close $serverChan
+    chan close $clientChan
+
+    file delete /dev/mqueue/$clientQueue
+    file delete /dev/mqueue/$serverQueue
+} -result {12}
+----
+
+On the server side,
+the server channel is set to `line` buffering.
+This makes it easy for the server to read each record in the
+message as a single line.
+This happens despite each message containing multiple text records.
+
+[source,c]
+----
+<<trm2: create server message queue>>=
+set serverChan [mq open $serverQueue {CREAT EXCL RDONLY}]
+chan configure $serverChan -buffering line
+log::debug "server queue, \"$serverQueue\", open"
+----
+
+Still on the server side,
+we make the client channel `full` buffering causing the Tcl channel place
+multiple text records in the same message.
+
+[source,c]
+----
+<<trm2: create client message queue>>=
+set clientChan [mq open $clientQueue {CREAT EXCL WRONLY}]
+chan configure $clientChan -buffering full
+log::debug "client queue, \"$clientQueue\", open"
+----
+
+The client side inverts the sense of the buffering of the two channels.
+This allows the client to read and evaluate each text record
+on a line by line basis.
+However, the response to the server are batched up.
+
+[source,c]
+----
+<<trm2: create client script file>>=
+makeFile {
+    load ../tea/build/libposixipc1.0.so
+
+    namespace import ::posixipc::mq
+
+    set clientQueue /mqtest_mtxt_client
+    set clientChan [mq open $clientQueue RDONLY]
+    chan configure $clientChan -buffering line
+
+    set serverQueue /mqtest_mtxt_server
+    chan close stdout                               ; # <1>
+    set serverChan [mq open $serverQueue WRONLY]
+    chan configure $serverChan -buffering full
+
+    while {[gets $clientChan line] > 0} {
+        try {
+            eval $line
+        } on error {result} {
+            chan puts "error: $result"
+            break
+        }
+    }
+    chan flush stdout   ; # <2>
+
+    chan close $serverChan
+    chan close $clientChan
+} mtxt-client.tcl
+----
+<1> This is the same bit of trickery we used before.
+<2> The `flush` causes the multiple, buffered responses to be sent as a single
+message back to the server.
+
+[source,c]
+----
+<<trm2: run client script>>=
+exec tclsh mtxt-client.tcl &
+log::debug "client started in the background"
+----
+
+===== Event driven text example
+
+This example is like the simple single record in a message example,
+except we run the client using event driven I/O.
+
+[source,tcl]
+----
+<<mq examples>>=
+test text-record-messages-3.0 {
+    Pass simple text records as messages.
+} -body {
+    set total 0
+    foreach num {7 8 9} {
+        chan puts $clientChan "chan puts $num"
+        set response [gets $serverChan]
+        log::debug "server: received, \"$response\""
+
+        set total [expr {$total + $response}]
+    }
+
+    chan puts $clientChan exit  ; # <1>
+    return $total
+} -setup {
+    set serverQueue /mqtest_edtxt_server
+    <<trm3: create server message queue>>
+
+    set clientQueue /mqtest_edtxt_client
+    <<trm3: create client message queue>>
+
+    <<trm3: create client script file>>
+
+    <<trm3: run client script>>
+} -cleanup {
+    chan close $serverChan
+    chan close $clientChan
+
+    file delete /dev/mqueue/$clientQueue
+    file delete /dev/mqueue/$serverQueue
+} -result {24}
+----
+<1> Since the client is event driven and not running a loop,
+we require an exit command to terminate.
+
+We set up the server side just as before using `line` buffering.
+
+[source,c]
+----
+<<trm3: create server message queue>>=
+set serverChan [mq open $serverQueue {CREAT EXCL RDONLY}]
+chan configure $serverChan -buffering line
+log::debug "server queue, \"$serverQueue\", open"
+----
+
+[source,c]
+----
+<<trm3: create client message queue>>=
+set clientChan [mq open $clientQueue {CREAT EXCL WRONLY}]
+chan configure $clientChan -buffering line
+log::debug "client queue, \"$clientQueue\", open"
+----
+
+The client also uses `line` buffering.
+However,
+the `while` loop is now gone and is replaced by a file event
+which triggers a `proc` to evaluate the line and interact with the
+server.
+
+[source,c]
+----
+<<trm3: create client script file>>=
+makeFile {
+    load ../tea/build/libposixipc1.0.so
+
+    namespace import ::posixipc::mq
+
+    set clientQueue /mqtest_edtxt_client
+    set clientChan [mq open $clientQueue RDONLY]
+    chan configure $clientChan -buffering line -blocking false
+
+    set serverQueue /mqtest_edtxt_server
+    chan close stdout
+    set serverChan [mq open $serverQueue WRONLY]
+    chan configure $serverChan -buffering line
+
+    proc ::readMsg {mqchan} {
+        set line [chan gets $mqchan]
+        try {
+            eval $line
+        } on error {result} {
+            chan puts "error: $result"
+            return -code error $result
+        }
+    }
+
+    chan event $clientChan readable [list ::readMsg $clientChan]
+    vwait forever
+} ed-txt-client.tcl
+----
+
+The `chan event` sets up the channel so that `::readMsg` is invoked
+when a message arrives.
+Of course, the event loop must be entered via `vwait` to process
+the I/O events.
+
+[source,c]
+----
+<<trm3: run client script>>=
+exec tclsh ed-txt-client.tcl &
+log::debug "client started in the background"
+----
+
+=== Message Queue Channel Driver
 
 A Tcl channel driver consists of a specific set of functions that
 match a fixed API and a Tcl level command to open or create the underlying
@@ -256,7 +499,7 @@ channel.
 In what follows, we present the Tcl channel driver functions first,
 followed by the Tcl level commands.
 
-=== Message Queue Channel Driver
+==== Channel Driver Components
 
 In this section,
 we describe the functions supplied for the Tcl channel driver that
@@ -401,7 +644,7 @@ typedef struct {
 The following sections describe each of the functions supplied as part
 of the message queue channel driver.
 
-==== Block mode procedure
+===== Block mode procedure
 
 [source,c]
 ----
@@ -437,7 +680,7 @@ mqBlockModeProc(
 `mq_setattr()` is `mq_flags`.
 All the other members are ignored, per the man page.
 
-==== Close procedure
+===== Close procedure
 
 [source,c]
 ----
@@ -469,7 +712,7 @@ mqCloseProc(
 <1> Closing the message queue implies any handlers are also deleted.
 <2> Deallocate the state information as it is not longer required.
 
-==== Input procedure
+===== Input procedure
 
 [source,c]
 ----
@@ -504,7 +747,7 @@ mqInputProc(
 <1> We save the priority of the last message so it can be queried later
 if desired.
 
-==== Output procedure
+===== Output procedure
 
 [source,c]
 ----
@@ -542,7 +785,7 @@ are allowed.
 Also, since we are in the channel driver,
 we supply the message priority as the default priority.
 
-==== Configuration options access support
+===== Configuration options access support
 
 Before we can get to the procedures that get and set configuration options on a
 message queue,
@@ -674,7 +917,7 @@ mqOptCompare(
 }
 ----
 
-==== Get option procedure
+===== Get option procedure
 
 [source,c]
 ----
@@ -1067,7 +1310,7 @@ mqFailure(
 }
 ----
 
-==== Set option procedure
+===== Set option procedure
 
 [source,c]
 ----
@@ -1161,7 +1404,66 @@ if (priority < 0) {
 mqPtr->defpriority = priority ;
 ----
 
-==== Watch procedure
+.Tests
+[source,tcl]
+----
+<<mq tests>>=
+test set-option-1.0 {
+    Set / get priority option on open queue
+} -setup {
+    set queueName /mqtest_so1
+    set queueFile /dev/mqueue$queueName
+} -cleanup {
+    chan close $mqchan
+    file delete $queueFile
+} -body {
+    set mqchan [posixipc mq open $queueName w+]
+    log::debug "mq channel = $mqchan"
+    chan configure $mqchan -priority 20
+    chan configure $mqchan -priority
+} -result {20}
+----
+
+[source,tcl]
+----
+<<mq tests>>=
+test set-option-1.1 {
+    Set priority option to negative number
+} -setup {
+    set queueName /mqtest_so2
+    set queueFile /dev/mqueue$queueName
+} -cleanup {
+    chan close $mqchan
+    file delete $queueFile
+} -body {
+    set mqchan [posixipc mq open $queueName w+]
+    log::debug "mq channel = $mqchan"
+    chan configure $mqchan -priority -20
+} -result {posixipc mq: set option: invalid negative message priority: -20}\
+  -returnCodes error
+----
+
+[source,tcl]
+----
+<<mq tests>>=
+test set-option-2.0 {
+    Attempt to set create time option
+} -setup {
+    set queueName /mqtest_so3
+    set queueFile /dev/mqueue$queueName
+} -cleanup {
+    chan close $mqchan
+    file delete $queueFile
+} -body {
+    set mqchan [posixipc mq open $queueName w+]
+    log::debug "mq channel = $mqchan"
+    chan configure $mqchan -msgsize 128
+} -result {posixipc mq: set option: -msgsize option may not be set by\
+        configuration}\
+  -returnCodes error
+----
+
+===== Watch procedure
 
 [source,c]
 ----
@@ -1195,7 +1497,7 @@ mqWatchProc(
 }
 ----
 
-==== Get handle procedure
+===== Get handle procedure
 
 [source,c]
 ----
@@ -1236,7 +1538,7 @@ Tcl sources have macros to do this,
 but they are only in the internal header file,
 which we are scrupulously avoiding in this code.
 
-== Opening a Message Queue Channel
+=== Opening a Message Queue Channel
 
 We provide an external function that may be called by a ``C'' based
 extension to open an message queue channel.
@@ -1285,11 +1587,17 @@ PosixIPC_OpenMQChannel(
 
     <<OpenMQChannel: set translation option>>
 
+    <<OpenMQChannel: set buffer size>>
+
     return mqChan ;
+
+chanerror:
+    Tcl_Close(interp, mqChan) ;
+    return NULL ;
 }
 ----
 
-=== Parsing fopen style modes
+==== Parsing fopen style modes
 
 First,
 we deal with parsing mode arguments that are patterned after `fopen(3)`.
@@ -1433,7 +1741,80 @@ mqModeCompare(
 }
 ----
 
-=== Parsing open style modes
+==== Fopen style mode testing
+
+The following are tests to verify the parsing of the fopen style modes.
+
+[source,tcl]
+----
+<<mq tests>>=
+test fopen-mode-1.0 {
+    Open the message queue in "w" mode
+} -setup {
+    set queueName mqtest-wmode
+    set queueFile [file join $qFSMount $queueName]
+} -cleanup {
+    chan close $mqchan
+    file delete $queueFile
+} -body {
+    set mqchan [posixipc mq open /$queueName w]
+    log::debug "mq channel = $mqchan"
+
+    set fattrs [file attributes $queueFile]
+    log::debug "mq file attributes = $fattrs"
+    set rightUser [expr {[dict get $fattrs -owner] eq $::tcl_platform(user)}]
+
+    set exists [file exists $queueFile]
+
+    return [expr {$rightUser && $exists}]
+} -result {1}
+----
+
+[source,tcl]
+----
+<<mq tests>>=
+test fopen-mode-1.1 {
+    Open the message queue in "wb+" mode
+} -setup {
+    set queueName mqtest-wbppmode
+    set queueFile [file join $qFSMount $queueName]
+} -cleanup {
+    chan close $mqchan
+    file delete $queueFile
+} -body {
+    set mqchan [posixipc mq open /$queueName wb+]
+    log::debug "mq channel = $mqchan"
+
+    set fattrs [file attributes $queueFile]
+    log::debug "mq file attributes = $fattrs"
+    set rightUser [expr {[dict get $fattrs -owner] eq $::tcl_platform(user)}]
+
+    set exists [file exists $queueFile]
+
+    set trans [chan configure $mqchan -translation]
+    log::debug "translation = \"$trans\""
+    set isBinary [expr {$trans eq "lf lf"}]
+
+    return [expr {$rightUser && $exists && $isBinary}]
+} -result {1}
+----
+
+[source,tcl]
+----
+<<mq tests>>=
+test fopen-mode-2.0 {
+    Open the message queue with bad mode
+} -setup {
+    set queueName mqtest-badmode
+} -cleanup {
+} -body {
+    posixipc mq open /$queueName a
+} -result {unknown open mode, "a": should be one of r, r+ rb, rb+, w, w+, wb,\
+        or wb+}\
+    -returnCodes error
+----
+
+==== Parsing open style modes
 
 The open style modes use a list of key strings to indicate the mode.
 We use the same strategy for parsing as we did previously.
@@ -1693,11 +2074,8 @@ mqdata->lastpriority = 0 ;
 mqdata->defpriority = priority ;
 ----
 
-Finally,
-we need to determine if the channel was opened in binary mode.
-If so,
-we need to instruct the Tcl channel system to set the translation
-properly.
+If the channel was opened in binary mode,
+we need to instruct the Tcl channel system to set the translation properly.
 
 [source,c]
 ----
@@ -1705,83 +2083,33 @@ properly.
 if (bintrans) {
     if (Tcl_SetChannelOption(interp, mqChan, "-translation", "binary") !=
             TCL_OK) {
-        Tcl_Close(interp, mqdata->channel) ;
-        return NULL ;
+        goto chanerror ;
     }
 }
 ----
 
-==== Fopen style mode testing
+Finally,
+we want to make sure that the buffering in the Tcl channel matches the
+size of a message.
+This is a convenience for users having to remember to set the buffer size
+properly.
+Forgetting to do so often results in an error when using message queue.
+The default Tcl channel buffer size if 4 KiBytes.
+There is little reason to have the buffer size be any different than
+the message size.
 
-The following are tests to verify the parsing of the fopen style modes.
-
-[source,tcl]
+[source,c]
 ----
-<<mq tests>>=
-test fopen-mode-1.0 {
-    Open the message queue in "w" mode
-} -setup {
-    set queueName mqtest-wmode
-    set queueFile [file join $qFSMount $queueName]
-} -cleanup {
-    chan close $mqchan
-    file delete $queueFile
-} -body {
-    set mqchan [posixipc mq open /$queueName w]
-    log::debug "mq channel = $mqchan"
+<<OpenMQChannel: set buffer size>>=
 
-    set fattrs [file attributes $queueFile]
-    log::debug "mq file attributes = $fattrs"
-    set rightUser [expr {[dict get $fattrs -owner] eq $::tcl_platform(user)}]
+struct mq_attr attrs ;
+int syserr = mq_getattr(mqdata->mqdes, &attrs) ;
+if (syserr < 0) {
+    mqFailure(interp, "mq_getattr failed during open") ;
+    goto chanerror ;
+}
 
-    set exists [file exists $queueFile]
-
-    return [expr {$rightUser && $exists}]
-} -result {1}
-----
-
-[source,tcl]
-----
-<<mq tests>>=
-test fopen-mode-1.1 {
-    Open the message queue in "wb+" mode
-} -setup {
-    set queueName mqtest-wbppmode
-    set queueFile [file join $qFSMount $queueName]
-} -cleanup {
-    chan close $mqchan
-    file delete $queueFile
-} -body {
-    set mqchan [posixipc mq open /$queueName wb+]
-    log::debug "mq channel = $mqchan"
-
-    set fattrs [file attributes $queueFile]
-    log::debug "mq file attributes = $fattrs"
-    set rightUser [expr {[dict get $fattrs -owner] eq $::tcl_platform(user)}]
-
-    set exists [file exists $queueFile]
-
-    set trans [chan configure $mqchan -translation]
-    log::debug "translation = \"$trans\""
-    set isBinary [expr {$trans eq "lf lf"}]
-
-    return [expr {$rightUser && $exists && $isBinary}]
-} -result {1}
-----
-
-[source,tcl]
-----
-<<mq tests>>=
-test fopen-mode-2.0 {
-    Open the message queue with bad mode
-} -setup {
-    set queueName mqtest-badmode
-} -cleanup {
-} -body {
-    posixipc mq open /$queueName a
-} -result {unknown open mode, "a": should be one of r, r+ rb, rb+, w, w+, wb,\
-        or wb+}\
-    -returnCodes error
+Tcl_SetChannelBufferSize(mqChan, attrs.mq_msgsize) ;
 ----
 
 ==== Open style mode testing
@@ -1856,13 +2184,13 @@ test open-mode-3.1 {
     -returnCodes error
 ----
 
-== Message Queue Commands
+=== Message Queue Commands
 
 In this section,
 we show the functions that implement the script level commands for
 message queues.
 
-=== mq open command
+==== mq open command
 
 *******
 `posixipc mq open` ?options? mqname +
@@ -2058,13 +2386,14 @@ we use `lookUpMqOpt()` that was described previously.
 <<mqOpenCmd: look up the option name>>=
 char const *optionName = Tcl_GetString(objv[objindex]) ;
 if (strcmp(optionName, "--") == 0) {                        // <1>
+    objindex++ ;                                            // <2>
     break ;
 }
 struct MqConfigOpt const *optProp = lookUpMqOpt(optionName) ;
-if (optProp == NULL) {     // <2>
+if (optProp == NULL) {                                      // <3>
     break ;
 }
-if (!optProp->setOnOpen) {                                  // <3>
+if (!optProp->setOnOpen) {                                  // <4>
     Tcl_SetObjResult(interp,
             Tcl_ObjPrintf("option, %s, cannot be set on open: "
             "should be one of: %s, %s, or %s",
@@ -2075,22 +2404,23 @@ if (!optProp->setOnOpen) {                                  // <3>
 ----
 <1> Using the usual convention, "--" stops option process so that
 the next argument could start with a dash character.
-<2> The first command argument that doesn't look like a valid option
+<2> Skip the option termination argument and stop option processing.
+<3> The first command argument that doesn't look like a valid option
 halts option processing.
-<3> Options that can't be set on an open call are in error.
+<4> Options that can't be set on an open call are in error.
 
 Having found the option to be allowed,
 we increment `objindex` to index its value.
-We must not increment off the end of the argument array.
 
 [source,c]
 ----
 <<mqOpenCmd: index the option value>>=
-if (++objindex >= objc) {
+if (++objindex >= objc) {                                   // <1>
     Tcl_WrongNumArgs(interp, 1, objv, usage) ;
     return TCL_ERROR ;
 }
 ----
+<1> We must not increment off the end of the argument array.
 
 There is specific code required to convert the option value into
 the proper internal form.
@@ -2191,14 +2521,16 @@ interpreter.
 [source,tcl]
 ----
 <<mq tests>>=
-test mq-1.0 {
+test open-1.0 {
     Open a message queue
 } -setup {
+    set queueName /mqtest_mq1
+    set queueFile $qFSMount$queueName
 } -cleanup {
     chan close $mqchan
-    file delete /dev/mqueue/mqtest1
+    file delete $queueFile
 } -body {
-    set mqchan [posixipc mq open /mqtest1 w+]
+    set mqchan [posixipc mq open $queueName w+]
     log::debug "mq channel = $mqchan"
     return $mqchan
 } -result {posixmq[0-9]*} -match glob
@@ -2207,16 +2539,64 @@ test mq-1.0 {
 [source,tcl]
 ----
 <<mq tests>>=
-test mq-2.0 {
-    Write to a message queue
+test open-2.0 {
+    Open a message queue with create time options
 } -setup {
-    set mqchan [posixipc mq open -maxmsg 1 -msgsize 128 /mqtest2 w+]
-    chan configure $mqchan\
-        -buffering line\
-        -buffersize [chan configure $mqchan -msgsize]
+    set queueName /mqtest_mq2_0
+    set queueFile $qFSMount$queueName
 } -cleanup {
     chan close $mqchan
-    file delete /dev/mqueue/mqtest2
+    file delete $queueFile
+} -body {
+    set mqchan [posixipc mq open -msgsize 256 -priority 10 -- $queueName w+]
+    log::debug "mq channel = $mqchan"
+    chan configure $mqchan -msgsize
+} -result {256}
+----
+
+[source,tcl]
+----
+<<mq tests>>=
+test open-2.1 {
+    Open a message queue with incorrect create time options
+} -setup {
+    set queueName /mqtest_mq2_1
+} -cleanup {
+} -body {
+    set mqchan [posixipc mq open -curmsgs 256 $queueName w+]
+} -result {option, -curmsgs, cannot be set on open: should be one of:\
+        -maxmsg, -msgsize, or -priority}\
+   -returnCodes error
+----
+
+[source,tcl]
+----
+<<mq tests>>=
+test open-2.2 {
+    Open a message queue with message size too large
+} -setup {
+    set queueName /mqtest_mq2_2
+} -cleanup {
+} -body {
+    set mqchan [posixipc mq open -msgsize 16000 $queueName w+]
+} -result {posixipc mq: /mqtest_mq2_2: invalid argument}\
+   -returnCodes error
+----
+
+[source,tcl]
+----
+<<mq tests>>=
+test open-3.0 {
+    Write to a message queue
+} -setup {
+    set queueName /mqtest3_0
+    set queueFile $qFSMount$queueName
+    set mqchan [posixipc mq open -maxmsg 1 -msgsize 128 $queueName w+]
+    chan configure $mqchan\
+        -buffering line
+} -cleanup {
+    chan close $mqchan
+    file delete $queueFile
 } -body {
     log::debug "mq channel = $mqchan"
     log::debug "max messages = [chan configure $mqchan -maxmsg]"
@@ -2227,7 +2607,7 @@ test mq-2.0 {
 } -result {Write a message}
 ----
 
-=== mq send command
+==== mq send command
 
 [source,c]
 ----
@@ -2246,9 +2626,69 @@ mqSendCmd(
     int objc,
     Tcl_Obj *const objv[])
 {
+    static char const usage[] = "mqchan msg ?priority?" ;
+    if (objc < 3 || objc > 4) {
+        Tcl_WrongNumArgs(interp, 1, objv, usage) ;
+        return TCL_ERROR ;
+    }
+
+    char const *chanName = Tcl_GetString(objv[1]) ;
+    int mode ;
+    Tcl_Channel channel = Tcl_GetChannel(interp, chanName, &mode) ;
+    if (channel == NULL) {
+        return TCL_ERROR ;
+    }
+    MqState *mqdata = Tcl_GetChannelInstanceData(channel) ;
+
+    int msglen ;
+    unsigned char *msg = Tcl_GetByteArrayFromObj(objv[2], &msglen) ;
+
+    int priority = mqdata->defpriority ;
+    if (objc == 4) {
+        if (Tcl_GetIntFromObj(interp, objv[3], &priority) != TCL_OK) {
+            return TCL_ERROR ;
+        }
+        if (priority < 0) {
+            Tcl_SetObjResult(interp,
+                    Tcl_ObjPrintf("negative values for priority "
+                    "are not allowed: got %d", priority)) ;
+            return TCL_ERROR ;
+        }
+    }
+
+    int err = mq_send(mqdata->mqdes, (char const *)msg, msglen, priority) ;
+    if (err < 0) {
+        return mqFailure(interp, "mq_send failed") ;
+    }
+
+    Tcl_SetObjResult(interp, Tcl_NewIntObj(msglen)) ;
     return TCL_OK ;
 }
 ----
+
+.Tests
+[source,tcl]
+----
+<<mq tests>>=
+test send-1.0 {
+    Write to a message queue using send command
+} -setup {
+    set queueName /mqtest_send1
+    set queueFile $qFSMount$queueName
+    set mqchan [posixipc mq open $queueName w+]
+    chan configure $mqchan -buffering line
+} -cleanup {
+    chan close $mqchan
+    file delete $queueFile
+} -body {
+    log::debug "mq channel = $mqchan"
+
+    posixipc mq send $mqchan "Write a message\n"
+    chan gets $mqchan
+} -result {Write a message}
+----
+
+==== mq receive command
 
 [source,c]
 ----
@@ -2267,9 +2707,88 @@ mqRecvCmd(
     int objc,
     Tcl_Obj *const objv[])
 {
+    static char const usage[] = "mqchan ?priorvar?" ;
+    if (objc < 2 || objc > 3) {
+        Tcl_WrongNumArgs(interp, 1, objv, usage) ;
+        return TCL_ERROR ;
+    }
+
+    char const *chanName = Tcl_GetString(objv[1]) ;
+    int mode ;
+    Tcl_Channel channel = Tcl_GetChannel(interp, chanName, &mode) ;
+    if (channel == NULL) {
+        return TCL_ERROR ;
+    }
+
+    MqState *mqdata = Tcl_GetChannelInstanceData(channel) ;
+    struct mq_attr attrs ;
+    int syserr = mq_getattr(mqdata->mqdes, &attrs) ;
+    if (syserr < 0) {
+        return mqFailure(interp, "mq_getattr failed during receive") ;
+    }
+
+    Tcl_Obj *resultObj = Tcl_NewObj() ;
+    unsigned char *value = Tcl_SetByteArrayLength(resultObj, attrs.mq_msgsize) ;
+
+    syserr = mq_receive(mqdata->mqdes, (char *)value, attrs.mq_msgsize,
+            &mqdata->lastpriority) ;
+    if (syserr < 0) {
+        mqFailure(interp, "mq_receive failed") ;
+        goto errorout ;
+    }
+
+    if (objc == 3) {
+        Tcl_Obj *priorObj = Tcl_NewIntObj(mqdata->lastpriority) ;
+        if (Tcl_ObjSetVar2(interp, objv[2], NULL, priorObj, TCL_LEAVE_ERR_MSG)
+                == NULL) {
+            Tcl_DecrRefCount(priorObj) ;
+            goto errorout ;
+        }
+    }
+
+    Tcl_SetObjResult(interp, resultObj) ;
     return TCL_OK ;
+
+errorout:
+    Tcl_DecrRefCount(resultObj) ;
+
+    return TCL_ERROR ;
 }
 ----
+
+.Tests
+[source,tcl]
+----
+<<mq tests>>=
+test receive-1.0 {
+    Receive a message using the receive command
+} -setup {
+    set queueName /mqtest_receive1
+    set queueFile $qFSMount$queueName
+    set mqchan [posixipc mq open $queueName w+]
+} -cleanup {
+    chan close $mqchan
+    file delete $queueFile
+} -body {
+    log::debug "mq channel = $mqchan"
+
+    set msgvalue "Receive a message"
+    append msgvalue "\0"
+    posixipc mq send $mqchan $msgvalue 20
+    set msg [posixipc mq receive $mqchan msgpriority]
+    set endmsg [expr {[string first \0 $msg] + 1}]
+    binary scan $msg a$endmsg msgstr
+
+    log::debug "message = \"$msgstr\""
+    log::debug "priority = $msgpriority"
+    log::debug "last priority = [chan configure $mqchan -lastpriority]"
+
+    expr {$msgstr eq $msgvalue && $msgpriority == 20 &&\
+            [chan configure $mqchan -lastpriority] == 20}
+} -result {1}
+----
+
+==== mq unlink command
 
 [source,c]
 ----
@@ -2277,6 +2796,20 @@ mqRecvCmd(
 static int mqUnlinkCmd(ClientData clientData, Tcl_Interp *interp, int objc,
         Tcl_Obj *const objv[]) ;
 ----
+
+*******
+`posixipc mq unlink mqname`
+
+mqname::
+    The name of message queue. Message queue names must start with
+    a slash (/) character and may *not* contain any other slash
+    characters.
+
+The `unlink` command removes the message queue named, `mqname`,
+from the system.
+The queue is actually destroyed when all processes that have open
+descriptors for the queue close those descriptors referring to the queue.
+*******
 
 [source,c]
 ----
@@ -2288,8 +2821,38 @@ mqUnlinkCmd(
     int objc,
     Tcl_Obj *const objv[])
 {
+    static char const usage[] = "queuename" ;
+    if (objc != 2) {
+        Tcl_WrongNumArgs(interp, 1, objv, usage) ;
+        return TCL_ERROR ;
+    }
+
+    char const *qname = Tcl_GetString(objv[1]) ;
+
+    mqd_t mqdes = mq_unlink(qname) ;
+    if (mqdes < 0) {
+        return mqFailure(interp, qname) ;
+    }
+
     return TCL_OK ;
 }
+----
+
+.Tests
+[source,tcl]
+----
+<<mq tests>>=
+test unlink-1.0 {
+    Unlink a message queue
+} -setup {
+    set queueName /mqtest_ul1
+} -cleanup {
+} -body {
+    set mqchan [posixipc mq open $queueName w+]
+    log::debug "mq channel = $mqchan"
+    posixipc mq unlink $queueName
+    file exists [file join $qFSMount $queueName]
+} -result {0}
 ----
 
 // vim:set syntax=asciidoc:
