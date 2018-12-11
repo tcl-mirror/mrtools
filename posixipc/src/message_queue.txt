@@ -734,9 +734,9 @@ mqInputProc(
     int bufSize,
     int *errorCodePtr)
 {
-    MqState *mqPtr = instanceData ;
+    MqState *mqData = instanceData ;
 
-    int read = mq_receive(mqPtr->mqdes, buf, bufSize, &mqPtr->lastpriority) ; // <1>
+    int read = mq_receive(mqData->mqdes, buf, bufSize, &mqData->lastpriority) ; // <1>
     if (read < 0) {
         *errorCodePtr = errno ;
         return -1 ;
@@ -1538,82 +1538,97 @@ Tcl sources have macros to do this,
 but they are only in the internal header file,
 which we are scrupulously avoiding in this code.
 
-=== Opening a Message Queue Channel
+=== Processing Open Mode Options
 
-We provide an external function that may be called by a ``C'' based
-extension to open an message queue channel.
-We don't expect that to be a common use case,
-but it is convenient when necessary and we will use the same function
-to provide the Tcl script level command to open a message queue channel.
-This function is patterned off of the Tcl ``C'' library function,
-`Tcl_FSOpenFileChannel()`.
-So it accepts arguments that are the same as the `mq open` command,
-parses them and creates the message queue channel.
+Before describing how a message queue channel is opened,
+we must take an aside to deal with processing the mode options for
+opening a channel.
+This option processing will be used for both shared memory and semaphore
+opening,
+so we are factoring it into functions that can be used when we
+take up those forms of IPC.
 
-Most of the work in this function deals with parsing the _mode_
-argument.
-Again, patterned after the Tcl `::open` core command,
-it accepts two different forms for the access mode of the message queue.
+We pattern the option specifications after the Tcl `open` core command.
+This command takes two forms of open mode options.
 The first form is like `fopen(3)` modes and the second form is like
 `open(2)` flags.
 
-[source,c]
-----
-<<mq external functions definitions>>=
-Tcl_Channel
-PosixIPC_OpenMQChannel(
-    Tcl_Interp *interp,
-    Tcl_Obj *name,
-    char const *mode,
-    mode_t permissions,
-    int maxmsg,
-    int msgsize,
-    unsigned priority)
-{
-    int flags = 0 ;
-    int tclMask = 0 ;
-    int bintrans = false ;
-
-    if (islower(*mode)) {
-        <<OpenMQChannel: parse fopen style mode>>
-    } else {
-        <<OpenMQChannel: parse open style mode>>
-    }
-
-    <<OpenMQChannel: open message queue>>
-
-    Tcl_Channel mqChan ;
-    <<OpenMQChannel: create message queue channel>>
-
-    <<OpenMQChannel: set translation option>>
-
-    <<OpenMQChannel: set buffer size>>
-
-    return mqChan ;
-
-chanerror:
-    Tcl_Close(interp, mqChan) ;
-    return NULL ;
-}
-----
-
-==== Parsing fopen style modes
+==== Processing fopen style modes
 
 First,
-we deal with parsing mode arguments that are patterned after `fopen(3)`.
+we deal with mode arguments that are patterned after `fopen(3)`.
 We use a data driven approach.
 All possible values of the mode are put into a table that is used to
 map mode name to the flags and other information used in the opening
 of the message queue.
-Parsing in this case implies searching for the mode argument.
+
+[source,c]
+----
+<<common forward function declarations>>=
+static int processFopenModeOption(Tcl_Interp *interp, char const *const mode,
+        int *flags, int *mask, bool *binary) ;
+----
+
+Processing the mode option in this case implies searching for the mode argument.
+We search the initialized array using standard library `bsearch(3)` function.
+Upon finding the mode string,
+then we return the open flags, a mask indicating the direction of data
+flow requested and whether the channel should be put into binary
+translation mode.
+
+[source,c]
+----
+<<common static function definitions>>=
+static int
+processFopenModeOption(
+    Tcl_Interp *interp,
+    char const *const mode,
+    int *flags,
+    int *mask,
+    bool *binary)
+{
+    <<processFopenModeOption: fopen style modes>>
+
+    struct fopenModeDes const *modeSpec ;
+    <<processFopenModeOption: search for mode match>>
+
+    if (modeSpec == NULL) {
+        Tcl_SetObjResult(interp, Tcl_ObjPrintf("unknown open mode, \"%s\": "
+                "should be one of %s, %s %s, %s, %s, %s, %s, or %s",
+                mode,
+                fopenModes[0].modeName, fopenModes[1].modeName,
+                fopenModes[3].modeName, fopenModes[4].modeName,
+                fopenModes[5].modeName, fopenModes[6].modeName,
+                fopenModes[8].modeName, fopenModes[9].modeName)) ;
+        return TCL_ERROR ;
+    }
+
+    *flags = modeSpec->oFlags ;
+    *mask = modeSpec->tclMask ;
+    *binary = modeSpec->isBinary ;
+
+    return TCL_OK ;
+}
+----
+
+[source,c]
+----
+<<processFopenModeOption: search for mode match>>=
+struct fopenModeDes key = {
+    .modeName = mode,
+} ;
+
+modeSpec = bsearch(&key, fopenModes, COUNTOF(fopenModes),
+        sizeof(struct fopenModeDes), fopenModeCompare) ;
+----
 
 We define a data structure to hold the mode name string and its associated
 data.
 
 [source,c]
 ----
-<<mq data types>>=
-struct mqModeDes {
+<<common data types>>=
+struct fopenModeDes {
     char const *modeName ;          // <1>
     int oFlags ;                    // <2>
     int tclMask ;                   // <3>
@@ -1631,14 +1646,13 @@ struct mqModeDes {
 
 We use an initialized array variable to hold the set of possible open
 modes.
-Note there are no _append_ modes since this is not a concept supported
-by message queue.
+Note there are no _append_ modes since this is not a supported concept.
 Also note, the array must be ordered by ascending `modeName`.
 
 [source,c]
 ----
-<<OpenMQChannel: parse fopen style mode>>=
-static struct mqModeDes const mqModes[] = { // ordered by ascending modeName!
+<<processFopenModeOption: fopen style modes>>=
+static struct fopenModeDes const fopenModes[] = { // ordered by ascending modeName!
     {
         .modeName = "r",
         .oFlags = O_RDONLY,
@@ -1649,6 +1663,11 @@ static struct mqModeDes const mqModes[] = { // ordered by ascending modeName!
         .oFlags = O_RDWR,
         .tclMask = TCL_READABLE | TCL_WRITABLE,
         .isBinary = false,
+    }, {
+        .modeName = "r+b",
+        .oFlags = O_RDWR,
+        .tclMask = TCL_READABLE | TCL_WRITABLE,
+        .isBinary = true,
     }, {
         .modeName = "rb",
         .oFlags = O_RDONLY,
@@ -1670,6 +1689,11 @@ static struct mqModeDes const mqModes[] = { // ordered by ascending modeName!
         .tclMask = TCL_READABLE | TCL_WRITABLE,
         .isBinary = false,
     }, {
+        .modeName = "w+b",
+        .oFlags = O_RDWR | O_CREAT,
+        .tclMask = TCL_READABLE | TCL_WRITABLE,
+        .isBinary = true,
+    }, {
         .modeName = "wb",
         .oFlags = O_WRONLY | O_CREAT,
         .tclMask = TCL_WRITABLE,
@@ -1683,44 +1707,13 @@ static struct mqModeDes const mqModes[] = { // ordered by ascending modeName!
 } ;
 ----
 
-We search the initialized array using standard library `bsearch(3)` function.
-Upon finding the mode string,
-we have the information required to perform the open operation on the message
-queue.
-
-[source,c]
-----
-<<OpenMQChannel: parse fopen style mode>>=
-struct mqModeDes key = {
-    .modeName = mode,
-} ;
-
-struct mqModeDes const *modeSpec =
-        bsearch(&key, mqModes, COUNTOF(mqModes), sizeof(struct mqModeDes),
-        mqModeCompare) ;
-
-if (modeSpec == NULL) {
-    Tcl_SetObjResult(interp, Tcl_ObjPrintf("unknown open mode, \"%s\": "
-            "should be one of %s, %s %s, %s, %s, %s, %s, or %s",
-            mode,
-            mqModes[0].modeName, mqModes[1].modeName, mqModes[2].modeName,
-            mqModes[3].modeName, mqModes[4].modeName, mqModes[5].modeName,
-            mqModes[6].modeName, mqModes[7].modeName)) ;
-    return NULL ;
-} else {
-    flags = modeSpec->oFlags ;
-    tclMask = modeSpec->tclMask ;
-    bintrans = modeSpec->isBinary ;
-}
-----
-
 As required when using `bsearch(3)`,
 we must supply a comparison function.
 
 [source,c]
 ----
-<<mq forward function declarations>>=
-static int mqModeCompare(void const *m1, void const *m2) ;
+<<common forward function declarations>>=
+static int fopenModeCompare(void const *m1, void const *m2) ;
 ----
 
 Since we are searching based on string values,
@@ -1728,14 +1721,14 @@ Since we are searching based on string values,
 
 [source,c]
 ----
-<<mq static function definitions>>=
+<<common static function definitions>>=
 static int
-mqModeCompare(
+fopenModeCompare(
     void const *m1,
     void const *m2)
 {
-    struct mqModeDes const *o1 = m1 ;
-    struct mqModeDes const *o2 = m2 ;
+    struct fopenModeDes const *o1 = m1 ;
+    struct fopenModeDes const *o2 = m2 ;
 
     return strcmp(o1->modeName, o2->modeName) ;
 }
@@ -1814,26 +1807,151 @@ test fopen-mode-2.0 {
     -returnCodes error
 ----
 
-==== Parsing open style modes
+==== Processing open style modes
 
 The open style modes use a list of key strings to indicate the mode.
-We use the same strategy for parsing as we did previously.
+We use the same strategy for processing the options as we did previously
+only now we will have to iterate across a list of key strings.
 A mapping structure is built to map the mode name string to the
 set of properties we need to open a message queue in the specified mode.
-We can structure the data in the same manner as with the fopen style
-modes and use the same `mqModeDes` structure definition.
-This also allows us to use the same `bsearch(3)` comparison function.
+
+[source,c]
+----
+<<common forward function declarations>>=
+static int processOpenModeOption(Tcl_Interp *interp, char const *const mode,
+        int *flags, int *mask, bool *binary) ;
+----
+
+The mode argument is a list of flags names to use for opening.
+We must split up the list and then iterate across it to gather
+the set of specified flags.
+The implication of the list is that the various flags implied by
+the list elements are **OR**'ed together.
+
+[source,c]
+----
+<<common static function definitions>>=
+static int
+processOpenModeOption(
+    Tcl_Interp *interp,
+    char const *const mode,
+    int *flags,
+    int *mask,
+    bool *binary)
+{
+    int resultCode = TCL_OK ;
+
+    <<processOpenModeOption: open style modes>>
+
+    <<processOpenModeOption: split mode items list>>
+
+    <<processOpenModeOption: iterate over mode items>>
+
+    <<processOpenModeOption: check access direction>>
+
+    *flags = oflags ;
+    *mask = tclMask ;
+    *binary = bintrans ;
+
+cleanup:
+    ckfree(modeItems) ;
+    return resultCode ;
+}
+----
+
+Tcl provides a function to do the heavy lifting of splitting a list.
+
+[source,c]
+----
+<<processOpenModeOption: split mode items list>>=
+int modeCount ;
+char const **modeItems ;
+
+if (Tcl_SplitList(interp, mode, &modeCount, &modeItems) != TCL_OK) {
+    return TCL_ERROR ;
+}
+----
+
+Iterating over each item in the list,
+we search the flags table for a match.
+Finding a match,
+the associated data is **OR**'ed into the variables used to accumulate
+the bit encoded flags.
+
+[source,c]
+----
+<<processOpenModeOption: iterate over mode items>>=
+int oflags = 0 ;
+int tclMask = 0 ;
+bool bintrans = false ;
+int accessFlagCount = 0 ;
+
+for (int itemIndex = 0 ; itemIndex < modeCount ; itemIndex++) {
+    struct openFlagDes key = {
+        .modeName = modeItems[itemIndex],
+    } ;
+
+    struct openFlagDes const *flagSpec =
+            bsearch(&key, openFlags, COUNTOF(openFlags),
+            sizeof(struct openFlagDes), openFlagCompare) ;
+
+    if (flagSpec == NULL) {
+        Tcl_SetObjResult(interp,
+                Tcl_ObjPrintf("invalid access mode \"%s\": must be "
+                "%s, %s, %s, %s, %s, %s, or %s", modeItems[itemIndex],
+                openFlags[0].modeName, openFlags[1].modeName,
+                openFlags[2].modeName, openFlags[3].modeName,
+                openFlags[4].modeName, openFlags[5].modeName,
+                openFlags[6].modeName)) ;
+        resultCode = TCL_ERROR ;
+        goto cleanup ;          // <1>
+    } else {
+        oflags |= flagSpec->oFlags ;
+        tclMask |= flagSpec->tclMask ;
+        bintrans = bintrans || flagSpec->isBinary ;
+        accessFlagCount += flagSpec->isAccessMode ;
+    }
+}
+----
+<1> Spliting the list causes memory to be allocated which must be returned.
+Don't bleed memory on an error.
+
+One of the restrictions when opening using a list of open mode flags is that
+some access direction, read, write or both, must be specified.
+This is not a problem in the `fopen(3)` style mode string, since an access
+direction is implied by the mode string value.
+However,
+when specifying individual flags, we need to perform the check.
+The rules are that exactly on of read only, write only, or read / write
+must be specified.
+For this reason,
+we have accumulated a count of the number flags that specify access modes as we
+iterated across the list of flag names.
+The check for specifying an access mode becomes
+a simple test against one.
+
+[source,c]
+----
+<<processOpenModeOption: check access direction>>=
+if (accessFlagCount != 1) {
+    Tcl_SetObjResult(interp, Tcl_NewStringObj(
+            "access mode must specify exactly one of RDONLY, WRONLY, or RDWR",
+            -1)) ;
+    resultCode = TCL_ERROR ;
+    goto cleanup ;
+}
+----
 
 Note the mode names follow those used in Tcl and are restricted to
-modes that apply to message queues.
+modes that apply to IPC channels.
 Again,
 the initializers for the array must be ordered by ascending
 `modeName` element value.
 
 [source,c]
 ----
-<<mq data types>>=
-struct mqFlagDes {
+<<common data types>>=
+struct openFlagDes {
     char const *modeName ;          // <1>
     int oFlags ;                    // <2>
     int tclMask ;                   // <3>
@@ -1843,10 +1961,10 @@ struct mqFlagDes {
 ----
 <1> The string value to indicate the opening mode.
 <2> The flags implied by the mode string. These are the `O_*` flags
-    used for opening the message queue.
+    used for opening a file.
 <3> A corresponding set of flags as used by Tcl. We will need to check
-    whether the message is readable or writable.
-<4> Indicates whether the message queue is opened in binary mode.
+    whether things are readable or writable.
+<4> Indicates whether binary mode is requested on opening.
     We need to know this so the translation configuration on the channel
     can be properly set.
 <5> Indicates whether this flag controls the access mode when opening
@@ -1859,11 +1977,11 @@ struct mqFlagDes {
 
 [source,c]
 ----
-<<OpenMQChannel: parse open style mode>>=
-static struct mqFlagDes const mqFlags[] = { // order by ascending modeName!
+<<processOpenModeOption: open style modes>>=
+static struct openFlagDes const openFlags[] = { // order by ascending modeName!
     {
         .modeName = "BINARY",
-        .oFlags = 0,        // BINARY does not affect the open flags.
+        .oFlags = 0,            // BINARY does not affect the open flags.
         .tclMask = 0,
         .isBinary = true,
         .isAccessMode = false,
@@ -1907,115 +2025,162 @@ static struct mqFlagDes const mqFlags[] = { // order by ascending modeName!
 } ;
 ----
 
-The mode argument is a list of flags names to use for opening.
-We must split up the list and then iterate across it to gather
-the set of specified flags.
-The implication of the list is that the various flags implied by
-the list elements are **OR**'ed together.
-
-[source,c]
-----
-<<OpenMQChannel: parse open style mode>>=
-int accessFlagCount = 0 ;
-int modeCount ;
-char const **modeItems ;
-
-if (Tcl_SplitList(interp, mode, &modeCount, &modeItems) != TCL_OK) {
-    return NULL ;
-}
-
-<<OpenMQChannel: iterate over mode items>>
-
-<<OpenMQChannel: check access direction>>
-----
-
-Iterating over each item in the list,
-we search the flags table for a match.
-Finding a match,
-the associated data is **OR**'ed into the variables used to accumulate
-the bit encoded flags.
-
-[source,c]
-----
-<<OpenMQChannel: iterate over mode items>>=
-for (int itemIndex = 0 ; itemIndex < modeCount ; itemIndex++) {
-    struct mqFlagDes key = {
-        .modeName = modeItems[itemIndex],
-    } ;
-
-    struct mqFlagDes const *flagSpec =
-            bsearch(&key, mqFlags, COUNTOF(mqFlags), sizeof(struct mqModeDes),
-            mqFlagCompare) ;
-
-    if (flagSpec == NULL) {
-        Tcl_SetObjResult(interp,
-                Tcl_ObjPrintf("invalid access mode \"%s\": must be "
-                "%s, %s, %s, %s, %s, %s, or %s", modeItems[itemIndex],
-                mqFlags[0].modeName, mqFlags[1].modeName, mqFlags[2].modeName,
-                mqFlags[3].modeName, mqFlags[4].modeName, mqFlags[5].modeName,
-                mqFlags[6].modeName)) ;
-        ckfree(modeItems) ;     // <1>
-        return NULL ;
-    } else {
-        flags |= flagSpec->oFlags ;
-        tclMask |= flagSpec->tclMask ;
-        bintrans = bintrans || flagSpec->isBinary ;
-        accessFlagCount += flagSpec->isAccessMode ;
-    }
-}
-
-ckfree(modeItems) ;
-----
-<1> Spliting the list causes memory to be allocated which must be returned.
-Don't bleed memory on an error.
-
 As required when using `bsearch(3)`,
 we must supply a comparison function.
 
 [source,c]
 ----
 <<mq forward function declarations>>=
-static int mqFlagCompare(void const *m1, void const *m2) ;
+static int openFlagCompare(void const *m1, void const *m2) ;
 ----
 
-Since we are searching based on string values,
+Again,
+since we are searching based on string values,
 `strcmp(3)` provides the correct interface.
 
 [source,c]
 ----
 <<mq static function definitions>>=
 static int
-mqFlagCompare(
+openFlagCompare(
     void const *m1,
     void const *m2)
 {
-    struct mqFlagDes const *f1 = m1 ;
-    struct mqFlagDes const *f2 = m2 ;
+    struct openFlagDes const *f1 = m1 ;
+    struct openFlagDes const *f2 = m2 ;
 
     return strcmp(f1->modeName, f2->modeName) ;
 }
 ----
 
-One of the restrictions for message queue is that some access direction,
-read, write or both, must be specified.
-This is not a problem in the `fopen(3)` style mode string, since an access
-direction is implied by the mode string value.
-However,
-when specifying individual flags, we need to perform the check.
-The rules are that exactly on of read only, write only, or read / write
-must be specified.
-For this reason,
-we have summed the number flags that specify access modes as we iterated
-across the list of flag names.
-Now it is a simple test against one.
+==== Open style mode testing
+
+The following are tests to verify the parsing of the open style modes.
+
+[source,tcl]
+----
+<<mq tests>>=
+test open-mode-1.0 {
+    Open the message queue for writing and create if necessary
+} -setup {
+    set queueName mqtest-wrmode
+    set queueFile [file join $qFSMount $queueName]
+} -cleanup {
+    chan close $mqchan
+    file delete $queueFile
+} -body {
+    set mqchan [posixipc mq open /$queueName {WRONLY CREAT}]
+    log::debug "mq channel = $mqchan"
+
+    set fattrs [file attributes $queueFile]
+    log::debug "mq file attributes = $fattrs"
+    set rightUser [expr {[dict get $fattrs -owner] eq $::tcl_platform(user)}]
+
+    set exists [file exists $queueFile]
+
+    return [expr {$rightUser && $exists}]
+} -result {1}
+----
+
+[source,tcl]
+----
+<<mq tests>>=
+test open-mode-2.0 {
+    Attempt to open with a bad flag name.
+} -setup {
+    set queueName mqtest-openerr
+} -cleanup {
+} -body {
+    posixipc mq open /$queueName FOO
+} -result {invalid access mode "FOO": must be BINARY, CREAT, EXCL,\
+        NONBLOCK, RDONLY, RDWR, or WRONLY}\
+    -returnCodes error
+----
+
+[source,tcl]
+----
+<<mq tests>>=
+test open-mode-3.0 {
+    Attempt to open with no access mode flag
+} -setup {
+    set queueName mqtest-openerr
+} -cleanup {
+} -body {
+    posixipc mq open /$queueName CREAT
+} -result {access mode must specify exactly one of RDONLY, WRONLY, or RDWR}\
+    -returnCodes error
+----
+
+[source,tcl]
+----
+<<mq tests>>=
+test open-mode-3.1 {
+    Attempt to open with multiple access mode flags
+} -setup {
+    set queueName mqtest-openerr
+} -cleanup {
+} -body {
+    posixipc mq open /$queueName {RDONLY RDWR}
+} -result {access mode must specify exactly one of RDONLY, WRONLY, or RDWR}\
+    -returnCodes error
+----
+
+=== Opening a Message Queue Channel
+
+We provide an external function that may be called by a ``C'' based
+extension to open an message queue channel.
+We don't expect that to be a common use case,
+but it is convenient when necessary and we will use the same function
+to provide the Tcl script level command to open a message queue channel.
+This function is patterned off of the Tcl ``C'' library function,
+`Tcl_FSOpenFileChannel()`.
+So it accepts arguments that are the same as the `mq open` command,
+parses them and creates the message queue channel.
+
 
 [source,c]
 ----
-<<OpenMQChannel: check access direction>>=
-if (accessFlagCount != 1) {
-    Tcl_SetObjResult(interp, Tcl_NewStringObj(
-            "access mode must specify exactly one of RDONLY, WRONLY, or RDWR",
-            -1)) ;
+<<mq external functions definitions>>=
+Tcl_Channel
+PosixIPC_OpenMQChannel(
+    Tcl_Interp *interp,
+    Tcl_Obj *name,
+    char const *mode,
+    mode_t permissions,
+    int maxmsg,
+    int msgsize,
+    unsigned priority)
+{
+    int flags = 0 ;
+    int tclMask = 0 ;
+    bool bintrans = false ;
+
+    if (islower(*mode)) {
+        if (processFopenModeOption(interp, mode, &flags, &tclMask, &bintrans) !=
+                TCL_OK) {
+            return NULL ;
+        }
+    } else {
+        if (processOpenModeOption(interp, mode, &flags, &tclMask, &bintrans) !=
+                TCL_OK) {
+            return NULL ;
+        }
+    }
+
+    <<OpenMQChannel: open message queue>>
+
+    Tcl_Channel mqChan ;
+
+    <<OpenMQChannel: create message queue channel>>
+
+    <<OpenMQChannel: set translation option>>
+
+    <<OpenMQChannel: set buffer size>>
+
+    return mqChan ;
+
+chanerror:
+    Tcl_Close(interp, mqChan) ;
     return NULL ;
 }
 ----
@@ -2094,7 +2259,7 @@ size of a message.
 This is a convenience for users having to remember to set the buffer size
 properly.
 Forgetting to do so often results in an error when using message queue.
-The default Tcl channel buffer size if 4 KiBytes.
+The default Tcl channel buffer size is 4 KiBytes.
 There is little reason to have the buffer size be any different than
 the message size.
 
@@ -2110,78 +2275,6 @@ if (syserr < 0) {
 }
 
 Tcl_SetChannelBufferSize(mqChan, attrs.mq_msgsize) ;
-----
-
-==== Open style mode testing
-
-The following are tests to verify the parsing of the open style modes.
-
-[source,tcl]
-----
-<<mq tests>>=
-test open-mode-1.0 {
-    Open the message queue for writing and create if necessary
-} -setup {
-    set queueName mqtest-wrmode
-    set queueFile [file join $qFSMount $queueName]
-} -cleanup {
-    chan close $mqchan
-    file delete $queueFile
-} -body {
-    set mqchan [posixipc mq open /$queueName {WRONLY CREAT}]
-    log::debug "mq channel = $mqchan"
-
-    set fattrs [file attributes $queueFile]
-    log::debug "mq file attributes = $fattrs"
-    set rightUser [expr {[dict get $fattrs -owner] eq $::tcl_platform(user)}]
-
-    set exists [file exists $queueFile]
-
-    return [expr {$rightUser && $exists}]
-} -result {1}
-----
-
-[source,tcl]
-----
-<<mq tests>>=
-test open-mode-2.0 {
-    Attempt to open with a bad flag name.
-} -setup {
-    set queueName mqtest-openerr
-} -cleanup {
-} -body {
-    posixipc mq open /$queueName FOO
-} -result {invalid access mode "FOO": must be BINARY, CREAT, EXCL,\
-        NONBLOCK, RDONLY, RDWR, or WRONLY}\
-    -returnCodes error
-----
-
-[source,tcl]
-----
-<<mq tests>>=
-test open-mode-3.0 {
-    Attempt to open with no access mode flag
-} -setup {
-    set queueName mqtest-openerr
-} -cleanup {
-} -body {
-    posixipc mq open /$queueName CREAT
-} -result {access mode must specify exactly one of RDONLY, WRONLY, or RDWR}\
-    -returnCodes error
-----
-
-[source,tcl]
-----
-<<mq tests>>=
-test open-mode-3.1 {
-    Attempt to open with multiple access mode flags
-} -setup {
-    set queueName mqtest-openerr
-} -cleanup {
-} -body {
-    posixipc mq open /$queueName {RDONLY RDWR}
-} -result {access mode must specify exactly one of RDONLY, WRONLY, or RDWR}\
-    -returnCodes error
 ----
 
 === Message Queue Commands
@@ -2260,7 +2353,7 @@ for reading or writing of binary data.
 In the second form,
 _access_ consists of a list of any of the following flags,
 all of which have the standard POSIX meanings.
-One of the flags must be either *RDONLY*, *WRONLY*, or *RDWR*.
+Exactly one flags must be either *RDONLY*, *WRONLY*, or *RDWR*.
 
     RDONLY;;
         Open the message queue for reading only.

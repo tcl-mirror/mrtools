@@ -80,6 +80,7 @@ A2XOPTS =\
 # --verbose\
 
 ATANGLEOPTS =\
+	-line '\#line %l% "%f%"'\
 	$(NULL)
 
 # -line '\#line %l% "%f%"'

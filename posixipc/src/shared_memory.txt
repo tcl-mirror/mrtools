@@ -1,5 +1,403 @@
 == Shared Memory
 Shared Memory
+In what follows, we present the Tcl channel driver functions first,
+followed by the Tcl level commands.
+
+=== Shared Memory Channel Driver
+
+In this section we present the channel driver for the POSIX shared
+memory type channel.
+
+==== Channel Driver Components
+
+In this section,
+we describe the functions supplied for the Tcl channel driver that
+is used for POSIX shared memory.
+
+The following is an initialized variable of the proper structure
+that is given to `Tcl_CreateChannel()` to define the message queue operations.
+
+[source,c]
+----
+<<shm static data>>=
+static Tcl_ChannelType ShmChannelType = {
+    .typeName = "shm",          /* The name of the channel type in Tcl
+                                 * commands. This storage is owned by channel
+                                 * type. */
+    .version = TCL_CHANNEL_VERSION_5,
+                                /* Version of the channel type. */
+    .closeProc = shmCloseProc,
+                                /* Function to call to close the channel, or
+                                 * TCL_CLOSE2PROC if the close2Proc should be
+                                 * used instead. */
+    .inputProc = shmInputProc,
+                                /* Function to call for input on channel. */
+    .outputProc = shmOutputProc,
+                                /* Function to call for output on channel. */
+    .seekProc = shmSeekProc,
+                                /* Function to call to seek on the channel.
+                                 * May be NULL. */
+    .setOptionProc = NULL,
+                                /* Set an option on a channel. */
+    .getOptionProc = NULL,
+                                /* Get an option from a channel. */
+    .watchProc = shmWatchProc,
+                                /* Set up the notifier to watch for events on
+                                 * this channel. */
+    .getHandleProc = shmGetHandleProc,
+                                /* Get an OS handle from the channel or NULL
+                                 * if not supported. */
+    .close2Proc = NULL,
+                                /* Function to call to close the channel if
+                                 * the device supports closing the read &
+                                 * write sides independently. */
+    .blockModeProc = NULL,
+                                /* Set blocking mode for the raw channel. May
+                                 * be NULL. */
+    /*
+     * Only valid in TCL_CHANNEL_VERSION_2 channels or later
+     */
+    .flushProc = NULL,
+                                /* Function to call to flush a channel. May be
+                                 * NULL. */
+    .handlerProc = NULL,
+                                /* Function to call to handle a channel event.
+                                 * This will be passed up the stacked channel
+                                 * chain. */
+    /*
+     * Only valid in TCL_CHANNEL_VERSION_3 channels or later
+     */
+    .wideSeekProc = NULL,
+                                /* Function to call to seek on the channel
+                                 * which can handle 64-bit offsets. May be
+                                 * NULL, and must be NULL if seekProc is
+                                 * NULL. */
+    /*
+     * Only valid in TCL_CHANNEL_VERSION_4 channels or later
+     * TIP #218, Channel Thread Actions
+     */
+    .threadActionProc = NULL,
+                                /* Function to call to notify the driver of
+                                 * thread specific activity for a channel. May
+                                 * be NULL. */
+
+    /*
+     * Only valid in TCL_CHANNEL_VERSION_5 channels or later
+     * TIP #208, File Truncation
+     */
+    .truncateProc = NULL
+                                /* Function to call to truncate the underlying
+                                 * file to a particular length. May be NULL if
+                                 * the channel does not support truncation. */
+} ;
+----
+
+Notice that not all functions are provided (_i.e._ some members of the
+structure are set to `NULL`).
+Those members are:
+
+setOptionProc::
+    There are no channel type specific options that can be written.
+getOptionProc::
+    There are no channel type specific options that can be read.
+close2Proc::
+    For shared memory,
+    the idea of closing read or write separately does not apply.
+blockModeProc::
+    For shared memory,
+    there is no notion of blocking.
+    All the shared memory is directly accessible from the process
+    address space.
+flushProc::
+    This is reserved.
+handlerProc::
+    Used only for stacked drivers.
+wideSeekProc::
+    We assume shared memory areas are less than 2 GiBytes so wide seeking
+    is not necessary.
+threadActionProc::
+    There is no thread specific driver state.
+
+When a new shared memory Tcl channel is created,
+some instance data for the channel may also be supplied.
+That instance data is then provided as an argument to each of the
+functions for the driver.
+This makes things much more convenient for the driver function code
+to have access to the state of the channel.
+The following data structure defines the information that constitutes
+the state of an individual message queue channel.
+
+[source,c]
+----
+<<shm data types>>=
+typedef struct {
+    Tcl_Channel channel ;       // <1>
+    int shmfd ;                 // <2>
+    int tclMask ;               // <3>
+    uint8_t *address ;
+    size_t length ;
+    size_t position ;
+} ShmState ;
+----
+<1> The Tcl channel handle as returned from `Tcl_CreateChannel()`.
+<2> The shared memory descriptor. In reality on Linux this is
+    an ordinary file descriptor.
+<3> A mask of allowed operations on the channel.
+    This is combination of TCL_READABLE or TCL_WRITABLE.
+
+The following sections describe each of the functions supplied as part
+of the shared memory channel driver.
+
+===== Close procedure
+
+[source,c]
+----
+<<shm forward function declarations>>=
+static int shmCloseProc(ClientData instanceData, Tcl_Interp *interp) ;
+----
+
+[source,c]
+----
+<<shm static function definitions>>=
+static int
+shmCloseProc(
+    ClientData instanceData,
+    Tcl_Interp *interp)
+{
+    ShmState *shmData = instanceData ;
+
+    Tcl_DeleteFileHandler(shmData->shmfd) ;
+
+    int syserr = close(shmData->shmfd) ;
+    if (syserr < 0) {
+        goto errorout ;
+    }
+
+    syserr = munmap(shmData->address, shmData->length) ;
+    if (syserr < 0) {
+        goto errorout ;
+    }
+
+    return 0 ;
+
+errorout:
+    ckfree(shmData) ;
+    return errno ;
+}
+----
+
+===== Input procedure
+
+[source,c]
+----
+<<shm forward function declarations>>=
+static int shmInputProc(ClientData instanceData, char *buf, int bufSize,
+        int *errorCodePtr) ;
+----
+
+[source,c]
+----
+<<shm static function definitions>>=
+static int
+shmInputProc(
+    ClientData instanceData,
+    char *buf,
+    int bufSize,
+    int *errorCodePtr)
+{
+    ShmState *shmData = instanceData ;
+
+    size_t remaining = shmData->length - shmData->position ;
+    int toRead = bufSize < remaining ? bufSize : remaining ;
+
+    memcpy(buf, shmData->address + shmData->position, toRead) ;
+    shmData->position += toRead ;
+
+    return toRead ;
+}
+----
+
+===== Output procedure
+
+[source,c]
+----
+<<shm forward function declarations>>=
+static int shmOutputProc(ClientData instanceData, char const *buf, int toWrite,
+        int *errorCodePtr) ;
+----
+
+Like the input procedure,
+the output procedure's main function is simply to bridge between
+the message queue system call and the Tcl API requirements.
+
+[source,c]
+----
+<<shm static function definitions>>=
+static int
+shmOutputProc(
+    ClientData instanceData,
+    char const *buf,
+    int toWrite,
+    int *errorCodePtr)
+{
+    ShmState *shmData = instanceData ;
+
+    size_t available = shmData->length - shmData->position ;
+    int canWrite = toWrite < available ? toWrite : available ;
+
+    memcpy(shmData->address + shmData->position, buf, canWrite) ;
+    shmData->position += canWrite ;
+
+    return canWrite ;
+}
+----
+
+===== Seek procedure
+
+[source,c]
+----
+<<shm forward function declarations>>=
+static int shmSeekProc(ClientData instanceData, long offset, int seekMode,
+        int *errorCodePtr) ;
+----
+
+[source,c]
+----
+<<shm static function definitions>>=
+static int
+shmSeekProc(
+    ClientData instanceData,
+    long offset,
+    int seekMode,
+    int *errorCodePtr)
+{
+    ShmState *shmData = instanceData ;
+
+    off_t start ;
+    switch (seekMode) {
+    case SEEK_SET:
+        start = 0 ;
+        break ;
+
+    case SEEK_CUR:
+        start = shmData->position ;
+        break ;
+
+    case SEEK_END:
+        start = shmData->length - 1 ;
+        break ;
+
+    default:
+        Tcl_Panic("unknown seek mode") ;
+        break ;
+    }
+
+    off_t newPosition = start + offset ;
+    if (newPosition < 0 || newPosition >= shmData->length) {
+        *errorCodePtr = EINVAL ;
+        return -1 ;
+    }
+
+    shmData->position = newPosition ;
+    return newPosition ;
+}
+----
+
+===== Watch procedure
+
+[source,c]
+----
+<<shm forward function declarations>>=
+static void shmWatchProc(ClientData instanceData, int mask) ;
+----
+
+[source,c]
+----
+<<shm static function definitions>>=
+static void
+shmWatchProc(
+    ClientData instanceData,
+    int mask)
+{
+    ShmState *shmData = instanceData ;
+
+    mask &= shmData->tclMask ;
+    if (mask != 0) {
+        Tcl_CreateFileHandler(shmData->shmfd, mask,
+                (Tcl_FileProc *)Tcl_NotifyChannel, shmData->channel) ;
+    } else {
+        Tcl_DeleteFileHandler(shmData->shmfd) ;
+    }
+}
+----
+
+===== Get handle procedure
+
+[source,c]
+----
+<<shm forward function declarations>>=
+static int shmGetHandleProc(ClientData instanceData, int direction,
+        ClientData *handlePtr) ;
+----
+
+The message queue descriptor is the OS handle for the message
+queue, so we simply return it.
+
+[source,c]
+----
+<<shm static function definitions>>=
+static int
+shmGetHandleProc(
+    ClientData instanceData,
+    int direction,
+    ClientData *handlePtr)
+{
+    ShmState *shmData = instanceData ;
+
+    if ((direction & shmData->tclMask) == 0) {
+        return TCL_ERROR ;
+    }
+
+    *handlePtr = (ClientData)(intptr_t)(shmData->shmfd) ;
+    return TCL_OK ;
+}
+----
+
+[source,c]
+----
+<<mq external functions definitions>>=
+Tcl_Channel
+PosixIPC_OpenSHMChannel(
+    Tcl_Interp *interp,
+    Tcl_Obj *name,
+    char const *mode,
+    mode_t permissions,
+    size_t size)
+{
+    int flags = 0 ;
+    int tclMask = 0 ;
+    int bintrans = false ;
+
+    if (islower(*mode)) {
+        <<OpenSHMChannel: parse fopen style mode>>
+    } else {
+        <<OpenSHMChannel: parse open style mode>>
+    }
+
+    <<OpenSHMChannel: open message queue>>
+
+    Tcl_Channel mqChan ;
+    <<OpenSHMChannel: create message queue channel>>
+
+    <<OpenSHMChannel: set translation option>>
+
+    return NULL ;
+
+chanerror:
+    Tcl_Close(interp, mqChan) ;
+    return NULL ;
+}
+----
 
 === SHM Command
 
