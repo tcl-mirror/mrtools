@@ -45,7 +45,6 @@ DOCPARTS=\
 	introduction.txt\
 	package.txt\
 	message_queue.txt\
-	semaphore.txt\
 	shared_memory.txt\
 	codeorg.txt\
 	copyright-info.txt\
@@ -80,7 +79,6 @@ A2XOPTS =\
 # --verbose\
 
 ATANGLEOPTS =\
-	-line '\#line %l% "%f%"'\
 	$(NULL)
 
 # -line '\#line %l% "%f%"'
@@ -133,14 +131,14 @@ doc : $(PDF)
 
 code : $(CODEFILE)
 
-test : $(TESTFILE) $(LIBFILE)
+test : $(TESTFILE) $(LIBFILE) code
 	cd $(TESTDIR) ; tclsh $(notdir $(TESTFILE)) $(TESTOPTS)
 
-coverage :
+coverage : code
 	$(RM) $(LIBFILE)
 	$(RM) $(OBJFILE)
 	$(RM) $(BUILDDIR)/*.gc*
-	cd $(BUILDDIR) ; make CFLAGS+=--coverage binaries
+	make -C $(BUILDDIR) CFLAGS+=--coverage binaries
 	cd $(TESTDIR) ; tclsh $(notdir $(TESTFILE)) $(TESTOPTS)
 	cd $(BUILDDIR) ;\
 		mkdir --parents coverage ;\

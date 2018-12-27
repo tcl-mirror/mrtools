@@ -15,7 +15,7 @@ we describe the functions supplied for the Tcl channel driver that
 is used for POSIX shared memory.
 
 The following is an initialized variable of the proper structure
-that is given to `Tcl_CreateChannel()` to define the message queue operations.
+that is given to `Tcl_CreateChannel()` to define the shared memory operations.
 
 [source,c]
 ----
@@ -51,7 +51,7 @@ static Tcl_ChannelType ShmChannelType = {
                                 /* Function to call to close the channel if
                                  * the device supports closing the read &
                                  * write sides independently. */
-    .blockModeProc = NULL,
+    .blockModeProc = shmBlockModeProc,
                                 /* Set blocking mode for the raw channel. May
                                  * be NULL. */
     /*
@@ -103,11 +103,6 @@ getOptionProc::
 close2Proc::
     For shared memory,
     the idea of closing read or write separately does not apply.
-blockModeProc::
-    For shared memory,
-    there is no notion of blocking.
-    All the shared memory is directly accessible from the process
-    address space.
 flushProc::
     This is reserved.
 handlerProc::
@@ -117,6 +112,9 @@ wideSeekProc::
     is not necessary.
 threadActionProc::
     There is no thread specific driver state.
+truncateProc::
+    Once created, the size of a shared memory object underlying
+    the channel is not changed.
 
 When a new shared memory Tcl channel is created,
 some instance data for the channel may also be supplied.
@@ -125,7 +123,7 @@ functions for the driver.
 This makes things much more convenient for the driver function code
 to have access to the state of the channel.
 The following data structure defines the information that constitutes
-the state of an individual message queue channel.
+the state of an individual shared memory channel.
 
 [source,c]
 ----
@@ -133,17 +131,25 @@ the state of an individual message queue channel.
 typedef struct {
     Tcl_Channel channel ;       // <1>
     int shmfd ;                 // <2>
-    int tclMask ;               // <3>
-    uint8_t *address ;
-    size_t length ;
-    size_t position ;
+    sem_t *semaphore ;          // <3>
+    int tclMask ;               // <4>
+    int blockingMode ;          // <5>
+    uint8_t *address ;          // <6>
+    size_t length ;             // <7>
+    size_t position ;           // <8>
 } ShmState ;
 ----
 <1> The Tcl channel handle as returned from `Tcl_CreateChannel()`.
 <2> The shared memory descriptor. In reality on Linux this is
     an ordinary file descriptor.
-<3> A mask of allowed operations on the channel.
+<3> The semaphore used to control exclusive access to the shared memory.
+<4> A mask of allowed operations on the channel.
     This is combination of TCL_READABLE or TCL_WRITABLE.
+<5> The current state of blocking mode for the channel.
+<6> The address in memory where the shared memory area is located.
+<7> The length in bytes of the shared memory area.
+<8> The current position in the shared memory area where the next
+    read or write will occur.
 
 The following sections describe each of the functions supplied as part
 of the shared memory channel driver.
@@ -168,21 +174,29 @@ shmCloseProc(
 
     Tcl_DeleteFileHandler(shmData->shmfd) ;
 
-    int syserr = close(shmData->shmfd) ;
+    int resultCode = 0 ;
+
+    int syserr = munmap(shmData->address, shmData->length) ;
     if (syserr < 0) {
+        resultCode = errno ;
         goto errorout ;
     }
 
-    syserr = munmap(shmData->address, shmData->length) ;
+    syserr = close(shmData->shmfd) ;
     if (syserr < 0) {
+        resultCode = errno ;
         goto errorout ;
     }
 
-    return 0 ;
+    syserr = sem_close(shmData->semaphore) ;
+    if (syserr < 0) {
+        resultCode = errno ;
+        goto errorout ;
+    }
 
 errorout:
     ckfree(shmData) ;
-    return errno ;
+    return resultCode ;
 }
 ----
 
@@ -207,13 +221,46 @@ shmInputProc(
 {
     ShmState *shmData = instanceData ;
 
+    <<shm: lock semaphore>>
+
     size_t remaining = shmData->length - shmData->position ;
     int toRead = bufSize < remaining ? bufSize : remaining ;
 
     memcpy(buf, shmData->address + shmData->position, toRead) ;
     shmData->position += toRead ;
 
+    <<shm: unlock semaphore>>
+
     return toRead ;
+}
+----
+
+[source,c]
+----
+<<shm: lock semaphore>>=
+int syserr ;
+if (shmData->blockingMode == TCL_MODE_NONBLOCKING) {
+    syserr = sem_trywait(shmData->semaphore) ;
+    if (syserr == -1) {
+        *errorCodePtr = errno ;
+        return errno == EAGAIN ? EAGAIN : -1 ;
+    }
+} else {
+    syserr = sem_wait(shmData->semaphore) ;
+    if (syserr == -1) {
+        *errorCodePtr = errno ;
+        return -1 ;
+    }
+}
+----
+
+[source,c]
+----
+<<shm: unlock semaphore>>=
+syserr = sem_post(shmData->semaphore) ;
+if (syserr == -1) {
+    *errorCodePtr = errno ;
+    return -1 ;
 }
 ----
 
@@ -225,10 +272,6 @@ shmInputProc(
 static int shmOutputProc(ClientData instanceData, char const *buf, int toWrite,
         int *errorCodePtr) ;
 ----
-
-Like the input procedure,
-the output procedure's main function is simply to bridge between
-the message queue system call and the Tcl API requirements.
 
 [source,c]
 ----
@@ -242,11 +285,15 @@ shmOutputProc(
 {
     ShmState *shmData = instanceData ;
 
+    <<shm: lock semaphore>>
+
     size_t available = shmData->length - shmData->position ;
     int canWrite = toWrite < available ? toWrite : available ;
 
     memcpy(shmData->address + shmData->position, buf, canWrite) ;
     shmData->position += canWrite ;
+
+    <<shm: unlock semaphore>>
 
     return canWrite ;
 }
@@ -340,9 +387,6 @@ static int shmGetHandleProc(ClientData instanceData, int direction,
         ClientData *handlePtr) ;
 ----
 
-The message queue descriptor is the OS handle for the message
-queue, so we simply return it.
-
 [source,c]
 ----
 <<shm static function definitions>>=
@@ -363,6 +407,31 @@ shmGetHandleProc(
 }
 ----
 
+===== Block mode procedure
+    .blockModeProc = shmBlockModeProc,
+
+[source,c]
+----
+<<shm forward function declarations>>=
+static int shmBlockModeProc(ClientData instanceData, int mode) ;
+----
+
+[source,c]
+----
+<<shm static function definitions>>=
+static int
+shmBlockModeProc(
+    ClientData instanceData,
+    int mode)
+{
+    ShmState *shmData = instanceData ;
+
+    shmData->blockingMode = mode ;
+
+    return 0 ;
+}
+----
+
 [source,c]
 ----
 <<mq external functions definitions>>=
@@ -376,30 +445,156 @@ PosixIPC_OpenSHMChannel(
 {
     int flags = 0 ;
     int tclMask = 0 ;
-    int bintrans = false ;
+    bool bintrans = false ;
 
     if (islower(*mode)) {
-        <<OpenSHMChannel: parse fopen style mode>>
+        if (processFopenModeOption(interp, mode, &flags, &tclMask, &bintrans) !=
+                TCL_OK) {
+            return NULL ;
+        }
     } else {
-        <<OpenSHMChannel: parse open style mode>>
+        if (processOpenModeOption(interp, mode, &flags, &tclMask, &bintrans) !=
+                TCL_OK) {
+            return NULL ;
+        }
     }
 
-    <<OpenSHMChannel: open message queue>>
+    int syserr ;
+    char const *qname = Tcl_GetString(name) ;
 
-    Tcl_Channel mqChan ;
-    <<OpenSHMChannel: create message queue channel>>
+    <<OpenSHMChannel: open semaphore>>
+    <<OpenSHMChannel: open shared memory>>
+
+    Tcl_Channel shmChan ;
+    <<OpenSHMChannel: create shared memory channel>>
 
     <<OpenSHMChannel: set translation option>>
 
-    return NULL ;
+    return shmChan ;
 
 chanerror:
-    Tcl_Close(interp, mqChan) ;
+    Tcl_Close(interp, shmChan) ;
     return NULL ;
 }
 ----
 
-=== SHM Command
+[source,c]
+----
+<<OpenSHMChannel: open semaphore>>=
+int semflags = flags & (O_CREAT | O_EXCL) ;
+sem_t *shmsem = sem_open(qname, semflags, permissions, 1) ;
+if (shmsem == SEM_FAILED) {
+    shmFailure(interp, "cannot open exclusive access semaphore") ;
+    return NULL ;
+}
+----
+
+[source,c]
+----
+<<OpenSHMChannel: open shared memory>>=
+if ((flags & O_CREAT) != 0 && size == 0) {
+    if (interp != NULL) {
+        Tcl_SetObjResult(interp,
+                Tcl_ObjPrintf("cannot create zero sized shared memory")) ;
+    }
+    return NULL ;
+}
+
+int shmfd = shm_open(qname, flags, permissions) ;
+if (shmfd < 0) {
+    shmFailure(interp, qname) ;
+    return NULL ;
+}
+
+struct stat shmStatus ;
+syserr = fstat(shmfd, &shmStatus) ;
+if (syserr < 0) {
+    shmFailure(interp, "cannot get status of shared memory") ;
+    close(shmfd) ;
+}
+
+if (shmStatus.st_size == 0) {
+    int syserr = ftruncate(shmfd, size) ;
+    if (syserr < 0) {
+        shmFailure(interp, "cannot set size of shared memory") ;
+        close(shmfd) ;
+        return NULL ;
+    }
+} else {
+    size = shmStatus.st_size ;
+}
+----
+
+[source,c]
+----
+<<OpenSHMChannel: create shared memory channel>>=
+char chanName[TCL_INTEGER_SPACE + 16] ;
+snprintf(chanName, sizeof(chanName), "posixshm%d", shmfd) ;
+
+ShmState *shmdata = ckalloc(sizeof(ShmState)) ;
+shmdata->shmfd = shmfd ;
+shmdata->semaphore = shmsem ;
+shmdata->tclMask = tclMask ;
+shmdata->length = size ;
+shmdata->position = 0 ;
+
+int mapProt = 0 ;
+mapProt |= (tclMask & TCL_READABLE) != 0 ? PROT_READ : 0 ;
+mapProt |= (tclMask & TCL_WRITABLE) != 0 ? PROT_WRITE : 0 ;
+
+shmdata->address = mmap(NULL, size, mapProt, MAP_SHARED, shmfd, 0) ;
+if (shmdata->address == MAP_FAILED) {
+    shmFailure(interp, qname) ;
+    close(shmfd) ;
+    ckfree(shmdata) ;
+    return NULL ;
+}
+
+
+shmChan = Tcl_CreateChannel(&ShmChannelType, chanName, shmdata, tclMask) ;
+shmdata->channel = shmChan ;
+----
+
+If the channel was opened in binary mode,
+we need to instruct the Tcl channel system to set the translation properly.
+
+[source,c]
+----
+<<OpenSHMChannel: set translation option>>=
+if (bintrans) {
+    if (Tcl_SetChannelOption(interp, shmChan, "-translation", "binary") !=
+            TCL_OK) {
+        goto chanerror ;
+    }
+}
+----
+
+[source,c]
+----
+<<shm forward function declarations>>=
+static int shmFailure(Tcl_Interp *interp, char const *msg) ;
+----
+
+Since it is a system call that has failed,
+we need a reasonable error message and must make sure to set Tcl's
+notion of `errno` indicating the cause of the error.
+
+[source,c]
+----
+<<mq static function definitions>>=
+static int
+shmFailure(
+    Tcl_Interp *interp,
+    char const *msg)
+{
+    return ipcFailure(interp, "shm", msg) ;
+}
+----
+
+=== SHM Commands
+SHM Commands
+
+==== shm open command
 
 [source,c]
 ----
@@ -418,9 +613,136 @@ shmOpenCmd(
     int objc,
     Tcl_Obj *const objv[])
 {
+    static char const usage[] = "?options? sharedname ?access? ?permissions?" ;
+    if (objc < 2) {
+        Tcl_WrongNumArgs(interp, 1, objv, usage) ;
+        return TCL_ERROR ;
+    }
+
+    <<shmOpenCmd: establish default option values>>
+
+    <<shmOpenCmd: parse options arguments>>
+
+    <<shmOpenCmd: gather remaining arguments>>
+
+    <<shmOpenCmd: create channel>>
+
     return TCL_OK ;
 }
 ----
+
+[source,c]
+----
+<<shmOpenCmd: establish default option values>>=
+char const *mode = "r" ;
+mode_t permissions = 0666 ;
+size_t shmSize = 0 ;
+----
+
+[source,c]
+----
+<<shmOpenCmd: parse options arguments>>=
+int objindex = 1 ;
+for ( ; objindex < objc ; objindex++) {
+    char const *optionName = Tcl_GetString(objv[objindex]) ;
+    if (strcmp(optionName, "--") == 0) {
+        objindex++ ;
+        break ;
+    } else if (strcmp(optionName, "-size") == 0) {
+        if (++objindex >= objc) {
+            Tcl_WrongNumArgs(interp, 1, objv, usage) ;
+            return TCL_ERROR ;
+        }
+        int size ;
+        if (Tcl_GetIntFromObj(interp, objv[objindex], &size) != TCL_OK) {
+            return TCL_ERROR ;
+        }
+        if (size <= 0) {
+            Tcl_SetObjResult(interp,
+                    Tcl_ObjPrintf("shared memory size must be positive")) ;
+            return TCL_ERROR ;
+        }
+        shmSize = size ;
+    } else {
+        break ;
+    }
+}
+----
+
+[source,c]
+----
+<<shmOpenCmd: gather remaining arguments>>=
+int remain = objc - objindex ;
+if (remain < 1 || remain > 3) {
+    Tcl_WrongNumArgs(interp, 1, objv, usage) ;
+    return TCL_ERROR ;
+}
+
+if (remain > 1) {
+    mode = Tcl_GetString(objv[objindex + 1]) ;
+}
+
+if (remain == 3) {
+    int permArgValue ;
+    if (Tcl_GetIntFromObj(interp, objv[objindex + 2], &permArgValue)
+            != TCL_OK) {
+        return TCL_ERROR ;
+    }
+    permissions = permArgValue ;
+}
+----
+
+[source,c]
+----
+<<shmOpenCmd: create channel>>=
+Tcl_Channel chan = PosixIPC_OpenSHMChannel(interp, objv[objindex], mode,
+        permissions, shmSize) ;
+if (chan == NULL) {
+    return TCL_ERROR ;
+}
+Tcl_RegisterChannel(interp, chan) ;
+Tcl_SetObjResult(interp, Tcl_NewStringObj(Tcl_GetChannelName(chan), -1)) ;
+----
+
+.Tests
+[source,tcl]
+----
+<<shm tests>>=
+test shm-open-1.0 {
+    Open a shared memory object
+} -setup {
+    set shmName /shm_open_1.0
+} -cleanup {
+    chan close $shmchan
+    posixipc shm unlink $shmName
+} -body {
+    set shmchan [posixipc shm open -size 256 $shmName w+]
+    log::debug "shm channel = $shmchan"
+    return $shmchan
+} -result {posixshm[0-9]*} -match glob
+----
+
+[source,tcl]
+----
+<<shm tests>>=
+test shm-open-2.0 {
+    Open shared memory, write and read
+} -setup {
+    set shmName /shm_open_2.0
+} -cleanup {
+    chan close $shmchan
+    posixipc shm unlink $shmName
+} -body {
+    set shmchan [posixipc shm open -size 256 -- $shmName w+]
+    log::debug "shm channel = $shmchan"
+    chan configure $shmchan -buffering line
+    chan puts $shmchan "Hello World"
+    chan seek $shmchan 0
+    chan gets $shmchan
+} -result {Hello World}
+----
+
+==== shm unlink command
 
 [source,c]
 ----
@@ -439,6 +761,21 @@ shmUnlinkCmd(
     int objc,
     Tcl_Obj *const objv[])
 {
+    static char const usage[] = "sharedname" ;
+    if (objc != 2) {
+        Tcl_WrongNumArgs(interp, 1, objv, usage) ;
+        return TCL_ERROR ;
+    }
+
+    char const *shmname = Tcl_GetString(objv[1]) ;
+
+    int shmerr = shm_unlink(shmname) ;
+    int semerr = sem_unlink(shmname) ;
+
+    if (shmerr < 0 || semerr < 0) {
+        return shmFailure(interp, shmname) ;
+    }
+
     return TCL_OK ;
 }
 ----
