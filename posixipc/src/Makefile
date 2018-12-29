@@ -11,8 +11,8 @@
 
 DOCDIR	= ../doc
 IMAGEDIR = ./images
-CODEDIR	= ../tea/generic
-BUILDDIR = ../tea/build
+CODEDIR	= ../tea/unix
+BUILDDIR = ../tea/build/x86_64-linux-tcl8.6
 TESTDIR = ../test
 
 VERSION=1.0
