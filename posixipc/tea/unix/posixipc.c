@@ -392,7 +392,7 @@ Posixipc_Init(
     Tcl_CreateObjCommand(interp, mqOpenCmdName, mqOpenCmd, NULL, NULL) ;    // <1>
     if (Tcl_DictObjPut(interp, mqMap, Tcl_NewStringObj(openStr, -1),
             Tcl_NewStringObj(mqOpenCmdName, -1)) != TCL_OK) {
-        goto release_mq ;                                                      // <2>
+        goto release_mq ;                                                   // <2>
     }
     static char const mqSendCmdName[] = MQ_SUBCMD(send) ;
     static char const sendStr[] = "send" ;
@@ -638,6 +638,14 @@ PosixIPC_OpenSHMChannel(
             return NULL ;
         }
     }
+    
+    if ((flags & O_CREAT) != 0 && size <= 0) {              // <1>
+        if (interp != NULL) {
+            Tcl_SetObjResult(interp,
+                    Tcl_ObjPrintf("shared memory size must be positive")) ;
+        }
+        return NULL ;
+    }
 
     int syserr ;
     char const *shmname = Tcl_GetString(name) ;
@@ -647,14 +655,6 @@ PosixIPC_OpenSHMChannel(
         shmFailure(interp, "cannot open shared memory exclusive access semaphore") ;
         return NULL ;
     }
-    if ((flags & O_CREAT) != 0 && size <= 0) {
-        if (interp != NULL) {
-            Tcl_SetObjResult(interp,
-                    Tcl_ObjPrintf("shared memory size must be positive")) ;
-        }
-        goto release_sem ;
-    }
-    
     int shmfd = shm_open(shmname, flags, permissions) ;
     if (shmfd < 0) {
         shmFailure(interp, shmname) ;
@@ -717,9 +717,11 @@ release_chan:
 
 release_shm:
     close(shmfd) ;
+    shm_unlink(shmname) ;
 
 release_sem:
     sem_close(shmsem) ;
+    sem_unlink(shmname) ;
 
     return NULL ;
 }
@@ -1405,8 +1407,8 @@ mqReceiveCmd(
         return mqFailure(interp, "mq_getattr failed during receive") ;
     }
 
-    Tcl_Obj *resultObj = Tcl_NewObj() ;
-    unsigned char *value = Tcl_SetByteArrayLength(resultObj, attrs.mq_msgsize) ;
+    Tcl_Obj *resultObj = Tcl_NewByteArrayObj(NULL, attrs.mq_msgsize) ;
+    unsigned char *value = Tcl_GetByteArrayFromObj(resultObj, NULL) ;
 
     syserr = mq_receive(mqdata->mqdes, (char *)value, attrs.mq_msgsize,
             &mqdata->lastpriority) ;
@@ -1417,9 +1419,12 @@ mqReceiveCmd(
 
     if (objc == 3) {
         Tcl_Obj *priorObj = Tcl_NewIntObj(mqdata->lastpriority) ;
-        if (Tcl_ObjSetVar2(interp, objv[2], NULL, priorObj, TCL_LEAVE_ERR_MSG)
-                == NULL) {
-            Tcl_DecrRefCount(priorObj) ;
+        Tcl_IncrRefCount(priorObj) ;
+        Tcl_Obj *newValue = Tcl_ObjSetVar2(interp, objv[2], NULL, priorObj,
+                TCL_LEAVE_ERR_MSG) ;
+        Tcl_DecrRefCount(priorObj) ;
+
+        if (newValue == NULL) {
             goto release_result ;
         }
     }
@@ -1568,7 +1573,7 @@ shmSeekProc(
 {
     ShmState *shmData = instanceData ;
 
-    off_t start ;
+    off_t start = 0 ;                   // <1>
     switch (seekMode) {
     case SEEK_SET:
         start = 0 ;

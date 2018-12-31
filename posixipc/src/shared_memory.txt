@@ -388,7 +388,7 @@ shmSeekProc(
 {
     ShmState *shmData = instanceData ;
 
-    off_t start ;
+    off_t start = 0 ;                   // <1>
     switch (seekMode) {
     case SEEK_SET:
         start = 0 ;
@@ -417,6 +417,7 @@ shmSeekProc(
     return newPosition ;
 }
 ----
+<1> This prevents some compiler warnings.
 
 ===== Watch procedure
 
@@ -539,17 +540,7 @@ PosixIPC_OpenSHMChannel(
     int tclMask = 0 ;
     bool bintrans = false ;
 
-    if (islower(*mode)) {
-        if (processFopenModeOption(interp, mode, &flags, &tclMask, &bintrans) !=
-                TCL_OK) {
-            return NULL ;
-        }
-    } else {
-        if (processOpenModeOption(interp, mode, &flags, &tclMask, &bintrans) !=
-                TCL_OK) {
-            return NULL ;
-        }
-    }
+    <<OpenSHMChannel: process arguments>>
 
     int syserr ;
     char const *shmname = Tcl_GetString(name) ;
@@ -571,13 +562,46 @@ release_chan:
 
 release_shm:
     close(shmfd) ;
+    shm_unlink(shmname) ;
 
 release_sem:
     sem_close(shmsem) ;
+    sem_unlink(shmname) ;
 
     return NULL ;
 }
 ----
+
+Like message queues,
+shared memory also uses the same argument conventions for mode and
+access.
+
+.processing arguments
+(((chunk,OpenSHMChannel: process arguments)))
+[source,c]
+----
+<<OpenSHMChannel: process arguments>>=
+if (islower(*mode)) {
+    if (processFopenModeOption(interp, mode, &flags, &tclMask, &bintrans) !=
+            TCL_OK) {
+        return NULL ;
+    }
+} else {
+    if (processOpenModeOption(interp, mode, &flags, &tclMask, &bintrans) !=
+            TCL_OK) {
+        return NULL ;
+    }
+}
+
+if ((flags & O_CREAT) != 0 && size <= 0) {              // <1>
+    if (interp != NULL) {
+        Tcl_SetObjResult(interp,
+                Tcl_ObjPrintf("shared memory size must be positive")) ;
+    }
+    return NULL ;
+}
+----
+<1> A non-positive size is not meaningful.
 
 .opening the semaphore
 (((chunk,OpenSHMChannel: open semaphore)))
@@ -623,14 +647,6 @@ shared memory of zero length.
 [source,c]
 ----
 <<OpenSHMChannel: open shared memory>>=
-if ((flags & O_CREAT) != 0 && size <= 0) {
-    if (interp != NULL) {
-        Tcl_SetObjResult(interp,
-                Tcl_ObjPrintf("shared memory size must be positive")) ;
-    }
-    goto release_sem ;
-}
-
 int shmfd = shm_open(shmname, flags, permissions) ;
 if (shmfd < 0) {
     shmFailure(interp, shmname) ;
@@ -644,9 +660,9 @@ file to give it the requested size.
 The complication here is knowing whether we have actually created
 the shared memory object or whether it was already there when
 we tried to open it.
-The resolution is to look at the size of the shared memory object.
+The answer is to look at the size of the shared memory object.
 A zero size indicates we actually created the share memory object and
-need to therefore expand its size.
+need to expand it to the requested size.
 Since, the shared memory object is represented by a file descriptor,
 `fstat()` will give the required information.
 
@@ -981,6 +997,144 @@ test shm-open-1.1 {
 [source,tcl]
 ----
 <<shm tests>>=
+test shm-open-1.2 {
+    Open a shared memory object with bad name
+} -setup {
+    set shmName /shm_open_1.2/foo
+} -cleanup {
+} -body {
+    shm open -size 256 $shmName w+
+} -result {posixipc shm: cannot open shared memory exclusive access\
+        semaphore: invalid argument} -returnCodes error
+----
+
+(((chunk,shm tests)))
+[source,tcl]
+----
+<<shm tests>>=
+test shm-open-1.3 {
+    Open a shared memory object with bad access value
+} -setup {
+    set shmName /shm_open_1.3
+} -cleanup {
+} -body {
+    shm open -size 256 $shmName a
+} -result {unknown open mode, "a": should be one of r, r+ rb, rb+, w, w+, wb,\
+        or wb+} -returnCodes error
+----
+
+(((chunk,shm tests)))
+[source,tcl]
+----
+<<shm tests>>=
+test shm-open-1.4 {
+    Open a shared memory object with bad access flag
+} -setup {
+    set shmName /shm_open_1.4
+} -cleanup {
+} -body {
+    shm open -size 256 $shmName {FOOBAR}
+} -result {invalid access mode "FOOBAR": must be BINARY, CREAT, EXCL,\
+        NONBLOCK, RDONLY, RDWR, or WRONLY} -returnCodes error
+----
+
+(((chunk,shm tests)))
+[source,tcl]
+----
+<<shm tests>>=
+test shm-open-1.5 {
+    Open a shared memory object with bad size spec
+} -setup {
+    set shmName /shm_open_1.5
+} -cleanup {
+} -body {
+    shm open -size
+} -result {wrong # args: should be "shm open ?options? sharedname ?access?\
+        ?permissions?"} -returnCodes error
+----
+
+(((chunk,shm tests)))
+[source,tcl]
+----
+<<shm tests>>=
+test shm-open-1.6 {
+    Open a shared memory object with no name
+} -setup {
+    set shmName /shm_open_1.6
+} -cleanup {
+} -body {
+    shm open -size 256
+} -result {wrong # args: should be "shm open ?options? sharedname ?access?\
+        ?permissions?"} -returnCodes error
+----
+
+(((chunk,shm tests)))
+[source,tcl]
+----
+<<shm tests>>=
+test shm-open-1.7 {
+    Open a shared memory object with no name
+} -setup {
+    set shmName /shm_open_1.6
+} -cleanup {
+} -body {
+    shm open $shmName r+ foobar
+} -result {expected integer but got "foobar"} -returnCodes error
+----
+
+(((chunk,shm tests)))
+[source,tcl]
+----
+<<shm tests>>=
+test shm-open-1.8 {
+    Open a shared memory -- too few arguments
+} -setup {
+} -cleanup {
+} -body {
+    shm open
+} -result {wrong # args: should be "shm open ?options? sharedname ?access?\
+        ?permissions?"} -returnCodes error
+----
+
+(((chunk,shm tests)))
+[source,tcl]
+----
+<<shm tests>>=
+test shm-open-1.9 {
+    Open a shared memory -- bad size spec
+} -setup {
+    set shmName /shm_open_1.9
+} -cleanup {
+} -body {
+    shm open -size foobar $shmName r+
+} -result {expected integer but got "foobar"} -returnCodes error
+----
+
+(((chunk,shm tests)))
+[source,tcl]
+----
+<<shm tests>>=
+test shm-open-1.10 {
+    Open a shared memory with non-default permissions
+} -setup {
+    set shmName /shm_open_1.10
+    set shmFile /dev/shm$shmName
+} -cleanup {
+    chan close $shmchan
+    shm unlink $shmName
+} -body {
+    set shmchan [shm open -size 1024 $shmName w+ 0640]
+
+    set fattrs [file attributes $shmFile]
+    log::debug "shm file attributes = $fattrs"
+    dict get $fattrs -permissions
+} -result {00640}
+----
+
+(((chunk,shm tests)))
+[source,tcl]
+----
+<<shm tests>>=
 test shm-open-2.0 {
     Open shared memory, write and read
 } -setup {
@@ -992,6 +1146,27 @@ test shm-open-2.0 {
     set shmchan [shm open -size 256 -- $shmName w+]
     log::debug "shm channel = $shmchan"
     chan configure $shmchan -buffering line
+    chan puts $shmchan "Hello World"
+    chan seek $shmchan 0
+    chan gets $shmchan
+} -result {Hello World}
+----
+
+(((chunk,shm tests)))
+[source,tcl]
+----
+<<shm tests>>=
+test shm-open-2.1 {
+    Open shared memory, write and read -- non-blocking
+} -setup {
+    set shmName /shm_open_2.1
+} -cleanup {
+    chan close $shmchan
+    shm unlink $shmName
+} -body {
+    set shmchan [shm open -size 256 -- $shmName w+]
+    log::debug "shm channel = $shmchan"
+    chan configure $shmchan -buffering line -blocking false
     chan puts $shmchan "Hello World"
     chan seek $shmchan 0
     chan gets $shmchan
@@ -1093,5 +1268,19 @@ shmUnlinkCmd(
 ----
 <1> The associated exclusion semaphore is also unlinked so as not
 to bleed semaphore names into the file system.
+
+.Tests
+(((chunk,shm tests)))
+[source,tcl]
+----
+<<shm tests>>=
+test shm-unlink-1.0 {
+    unlink shared memory -- wrong arguments
+} -setup {
+} -cleanup {
+} -body {
+    shm unlink
+} -result {wrong # args: should be "shm unlink shmname"} -returnCodes error
+----
 
 // vim:set syntax=asciidoc:
