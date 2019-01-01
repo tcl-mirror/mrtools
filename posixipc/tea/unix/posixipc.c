@@ -177,6 +177,19 @@ static int shmUnlinkCmd(ClientData clientData, Tcl_Interp *interp, int objc,
         Tcl_Obj *const objv[]) ;
 
 /*
+ * Static Inline Functions
+ */
+static inline int
+mqdToFd(mqd_t mq)
+{
+#if defined(__linux__)
+    return (int)mq ;
+#elif defined(__FreeBDS__)
+    return *(int *)mq ;
+# endif
+}
+
+/*
  * Static Data
  */
 static Tcl_ChannelType MqChannelType = {
@@ -575,7 +588,7 @@ PosixIPC_OpenMQChannel(
     } ;
     
     mqd_t mqdes = mq_open(mqname, flags, permissions, &attrs) ;
-    if (mqdes < 0) {
+    if (mqdes == (mqd_t)(-1)) {
         mqFailure(interp, mqname) ;
         return NULL ;
     }
@@ -583,7 +596,7 @@ PosixIPC_OpenMQChannel(
     Tcl_Channel mqChan ;
 
     char chanName[TCL_INTEGER_SPACE + 16] ;
-    snprintf(chanName, sizeof(chanName), "posixmq%d", mqdes) ;
+    snprintf(chanName, sizeof(chanName), "posixmq%d", mqdToFd(mqdes)) ;
     MqState *mqdata = ckalloc(sizeof(MqState)) ;
     mqChan = Tcl_CreateChannel(&MqChannelType, chanName, mqdata, tclMask) ;
     
@@ -961,7 +974,7 @@ mqCloseProc(
 {
     MqState *mqPtr = instanceData ;
 
-    Tcl_DeleteFileHandler(mqPtr->mqdes) ;   // <1>
+    Tcl_DeleteFileHandler(mqdToFd(mqPtr->mqdes)) ;   // <1>
 
     int err = mq_close(mqPtr->mqdes) ;
     ckfree(mqPtr) ;                         // <2>
@@ -1191,10 +1204,10 @@ mqWatchProc(
 
     mask &= mqPtr->tclMask ;
     if (mask != 0) {
-        Tcl_CreateFileHandler(mqPtr->mqdes, mask,
+        Tcl_CreateFileHandler(mqdToFd(mqPtr->mqdes), mask,
                 (Tcl_FileProc *)Tcl_NotifyChannel, mqPtr->channel) ;
     } else {
-        Tcl_DeleteFileHandler(mqPtr->mqdes) ;
+        Tcl_DeleteFileHandler(mqdToFd(mqPtr->mqdes)) ;
     }
 }
 static int
@@ -1451,9 +1464,8 @@ mqUnlinkCmd(
     }
 
     char const *mqname = Tcl_GetString(objv[1]) ;
-
-    mqd_t mqdes = mq_unlink(mqname) ;
-    if (mqdes < 0) {
+    int syserr = mq_unlink(mqname) ;
+    if (syserr == -1) {
         return mqFailure(interp, mqname) ;
     }
 

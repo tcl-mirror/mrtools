@@ -659,6 +659,28 @@ typedef struct {
 <4> The priority of the last received message from the queue.
 <5> The priority to use to post a message to a queue.
 
+There turns out to be a small difference in the way Linux and FreeBSD
+hand a value of type `mqd_t`.
+In Linux, a value of type `mqd_t` is just an ordinary file descriptor.
+In FreeBSD, a value of type `mqd_t` is a pointer to the file
+descriptor.
+So we will use a small inline function to handle the conversion of
+`mqd_t` values to file descriptors.
+
+[source,c]
+----
+<<static inline function definitions>>=
+static inline int
+mqdToFd(mqd_t mq)
+{
+#if defined(__linux__)
+    return (int)mq ;
+#elif defined(__FreeBDS__)
+    return *(int *)mq ;
+# endif
+}
+----
+
 The following sections describe each of the functions supplied as part
 of the message queue channel driver.
 
@@ -723,7 +745,7 @@ mqCloseProc(
 {
     MqState *mqPtr = instanceData ;
 
-    Tcl_DeleteFileHandler(mqPtr->mqdes) ;   // <1>
+    Tcl_DeleteFileHandler(mqdToFd(mqPtr->mqdes)) ;   // <1>
 
     int err = mq_close(mqPtr->mqdes) ;
     ckfree(mqPtr) ;                         // <2>
@@ -1692,10 +1714,10 @@ mqWatchProc(
 
     mask &= mqPtr->tclMask ;
     if (mask != 0) {
-        Tcl_CreateFileHandler(mqPtr->mqdes, mask,
+        Tcl_CreateFileHandler(mqdToFd(mqPtr->mqdes), mask,
                 (Tcl_FileProc *)Tcl_NotifyChannel, mqPtr->channel) ;
     } else {
-        Tcl_DeleteFileHandler(mqPtr->mqdes) ;
+        Tcl_DeleteFileHandler(mqdToFd(mqPtr->mqdes)) ;
     }
 }
 ----
@@ -2438,7 +2460,7 @@ struct mq_attr attrs = {
 } ;
 
 mqd_t mqdes = mq_open(mqname, flags, permissions, &attrs) ;
-if (mqdes < 0) {
+if (mqdes == (mqd_t)(-1)) {
     mqFailure(interp, mqname) ;
     return NULL ;
 }
@@ -2455,7 +2477,7 @@ data associated to it.
 ----
 <<OpenMQChannel: create message queue channel>>=
 char chanName[TCL_INTEGER_SPACE + 16] ;
-snprintf(chanName, sizeof(chanName), "posixmq%d", mqdes) ;
+snprintf(chanName, sizeof(chanName), "posixmq%d", mqdToFd(mqdes)) ;
 MqState *mqdata = ckalloc(sizeof(MqState)) ;
 mqChan = Tcl_CreateChannel(&MqChannelType, chanName, mqdata, tclMask) ;
 
@@ -3518,9 +3540,8 @@ mqUnlinkCmd(
     }
 
     char const *mqname = Tcl_GetString(objv[1]) ;
-
-    mqd_t mqdes = mq_unlink(mqname) ;
-    if (mqdes < 0) {
+    int syserr = mq_unlink(mqname) ;
+    if (syserr == -1) {
         return mqFailure(interp, mqname) ;
     }
 
