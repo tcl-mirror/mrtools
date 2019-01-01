@@ -663,7 +663,8 @@ PosixIPC_OpenSHMChannel(
     int syserr ;
     char const *shmname = Tcl_GetString(name) ;
 
-    sem_t *shmsem = sem_open(shmname, flags, permissions, 1) ;      // <1>
+    int semFlags = flags & (O_CREAT | O_EXCL) ;                     // <1>
+    sem_t *shmsem = sem_open(shmname, semFlags, permissions, 1) ;
     if (shmsem == SEM_FAILED) {
         shmFailure(interp, "cannot open shared memory exclusive access semaphore") ;
         return NULL ;
