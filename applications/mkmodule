@@ -1,0 +1,260 @@
+#!/usr/bin/env tclsh
+
+# This software is copyrighted 2018 by G. Andrew Mangogna.
+# The following terms apply to all files associated with the software unless
+# explicitly disclaimed in individual files.
+# 
+# The authors hereby grant permission to use, copy, modify, distribute,
+# and license this software and its documentation for any purpose, provided
+# that existing copyright notices are retained in all copies and that this
+# notice is included verbatim in any distributions. No written agreement,
+# license, or royalty fee is required for any of the authorized uses.
+# Modifications to this software may be copyrighted by their authors and
+# need not follow the licensing terms described here, provided that the
+# new terms are clearly indicated on the first page of each file where
+# they apply.
+# 
+# IN NO EVENT SHALL THE AUTHORS OR DISTRIBUTORS BE LIABLE TO ANY PARTY FOR
+# DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES ARISING
+# OUT OF THE USE OF THIS SOFTWARE, ITS DOCUMENTATION, OR ANY DERIVATIVES
+# THEREOF, EVEN IF THE AUTHORS HAVE BEEN ADVISED OF THE POSSIBILITY OF
+# SUCH DAMAGE.
+# 
+# THE AUTHORS AND DISTRIBUTORS SPECIFICALLY DISCLAIM ANY WARRANTIES,
+# INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.  THIS SOFTWARE
+# IS PROVIDED ON AN "AS IS" BASIS, AND THE AUTHORS AND DISTRIBUTORS HAVE
+# NO OBLIGATION TO PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS,
+# OR MODIFICATIONS.
+# 
+# GOVERNMENT USE: If you are acquiring this software on behalf of the
+# U.S. government, the Government shall have only "Restricted Rights"
+# in the software and related documentation as defined in the Federal
+# Acquisition Regulations (FARs) in Clause 52.227.19 (c) (2).  If you
+# are acquiring the software on behalf of the Department of Defense,
+# the software shall be classified as "Commercial Computer Software"
+# and the Government shall have only "Restricted Rights" as defined in
+# Clause 252.227-7013 (c) (1) of DFARs.  Notwithstanding the foregoing,
+# the authors grant the U.S. Government and others acting in its behalf
+# permission to use and distribute the software in accordance with the
+# terms specified in this license.
+
+# Make a Tcl module from script or binary extension files.
+# usage: mkmodule package version ?-script scriptfile ...?\
+#        ?-Linux | -Windows | -Darwin | -FreeBSD libraryfile ...?\
+#        ?-outdir dirname?"
+#
+# where:
+#   package is the name of the package
+#   version is the version number of the package
+#   -script scriptfile gives the name of a text file containing
+#           a Tcl script. Multiple script files may be placed in the module.
+#   -Linux | -Windows | -Darwin | -FreeBSD libraryfile gives the name of
+#           a shared object file for the appropriate OS. Multiple platform
+#           binaries may be placed in the module
+#   -outdir The name of directory where the output module file is placed.
+#           By default, the current directory.
+#
+#   A Tcl module file is constructed from the binary and script files
+#   and placed in the output directory. The file name follows the
+#   pattern required by Tcl module files, i.e. package-version.tm.
+
+namespace eval ::mkmodule {
+    namespace export module
+    namespace ensemble create
+
+    # This is the code placed in the module file that does the
+    # heavy lifting to copy the binary extension to the native file
+    # system and execute the "load" command on the result.
+    variable loadScript {proc __copyAndLoad__ {offset size package} {
+    set mchan [open [info script] rb]
+    set lchan [file tempfile tempname]
+    chan configure $lchan -translation binary
+    try {
+        chan seek $mchan $offset start
+        chan copy $mchan $lchan -size $size
+    } finally {
+        chan close $mchan
+        chan close $lchan
+    }
+
+    try {
+        load $tempname $package
+    } finally {
+        catch {file delete $tempname}
+    }
+}}
+
+    # This is the Tcl sequence to load a binary extension for a given
+    # OS platform.
+    variable loadTemplate {if {$::tcl_platform(os) eq "%s"} {
+    __copyAndLoad__ %ld %ld %s
+}}
+    # This value must be larger than the number of characters in "loadTemplate"
+    # when it is substituted with its parameters. Here we are being generous,
+    # but if the value of "loadTemplate" expands, make sure it either
+    # is smaller than this quantity or increase the "templateSize" value.
+    variable templateSize 256
+}
+
+proc ::mkmodule::module {package version args} {
+    set scripts [list]
+    set binaries [dict create]
+    set outdir .
+
+    # Parse arguments and accumlate the argument information into
+    # some data variables for later.
+    set nargs [llength $args]
+    for {set aindex 0} {$aindex < $nargs} {incr aindex} {
+        set arg [lindex $args $aindex]
+        switch -exact -- $arg {
+            -script {
+                set filename [lindex $args [incr aindex]]
+                validateFile $filename
+                if {$filename in $scripts} {
+                    error "file, \"$filename\", already used as a script file"
+                }
+                lappend scripts $filename
+            }
+            -outdir {
+                set outdir [lindex $args [incr aindex]]
+                if {![file isdirectory $outdir]} {
+                    error "output location, \"$outdir\", is not a directory"
+                }
+            }
+            -Windows -
+            -Linux -
+            -Darwin -
+            -FreeBSD {
+                set filename [lindex $args [incr aindex]]
+                validateFile $filename
+                if {[dict exists $binaries $filename]} {
+                    error "file, \"$filename\", already used as a binary file"
+                }
+                dict set binaries $filename [dict create\
+                        size [file size $filename]\
+                        os [string range $arg 1 end]\
+                    ]
+                # So that we don't have to type "Windows NT" on the command
+                # line and have to worry about escaping it from the shell,
+                # we'll tack on the other part here.
+                if {$arg eq "-Windows"} {
+                    set props [dict get $binaries $filename]
+                    dict set binaries $filename [dict append props os " NT"]
+                }
+            }
+            default {
+                usage "unrecognized argument, \"$arg\""
+            }
+        }
+    }
+
+    set tmchan [open [file join $outdir ${package}-${version}.tm] w]
+
+    variable templateSize
+    set slackSpace [expr {[dict size $binaries] * $templateSize}]
+
+    try {
+        set loadOffset 0
+        # First we output the text needed to load binary extensions.
+        # There is a proc that is used.
+        if {[dict size $binaries] != 0} {
+            variable loadScript
+            puts $tmchan $loadScript
+            # Block of blanks allocate space for the code that
+            # invokes the binary loading.
+            # Later we come back and fill in the actual invocations.
+            # We do it this way because at this time we don't know the
+            # file offsets to the binaries.
+            set loadOffset [chan tell $tmchan]
+            puts $tmchan [string repeat { } $slackSpace]
+        }
+
+        # Next come the script files.
+        foreach scriptfile $scripts {
+            set schan [open $scriptfile r]
+            try {
+                chan copy $schan $tmchan
+            } finally {
+                chan close $schan
+            }
+        }
+
+        # ^Z to stop the source command from scanning any further
+        puts -nonewline $tmchan "\x1a"
+
+        # After the ^Z, we load in all the binaries. We keep track of
+        # where in the file the binaries are located.
+        if {[dict size $binaries] != 0} {
+            chan configure $tmchan -translation binary
+
+            dict for {binfile props} $binaries {
+                dict set binaries $binfile offset [chan tell $tmchan]
+                set bchan [open $binfile rb]
+                try {
+                    chan copy $bchan $tmchan
+                } finally {
+                    chan close $bchan
+                }
+            }
+
+            # Now, seek back to the blank section and overwrite the blanks
+            # with command invocations to load the binaries
+            chan seek $tmchan $loadOffset start
+            chan configure $tmchan -translation auto
+            variable loadTemplate
+            set count 1
+            dict for {binfile props} $binaries {
+                if {$count != 1} {
+                    chan puts -nonewline $tmchan " else"
+                }
+                incr count
+
+                set loadCode [format $loadTemplate\
+                    [dict get $props os] [dict get $props offset]\
+                    [dict get $props size] $package]
+                chan puts -nonewline $tmchan $loadCode
+            }
+            chan puts $tmchan " else \{"
+            chan puts $tmchan {    error "no binary found for\
+                    $::tcl_platform(os)"}
+            chan puts $tmchan "\}"
+            puts $tmchan "rename __copyAndLoad__ {}"
+            # Check that the overwriting didn't destroy anything.
+            if {[chan tell $tmchan] - $loadOffset > $slackSpace} {
+                error "panic, overwrote space allocated for loading script"
+            }
+        }
+    } finally {
+        chan close $tmchan
+    }
+}
+
+proc usage {errstring} {
+    puts stderr $errstring
+    set progname [lindex [file split $::argv0] end]
+    puts stderr "usage: $progname package version ?-script scriptfile ...?\
+        ?-Linux | -Windows | -Darwin | -FreeBSD libraryfile ...?\
+        ?-outdir dirname?"
+    exit 1
+}
+
+proc ::mkmodule::validateFile {filename} {
+    if {![file readable $filename]} {
+        error "file, \"$filename\", is not a valid, readable file"
+    }
+}
+
+#
+# Start of main program.
+#
+
+set argv [lassign $argv package version]
+if {$package eq {}} {
+    usage "no package name given"
+}
+if {![string is integer -strict [string index $version 0]]} {
+    usage "version number does not begin with a number,\
+        found \"[string index $version 0]\""
+}
+::mkmodule module $package $version {*}$argv
