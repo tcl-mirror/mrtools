@@ -1,0 +1,1289 @@
+== Shared Memory
+
+POSIX shared memory mechanisms are implemented in Linux using a virtual
+file system.
+Opening a shared memory object creates a file at a specfic location in
+the file system.
+The object exists until either the system is rebooted or the shared
+memory is explicitly unlinked.
+To use shared memory,
+it is mapped into the address space of the process.
+At that point,
+it just looks like any other data memory.
+
+The Tcl channel metaphor extends well to shared memory.
+However,
+since the memory is shared between multiple processes,
+some form of exclusive access must be implemented to insure the
+sharing processes do not interfer with each other.
+We use a POSIX semaphore for that purpose.
+The *wait* and *post* operations on the semaphore are kept as part
+of the channel operations and are not exposed to the script level.
+The semaphore is only locked for a long as necessary to copy memory
+to and from the shared area.
+
+In what follows, we present the Tcl channel driver functions first,
+followed by the script level Tcl commands.
+
+=== Shared Memory Channel Driver
+
+In this section we present the channel driver for the POSIX shared
+memory type channel.
+
+==== Channel Driver Components
+
+In this section,
+we describe the functions supplied for the Tcl channel driver that
+is used for POSIX shared memory.
+This is similar to what was supplied for the message queue driver.
+
+The following is an initialized variable of the proper structure
+that is given to `Tcl_CreateChannel()` to define the shared memory operations.
+
+(((chunk,shm static data)))
+[source,c]
+----
+<<shm static data>>=
+static Tcl_ChannelType ShmChannelType = {
+    .typeName = "shm",          /* The name of the channel type in Tcl
+                                 * commands. This storage is owned by channel
+                                 * type. */
+    .version = TCL_CHANNEL_VERSION_5,
+                                /* Version of the channel type. */
+    .closeProc = shmCloseProc,
+                                /* Function to call to close the channel, or
+                                 * TCL_CLOSE2PROC if the close2Proc should be
+                                 * used instead. */
+    .inputProc = shmInputProc,
+                                /* Function to call for input on channel. */
+    .outputProc = shmOutputProc,
+                                /* Function to call for output on channel. */
+    .seekProc = shmSeekProc,
+                                /* Function to call to seek on the channel.
+                                 * May be NULL. */
+    .setOptionProc = NULL,
+                                /* Set an option on a channel. */
+    .getOptionProc = NULL,
+                                /* Get an option from a channel. */
+    .watchProc = shmWatchProc,
+                                /* Set up the notifier to watch for events on
+                                 * this channel. */
+    .getHandleProc = shmGetHandleProc,
+                                /* Get an OS handle from the channel or NULL
+                                 * if not supported. */
+    .close2Proc = NULL,
+                                /* Function to call to close the channel if
+                                 * the device supports closing the read &
+                                 * write sides independently. */
+    .blockModeProc = shmBlockModeProc,
+                                /* Set blocking mode for the raw channel. May
+                                 * be NULL. */
+    /*
+     * Only valid in TCL_CHANNEL_VERSION_2 channels or later
+     */
+    .flushProc = NULL,
+                                /* Function to call to flush a channel. May be
+                                 * NULL. */
+    .handlerProc = NULL,
+                                /* Function to call to handle a channel event.
+                                 * This will be passed up the stacked channel
+                                 * chain. */
+    /*
+     * Only valid in TCL_CHANNEL_VERSION_3 channels or later
+     */
+    .wideSeekProc = NULL,
+                                /* Function to call to seek on the channel
+                                 * which can handle 64-bit offsets. May be
+                                 * NULL, and must be NULL if seekProc is
+                                 * NULL. */
+    /*
+     * Only valid in TCL_CHANNEL_VERSION_4 channels or later
+     * TIP #218, Channel Thread Actions
+     */
+    .threadActionProc = NULL,
+                                /* Function to call to notify the driver of
+                                 * thread specific activity for a channel. May
+                                 * be NULL. */
+
+    /*
+     * Only valid in TCL_CHANNEL_VERSION_5 channels or later
+     * TIP #208, File Truncation
+     */
+    .truncateProc = NULL
+                                /* Function to call to truncate the underlying
+                                 * file to a particular length. May be NULL if
+                                 * the channel does not support truncation. */
+} ;
+----
+
+Notice that not all functions are provided (_i.e._ some members of the
+structure are set to `NULL`).
+Those members are:
+
+setOptionProc::
+    There are no channel type specific options that can be written.
+getOptionProc::
+    There are no channel type specific options that can be read.
+close2Proc::
+    For shared memory,
+    the idea of closing read or write separately does not apply.
+flushProc::
+    This is reserved.
+handlerProc::
+    Used only for stacked drivers.
+wideSeekProc::
+    We assume shared memory areas are less than 2 GiBytes so wide seeking
+    is not necessary.
+threadActionProc::
+    There is no thread specific driver state.
+truncateProc::
+    Once created, the size of a shared memory object underlying
+    the channel is not changed.
+
+When a new shared memory Tcl channel is created,
+some instance data for the channel may also be supplied.
+That instance data is then provided as an argument to each of the
+functions for the driver.
+This makes things much more convenient for the driver function code
+to have access to the state of the channel.
+The following data structure defines the information that constitutes
+the state of an individual shared memory channel.
+
+(((chunk,shm data types)))
+[source,c]
+----
+<<shm data types>>=
+typedef struct {
+    Tcl_Channel channel ;       // <1>
+    int shmfd ;                 // <2>
+    sem_t *semaphore ;          // <3>
+    int tclMask ;               // <4>
+    int blockingMode ;          // <5>
+    uint8_t *address ;          // <6>
+    size_t length ;             // <7>
+    size_t position ;           // <8>
+} ShmState ;
+----
+<1> The Tcl channel handle as returned from `Tcl_CreateChannel()`.
+<2> The shared memory descriptor. In reality on Linux this is
+    an ordinary file descriptor.
+<3> The semaphore used to control exclusive access to the shared memory.
+<4> A mask of allowed operations on the channel.
+    This is combination of TCL_READABLE or TCL_WRITABLE.
+<5> The current state of blocking mode for the channel.
+<6> The address in memory where the shared memory area is located.
+<7> The length in bytes of the shared memory area.
+<8> The current position in the shared memory area where the next
+    read or write will occur.
+
+The following sections describe each of the functions supplied as part
+of the shared memory channel driver.
+
+===== Close procedure
+
+(((chunk,shm forward function declarations)))
+[source,c]
+----
+<<shm forward function declarations>>=
+static int shmCloseProc(ClientData instanceData, Tcl_Interp *interp) ;
+----
+
+To close a share memory object,
+we must unmap it,
+close the underlying file, and
+close the exclusion semaphore.
+Should an error occur in this process,
+we want to continue to finish all the operations.
+We report the last error that occurred.
+
+(((chunk,shm static function definitions)))
+[source,c]
+----
+<<shm static function definitions>>=
+static int
+shmCloseProc(
+    ClientData instanceData,
+    Tcl_Interp *interp)
+{
+    ShmState *shmData = instanceData ;
+
+    Tcl_DeleteFileHandler(shmData->shmfd) ;
+
+    int resultCode = 0 ;
+
+    int syserr = munmap(shmData->address, shmData->length) ;
+    if (syserr < 0) {
+        resultCode = errno ;
+    }
+
+    syserr = close(shmData->shmfd) ;
+    if (syserr < 0) {
+        resultCode = errno ;
+    }
+
+    syserr = sem_close(shmData->semaphore) ;
+    if (syserr < 0) {
+        resultCode = errno ;
+    }
+
+    ckfree(shmData) ;
+    return resultCode ;
+}
+----
+
+===== Input procedure
+
+(((chunk,shm forward function declarations)))
+[source,c]
+----
+<<shm forward function declarations>>=
+static int shmInputProc(ClientData instanceData, char *buf, int bufSize,
+        int *errorCodePtr) ;
+----
+
+Input from the share memory is just copying from memory.
+There is necessary book keeping to make sure we don't run off the
+end of the memory area.
+Also,
+we must acquire the semaphore used to insure exclusive access to the
+shared memory.
+
+(((chunk,shm static function definitions)))
+[source,c]
+----
+<<shm static function definitions>>=
+static int
+shmInputProc(
+    ClientData instanceData,
+    char *buf,
+    int bufSize,
+    int *errorCodePtr)
+{
+    ShmState *shmData = instanceData ;
+
+    <<shm: lock semaphore>>
+
+    size_t remaining = shmData->length - shmData->position ;
+    int toRead = bufSize < remaining ? bufSize : remaining ;
+
+    memcpy(buf, shmData->address + shmData->position, toRead) ;
+    shmData->position += toRead ;
+
+    <<shm: unlock semaphore>>
+
+    return toRead ;
+}
+----
+
+We interpret non-blocking mode as not wanting to wait on the
+semaphore for access to the shared memory.
+We don't anticipate this to be a common situation.
+The semaphore is _hidden_ in the channel driver and is only
+locked during the memory copy operations.
+So there seems little reason to use non-blocking mode
+for the shared memory.
+
+.lock semaphore
+(((chunk,shm: lock semaphore)))
+[source,c]
+----
+<<shm: lock semaphore>>=
+int syserr ;
+if (shmData->blockingMode == TCL_MODE_NONBLOCKING) {
+    syserr = sem_trywait(shmData->semaphore) ;
+    if (syserr == -1) {
+        *errorCodePtr = errno ;
+        return -1 ;
+    }
+} else {
+    syserr = sem_wait(shmData->semaphore) ;
+    if (syserr == -1) {
+        *errorCodePtr = errno ;
+        return -1 ;
+    }
+}
+----
+
+.unlock semaphore
+(((chunk,shm: unlock semaphore)))
+[source,c]
+----
+<<shm: unlock semaphore>>=
+syserr = sem_post(shmData->semaphore) ;
+if (syserr == -1) {
+    *errorCodePtr = errno ;
+    return -1 ;
+}
+----
+
+===== Output procedure
+
+(((chunk,shm forward function declarations)))
+[source,c]
+----
+<<shm forward function declarations>>=
+static int shmOutputProc(ClientData instanceData, char const *buf, int toWrite,
+        int *errorCodePtr) ;
+----
+
+Like input,
+output to the share memory is nothing more than copying data to the
+shared memory area.
+Again, there is some book keeping to account for boundaries
+and we must acquire the semaphore to have exclusive access to the
+underlying data.
+
+(((chunk,shm static function definitions)))
+[source,c]
+----
+<<shm static function definitions>>=
+static int
+shmOutputProc(
+    ClientData instanceData,
+    char const *buf,
+    int toWrite,
+    int *errorCodePtr)
+{
+    ShmState *shmData = instanceData ;
+
+    <<shm: lock semaphore>>
+
+    size_t available = shmData->length - shmData->position ;
+    int canWrite = toWrite < available ? toWrite : available ;
+
+    memcpy(shmData->address + shmData->position, buf, canWrite) ;
+    shmData->position += canWrite ;
+
+    <<shm: unlock semaphore>>
+
+    return canWrite ;
+}
+----
+
+===== Seek procedure
+
+(((chunk,shm forward function declarations)))
+[source,c]
+----
+<<shm forward function declarations>>=
+static int shmSeekProc(ClientData instanceData, long offset, int seekMode,
+        int *errorCodePtr) ;
+----
+
+The seeking operation in shared memory is just moving the notion of
+the current position to a new place in memory.
+Of course, we must account for boundary conditions and the way relative
+offsets are specified for the seek operation.
+
+(((chunk,shm static function definitions)))
+[source,c]
+----
+<<shm static function definitions>>=
+static int
+shmSeekProc(
+    ClientData instanceData,
+    long offset,
+    int seekMode,
+    int *errorCodePtr)
+{
+    ShmState *shmData = instanceData ;
+
+    off_t start = 0 ;                   // <1>
+    switch (seekMode) {
+    case SEEK_SET:
+        start = 0 ;
+        break ;
+
+    case SEEK_CUR:
+        start = shmData->position ;
+        break ;
+
+    case SEEK_END:
+        start = shmData->length - 1 ;
+        break ;
+
+    default:
+        Tcl_Panic("unknown seek mode") ;
+        break ;
+    }
+
+    off_t newPosition = start + offset ;
+    if (newPosition < 0 || newPosition >= shmData->length) {
+        *errorCodePtr = EINVAL ;
+        return -1 ;
+    }
+
+    shmData->position = newPosition ;
+    return newPosition ;
+}
+----
+<1> This prevents some compiler warnings.
+
+===== Watch procedure
+
+(((chunk,shm forward function declarations)))
+[source,c]
+----
+<<shm forward function declarations>>=
+static void shmWatchProc(ClientData instanceData, int mask) ;
+----
+
+We set the watch on the file descriptor for the shared memory,
+but it is not clear that this is a useful thing.
+
+(((chunk,shm static function definitions)))
+[source,c]
+----
+<<shm static function definitions>>=
+static void
+shmWatchProc(
+    ClientData instanceData,
+    int mask)
+{
+    ShmState *shmData = instanceData ;
+
+    mask &= shmData->tclMask ;
+    if (mask != 0) {
+        Tcl_CreateFileHandler(shmData->shmfd, mask,
+                (Tcl_FileProc *)Tcl_NotifyChannel, shmData->channel) ;
+    } else {
+        Tcl_DeleteFileHandler(shmData->shmfd) ;
+    }
+}
+----
+
+===== Get handle procedure
+
+(((chunk,shm forward function declarations)))
+[source,c]
+----
+<<shm forward function declarations>>=
+static int shmGetHandleProc(ClientData instanceData, int direction,
+        ClientData *handlePtr) ;
+----
+
+Again, the underlying shared memory identifier is, in reality,
+an ordinary file descriptor.
+
+(((chunk,shm static function definitions)))
+[source,c]
+----
+<<shm static function definitions>>=
+static int
+shmGetHandleProc(
+    ClientData instanceData,
+    int direction,
+    ClientData *handlePtr)
+{
+    ShmState *shmData = instanceData ;
+
+    if ((direction & shmData->tclMask) == 0) {
+        return TCL_ERROR ;
+    }
+
+    *handlePtr = (ClientData)(intptr_t)(shmData->shmfd) ;
+    return TCL_OK ;
+}
+----
+
+===== Block mode procedure
+
+(((chunk,shm forward function declarations)))
+[source,c]
+----
+<<shm forward function declarations>>=
+static int shmBlockModeProc(ClientData instanceData, int mode) ;
+----
+
+We need only to record the blocking mode so that it may be used
+to decide how to wait for the exclusion semaphore.
+
+(((chunk,shm static function definitions)))
+[source,c]
+----
+<<shm static function definitions>>=
+static int
+shmBlockModeProc(
+    ClientData instanceData,
+    int mode)
+{
+    ShmState *shmData = instanceData ;
+
+    shmData->blockingMode = mode ;
+
+    return 0 ;
+}
+----
+
+=== Opening a Shared Memory Channel
+
+Just as for message queues,
+we provide an external function that may be called by a ``C'' based
+extension to open an message queue channel.
+We don't expect that to be a common use case,
+but it is convenient when necessary and we will use the same function
+to provide the Tcl script level command to open a message queue channel.
+
+(((chunk,shm external functions definitions)))
+[source,c]
+----
+<<shm external functions definitions>>=
+Tcl_Channel
+PosixIPC_OpenSHMChannel(
+    Tcl_Interp *interp,
+    Tcl_Obj *name,
+    char const *mode,
+    mode_t permissions,
+    off_t size)
+{
+    int flags = 0 ;
+    int tclMask = 0 ;
+    bool bintrans = false ;
+
+    <<OpenSHMChannel: process arguments>>
+
+    int syserr ;
+    char const *shmname = Tcl_GetString(name) ;
+
+    <<OpenSHMChannel: open semaphore>>
+    <<OpenSHMChannel: open shared memory>>
+    <<OpenSHMChannel: size shared memory>>
+    <<OpenSHMChannel: map shared memory>>
+
+    Tcl_Channel shmChan ;
+    <<OpenSHMChannel: create shared memory channel>>
+    <<OpenSHMChannel: set translation option>>
+
+    return shmChan ;
+
+release_chan:
+    Tcl_Close(interp, shmChan) ;
+    ckfree(shmdata) ;
+
+release_shm:
+    close(shmfd) ;
+    shm_unlink(shmname) ;
+
+release_sem:
+    sem_close(shmsem) ;
+    sem_unlink(shmname) ;
+
+    return NULL ;
+}
+----
+
+Like message queues,
+shared memory also uses the same argument conventions for mode and
+access.
+
+.processing arguments
+(((chunk,OpenSHMChannel: process arguments)))
+[source,c]
+----
+<<OpenSHMChannel: process arguments>>=
+if (islower(*mode)) {
+    if (processFopenModeOption(interp, mode, &flags, &tclMask, &bintrans) !=
+            TCL_OK) {
+        return NULL ;
+    }
+} else {
+    if (processOpenModeOption(interp, mode, &flags, &tclMask, &bintrans) !=
+            TCL_OK) {
+        return NULL ;
+    }
+}
+
+if ((flags & O_CREAT) != 0 && size <= 0) {              // <1>
+    if (interp != NULL) {
+        Tcl_SetObjResult(interp,
+                Tcl_ObjPrintf("shared memory size must be positive")) ;
+    }
+    return NULL ;
+}
+----
+<1> A non-positive size is not meaningful.
+
+.opening the semaphore
+(((chunk,OpenSHMChannel: open semaphore)))
+[source,c]
+----
+<<OpenSHMChannel: open semaphore>>=
+int semFlags = flags & (O_CREAT | O_EXCL) ;                     // <1>
+sem_t *shmsem = sem_open(shmname, semFlags, permissions, 1) ;
+if (shmsem == SEM_FAILED) {
+    shmFailure(interp, "cannot open shared memory exclusive access semaphore") ;
+    return NULL ;
+}
+----
+<1> The only flags that make sense for a semaphore deal with creation.
+So we mask off any others.
+Linux is more forgiving of passing other flags in.
+FreeBSD is not.
+
+Since it is possible to have system calls related to shared memory fail,
+we specialize `ipcFailure()` for shared memory use.
+
+(((chunk,shm forward function declarations)))
+[source,c]
+----
+<<shm forward function declarations>>=
+static int shmFailure(Tcl_Interp *interp, char const *msg) ;
+----
+
+(((chunk,shm static function definitions)))
+[source,c]
+----
+<<shm static function definitions>>=
+static int
+shmFailure(
+    Tcl_Interp *interp,
+    char const *msg)
+{
+    return ipcFailure(interp, "shm", msg) ;
+}
+----
+
+We need a check on the arguments to make sure don't end up with
+shared memory of zero length.
+
+(((chunk,OpenSHMChannel: open shared memory)))
+[source,c]
+----
+<<OpenSHMChannel: open shared memory>>=
+int shmfd = shm_open(shmname, flags, permissions) ;
+if (shmfd < 0) {
+    shmFailure(interp, shmname) ;
+    goto release_sem ;
+}
+----
+
+When a shared memory object is created,
+it has a zero size and we need to `ftruncate()` the underlying
+file to give it the requested size.
+The complication here is knowing whether we have actually created
+the shared memory object or whether it was already there when
+we tried to open it.
+The answer is to look at the size of the shared memory object.
+A zero size indicates we actually created the share memory object and
+need to expand it to the requested size.
+Since, the shared memory object is represented by a file descriptor,
+`fstat()` will give the required information.
+
+(((chunk,OpenSHMChannel: size shared memory)))
+[source,c]
+----
+<<OpenSHMChannel: size shared memory>>=
+struct stat shmStatus ;
+syserr = fstat(shmfd, &shmStatus) ;
+if (syserr < 0) {
+    shmFailure(interp, "cannot get status of shared memory") ;
+    goto release_shm ;
+}
+
+if (shmStatus.st_size == 0) {
+    int syserr = ftruncate(shmfd, size) ;
+    if (syserr < 0) {
+        shmFailure(interp,
+                "cannot set the size of shared memory using ftruncate()") ;
+        goto release_shm ;
+    }
+} else {
+    size = shmStatus.st_size ;
+}
+----
+
+The last bit of systems programming is to map the shared memory object
+into the process address space.
+Since the shared memory is really a file,
+then `mmap()` is used to perform the mapping.
+It's just a matter of computing the flag values based on the
+direction of data flow.
+
+(((chunk,OpenSHMChannel: map shared memory)))
+[source,c]
+----
+<<OpenSHMChannel: map shared memory>>=
+int mapProt = 0 ;
+mapProt |= (tclMask & TCL_READABLE) != 0 ? PROT_READ : 0 ;
+mapProt |= (tclMask & TCL_WRITABLE) != 0 ? PROT_WRITE : 0 ;
+
+void *mapaddr = mmap(NULL, size, mapProt, MAP_SHARED, shmfd, 0) ;
+if (mapaddr == MAP_FAILED) {
+    shmFailure(interp, shmname) ;
+    goto release_shm ;
+}
+----
+
+Once all the required system programming is done,
+we can now turn the shared memory and its associated semaphore
+into a Tcl channel.
+We allocate the data object used to deal with the state of the channel
+and call Tcl to create it.
+
+(((chunk,OpenSHMChannel: create shared memory channel)))
+[source,c]
+----
+<<OpenSHMChannel: create shared memory channel>>=
+char chanName[TCL_INTEGER_SPACE + 16] ;
+snprintf(chanName, sizeof(chanName), "posixshm%d", shmfd) ;
+
+ShmState *shmdata = ckalloc(sizeof(ShmState)) ;
+shmdata->shmfd = shmfd ;
+shmdata->semaphore = shmsem ;
+shmdata->tclMask = tclMask ;
+shmdata->blockingMode = (flags & O_NONBLOCK) != 0 ?
+        TCL_MODE_NONBLOCKING : TCL_MODE_BLOCKING ;
+shmdata->address = mapaddr ;
+shmdata->length = size ;
+shmdata->position = 0 ;
+shmdata->channel = shmChan =
+        Tcl_CreateChannel(&ShmChannelType, chanName, shmdata, tclMask) ;
+----
+
+If the channel was opened in binary mode,
+we need to instruct the Tcl channel system to set the translation properly.
+
+(((chunk,OpenSHMChannel: set translation option)))
+[source,c]
+----
+<<OpenSHMChannel: set translation option>>=
+if (bintrans) {
+    if (Tcl_SetChannelOption(interp, shmChan, "-translation", "binary") !=
+            TCL_OK) {
+        goto release_chan ;
+    }
+}
+----
+
+=== Shared Memory Commands
+
+In this section,
+we present the ``C'' code that implements the Tcl script level commands
+for shared memory.
+Per the usual conventions,
+we provide a command to open a shared memory channel.
+The usual Tcl channel commands can then be used to read or write to the
+channel.
+Like, message queues,
+shared memory is special in that it can be unlinked and a separate command
+is provided for that (_i.e._ unlinking is different than closing).
+
+==== shm open command
+
+*******
+`posixipc shm open` ?options? shmname +
+`posixipc shm open` ?options? shmname ?access? +
+`posixipc shm open` ?options? shmname ?access? ?permissions?
+
+options::
+    -size _bytes_;;
+        The size of the shared memory in bytes. This option must be supplied
+        if the shared memory object is to be created.
+        This option is not required if an existing shared memory object
+        is being opened nor can the size of an existing shared memory
+        object be changed as part of opening it.
+shmname::
+    The name of shared memory object. Shared memory names must start with
+    a slash (/) character and may *not* contain any other slash
+    characters.
+access::
+    The _access_ argument, if present, indicates the way in which the
+    shared memory is to be accessed.
+    In the first form, _access_ may have any of the following forms:
+    r;;
+        Open the shared memory for reading only.
+        The shared memory must already exist.
+        This is the default if _access_ is not specified.
+    r+;;
+        Open the shared memory for reading and writing.
+        The shared memory must already exist.
+    w;;
+        Open the shared memory for writing only.
+        Create the shared memory if it does not already exist.
+    w+;;
+        Open the shared memory for reading and writing.
+        Create the shared memory if it does not already exist.
+
++
+All legal _access_ values above may have the character *b* added
+as the second or third character in the value to indicate that the
+opened channel should be configured as if with the
+*fconfigure -translation binary* option, making the channel suitable
+for reading or writing of binary data.
++
+In the second form,
+_access_ consists of a list of any of the following flags,
+all of which have the standard POSIX meanings.
+Exactly one flags must be either *RDONLY*, *WRONLY*, or *RDWR*.
+
+    RDONLY;;
+        Open the shared memory for reading only.
+    WRONLY;;
+        Open the shared memory for writing only.
+    RDWR;;
+        Open the shared memory for both reading and writing.
+    BINARY;;
+        Configure the opened channel with the *-translation binary* option.
+    CREAT;;
+        Create the shared memory if it does not already exist.
+    EXCL;;
+        If *CREAT* is also specified, an error is returned if the
+        shared memory already exists.
+    NONBLOCK;;
+        Prevent the process from blocking in subsequent I/O operations.
+
+permissions::
+    If the shared memory is created as part of opening it,
+    _permissions_ is used to set the permissions for the new message
+    queue in conjunction withthe process's file mode creation mask.
+    _Permissions_ defaults to 0666.
+*******
+
+(((chunk,shm forward function declarations)))
+[source,c]
+----
+<<shm forward function declarations>>=
+static int shmOpenCmd(ClientData clientData, Tcl_Interp *interp, int objc,
+        Tcl_Obj *const objv[]) ;
+----
+
+The following function is executed for the `shm open` command.
+Like most Tcl command functions,
+much of its code deals with marshalling and validating arguments.
+
+(((chunk,shm static function definitions)))
+[source,c]
+----
+<<shm static function definitions>>=
+static int
+shmOpenCmd(
+    ClientData clientData,
+    Tcl_Interp *interp,
+    int objc,
+    Tcl_Obj *const objv[])
+{
+    static char const usage[] = "?options? sharedname ?access? ?permissions?" ;
+    if (objc < 2) {
+        Tcl_WrongNumArgs(interp, 1, objv, usage) ;
+        return TCL_ERROR ;
+    }
+
+    <<shmOpenCmd: establish default option values>>
+
+    <<shmOpenCmd: parse options arguments>>
+
+    <<shmOpenCmd: gather remaining arguments>>
+
+    <<shmOpenCmd: create channel>>
+
+    return TCL_OK ;
+}
+----
+
+.default shared memory options
+(((chunk,shmOpenCmd: establish default option values)))
+[source,c]
+----
+<<shmOpenCmd: establish default option values>>=
+char const *mode = "r" ;
+mode_t permissions = 0666 ;
+off_t shmSize = 0 ;                // <1>
+----
+<1> Start at zero and expect it to be overridden if we intend to create
+the shared memory object.
+
+The only argument allowed for shared memory is to set the size for
+newly created shared memory objects.
+
+(((chunk,shmOpenCmd: parse options arguments)))
+[source,c]
+----
+<<shmOpenCmd: parse options arguments>>=
+int objindex = 1 ;
+for ( ; objindex < objc ; objindex++) {
+    char const *optionName = Tcl_GetString(objv[objindex]) ;
+    if (strcmp(optionName, "--") == 0) {
+        objindex++ ;
+        break ;
+    } else if (strcmp(optionName, "-size") == 0) {
+        if (++objindex >= objc) {
+            Tcl_WrongNumArgs(interp, 1, objv, usage) ;
+            return TCL_ERROR ;
+        }
+        int size ;
+        if (Tcl_GetIntFromObj(interp, objv[objindex], &size) != TCL_OK) {
+            return TCL_ERROR ;
+        }
+        shmSize = size ;
+    } else {
+        break ;
+    }
+}
+----
+
+The access and permissions arguments are optional.
+
+(((chunk,shmOpenCmd: gather remaining arguments)))
+[source,c]
+----
+<<shmOpenCmd: gather remaining arguments>>=
+int remain = objc - objindex ;
+if (remain < 1 || remain > 3) {
+    Tcl_WrongNumArgs(interp, 1, objv, usage) ;
+    return TCL_ERROR ;
+}
+
+if (remain > 1) {
+    mode = Tcl_GetString(objv[objindex + 1]) ;
+}
+
+if (remain == 3) {
+    int permArgValue ;
+    if (Tcl_GetIntFromObj(interp, objv[objindex + 2], &permArgValue)
+            != TCL_OK) {
+        return TCL_ERROR ;
+    }
+    permissions = permArgValue ;
+}
+----
+
+To create the channel we invoke the external function supplied for
+that purpose.
+
+(((chunk,shmOpenCmd: create channel)))
+[source,c]
+----
+<<shmOpenCmd: create channel>>=
+Tcl_Channel chan = PosixIPC_OpenSHMChannel(interp, objv[objindex], mode,
+        permissions, shmSize) ;
+if (chan == NULL) {
+    return TCL_ERROR ;
+}
+Tcl_RegisterChannel(interp, chan) ;
+Tcl_SetObjResult(interp, Tcl_NewStringObj(Tcl_GetChannelName(chan), -1)) ;
+----
+
+.Tests
+(((chunk,shm tests)))
+[source,tcl]
+----
+<<shm tests>>=
+test shm-open-1.0 {
+    Open a shared memory object
+} -setup {
+    set shmName /shm_open_1.0
+} -cleanup {
+    chan close $shmchan
+    shm unlink $shmName
+} -body {
+    set shmchan [shm open -size 256 $shmName w+]
+    log::debug "shm channel = $shmchan"
+    return $shmchan
+} -result {posixshm[0-9]*} -match glob
+----
+
+(((chunk,shm tests)))
+[source,tcl]
+----
+<<shm tests>>=
+test shm-open-1.1 {
+    Open a shared memory object with negative size
+} -setup {
+    set shmName /shm_open_1.1
+} -cleanup {
+} -body {
+    shm open -size -20 $shmName w+
+} -result {shared memory size must be positive} -returnCodes error
+----
+
+(((chunk,shm tests)))
+[source,tcl]
+----
+<<shm tests>>=
+test shm-open-1.2 {
+    Open a shared memory object with bad name
+} -setup {
+    set shmName /shm_open_1.2/foo
+} -cleanup {
+} -body {
+    shm open -size 256 $shmName w+
+} -result {posixipc shm: cannot open shared memory exclusive access\
+        semaphore:*} -match glob -returnCodes error
+----
+
+(((chunk,shm tests)))
+[source,tcl]
+----
+<<shm tests>>=
+test shm-open-1.3 {
+    Open a shared memory object with bad access value
+} -setup {
+    set shmName /shm_open_1.3
+} -cleanup {
+} -body {
+    shm open -size 256 $shmName a
+} -result {unknown open mode, "a": should be one of r, r+ rb, rb+, w, w+, wb,\
+        or wb+} -returnCodes error
+----
+
+(((chunk,shm tests)))
+[source,tcl]
+----
+<<shm tests>>=
+test shm-open-1.4 {
+    Open a shared memory object with bad access flag
+} -setup {
+    set shmName /shm_open_1.4
+} -cleanup {
+} -body {
+    shm open -size 256 $shmName {FOOBAR}
+} -result {invalid access mode "FOOBAR": must be BINARY, CREAT, EXCL,\
+        NONBLOCK, RDONLY, RDWR, or WRONLY} -returnCodes error
+----
+
+(((chunk,shm tests)))
+[source,tcl]
+----
+<<shm tests>>=
+test shm-open-1.5 {
+    Open a shared memory object with bad size spec
+} -setup {
+    set shmName /shm_open_1.5
+} -cleanup {
+} -body {
+    shm open -size
+} -result {wrong # args: should be "shm open ?options? sharedname ?access?\
+        ?permissions?"} -returnCodes error
+----
+
+(((chunk,shm tests)))
+[source,tcl]
+----
+<<shm tests>>=
+test shm-open-1.6 {
+    Open a shared memory object with no name
+} -setup {
+    set shmName /shm_open_1.6
+} -cleanup {
+} -body {
+    shm open -size 256
+} -result {wrong # args: should be "shm open ?options? sharedname ?access?\
+        ?permissions?"} -returnCodes error
+----
+
+(((chunk,shm tests)))
+[source,tcl]
+----
+<<shm tests>>=
+test shm-open-1.7 {
+    Open a shared memory object with no name
+} -setup {
+    set shmName /shm_open_1.6
+} -cleanup {
+} -body {
+    shm open $shmName r+ foobar
+} -result {expected integer but got "foobar"} -returnCodes error
+----
+
+(((chunk,shm tests)))
+[source,tcl]
+----
+<<shm tests>>=
+test shm-open-1.8 {
+    Open a shared memory -- too few arguments
+} -setup {
+} -cleanup {
+} -body {
+    shm open
+} -result {wrong # args: should be "shm open ?options? sharedname ?access?\
+        ?permissions?"} -returnCodes error
+----
+
+(((chunk,shm tests)))
+[source,tcl]
+----
+<<shm tests>>=
+test shm-open-1.9 {
+    Open a shared memory -- bad size spec
+} -setup {
+    set shmName /shm_open_1.9
+} -cleanup {
+} -body {
+    shm open -size foobar $shmName r+
+} -result {expected integer but got "foobar"} -returnCodes error
+----
+
+(((chunk,shm tests)))
+[source,tcl]
+----
+<<shm tests>>=
+test shm-open-1.10 {
+    Open a shared memory with non-default permissions
+} -setup {
+    set shmName /shm_open_1.10
+    set shmFile /dev/shm$shmName
+} -cleanup {
+    chan close $shmchan
+    shm unlink $shmName
+} -constraints linuxOnly -body {
+    set shmchan [shm open -size 1024 $shmName w+ 0640]
+
+    set fattrs [file attributes $shmFile]
+    log::debug "shm file attributes = $fattrs"
+    dict get $fattrs -permissions
+} -result {00640}
+----
+
+(((chunk,shm tests)))
+[source,tcl]
+----
+<<shm tests>>=
+test shm-open-2.0 {
+    Open shared memory, write and read
+} -setup {
+    set shmName /shm_open_2.0
+} -cleanup {
+    chan close $shmchan
+    shm unlink $shmName
+} -body {
+    set shmchan [shm open -size 256 -- $shmName w+]
+    log::debug "shm channel = $shmchan"
+    chan configure $shmchan -buffering line
+    chan puts $shmchan "Hello World"
+    chan seek $shmchan 0
+    chan gets $shmchan
+} -result {Hello World}
+----
+
+(((chunk,shm tests)))
+[source,tcl]
+----
+<<shm tests>>=
+test shm-open-2.1 {
+    Open shared memory, write and read -- non-blocking
+} -setup {
+    set shmName /shm_open_2.1
+} -cleanup {
+    chan close $shmchan
+    shm unlink $shmName
+} -body {
+    set shmchan [shm open -size 256 -- $shmName w+]
+    log::debug "shm channel = $shmchan"
+    chan configure $shmchan -buffering line -blocking false
+    chan puts $shmchan "Hello World"
+    chan seek $shmchan 0
+    chan gets $shmchan
+} -result {Hello World}
+----
+
+(((chunk,shm tests)))
+[source,tcl]
+----
+<<shm tests>>=
+test shm-open-3.0 {
+    Read past EOF.
+} -setup {
+    set shmName /shm_open_3.0
+} -cleanup {
+    chan close $shmchan
+    shm unlink $shmName
+} -body {
+    set shmchan [shm open -size 256 -- $shmName w+]
+    log::debug "shm channel = $shmchan"
+    chan configure $shmchan -buffering line
+    chan seek $shmchan 0
+    chan puts $shmchan [string repeat a 255]
+    chan seek $shmchan 0
+    set contents [chan gets $shmchan]
+    log::debug "got [string length $contents] byte string"
+    log::debug "string starts with \"[string index $contents 0]\""
+    log::debug "at file location, [chan tell $shmchan]"
+    set end [chan read $shmchan 1]
+    log::debug "reading past EOF, \"$end\""
+    set eof [chan eof $shmchan]
+    log::debug "eof = $eof"
+    return $eof
+} -result {1}
+----
+
+==== shm unlink command
+
+Like message queue,
+shared memory has a presence in the file system.
+Unlinking removes the name of the shared memory object and the
+shared memory is deleted when there are no open references to it.
+This operation can be done through the file system, but that requires
+knowledge that the share memory resides in a virtual file system and
+knowledge of where that file system is mounted.
+Further,
+using this call also cleans up any associated exclusion semaphore.
+
+*******
+`posixipc shm unlink shmname`
+
+shmname::
+    The name of shared memory object. Shared memory object names must start
+    with a slash (/) character and may *not* contain any other slash
+    characters.
+
+The `unlink` command removes the shared memory object named, `shmname`,
+from the system.
+The shared memory is actually destroyed when all processes that have open
+descriptors for the shared memory close those descriptors.
+*******
+
+(((chunk,shm forward function declarations)))
+[source,c]
+----
+<<shm forward function declarations>>=
+static int shmUnlinkCmd(ClientData clientData, Tcl_Interp *interp, int objc,
+        Tcl_Obj *const objv[]) ;
+----
+
+(((chunk,shm static function definitions)))
+[source,c]
+----
+<<shm static function definitions>>=
+static int
+shmUnlinkCmd(
+    ClientData clientData,
+    Tcl_Interp *interp,
+    int objc,
+    Tcl_Obj *const objv[])
+{
+    static char const usage[] = "shmname" ;
+    if (objc != 2) {
+        Tcl_WrongNumArgs(interp, 1, objv, usage) ;
+        return TCL_ERROR ;
+    }
+
+    char const *shmname = Tcl_GetString(objv[1]) ;
+
+    int shmerr = shm_unlink(shmname) ;
+    int semerr = sem_unlink(shmname) ;      // <1>
+
+    if (shmerr < 0 || semerr < 0) {
+        return shmFailure(interp, shmname) ;
+    }
+
+    return TCL_OK ;
+}
+----
+<1> The associated exclusion semaphore is also unlinked so as not
+to bleed semaphore names into the file system.
+
+.Tests
+(((chunk,shm tests)))
+[source,tcl]
+----
+<<shm tests>>=
+test shm-unlink-1.0 {
+    unlink shared memory -- wrong arguments
+} -setup {
+} -cleanup {
+} -body {
+    shm unlink
+} -result {wrong # args: should be "shm unlink shmname"} -returnCodes error
+----
+
+// vim:set syntax=asciidoc:
