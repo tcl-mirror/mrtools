@@ -1,0 +1,385 @@
+== Package Overview
+
+The `dbusclient` package builds upon the Tcl bindings to DBus
+contained in the
+http://chiselapp.com/user/schelte/repository/dbus[`dbus`]
+package by Schelte Bron.
+The `dbus` package provides the fundamental interface to the
+DBus ``C'' library used to access the DBus daemon.
+
+[source,tcl]
+----
+<<required packages>>=
+package require dbus
+----
+
+The `dbusclient` package is implemented using TclOO as two classes.
+
+[source,tcl]
+----
+<<required packages>>=
+package require Tcl 8.6
+----
+
+=== Connection class
+
+The `Connection` class represents the communications connection to a
+DBus daemon.
+It's primary purpose is the encapsulate the calls to `dbus` package
+commands, supplying the required bus identifier for those calls.
+
+Since the `dbus` package is the fundamental interface to the DBus,
+we require that package to operate.
+
+[source,tcl]
+----
+<<connection class>>=
+::oo::class create ::dbusclient::Connection {
+    variable busId ;                # <1>
+
+    <<connection methods>>
+}
+----
+<1> We use the bus identifier in all the methods, so just declare it
+a variable and have it automatically imported into each method.
+
+We intend to export the class commands from the package namespace.
+
+[source,tcl]
+----
+<<package exports>>=
+namespace export Connection
+----
+
+==== Connection constructor
+
+[source,tcl]
+----
+<<connection methods>>=
+constructor {address} {
+    ::logger::import -all -force -namespace log dbusclient ;        # <1>
+
+    set busId [dbus connect $address]
+    log::info "connected to dbus version = [dbus info $busId version]"
+}
+----
+<1> Bring in all the logger apparatus to the local object instance namespace.
+
+.Tests
+[source,tcl]
+----
+<<connection tests>>=
+test Dbus-create-1.0 {
+    Create a DBus object
+} -setup {
+} -cleanup {
+    sysBus destroy
+} -body {
+    Connection create sysBus system
+    llength [info commands sysBus]
+} -result {1}
+----
+
+==== Connection destructor
+
+When we destroy a connection,
+we want to make sure to destroy any bus client that may be also connected.
+So we have to iterate across any connected bus clients.
+
+[source,tcl]
+----
+<<connection methods>>=
+destructor {
+    foreach bus [my FindConnectedBusses] {
+        $bus destroy
+    }
+    dbus close $busId
+}
+----
+
+To find the connected bus clients,
+we look for all the instances of the Bus class and determine if they
+are using this particular connection.
+
+[source,tcl]
+----
+<<connection methods>>=
+method FindConnectedBusses {} {
+    set connected [list]
+    foreach bus [info class instances ::dbusclient::Service] {
+        if {[$bus connectedTo] eq $busId} {
+            lappend connected $bus
+        }
+    }
+
+    return $connected
+}
+----
+
+==== Connection call method
+
+[source,tcl]
+----
+<<connection method>>=
+method call {target path interface method sig args} {
+    set cmd [list dbus call $busId -dest $target]
+    if {$sig ne {}} {
+        lappend cmd -signature $sig
+    }
+    lappend cmd $path $interface $method
+
+    log::debug "calling method $cmd $args"
+    tailcall {*}$cmd {*}$args
+}
+----
+
+==== Connection listen method
+
+[source,tcl]
+----
+<<connection methods>>=
+method listen {path member args} {
+    log::debug "setting listen for \"$path\" $member $args"
+    set nargs [llength $args]
+    if {$nargs == 1} {
+        tailcall dbus listen $busId $path $member [lindex $args 0]
+    } elseif {$nargs == 0} {
+        tailcall dbus listen $busId $path $member
+    }
+    set msg "wrong # of args: expected listen path member ?script?"
+    throw [list CONNECTION WRONG#ARGS $msg] $msg
+}
+----
+
+==== Connection filter method
+
+[source,tcl]
+----
+<<connection methods>>=
+method filter {subcmd args} {
+    log::debug "filter $subcmd $args"
+    tailcall dbus filter $busId $subcmd {*}$args
+}
+----
+
+=== Service class
+
+The `Service` class represents the name of a service provider on a
+DBus.
+Programs may connect to the DBus daemon and request a name for the
+connection.
+This name typically follows an inverted URI host name (_e.g._ com.example).
+In DBus terms,
+these are bus names and give the target to which service requests may be
+directed.
+
+[source,tcl]
+----
+<<service class>>=
+::oo::class create ::dbusclient::Service {
+
+    <<service methods>>
+}
+----
+
+==== Service metadata
+
+A service on the DBus exposes its capabilities by introspection.
+To access a service on the DBus it is necessary to
+direct requests to a particular service,
+object contained in that service,
+interface implemented by the object,
+and member of the interface.
+To know what objects and interfaces are supported by a service,
+the objects of the service support the standard interface,
+org.freedesktop.DBus.Introspectable.
+
+By using the method in this interface it is possible to uncover
+all the objects and interfaces supported by a service.
+The `dbusclient` package caches this information to make various
+tasks easier, such immediate access to property values.
+In this section we show a class diagram of the how the service
+metadata is held.
+
+.Class Diagram for DBus Service Metadata
+image::service-metadata.pdf[]
+
+To implement this data schema,
+we use the `ral` package to hold the data in relvars within
+the `Service` instances.
+
+
+[source,tcl]
+----
+<<service meta-data definitions>>=
+relvar create Path {
+    Name string
+} Name
+
+relvar create Interface {
+    Name string
+} Name
+
+relvar create Implements {
+    Path string
+    Interface string
+} {Path Interface}
+
+relvar create Member {
+    Interface string
+    Name string
+} {Interface Name}
+
+relvar create Method {
+    Interface string
+    Name string
+    Signature string
+} {Interface Name}
+
+relvar create Property {
+    Interface string
+    Name string
+    Type string
+    Access string
+} {Interface Name}
+
+relvar create Signal {
+    Interface string
+    Name string
+    Signature string
+} {Interface Name}
+
+relvar create Argument {
+    Interface string
+    Method string
+    Name string
+    Type string
+} {Interface Method Name}
+
+relvar create PropertyValue {
+    Path string
+    Interface string
+    Property string
+    Value string
+    Valid boolean
+} {Path Interface Property}
+
+relvar create Annotation {
+    Interface string
+    Member string
+    Name string
+    Value string
+} {Member Name}
+
+relvar correlation R1 Implements\
+        Path * Path Name\
+        Interface * Interface Name
+relvar association R2\
+        Member Interface +\
+        Interface Name 1
+relvar partition R3 Member {Interface Name}\
+        Method {Interface Name}\
+        Property {Interface Name}\
+        Signal {Interface Name}
+relvar association R4\
+        Argument {Interface Method} *\
+        Method {Interface Name} 1
+relvar correlation R5 PropertyValue\
+        {Path Interface} * Implements {Path Interface}\
+        {Interface Property} * Property {Interface Name}
+relvar association R6\
+        Annotation {Interface Member} *\
+        Member {Interface Name} 1
+----
+
+==== Service constructor
+
+[source,tcl]
+----
+<<service methods>>=
+constructor {conn} {
+    namespace import ::ral::*
+    namespace import ::ralutil::*
+
+    ::logger::import -all -force -namespace log dbusclient
+
+    my variable connId
+    set connId $conn
+
+    my variable traceNumber
+    set traceNumber 0
+
+    <<service meta-data definitions>>
+
+    relvar eval {
+        my Introspect /
+        my CreatePropertyValues
+    }
+
+    # catching signals from the bus
+    $connId filter add -type signal -sender [namespace tail [self]]
+    $connId listen {} PropertiesChanged [mymethod HandleSignals]
+    $connId listen {} InterfacesAdded [mymethod HandleSignals]
+    $connId listen {} InterfacesRemoved [mymethod HandleSignals]
+
+    my InitializeProperties
+
+    foreach rv [lsort [relvar names [namespace current]::*]] {
+        log::info "\n[relformat [relvar set $rv] [namespace tail $rv]]"
+    }
+}
+----
+
+==== Tracing properties and signals
+
+[source,tcl]
+----
+<<service meta-data definitions>>=
+relvar create Trace {
+    TraceId int
+    Interface string
+    Member string
+    PathMatch string
+    CmdPrefix string
+} TraceId
+
+relvar create SignalTrace {
+    TraceId int
+} TraceId
+
+relvar create PropertyTrace {
+    TraceId int
+} TraceId
+
+relvar partition R7 Trace TraceId\
+        SignalTrace TraceId\
+        PropertyTrace TraceId\
+----
+
+=== Package logging
+
+[source,tcl]
+----
+<<required packages>>=
+package require logger
+package require logger::utils
+package require logger::appender
+----
+
+The following incantation sets up the logger to use color to output log
+messages if we are connected to a terminal and plain text otherwise.
+Then the logger commands are imported into a child namespace for
+convenience.
+
+[source,tcl]
+----
+<<logger setup>>=
+set logger [::logger::init dbusclient]
+set appenderType [expr {[dict exist [fconfigure stdout] -mode] ?\
+        "colorConsole" : "console"}]
+::logger::utils::applyAppender -appender $appenderType -serviceCmd $logger\
+        -appenderArgs {-conversionPattern {\[%c\] \[%p\] '%m'}}
+::logger::import -all -force -namespace log dbusclient
+----
+
+// vim:set syntax=asciidoc:
