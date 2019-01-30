@@ -20,8 +20,12 @@ vpath %.pdf $(DOCDIR)
 vpath %.uxf $(IMAGEDIR)
 vpath %.tcl $(CODEDIR)
 
+PKGNAME =\
+	dbusclient\
+	$(NULL)
+
 DOCSRC 	=\
-	dbusclient.aweb\
+	$(patsubst %,%.aweb,$(PKGNAME))\
 	$(NULL)
 
 DOCFILE =\
@@ -30,6 +34,10 @@ DOCFILE =\
 
 CODEFILE =\
 	  $(CODEDIR)/$(patsubst %.aweb,%.tcl,$(DOCSRC))\
+	  $(NULL)
+
+MODULEFILE =\
+	  $(CODEDIR)/$(patsubst %,%-$(VERSION).tm,$(PKGNAME))\
 	  $(NULL)
 
 OBJFILE =\
@@ -118,18 +126,24 @@ ASCIIDOC_OPTS =\
 
 TESTOPTS =\
 	-verbose bet\
-	-level debug\
+	-level notice\
 	$(NULL)
 
-.PHONY : all doc code test clean
+.PHONY : all doc code test module clean
 
-all : doc code
+all : doc module
 
 doc : $(PDF)
 
 code : $(CODEFILE)
 
-test : $(TESTFILE) $(LIBFILE) code
+module : $(MODULEFILE)
+
+$(MODULEFILE) : $(CODEFILE)
+	cd $(CODEDIR) ; mkmodule $(PKGNAME) $(VERSION)\
+		-script $(notdir $(CODEFILE))
+
+runtests : $(TESTFILE) code
 	cd $(TESTDIR) ; tclsh $(notdir $(TESTFILE)) $(TESTOPTS)
 
 clean :

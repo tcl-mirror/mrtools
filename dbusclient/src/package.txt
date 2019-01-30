@@ -6,6 +6,8 @@ http://chiselapp.com/user/schelte/repository/dbus[`dbus`]
 package by Schelte Bron.
 The `dbus` package provides the fundamental interface to the
 DBus ``C'' library used to access the DBus daemon.
+Since the `dbus` package is the fundamental interface to the DBus,
+we require that package to operate.
 
 [source,tcl]
 ----
@@ -13,12 +15,22 @@ DBus ``C'' library used to access the DBus daemon.
 package require dbus
 ----
 
-The `dbusclient` package is implemented using TclOO as two classes.
+The `dbusclient` package is implemented as two classes using TclOO.
+This means we need a relatively new version of Tcl.
 
 [source,tcl]
 ----
 <<required packages>>=
-package require Tcl 8.6
+package require Tcl 8.5
+----
+
+The two class commands are exported from the namespace and a
+namespace ensemble is created with them.
+[source,tcl]
+----
+<<package exports>>=
+namespace export Connection
+namespace export Service
 ----
 
 === Connection class
@@ -27,9 +39,6 @@ The `Connection` class represents the communications connection to a
 DBus daemon.
 It's primary purpose is the encapsulate the calls to `dbus` package
 commands, supplying the required bus identifier for those calls.
-
-Since the `dbus` package is the fundamental interface to the DBus,
-we require that package to operate.
 
 [source,tcl]
 ----
@@ -43,15 +52,10 @@ we require that package to operate.
 <1> We use the bus identifier in all the methods, so just declare it
 a variable and have it automatically imported into each method.
 
-We intend to export the class commands from the package namespace.
-
-[source,tcl]
-----
-<<package exports>>=
-namespace export Connection
-----
-
 ==== Connection constructor
+
+Construction of a `Connection` is a thin veneer on the underlying
+`dbus` package command.
 
 [source,tcl]
 ----
@@ -59,11 +63,12 @@ namespace export Connection
 constructor {address} {
     ::logger::import -all -force -namespace log dbusclient ;        # <1>
 
-    set busId [dbus connect $address]
-    log::info "connected to dbus version = [dbus info $busId version]"
+    set busId [::dbus connect $address]
+    log::info "connected to dbus version = [::dbus info $busId version]"
 }
 ----
 <1> Bring in all the logger apparatus to the local object instance namespace.
+Logging setup is shown <<package-logging,below>>.
 
 .Tests
 [source,tcl]
@@ -83,34 +88,39 @@ test Dbus-create-1.0 {
 ==== Connection destructor
 
 When we destroy a connection,
-we want to make sure to destroy any bus client that may be also connected.
-So we have to iterate across any connected bus clients.
+we want to make sure to destroy any services that may be using this connection.
+So we have to iterate across any connected services.
 
 [source,tcl]
 ----
 <<connection methods>>=
 destructor {
-    foreach bus [my FindConnectedBusses] {
-        $bus destroy
+    foreach service [my FindConnectedServices] {
+        $service destroy
     }
-    dbus close $busId
+    ::dbus close $busId
 }
 ----
 
 To find the connected bus clients,
-we look for all the instances of the Bus class and determine if they
+we look for all the instances of the `Service` class and determine if they
 are using this particular connection.
 
 [source,tcl]
 ----
 <<connection methods>>=
-method FindConnectedBusses {} {
+method FindConnectedServices {} {
+    set me [self]
+    set services [info class instances ::dbusclient::Service]
+
     set connected [list]
-    foreach bus [info class instances ::dbusclient::Service] {
-        if {[$bus connectedTo] eq $busId} {
-            lappend connected $bus
+    foreach service $services {
+        if {[$service connectedTo] eq $me} {
+            lappend connected $service
         }
     }
+
+    log::debug "services connected to $me : \"[join $connected {, }]\""
 
     return $connected
 }
@@ -118,11 +128,23 @@ method FindConnectedBusses {} {
 
 ==== Connection call method
 
+In DBus terms,
+a method is a member of an interface that is supported by an object
+instance.
+Calling the method is a request to perform the function of the method.
+
+The only complication here deals with the signature of the method.
+The `dbus` package documentation describes the details of signatures in DBus,
+but, as you might suspect, it is a means of dealing with DBus typing
+semantics in the face of Tcl _everything is a string_ semantics.
+We interpret an empty string signature as not wishing to pass in the
+signature to the `dbus` command.
+
 [source,tcl]
 ----
-<<connection method>>=
+<<connection methods>>=
 method call {target path interface method sig args} {
-    set cmd [list dbus call $busId -dest $target]
+    set cmd [list ::dbus call $busId -dest $target]
     if {$sig ne {}} {
         lappend cmd -signature $sig
     }
@@ -142,12 +164,12 @@ method listen {path member args} {
     log::debug "setting listen for \"$path\" $member $args"
     set nargs [llength $args]
     if {$nargs == 1} {
-        tailcall dbus listen $busId $path $member [lindex $args 0]
+        tailcall ::dbus listen $busId $path $member [lindex $args 0]
     } elseif {$nargs == 0} {
-        tailcall dbus listen $busId $path $member
+        tailcall ::dbus listen $busId $path $member
     }
     set msg "wrong # of args: expected listen path member ?script?"
-    throw [list CONNECTION WRONG#ARGS $msg] $msg
+    throw [list CONNECTION WRONGARGS $msg] $msg
 }
 ----
 
@@ -158,7 +180,7 @@ method listen {path member args} {
 <<connection methods>>=
 method filter {subcmd args} {
     log::debug "filter $subcmd $args"
-    tailcall dbus filter $busId $subcmd {*}$args
+    tailcall ::dbus filter $busId $subcmd {*}$args
 }
 ----
 
@@ -172,6 +194,10 @@ This name typically follows an inverted URI host name (_e.g._ com.example).
 In DBus terms,
 these are bus names and give the target to which service requests may be
 directed.
+You can think of bus names as being similar to _well known_ ports in
+Internet protocols.
+You know the name of the service in which you are interested _a priori_,
+although it is possible to get a list of all the bus names on a DBus.
 
 [source,tcl]
 ----
@@ -187,19 +213,20 @@ directed.
 A service on the DBus exposes its capabilities by introspection.
 To access a service on the DBus it is necessary to
 direct requests to a particular service,
-object contained in that service,
-interface implemented by the object,
-and member of the interface.
+an object contained in that service,
+an interface implemented by the object,
+and a member of the interface.
 To know what objects and interfaces are supported by a service,
 the objects of the service support the standard interface,
-org.freedesktop.DBus.Introspectable.
+`org.freedesktop.DBus.Introspectable`.
 
-By using the method in this interface it is possible to uncover
+By using the `Introspect` method in this interface it is possible to uncover
 all the objects and interfaces supported by a service.
 The `dbusclient` package caches this information to make various
-tasks easier, such immediate access to property values.
-In this section we show a class diagram of the how the service
-metadata is held.
+tasks easier, such immediate access to property values and keeping
+track of property values when they change.
+In this section,
+we show a class diagram of the how the service metadata is held.
 
 .Class Diagram for DBus Service Metadata
 image::service-metadata.pdf[]
@@ -208,6 +235,15 @@ To implement this data schema,
 we use the `ral` package to hold the data in relvars within
 the `Service` instances.
 
+[source,tcl]
+----
+<<required packages>>=
+package require ral
+package require ralutil
+----
+
+The previous class diagram can be transcribed to `ral` commands as
+follows.
 
 [source,tcl]
 ----
@@ -220,7 +256,7 @@ relvar create Interface {
     Name string
 } Name
 
-relvar create Implements {
+relvar create Implementation {
     Path string
     Interface string
 } {Path Interface}
@@ -271,7 +307,7 @@ relvar create Annotation {
     Value string
 } {Member Name}
 
-relvar correlation R1 Implements\
+relvar correlation R1 Implementation\
         Path * Path Name\
         Interface * Interface Name
 relvar association R2\
@@ -285,7 +321,7 @@ relvar association R4\
         Argument {Interface Method} *\
         Method {Interface Name} 1
 relvar correlation R5 PropertyValue\
-        {Path Interface} * Implements {Path Interface}\
+        {Path Interface} * Implementation {Path Interface}\
         {Interface Property} * Property {Interface Name}
 relvar association R6\
         Annotation {Interface Member} *\
@@ -294,40 +330,1071 @@ relvar association R6\
 
 ==== Service constructor
 
+Constructing a `Service` instance is quite complicated.
+The complications arise from the need to use introspection
+to discover the object instances and interfaces they support.
+Objects are given file system path-like names and we use the term _path_
+here to mean an object instance.
+During the introspection,
+we store the data obtained in the `relvars` shown previously,
+effectively caching the introspection data.
+
 [source,tcl]
 ----
 <<service methods>>=
-constructor {conn} {
+constructor {svc conn} {
     namespace import ::ral::*
     namespace import ::ralutil::*
 
     ::logger::import -all -force -namespace log dbusclient
 
+    my variable svcName
+    set svcName $svc
+    if {![::dbus validate interface $svcName]} {
+        set msg "Invalid service name syntax"
+        throw [list CONSTRUCTOR BADSERVICE $msg] $msg
+    }
+
     my variable connId
     set connId $conn
 
-    my variable traceNumber
+    my variable traceNumber ;                   # <1>
     set traceNumber 0
 
     <<service meta-data definitions>>
 
     relvar eval {
-        my Introspect /
+        my Introspect /     ;                   # <2>
         my CreatePropertyValues
     }
 
-    # catching signals from the bus
-    $connId filter add -type signal -sender [namespace tail [self]]
-    $connId listen {} PropertiesChanged [mymethod HandleSignals]
-    $connId listen {} InterfacesAdded [mymethod HandleSignals]
-    $connId listen {} InterfacesRemoved [mymethod HandleSignals]
+    my InitializeProperties ;                   # <3>
 
-    my InitializeProperties
+    # Set up signal handlers for the internal mechanisms used to keep the
+    # local cache of properties and interfaces up to date.
+    # There are some signals from standard, defined interfaces that
+    # we will use to insure that internal data structures are keep up to date.
+    my SetupStdSignals
 
     foreach rv [lsort [relvar names [namespace current]::*]] {
         log::info "\n[relformat [relvar set $rv] [namespace tail $rv]]"
     }
 }
+----
+<1> Used for identifying trace requests.
+<2> Recursively introspect the service starting at the root path.
+<3> Fetch the property values for the discovered object.
+
+Notice we used the `mymethod` command to specify a callback that
+is a method of the `Service` class.
+This is a utilty function available from tcllib.
+
+[source,tcl]
+----
+<<service methods>>=
+method SetupStdSignals {} {
+    my variable connId svcName
+
+    set stdSignals [my FindStdSignals]
+    foreach stdSignal $stdSignals {
+        $connId listen {} $stdSignal [mymethod HandleSignals]
+    }
+    if {[llength $stdSignals] != 0} {
+        $connId filter add -type signal -sender $svcName
+    }
+
+    return
+}
+----
+
+[source,tcl]
+----
+<<service methods>>=
+method FindStdSignals {} {
+    set stdInterfaces {
+        PropertiesChanged
+        InterfacesAdded
+        InterfacesRemoved
+    }
+
+    return [pipe {
+        relvar set Signal |
+        relation restrictwith ~ {$Name in $stdInterfaces} |
+        relation list ~ Name
+    }]
+}
+----
+
+[source,tcl]
+----
+<<service methods>>=
+method TakeDownStdSignals {} {
+    my variable connId svcName
+
+    set stdSignals [my FindStdSignals]
+    foreach stdSignal $stdSignals {
+        $connId listen {} $stdSignal
+    }
+    if {[llength $stdSignals] != 0} {
+        $connId filter remove -type signal -sender $svcName
+    }
+
+    return
+}
+----
+
+[source,tcl]
+----
+<<required packages>>=
+package require oo::util
+----
+
+Each DBus has a service,
+`org.freedesktop.DBus`,
+that represents the bus itself.
+The following test uses this service
+
+.Tests
+[source,tcl]
+----
+<<service tests>>=
+test Service-create-1.0 {
+    Create an instance representing the bus itself
+} -setup {
+    set conn [Connection create sysBus system]
+} -cleanup {
+    sysBus destroy
+} -body {
+    Service create DBus org.freedesktop.DBus $conn
+    llength [info commands DBus]
+} -result {1}
+----
+
+===== Introspection of objects
+
+When the `Introspect` method of the `org.freedesktop.DBus.Introspectable`
+interface is executed,
+the return is a chunk of XML containing the description of the
+objects of the service and the interfaces they implement.
+We use the `tdom` package to parse the XML.
+
+[source,tcl]
+----
+<<required packages>>=
+package require tdom
+----
+
+The XML schema is defined by the DBus spec and we do not repeat it here.
+The essential elements of the schema are the interfaces implemented
+by the object instance and a list of child nodes that give the path
+to other object instances of the service.
+So the logic of storing the metadata from the introspection first
+creates the path represented by the object instance followed by
+the interfaces it implements and finally creates all the child nodes.
+As we see below,
+creating the child nodes causes the introspection to be repeated
+recursively.
+
+[source,tcl]
+----
+<<service methods>>=
+method Introspect {path}  {
+    my variable connId svcName
+
+    set svcxml [$connId call $svcName $path\
+            org.freedesktop.DBus.Introspectable Introspect {}]
+    log::debug "xml for $path: \"$svcxml\""
+
+    set svcdoc [dom parse -simple $svcxml]
+    set svcroot [$svcdoc documentElement]
+
+    try {
+        relvar insert Path [list Name $path]
+        set intfs [my CreateInterfaces $svcroot]
+        foreach intf $intfs {
+            relvar insert Implementation [list Path $path Interface $intf]
+        }
+        my CreateNodes $path $svcroot
+    } finally {
+        $svcdoc delete
+    }
+
+    return
+}
+----
+
+The only complication in creating interfaces has to do with the
+redundant information sent in the introspection XML.
+Interface names are unique,
+yet the complete interface description is sent along with every object
+that implements a particular interface.
+So, we check to make sure we haven't already seen the interface
+definition.
+Otherwise,
+interfaces consist of methods, properties and signals
+and they must be inserted into the service metadata.
+
+[source,tcl]
+----
+<<service methods>>=
+method CreateInterfaces {root} {
+    set intflist [list]
+    set intfnodes [$root getElementsByTagName interface]
+
+    foreach intfnode $intfnodes {
+        set intfname [$intfnode getAttribute name]
+        lappend intflist $intfname
+
+        set haveIntf [pipe {
+            relvar restrictone Interface Name $intfname |
+            relation isnotempty ~
+        }]
+        if {!$haveIntf} {
+            relvar insert Interface [list Name $intfname]
+
+            my CreateMethods $intfnode
+            my CreateProperties $intfnode
+            my CreateSignals $intfnode
+        }
+    }
+
+    return $intflist
+}
+----
+
+Methods have arguments.
+The XML for arguments has optional parts for the attribute name
+and the direction of the argument, either _in_ or _out_.
+For missing names, we make one up.
+For missing direction, the default is that the argument is an input.
+The concatenation of the argument types for the method arguments
+forms the method signature.
+That is a characteristic of the way types are specified in DBus.
+
+[source,tcl]
+----
+<<service methods>>=
+method CreateMethods {intfnode} {
+    set intfName [$intfnode getAttribute name]
+    set methNodes [$intfnode getElementsByTagName method]
+    foreach methNode $methNodes {
+        set methName [$methNode getAttribute name]
+        set methSig {}
+        set argCounter -1
+
+        set argNodes [$methNode getElementsByTagName arg]
+        foreach argNode $argNodes {
+            set argName [expr {[$argNode hasAttribute name] ?\
+                    [$argNode getAttribute name] :\
+                    "arg_[incr argCounter]"}]
+            set argDir [expr {[$argNode hasAttribute direction] ?\
+                    [$argNode getAttribute direction] : "in"}]
+            set argType [$argNode getAttribute type]
+            if {$argDir eq "in"} {
+                append methSig $argType
+                set ainserted [relvar insert Argument [list\
+                    Interface $intfName\
+                    Method $methName\
+                    Name $argName\
+                    Type $argType\
+                ]]
+            }
+        }
+
+        set memId [list Interface $intfName Name $methName]
+        relvar insert Member $memId
+        lappend memId Signature $methSig
+        relvar insert Method $memId
+
+        my CreateAnnotations $methNode $intfName $methName
+    }
+
+    return
+}
+----
+
+All interface members may optionally have an annotation attached to them.
+Usually this is used to denote a deprecated method in an interface.
+
+[source,tcl]
+----
+<<service methods>>=
+method CreateAnnotations {node interface member} {
+    set noteNodes [$node getElementsByTagName annotation]
+    foreach noteNode $noteNodes {
+        set noteName [$noteNode getAttribute name]
+        set noteValue [$noteNode getAttribute value]
+        relvar insert Annotation [list\
+            Interface $interface\
+            Member $member\
+            Name $noteName\
+            Value $noteValue\
+        ]
+    }
+}
+----
+
+Properties are data values supported by an interface.
+They have types and access permissions.
+
+[source,tcl]
+----
+<<service methods>>=
+method CreateProperties {intfnode} {
+    set intfName [$intfnode getAttribute name]
+    set propNodes [$intfnode getElementsByTagName property]
+    foreach propNode $propNodes {
+        set propName [$propNode getAttribute name]
+        set propType [$propNode getAttribute type]
+        set propAccess [$propNode getAttribute access]
+
+        set memId [list Interface $intfName Name $propName]
+        relvar insert Member $memId
+        lappend memId Type $propType Access $propAccess
+        relvar insert Property $memId
+
+        my CreateAnnotations $propNode $intfName $propName
+    }
+
+    return
+}
+----
+
+Interfaces may also have signals associated with them.
+Signals are sent asychronously.
+As we have seen already,
+there are a set of standard signals used to maintain the population
+of properties and interfaces.
+These are handled internally by the package.
+Other signals may be of interest to the client application.
+
+[source,tcl]
+----
+<<service methods>>=
+method CreateSignals {intfnode} {
+    set intfName [$intfnode getAttribute name]
+
+    set sigNodes [$intfnode getElementsByTagName signal]
+    foreach sigNode $sigNodes {
+        set sigName [$sigNode getAttribute name]
+        set sigSig [list]
+
+        set argCounter -1
+        set argNodes [$sigNode getElementsByTagName arg]
+        foreach argNode $argNodes {
+            set argName [expr {[$argNode hasAttribute name] ?\
+                    [$argNode getAttribute name] :\
+                    "arg_[incr argCounter]"}]
+            set argType [$argNode getAttribute type]
+            append sigSig $argType
+        }
+
+        set memId [list Interface $intfName Name $sigName]
+        relvar insert Member $memId
+        lappend memId Signature $sigSig
+        relvar insert Signal $memId
+
+        my CreateAnnotations $sigNode $intfName $sigName
+    }
+}
+----
+
+The final part of introspection of a given node is to create any
+child nodes.
+Object instances and their path names are strictly hierarchical
+and use file system-like naming for the paths.
+
+[source,tcl]
+----
+<<service methods>>=
+method CreateNodes {path root} {
+    set nodeNodes [$root getElementsByTagName node]
+    foreach nodeNode $nodeNodes {
+        set nodeName [$nodeNode getAttribute name]
+        set fullpath [file join $path $nodeName]
+        my Introspect $fullpath ;                   # <1>
+    }
+}
+----
+<1> Here is the recursive introspection to obtain the information for
+child nodes.
+
+Once we know all the paths and interfaces in a service and know
+which interfaces are implemented by which paths,
+then we can create values for the properties that are associated with
+a given path.
+At this point,
+we don't know the values of the properties.
+So, each property value is set to the empty string and marked as invalid.
+
+[source,tcl]
+----
+<<service methods>>=
+method CreatePropertyValues {} {
+    pipe {
+        relvar set Implementation |
+        relation join ~ [relvar set Property] |
+        relation project ~ Path Interface Name |
+        relation rename ~ Name Property |
+        relation extend ~ exTup Value string {""} Valid boolean {"false"} |
+        relvar set PropertyValue ~
+    }
+
+    return
+}
+----
+
+After introspection is completed,
+we can then request the property values and place those values in
+the metadata cache.
+
+[source,tcl]
+----
+<<service methods>>=
+method InitializeProperties {} {
+    my variable connId svcName
+
+    # check if there is an object manager, we can get the properties
+    # from it and set up listening for future changes.
+    set objMgrPaths [pipe {
+        relvar set Implementation |
+        relation restrictwith ~\
+            {$Interface eq "org.freedesktop.DBus.ObjectManager"} |
+        relation list ~ Path
+    }]
+
+    foreach path $objMgrPaths {
+        my trace add signal org.freedesktop.DBus.ObjectManager\
+                InterfacesAdded ${path}* [mymethod InterfacesAdded]
+        my trace add signal org.freedesktop.DBus.ObjectManager\
+                InterfacesRemoved ${path}* [mymethod InterfacesRemoved]
+
+        set managed [$connId call $svcName $path\
+                org.freedesktop.DBus.ObjectManager GetManagedObjects {}]
+        log::debug "managed objects = $managed"
+
+        dict for {objPath objDesc} $managed {
+            dict for {intf props} $objDesc {
+                dict for {propName propValue} $props {
+                    my UpdatePropertyValue $objPath $intf $propName\
+                            $propValue
+                }
+            }
+        }
+    }
+
+    # Check for paths that implement org.freedesktop.DBus.Properties
+    # We can then invoke the GetAll method using the property
+    # interface to get the set of valid values.
+    set propPaths [pipe {
+        relvar set Implementation |
+        relation restrictwith ~\
+                {$Interface eq "org.freedesktop.DBus.Properties"} |
+        relation project ~ Path |
+        relation join ~ [relvar set PropertyValue] |
+        relation project ~ Path Interface
+    }]
+
+    relation foreach propPath $propPaths {
+        relation assign $propPath
+        set values [$connId call $svcName $Path org.freedesktop.DBus.Properties\
+                GetAll {} $Interface]
+        dict for {propName propValue} $values {
+            my UpdatePropertyValue $Path $Interface $propName $propValue
+        }
+    }
+    if {[relation isnotempty $propPaths]} {
+        set svcroot /[string map {. /} $svcName]
+        my trace add signal org.freedesktop.DBus.Properties\
+                PropertiesChanged ${svcroot}* [mymethod PropertiesChanged]
+    }
+}
+----
+
+[source,tcl]
+----
+<<service methods>>=
+method UpdatePropertyValue {path interface property value} {
+    log::debug "updating property value: $path $interface.$property $value"
+    relvar updateone PropertyValue propTup [list\
+        Path $path Interface $interface Property $property] {
+            tuple update $propTup Value $value Valid true
+        }
+}
+----
+
+[source,tcl]
+----
+<<service methods>>=
+method InvalidatePropertyValue {path interface property} {
+    log::debug "invalidating property value: $path $interface.$property"
+    relvar updateone PropertyValue propTup [list\
+        Path $path Interface $interface Property $property] {
+            tuple update $propTup Valid false
+        }
+}
+----
+
+==== Destructor
+
+[source,tcl]
+----
+<<service methods>>=
+destructor {
+    my TakeDownStdSignals
+
+    relvar constraint delete {*}[relvar constraint names [namespace current]::*]
+    relvar unset {*}[relvar names [namespace current]::*]
+}
+----
+
+==== Introspection
+
+[source,tcl]
+----
+<<service methods>>=
+method connectedTo {} {
+    my variable connId
+    return $connId
+}
+----
+
+.Tests
+[source,tcl]
+----
+<<service tests>>=
+test Service-introspection-1.0 {
+    which connection
+} -setup {
+    set conn [Connection create sysBus system]
+    Service create DBus org.freedesktop.DBus $conn
+} -cleanup {
+    sysBus destroy
+} -body {
+    DBus connectedTo
+} -result $conn
+----
+
+[source,tcl]
+----
+<<service methods>>=
+method pathList {} {
+    return [relation list [relvar set Path] Name]
+}
+----
+
+.Tests
+[source,tcl]
+----
+<<service tests>>=
+test Service-introspection-2.0 {
+    object paths
+} -setup {
+    set conn [Connection create sysBus system]
+    Service create DBus org.freedesktop.DBus $conn
+} -cleanup {
+    sysBus destroy
+} -body {
+    DBus pathList
+} -result {/ /org/freedesktop/DBus}
+----
+
+[source,tcl]
+----
+<<service methods>>=
+method findPathsByPropertyValue {interface property expression} {
+    return [pipe {
+        relvar set PropertyValue |
+        relation restrictwith ~ {$Interface eq $interface &&\
+                $Property eq $property && $Valid} |
+        relation restrictwith ~ $expression |
+        relation list ~ Path
+    }]
+}
+----
+
+.Tests
+[source,tcl]
+----
+<<service tests>>=
+test Service-introspection-3.0 {
+    selecting paths based on property value
+} -setup {
+    set conn [Connection create sysBus system]
+    Service create DBus org.freedesktop.DBus $conn
+} -cleanup {
+    sysBus destroy
+} -body {
+    DBus findPathsByPropertyValue org.freedesktop.DBus Interfaces\
+            {"org.freedesktop.DBus.Monitoring" in $Value}
+} -result {/org/freedesktop/DBus}
+----
+
+[source,tcl]
+----
+<<service methods>>=
+method pathInterfaces {path} {
+    return [pipe {
+        relvar set Implementation |
+        relation restrictwith ~ {$Path eq $path} |
+        relation list ~ Interface
+    }]
+}
+----
+
+.Tests
+
+[source,tcl]
+----
+<<required packages for test>>=
+package require struct::set
+----
+
+[source,tcl]
+----
+<<test utilities>>=
+customMatch set {::struct::set equal}
+----
+
+[source,tcl]
+----
+<<service tests>>=
+test Service-introspection-4.0 {
+    querying the interfaces supported by a path
+} -setup {
+    set conn [Connection create sysBus system]
+    Service create DBus org.freedesktop.DBus $conn
+} -cleanup {
+    sysBus destroy
+} -body {
+    DBus pathInterfaces /org/freedesktop/DBus
+} -result {org.freedesktop.DBus org.freedesktop.DBus.Properties\
+    org.freedesktop.DBus.Introspectable org.freedesktop.DBus.Monitoring\
+    org.freedesktop.DBus.Debug.Stats org.freedesktop.DBus.Peer}\
+    -match set
+----
+
+[source,tcl]
+----
+<<service methods>>=
+method interfaceMethods {interface} {
+    return [pipe {
+        relvar set Method |
+        relation restrictwith ~ {$Interface eq $interface} |
+        relation list ~ Name
+    }]
+}
+----
+
+.Tests
+
+[source,tcl]
+----
+<<service tests>>=
+test Service-introspection-5.0 {
+    querying the methods supported by an interface
+} -setup {
+    set conn [Connection create sysBus system]
+    Service create DBus org.freedesktop.DBus $conn
+} -cleanup {
+    sysBus destroy
+} -body {
+    DBus interfaceMethods org.freedesktop.DBus.Properties
+} -result {Get GetAll Set} -match set
+----
+
+[source,tcl]
+----
+<<service methods>>=
+method methodSignature {interface method} {
+    return [pipe {
+        relvar restrictone Method Interface $interface Name $method |
+        relation extract ~ Signature
+    }]
+}
+----
+
+.Tests
+
+[source,tcl]
+----
+<<service tests>>=
+test Service-introspection-6.0 {
+    querying the signature of a method
+} -setup {
+    set conn [Connection create sysBus system]
+    Service create DBus org.freedesktop.DBus $conn
+} -cleanup {
+    sysBus destroy
+} -body {
+    DBus methodSignature org.freedesktop.DBus.Properties Get
+} -result {ss}
+----
+
+[source,tcl]
+----
+<<service methods>>=
+method interfaceProperties {interface} {
+    return [pipe {
+        relvar set Property |
+        relation restrictwith ~ {$Interface eq $interface} |
+        relation list ~ Name
+    }]
+}
+----
+
+.Tests
+
+[source,tcl]
+----
+<<service tests>>=
+test Service-introspection-7.0 {
+    querying the properties for an interface
+} -setup {
+    set conn [Connection create sysBus system]
+    Service create DBus org.freedesktop.DBus $conn
+} -cleanup {
+    sysBus destroy
+} -body {
+    DBus interfaceProperties org.freedesktop.DBus
+} -result {Features Interfaces} -match set
+----
+
+[source,tcl]
+----
+<<service methods>>=
+method interfaceSignals {interface} {
+    return [pipe {
+        relvar set Signal |
+        relation restrictwith ~ {$Interface eq $interface} |
+        relation list ~ Name
+    }]
+}
+----
+
+.Tests
+
+[source,tcl]
+----
+<<service tests>>=
+test Service-introspection-8.0 {
+    querying the signals for an interface
+} -setup {
+    set conn [Connection create sysBus system]
+    Service create DBus org.freedesktop.DBus $conn
+} -cleanup {
+    sysBus destroy
+} -body {
+    DBus interfaceSignals org.freedesktop.DBus.Properties
+} -result {PropertiesChanged}
+----
+
+==== Calling methods
+
+[source,tcl]
+----
+<<service methods>>=
+method call {path interface method args} {
+    my ValidateCall $path $interface $method $args
+    my variable svcName
+    my variable connId
+    tailcall $connId call $svcName $path $interface $method\
+        [my methodSignature $interface $method] {*}$args
+}
+----
+
+.Tests
+
+[source,tcl]
+----
+<<test utilities>>=
+proc isInSet {expected actual} {
+    return [::struct::set contains $actual $expected]
+}
+----
+
+[source,tcl]
+----
+<<test utilities>>=
+customMatch contains [namespace code isInSet]
+----
+
+[source,tcl]
+----
+<<service tests>>=
+test Service-call-1.0 {
+    Invoke a method
+} -setup {
+    set conn [Connection create sysBus system]
+    Service create DBus org.freedesktop.DBus $conn
+} -cleanup {
+    sysBus destroy
+} -body {
+    DBus call /org/freedesktop/DBus\
+            org.freedesktop.DBus ListNames
+} -result {org.freedesktop.DBus} -match contains
+----
+
+[source,tcl]
+----
+<<service methods>>=
+method ValidateCall {path interface method arglist} {
+    my ValidatePath $path
+    my ValidateInterface $path $interface
+    my ValidateMethod $interface $method $arglist
+    my CheckAnnotations $interface $method
+    return
+}
+----
+
+[source,tcl]
+----
+<<service methods>>=
+method ValidatePath {path} {
+    if {![::dbus validate path $path]} {
+        set msg "invalid path name: \"$path\""
+        throw [list PATH INVALID $msg] $msg
+    }
+    set pathFound [pipe {
+        relvar restrictone Path Name $path |
+        relation isnotempty
+    }]
+    if {!$pathFound} {
+        set msg "unknown path, \"$path\""
+        throw [list PATH UNKNOWN $msg] $msg
+    }
+    return
+}
+----
+
+[source,tcl]
+----
+<<service tests>>=
+test Service-call-2.0 {
+    Invoke a method -- bad path
+} -setup {
+    set conn [Connection create sysBus system]
+    Service create DBus org.freedesktop.DBus $conn
+} -cleanup {
+    sysBus destroy
+} -body {
+    DBus call /foo org.freedesktop.DBus ListNames
+} -result {unknown path, "/foo"} -returnCodes error
+----
+
+[source,tcl]
+----
+<<service methods>>=
+method ValidateInterface {path interface} {
+    if {![::dbus validate interface $interface]} {
+        set msg "invalid interface name: \"$interface\""
+        throw [list INTERFACE INVALID $msg] $msg
+    }
+    set intfFound [pipe {
+        relvar restrictone Interface Name $interface |
+        relation isnotempty
+    }]
+    if {!$intfFound} {
+        set msg "unknown interface, \"$interface\""
+        throw [list INTERFACE UNKNOWN $msg] $msg
+    }
+    set isImplemented [pipe {
+        relvar restrictone Implementation Path $path Interface $interface |
+        relation isnotempty
+    }]
+    if {!$isImplemented} {
+        set msg "path, \"$path\", does not implement\
+                interface, \"$interface\""
+        throw [list INTERFACE NOTIMPLEMENTED $msg] $msg
+    }
+    return
+}
+----
+
+[source,tcl]
+----
+<<service tests>>=
+test Service-call-2.1.0 {
+    Invoke a method -- bad interface
+} -setup {
+    set conn [Connection create sysBus system]
+    Service create DBus org.freedesktop.DBus $conn
+} -cleanup {
+    sysBus destroy
+} -body {
+    DBus call /org/freedesktop/DBus org.foo ListNames
+} -result {unknown interface, "org.foo"} -returnCodes error
+----
+
+[source,tcl]
+----
+<<service tests>>=
+test Service-call-2.1.1 {
+    Invoke a method -- unimplemented on a path
+} -setup {
+    set conn [Connection create sysBus system]
+    Service create DBus org.freedesktop.DBus $conn
+} -cleanup {
+    sysBus destroy
+} -body {
+    DBus call / org.freedesktop.DBus.Properties GetAll
+} -result {path, "/", does not implement interface,\
+        "org.freedesktop.DBus.Properties"} -returnCodes error
+----
+
+[source,tcl]
+----
+<<service methods>>=
+method ValidateMethod {interface method arglist} {
+    if {![::dbus validate member $method]} {
+        set msg "invalid method name: \"$method\""
+        throw [list METHOD INVALID $msg] $msg
+    }
+    set methRel [relvar restrictone Method\
+            Interface $interface Name $method]
+    if {[relation isempty $methRel]} {
+        set msg "interface, \"$interface\", does not have a method named,\
+                \"$method\""
+        throw [list METHOD UNKNOWN $msg] $msg
+    }
+
+    set args [pipe {
+        relvar set Argument |
+        relation semijoin $methRel ~\
+            -using {Interface Interface Name Method}
+    }]
+    if {[relation cardinality $args] != [llength $arglist]} {
+        set expectArgs [relation list $args Name]
+        set msg "wrong # args: expected $method [join $expectArgs ,]:\
+                got: [join $arglist ,]"
+        throw [list METHOD WRONGARGS $msg] $msg
+    }
+    return
+}
+----
+
+[source,tcl]
+----
+<<service tests>>=
+test Service-call-2.2 {
+    Invoke a method -- bad method
+} -setup {
+    set conn [Connection create sysBus system]
+    Service create DBus org.freedesktop.DBus $conn
+} -cleanup {
+    sysBus destroy
+} -body {
+    DBus call /org/freedesktop/DBus org.freedesktop.DBus Foo
+} -result {interface, "org.freedesktop.DBus",\
+            does not have a method named, "Foo"} -returnCodes error
+----
+
+[source,tcl]
+----
+<<service methods>>=
+method CheckAnnotations {interface member} {
+    set notes [pipe {
+        relvar set Annotation |
+        relation restrictwith ~\
+                {$Interface eq $interface && $Member eq $member}
+    }]
+
+    relation foreach note $notes {
+        relation assign $note
+        log::notice "member, $Interface.$Member,\
+            is annotated as, $Name = $Value"
+    }
+}
+----
+
+==== Accessing properties
+
+Once constructed,
+all the property values for the paths found for the service
+are cached in the service metadata.
+This method provides access to the property values.
+
+The `property` method interface is typical of Tcl commands which set
+values.
+If no value is supplied then the property value is returned
+from of the metadata.
+If a value is supplied, then a method is called to write the property value.
+
+Note that after a write,
+the cached metadata is out of sync.
+Later, a signal is sent to indicate the property value was changed.
+Note that is will be necessary to enter the event loop to process
+that property value change and sync the cached metadata.
+
+[source,tcl]
+----
+<<service methods>>=
+method property {path interface property args} {
+    if {[llength $args] > 1} {
+        set msg "wrong # args:\
+                expected \"property path interface property ?value?"
+        throw [list PROPERTY WRONGARGS $msg] $msg
+    }
+
+    set prop [relvar restrictone Property\
+            Interface $interface Name $property]
+    if {[relation isempty $prop]} {
+        set msg "unknown property, \"$interface.$property\""
+        throw [list PROPERTY UNKNOWN $msg] $msg
+    }
+    relation assign $prop {Access propAccess} {Type propType}
+            
+    set propValue [relvar restrictone PropertyValue\
+            Path $path Interface $interface Property $property]
+    if {[relation isempty $propValue]} {
+        set msg "property, \"$interface.$property\", is not implemented\
+                for path, \"$path\""
+        throw [list PROPERTY NOTIMPLEMENTED $msg] $msg
+    }
+
+    if {[llength $args] == 1} {
+        if {![string match *write* $propAccess]} {
+            set msg "property, $interface.$property cannot be updated"
+            throw [list PROPERTY NOWRITE $msg] $msg
+        }
+        set value [lindex $args 0]
+        my call $path org.freedesktop.DBus.Properties Set\
+                $interface $property [list $propType $value]
+    } else {
+        if {![string match *read* $propAccess]} {
+            set msg "property, $interface.$property cannot be read"
+            throw [list PROPERTY NOREAD $msg] $msg
+        }
+        relation assign $propValue {Value value} Valid
+        if {!$Valid} {
+            my variable connId svcName
+            set value [$connId call $svcName $path\
+                    org.freedesktop.DBus.Properties Get {} $interface $property]
+            my UpdatePropertyValue $path $interface $property $value
+        }
+    }
+    return $value
+}
+----
+
+[source,tcl]
+----
+<<service tests>>=
+test bluez-property-1.0 {
+    Set an bluez adapter property
+} -setup {
+    set conn [Connection create sysBus system]
+    Service create bluez org.bluez $conn
+} -cleanup {
+    bluez waitForProperty org.bluez.Adapter1 DiscoverableTimeout\
+        /org/bluez/hci0 {bluez property /org/bluez/hci0 org.bluez.Adapter1\
+            DiscoverableTimeout 0}
+    sysBus destroy
+} -body {
+    bluez waitForProperty org.bluez.Adapter1 DiscoverableTimeout\
+        /org/bluez/hci0 {bluez property /org/bluez/hci0 org.bluez.Adapter1\
+            DiscoverableTimeout 100}
+} -result {100}
 ----
 
 ==== Tracing properties and signals
@@ -343,6 +1410,10 @@ relvar create Trace {
     CmdPrefix string
 } TraceId
 
+relvar create PathTrace {
+    TraceId int
+} TraceId
+
 relvar create SignalTrace {
     TraceId int
 } TraceId
@@ -352,11 +1423,374 @@ relvar create PropertyTrace {
 } TraceId
 
 relvar partition R7 Trace TraceId\
+        PathTrace TraceId\
         SignalTrace TraceId\
-        PropertyTrace TraceId\
+        PropertyTrace TraceId
 ----
 
-=== Package logging
+[source,tcl]
+----
+<<service meta-data definitions>>=
+my variable typeMap
+set typeMap [dict create\
+    path PathTrace\
+    signal SignalTrace\
+    property PropertyTrace\
+]
+----
+
+[source,tcl]
+----
+<<service methods>>=
+method trace {operation tracetype args} {
+    set tracetypes {path signal property}
+    if {$tracetype ni $tracetypes} {
+        set msg "unknown trace type, \"$tracetype\":\
+                expected [join $tractypes {, }]"
+        throw [list TRACE UNKNOWNTYPE $msg] $msg
+    }
+    switch -exact $operation {
+        add {
+            set result [my AddTrace $tracetype {*}$args]
+        }
+        remove {
+            set result [my RmTrace $tracetype {*}$args]
+        }
+        info {
+            set result [my InfoTrace $tracetype {*}$args]
+        }
+        default {
+            set msg "unknown trace operation, \"$operation\":\
+                expected add, remove or info"
+            throw [list TRACE UNKNOWNOP $msg] $msg
+        }
+    }
+}
+----
+
+[source,tcl]
+----
+<<service tests>>=
+test bluez-property-trace-1.0 {
+    set up property trace
+} -setup {
+    set conn [Connection create sysBus system]
+    Service create bluez org.bluez $conn
+} -cleanup {
+    bluez trace remove property $traceid
+    sysBus destroy
+} -body {
+    set traceid [bluez trace add property org.bluez.Adapter1\
+            Discovering /org/bluez/hci0 [namespace code propertyChanged]]
+    bluez trace info property $traceid
+} -result {{path /org/bluez/hci0\
+        prefix {::namespace inscope ::dbusclient::test propertyChanged}}}
+----
+
+[source,tcl]
+----
+<<service methods>>=
+method AddTrace {tracetype interface member pathpattern cmdprefix} {
+    my variable traceNumber typeMap
+    incr traceNumber
+
+    relvar eval {
+        relvar insert Trace [list\
+            TraceId $traceNumber\
+            Interface $interface\
+            Member $member\
+            PathMatch $pathpattern\
+            CmdPrefix $cmdprefix\
+        ]
+        relvar insert [dict get $typeMap $tracetype] [list\
+            TraceId $traceNumber\
+        ]
+    }
+    return $traceNumber
+}
+----
+
+[source,tcl]
+----
+<<service methods>>=
+method RmTrace {tracetype traceid} {
+    my variable typeMap
+    relvar eval {
+        relvar deleteone Trace TraceId $traceid
+        relvar deleteone [dict get $typeMap $tracetype] TraceId $traceid
+    }
+    return
+}
+----
+
+[source,tcl]
+----
+<<service methods>>=
+method InfoTrace {tracetype traceid} {
+    my variable typeMap
+    set traces [pipe {
+        relvar restrictone [dict get $typeMap $tracetype] TraceId $traceid |
+        relation join [relvar set Trace] ~ |
+        relation project ~ PathMatch CmdPrefix |
+        relation rename ~ PathMatch path CmdPrefix prefix
+    }]
+    log::debug "query $tracetype traces:\n[relformat $traces Trace]"
+    return [relation body $traces]
+}
+----
+
+[source,tcl]
+----
+<<service methods>>=
+method waitForProperty {interface property pathpattern trigger} {
+    set traceId [my trace add property $interface $property $pathpattern\
+            [mymethod PropertySync]]
+    set result [uplevel 1 $trigger]
+    vwait [my varname propSync]
+    my trace remove property $traceId
+    return $result
+}
+----
+
+[source,tcl]
+----
+<<service methods>>=
+method PropertySync {status path interface property value} {
+    set [my varname propSync] 1
+    return
+}
+----
+
+[source,tcl]
+----
+<<service methods>>=
+method waitForPath {interface property pathpattern trigger} {
+    set traceId [my trace add property $interface $property $pathpattern\
+            [mymethod PathSync]]
+    set result [uplevel 1 $trigger]
+    vwait [my varname pathSync]
+    my trace remove property $traceId
+    return $result
+}
+----
+
+[source,tcl]
+----
+<<service methods>>=
+method PathSync {status path interface property value} {
+    set [my varname pathSync] 1
+    return
+}
+----
+
+==== Listening for events
+
+[source,tcl]
+----
+<<service methods>>=
+method listen {path member args} {
+    log::debug "listening for $member on \"$path\""
+    my variable connId
+    tailcall $connId listen $path $member {*}$args
+}
+----
+
+==== Callbacks for signals
+
+[source,tcl]
+----
+<<service methods>>=
+method HandleSignals {eventInfo args} {
+    log::debug [info level 0]
+    set interface [dict get $eventInfo interface]
+    set member [dict get $eventInfo member]
+    set path [dict get $eventInfo path]
+
+    my EvalTrace signal {$Interface eq $interface &&\
+            $Member eq $member &&\
+            [string match $PathMatch $path]} $eventInfo {*}$args
+}
+----
+
+[source,tcl]
+----
+<<service methods>>=
+method EvalTrace {tracetype predicate args} {
+    set traces [uplevel 1 [list relation restrictwith [relvar set Trace]\
+            $predicate]]
+    my variable typeMap
+    set traces [relation join $traces\
+            [relvar set [dict get $typeMap $tracetype]]]
+    log::debug "$tracetype traces:\n[relformat $traces Trace]"
+
+    relation foreach trace $traces -ascending TraceId {
+        relation assign $trace CmdPrefix TraceId
+        set cmd [list {*}$CmdPrefix {*}$args]
+
+        try {
+            eval $cmd
+        } on continue {} {
+            continue
+        } on break {} {
+            break
+        } on error {result opts} {
+            log::error $::errorInfo
+            log::error "error executing $tracetype trace command,\
+                    \"$cmd\": $result"
+            my RmTrace $tracetype $TraceId
+            break
+        }
+    }
+}
+----
+
+[source,tcl]
+----
+<<service methods>>=
+method TracePropertyValue {status path interface property args} {
+    log::debug [info level 0]
+    my EvalTrace property {$Interface eq $interface &&\
+            $Member eq $property && [string match $PathMatch $path]}\
+            $status $path $interface $property {*}$args
+}
+----
+
+[source,tcl]
+----
+<<service methods>>=
+method TracePath {status path} {
+    log::debug [info level 0]
+    my EvalTrace path {[string match $PathMatch $path]} $status $path
+}
+----
+
+[source,tcl]
+----
+<<service methods>>=
+# signature oa{sa{sv}}
+method InterfacesAdded {eventInfo path interfaces} {
+    relvar eval {
+        dict for {interface properties} $interfaces {
+            my AddNewInterface $interface $path
+
+            dict for {propName propValue} $properties {
+                my UpdatePropertyValue $path $interface $propName $propValue
+                my TracePropertyValue changed $path $interface $propName\
+                        $propValue
+            }
+        }
+        my AddNewPath $path [dict keys $interfaces]
+    }
+
+    return
+}
+----
+
+[source,tcl]
+----
+<<service methods>>=
+method AddNewInterface {interface path} {
+    set intf [relvar restrictone Interface Name $interface]
+    if {[relation isempty $intf]} {
+        my variable connId svcName
+
+        set svcxml [$connId call $svcName $path\
+                org.freedesktop.DBus.Introspectable Introspect {}]
+        log::debug "new interface xml = \"$svcxml\""
+        set svcdoc [dom parse -simple $svcxml]
+        set svcroot [$svcdoc documentElement]
+        set intfNode [$svcroot selectNodes\
+                {/node/interface[@name=$interface]}]
+        log::debug "intfNode = $intfNode"
+
+        try {
+            set intf [relvar insert Interface [list Name $interface]]
+
+            if {$intfNode eq {}} {
+                log::notice "failed to find interface, \"$interface\",\
+                    in introspection XML for path, \"$path\""
+                return
+            }
+
+            my CreateMethods $intfNode
+            my CreateProperties $intfNode
+            my CreateSignals $intfNode
+        } finally {
+            $svcdoc delete
+        }
+    }
+    # the interface exists and we need to create the
+    # PropertyValue instances
+    set pvalues [pipe {
+        relation rename $intf Name Interface |
+        relation join ~ [relvar set Property] |
+        relation project ~ Interface Name |
+        relation rename ~ Name Property |
+        relation extend ~ ifTup Path string {"$path"} Value string {""}\
+                Valid boolean {"false"}
+    }]
+    relvar union PropertyValue $pvalues
+}
+----
+
+[source,tcl]
+----
+<<service methods>>=
+method AddNewPath {path interfaces} {
+    foreach interface $interfaces {
+        relvar uinsert Implementation [list Path $path Interface $interface]
+    }
+
+    set pathRel [relvar restrictone Path Name $path]
+    if {[relation isempty $pathRel]} {
+        relvar insert Path [list Name $path]
+        my TracePath added $path
+    }
+}
+----
+
+[source,tcl]
+----
+<<service methods>>=
+method InterfacesRemoved {eventInfo path interfaces} {
+    relvar eval {
+        foreach interface $interfaces {
+            relvar deleteone Implementation Path $path Interface $interface
+            relvar delete PropertyValue pvTup {
+                [tuple extract $pvTup Path] eq $path &&\
+                [tuple extract $pvTup Interface] eq $interface}
+        }
+        set noImplRemain [pipe {
+            relvar set Implementation |
+            relation restrictwith ~ {$Path eq $path} |
+            relation isempty
+        }]
+        if {$noImplRemain} {
+            relvar deleteone Path Name $path
+            my TracePath removed $path
+        }
+    }
+}
+----
+
+[source,tcl]
+----
+<<service methods>>=
+method PropertiesChanged {eventInfo intfName changed invalidated} {
+    log::debug "changing properties for $intfName"
+    set path [dict get $eventInfo path]
+    dict for {propName propValue} $changed {
+        my UpdatePropertyValue $path $intfName $propName $propValue
+        my TracePropertyValue changed $path $intfName $propName $propValue
+    }
+    foreach invalProp $invalidated {
+        my InvalidatePropertyValue $path $intfName $invalProp
+        my TracePropertyValue invalidated $path $intfName $invalProp
+    }
+}
+----
+
+=== Package logging [[package-logging]]
 
 [source,tcl]
 ----
