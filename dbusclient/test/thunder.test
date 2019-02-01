@@ -1,0 +1,201 @@
+#!/usr/bin/env tclsh
+#
+# This software is copyrighted 2019 by G. Andrew Mangogna.
+# The following terms apply to all files associated with the software unless
+# explicitly disclaimed in individual files.
+# 
+# The authors hereby grant permission to use, copy, modify, distribute,
+# and license this software and its documentation for any purpose, provided
+# that existing copyright notices are retained in all copies and that this
+# notice is included verbatim in any distributions. No written agreement,
+# license, or royalty fee is required for any of the authorized uses.
+# Modifications to this software may be copyrighted by their authors and
+# need not follow the licensing terms described here, provided that the
+# new terms are clearly indicated on the first page of each file where
+# they apply.
+# 
+# IN NO EVENT SHALL THE AUTHORS OR DISTRIBUTORS BE LIABLE TO ANY PARTY FOR
+# DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES ARISING
+# OUT OF THE USE OF THIS SOFTWARE, ITS DOCUMENTATION, OR ANY DERIVATIVES
+# THEREOF, EVEN IF THE AUTHORS HAVE BEEN ADVISED OF THE POSSIBILITY OF
+# SUCH DAMAGE.
+# 
+# THE AUTHORS AND DISTRIBUTORS SPECIFICALLY DISCLAIM ANY WARRANTIES,
+# INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.  THIS SOFTWARE
+# IS PROVIDED ON AN "AS IS" BASIS, AND THE AUTHORS AND DISTRIBUTORS HAVE
+# NO OBLIGATION TO PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS,
+# OR MODIFICATIONS.
+# 
+# GOVERNMENT USE: If you are acquiring this software on behalf of the
+# U.S. government, the Government shall have only "Restricted Rights"
+# in the software and related documentation as defined in the Federal
+# Acquisition Regulations (FARs) in Clause 52.227.19 (c) (2).  If you
+# are acquiring the software on behalf of the Department of Defense,
+# the software shall be classified as "Commercial Computer Software"
+# and the Government shall have only "Restricted Rights" as defined in
+# Clause 252.227-7013 (c) (1) of DFARs.  Notwithstanding the foregoing,
+# the authors grant the U.S. Government and others acting in its behalf
+# permission to use and distribute the software in accordance with the
+# terms specified in this license.
+#
+
+package require Tcl 8.6
+package require cmdline
+package require logger
+package require logger::utils
+package require logger::appender
+package require control
+
+# source ../code/dbusclient.tcl
+package require dbusclient
+
+# Add custom arguments here.
+set optlist {
+    {level.arg notice {Log debug level}}
+    {nodelete {Don't delete Thundersense device when done}}
+}
+array set options [::cmdline::getKnownOptions argv $optlist]
+
+control::control assert enabled true
+
+logger::setlevel $options(level)
+set logger [::logger::init thunder]
+::logger::utils::applyAppender -appender colorConsole -serviceCmd $logger\
+        -appenderArgs {-conversionPattern {\[%c\] \[%p\] '%m'}}
+
+namespace eval ::thunder {
+    namespace import ::dbusclient::*
+    namespace import ::ral::*
+    namespace import ::ralutil::*
+    namespace import ::control::assert
+
+    deserializeFromFile ./gattdb.ral
+
+    proc propSync {status path interface property value} {
+        set [namespace current]::done [dict create\
+            status $status path $path interface $interface property $property\
+            value $value]
+    }
+
+    ::logger::import -all -force -namespace log thunder
+    log::info "testing dbusclient version: [package require dbusclient]"
+
+    log::info "connecting to org.bluez on the system bus"
+    Connection create ::sysBus system
+    Service create org.bluez org.bluez ::sysBus
+
+    set path [org.bluez findPathsByPropertyValue org.bluez.Device1\
+            Name {[string match Thunder* $Value]}]
+    log::debug "paths matching Thunder*: \"$path\""
+
+    if {[llength $path] == 0} {
+        log::notice "starting discovery"
+        set discovering [org.bluez waitForProperty org.bluez.Adapter1\
+                Discovering /org/bluez/hci0\
+                {org.bluez call /org/bluez/hci0\
+                    org.bluez.Adapter1 StartDiscovery}]
+        assert {[dict get $discovering value] == 1} "Discovering property is not 1"
+
+        while {true} {
+            try {
+                set newName [org.bluez waitForProperty org.bluez.Device1\
+                    Name /org/bluez/hci0/dev* {} 10000]
+                if {[string match Thunder* [dict get $newName value]]} {
+                    set path [dict get $newName path]
+                    break
+                }
+            } on error {result} {
+                log::error $result
+                return
+            }
+        }
+
+        log::notice "stopping discovery"
+        set discovering [org.bluez waitForProperty org.bluez.Adapter1 Discovering\
+            /org/bluez/hci0 {org.bluez call /org/bluez/hci0\
+                org.bluez.Adapter1 StopDiscovery}]
+        assert {[dict get $discovering value] == 0} "Discovering property is not 0"
+    }
+
+    log::notice "connecting to $path"
+    set connected [org.bluez waitForProperty org.bluez.Device1 Connected $path\
+            {org.bluez call $path org.bluez.Device1 Connect} 10000]
+    assert {[dict get $connected value] == 1} "Connected property is not 1"
+
+    set svcres [org.bluez waitForProperty org.bluez.Device1 ServicesResolved $path {}]
+    assert {[dict get $svcres value] == 1} "ServicesResolved property is not 1"
+    log::info "services resolved"
+
+    log::notice "waiting for settling time"
+    after 3000
+
+    set props [org.bluez pathProperties $path org.bluez.Device1]
+    puts "Properties for $path"
+    foreach prop $props {
+        try {
+            set value [org.bluez property $path org.bluez.Device1 $prop]
+            puts "    $prop = $value"
+        } on error {result} {
+            log::error $result
+            log::info "cannot get $prop value"
+        }
+    }
+
+    set uuids [org.bluez property $path org.bluez.Device1 UUIDs]
+    puts "services for $path"
+    foreach uuid $uuids {
+        set name [pipe {
+            relvar restrictone Entity UUID $uuid |
+            relation extract ~ Name
+        }]
+        set svcpath [org.bluez findPathsByPropertyValue org.bluez.GattService1\
+                UUID {$uuid eq $Value}]
+
+        puts "Service: $name ==> $uuid, on path $svcpath"
+
+        set charpaths [org.bluez findPathsByPropertyValue org.bluez.GattCharacteristic1\
+                Service {$svcpath eq $Value}]
+        puts "    Characteristics:"
+        foreach charpath $charpaths {
+            set cuuid [org.bluez property $charpath org.bluez.GattCharacteristic1 UUID]
+            set cname [pipe {
+                relvar restrictone Entity UUID $cuuid |
+                relation extract ~ Name
+            }]
+
+            set flags [org.bluez property $charpath org.bluez.GattCharacteristic1 Flags]
+            if {"read" in $flags} {
+                set value [org.bluez call $charpath org.bluez.GattCharacteristic1 ReadValue {}]
+            } else {
+                set value "not readable"
+            }
+            puts "    $cname ==> $value\n        UUID ==> $cuuid, Path ==> $charpath"
+
+            set descpaths [org.bluez findPathsByPropertyValue org.bluez.GattDescriptor1\
+                    Characteristic {$charpath eq $Value}]
+            foreach descpath $descpaths {
+                set duuid [org.bluez property $descpath org.bluez.GattDescriptor1 UUID]
+                set dvalue [org.bluez call $descpath org.bluez.GattDescriptor1 ReadValue {}]
+
+                puts "        Descriptor: UUID = $duuid, Value = $dvalue"
+            }
+        }
+        puts {}
+    }
+
+    log::notice "disconnecting from $path"
+    set connected [org.bluez waitForProperty org.bluez.Device1 Connected $path\
+            {org.bluez call $path org.bluez.Device1 Disconnect}]
+    assert {[dict get $connected value] == 0} "Connected property is not 0"
+
+    if {!$::options(nodelete)} {
+        log::notice "deleting path $path"
+        set rmpath [org.bluez waitForPath $path\
+                {org.bluez call /org/bluez/hci0 org.bluez.Adapter1 RemoveDevice $path}]
+        assert {[dict get $rmpath status] eq "removed" &&\
+                [dict get $rmpath path] eq $path} "$path not removed"
+    }
+}
+
+# vim :set syntax=tcl:
