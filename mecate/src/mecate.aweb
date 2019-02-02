@@ -53,7 +53,8 @@ to provide services to monitor the output of the application and take
 actions when specific traces, etc. are received as responses from the
 test application.
 
-The `mecate` package is organized as a single TclOO class called `rein`.
+The `mecate` package is organized as a single TclOO class called `rein`
+and a few ordinary utility procedures.
 
 (((command,rein)))
 
@@ -103,9 +104,7 @@ The options are:
 ----
 <<rein configuration>>=
 constructor {args} {
-    set svcname mecate[self]
-    ::logger::init $svcname
-    ::logger::import -all -namespace log $svcname
+    ::logger::import -all -namespace log mecate
 
     set timeout 2000
     foreach {option value} $args {
@@ -998,7 +997,7 @@ time in the future.
 ----
 <<rein configuration>>=
 method delaysignal {domain class inst delay event args} {
-    return [my Command signal $domain $class $inst $delay $event {*}$args]
+    return [my Command delaysignal $domain $class $inst $delay $event {*}$args]
 }
 ----
 
@@ -1371,7 +1370,7 @@ method waitForEventTrace {args} {
             if {[my MatchTrace $actual $expect]} {
                 return $actual
             } else {
-                log::notice "discarding trace, \"$actual\":\
+                log::debug "discarding trace, \"$actual\":\
                         failed to match, \"$expect\""
             }
         }
@@ -1644,6 +1643,55 @@ method NotifyTraceArrived {trace} {
 ----
 <1> Notice we turn off trace arrival notification if there was an error.
 This prevents repeated error messages.
+
+=== Event Trace Format
+
+(((mecate,proc,eventTraceFormat)))
+
+*****
+`mecate eventTraceFormat` _trace_
+
+`trace`::
+    A state machine event trace in dictionary form as returned from
+    the test harness.
+
+The `eventTraceFormat` procedure returns a string containing a human readable
+version of the _trace_.
+*****
+
+[source,tcl]
+.Implementation
+----
+<<mecate commands>>=
+proc ::mecate::eventTraceFormat {trace} {
+    dict with trace {
+        switch -exact -- $type {
+            transition {
+                return [format\
+                    "%s: Transition: %s - %s -> %s: %s ==> %s"\
+                    $time $source $event $target $currstate $newstate\
+                ]
+            }
+            polymorphic {
+                return [format\
+                    "%s: Polymorphic: %s - %s -> %s: %s - %s -> %s"\
+                    $time $source $event $target $relationship $newevent\
+                    $subclass\
+                ]
+            }
+            creation {
+                return [format\
+                    "%s: Creation: %s - %s -> %s"\
+                    $time $source $event $target\
+                ]
+            }
+            default {
+                my Throw "unknown trace type, \"$type\""
+            }
+        }
+    }
+}
+----
 
 == Sequence Diagram of State Machine Traces
 
@@ -1933,7 +1981,7 @@ method waitForInstrTrace {args} {
             if {[my MatchTrace $actual $expect]} {
                 return $actual
             } else {
-                log::notice "discarding trace, \"$actual\":\
+                log::debug "discarding trace, \"$actual\":\
                         failed to match, \"$expect\""
             }
         }
@@ -2101,6 +2149,32 @@ method NotifyInstrArrived {instr} {
 }
 ----
 
+=== Instrumentation Trace Format
+
+(((mecate,proc,instrTraceFormat)))
+
+*****
+`mecate instrTraceFormat` _trace_
+
+`trace`::
+    An instrumentation trace in dictionary form as returned from
+    the test harness.
+
+The `instrTraceFormat` procedure returns a string containing a human readable
+version of the _trace_.
+*****
+
+[source,tcl]
+.Implementation
+----
+<<mecate commands>>=
+proc ::mecate::instrTraceFormat {trace} {
+    dict with trace {
+        return [format "%s: Instr: %s" $time $message]
+    }
+}
+----
+
 == Fatal Error Traces
 
 The `micca` run-time code detects several fatal errors.
@@ -2162,7 +2236,7 @@ method waitForFatalTrace {args} {
             if {[my MatchTrace $actual $expect]} {
                 return $actual
             } else {
-                log::notice "discarding trace, \"$actual\":\
+                log::debug "discarding trace, \"$actual\":\
                         failed to match, \"$expect\""
             }
         }
@@ -2339,6 +2413,32 @@ method NotifyFatalArrived {fatal} {
     } on error {result} {
         log::error "error notifying fatal error arrival: \"$result\""
         set fatalPrefix {}
+    }
+}
+----
+
+=== Fatal Trace Format
+
+(((mecate,proc,fatalTraceFormat)))
+
+*****
+`mecate fatalTraceFormat` _trace_
+
+`trace`::
+    An fatal error trace in dictionary form as returned from
+    the test harness.
+
+The `fatalTraceFormat` procedure returns a string containing a human readable
+version of the _trace_.
+*****
+
+[source,tcl]
+.Implementation
+----
+<<mecate commands>>=
+proc ::mecate::fatalTraceFormat {trace} {
+    dict with trace {
+        return [format "%s: Fatal: %s" $time $message]
     }
 }
 ----
@@ -2931,9 +3031,9 @@ test scenario-0.1 {
     ::apptest start ./bstore_harness
     ::apptest connect
 
-    ::apptest traceNotify puts
-    ::apptest instrNotify puts
-    ::apptest fatalNotify puts
+    ::apptest traceNotify [namespace code {logTrace info}]
+    ::apptest instrNotify [namespace code {logInstr info}]
+    ::apptest fatalNotify [namespace code {logFatal error}]
 
     ::apptest instr on
     ::apptest trace on
@@ -3212,6 +3312,8 @@ The source code for the `mecate` package is shown below.
 
 package require Tcl 8.6
 package require logger
+package require logger::utils
+package require logger::appender
 package require ral
 package require ralutil
 package require oo::util
@@ -3219,11 +3321,19 @@ package require struct::queue
 
 namespace eval ::mecate {
     namespace export rein
+    namespace export eventTraceFormat
+    namespace export instrTraceFormat
+    namespace export fatalTraceFormat
     namespace ensemble create
 
-    logger::initNamespace [namespace current]
+    set logger [::logger::init mecate]
+    set appenderType [expr {[dict exist [fconfigure stdout] -mode] ?\
+            "colorConsole" : "console"}]
+    ::logger::utils::applyAppender -appender $appenderType -serviceCmd $logger\
+            -appenderArgs {-conversionPattern {\[%c\] \[%p\] '%m'}}
+    ::logger::import -all -force -namespace log mecate
 
-    variable version 1.0
+    variable version 1.1
 }
 
 <<mecate commands>>
@@ -3248,6 +3358,8 @@ test file.
 package require Tcl 8.6
 package require cmdline
 package require logger
+package require logger::utils
+package require logger::appender
 package require tcltest
 
 source ../code/tcl/mecate.tcl
@@ -3263,7 +3375,12 @@ array set options [::cmdline::getKnownOptions argv $optlist]
 tcltest::configure {*}$argv
 
 namespace eval ::mecate::test {
-    ::logger::initNamespace [namespace current]
+    set logger [::logger::init mecate::test]
+    set appenderType [expr {[dict exist [fconfigure stdout] -mode] ?\
+            "colorConsole" : "console"}]
+    ::logger::utils::applyAppender -appender $appenderType -serviceCmd $logger\
+            -appenderArgs {-conversionPattern {\[%c\] \[%p\] '%m'}}
+    ::logger::import -all -force -namespace log mecate::test
 
     log::info "testing mecate version: [package require mecate]"
 
@@ -3291,13 +3408,27 @@ proc objeval {obj args} {
 }
 ----
 
+----
+<<test utilities>>=
+# Utility proc log a formated event trace
+proc logTrace {level trace} {
+    log::$level [::mecate eventTraceFormat $trace]
+}
+proc logInstr {level trace} {
+    log::$level [::mecate instrTraceFormat $trace]
+}
+proc logFatal {level trace} {
+    log::$level [::mecate fatalTraceFormat $trace]
+}
+----
+
 === Package Index
 
 We also provide a root chunk to extract a package index file.
 
 ----
 <<pkgIndex.tcl>>=
-package ifneeded mecate 1.0 [list source [file join $dir mecate.tcl]]
+package ifneeded mecate 1.1 [list source [file join $dir mecate.tcl]]
 ----
 
 === Template
@@ -3316,6 +3447,8 @@ that uses `mecate`.
 package require Tcl 8.6
 package require cmdline
 package require logger
+package require logger::utils
+package require logger::appender
 package require tcltest
 package require mecate
 
@@ -3331,13 +3464,19 @@ array set options [::cmdline::getKnownOptions argv $optlist]
 tcltest::configure {*}$argv
 
 namespace eval ::$options(program)::test {
-    namespace import ::tcltest::*
-    ::logger::initNamespace [namespace current] $::options(level)
+    set logger [::logger::init $::options(program)::test]
+    set appenderType [expr {[dict exist [fconfigure stdout] -mode] ?\
+            "colorConsole" : "console"}]
+    ::logger::utils::applyAppender -appender $appenderType -serviceCmd $logger\
+            -appenderArgs {-conversionPattern {\[%c\] \[%p\] '%m'}}
+    ::logger::import -all -force -namespace log $::options(program)::test
 
     if {$options(program) eq {}} {
         my Throw "no bosal test harness program name was supplied:\
                 use \"-program <name>\" option"
     }
+
+    namespace import ::tcltest::*
 
     mecate rein create ::apptest
 

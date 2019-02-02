@@ -9,12 +9,13 @@
 #*--
 #
 
-VERSION = 1.0
+VERSION = 1.1
 
 DOCDIR	= ../doc
 CODEDIR	= ../code/tcl
 TESTDIR = ../tests
 PKGDIR	= ../../packages
+MODDIR	= ../../modules
 
 vpath %.pdf $(DOCDIR)
 vpath %.test $(TESTDIR)
@@ -84,7 +85,7 @@ ASCIIDOC_OPTS	=\
 
 .PHONY : all doc code tests runtests package clean
 
-all : doc code tests package template
+all : doc code tests package module template
 
 doc : $(PDF)
 
@@ -93,6 +94,8 @@ code : $(TCLSRC)
 tests : code $(TESTS)
 
 package : $(PKGDIR)/package-mecate-$(VERSION)-tcl.tm
+
+module : $(MODDIR)/mecate-$(VERSION).tm
 
 template : $(TEMPLATE)
 
@@ -112,6 +115,9 @@ pkgIndex.tcl : $(DOCSRC)
 $(PKGDIR)/package-mecate-$(VERSION)-tcl.tm : $(TCLSRC) pkgIndex.tcl\
     		$(CODEDIR)/teapot.txt
 	cd $(CODEDIR) ; teapot-pkg generate --output ../$(PKGDIR) .
+
+$(MODDIR)/mecate-$(VERSION).tm : $(TCLSRC)
+	mkmodule mecate $(VERSION) -script $(CODEDIR)/$(TCLSRC) -outdir $(MODDIR)
 
 $(MAN) : $(DOCSRC)
 
