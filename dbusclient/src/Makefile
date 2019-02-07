@@ -10,6 +10,7 @@
 #
 
 DOCDIR	= ../doc
+MANDIR	= $(DOCDIR)/man
 IMAGEDIR = ./figures
 CODEDIR	= ../code
 TESTDIR = ../test
@@ -36,6 +37,10 @@ CODEFILE =\
 	  $(CODEDIR)/$(patsubst %.aweb,%.tcl,$(DOCSRC))\
 	  $(NULL)
 
+MANFILE =\
+	  $(MANDIR)/$(patsubst %.aweb,%.man,$(DOCSRC))\
+	  $(NULL)
+
 MODULEFILE =\
 	  $(CODEDIR)/$(patsubst %,%-$(VERSION).tm,$(PKGNAME))\
 	  $(NULL)
@@ -59,6 +64,7 @@ DOCPARTS=\
 
 DIAGRAMS =\
 	service-metadata.uxf\
+	trace-metadata.uxf\
 	$(NULL)
 
 LSDIAGRAMS =\
@@ -129,15 +135,17 @@ TESTOPTS =\
 	-level notice\
 	$(NULL)
 
-.PHONY : all doc code test module clean
+.PHONY : all doc code test module man clean
 
-all : doc module
+all : doc module man
 
 doc : $(PDF)
 
 code : $(CODEFILE)
 
 module : $(MODULEFILE)
+
+man : $(MANFILE)
 
 $(MODULEFILE) : $(CODEFILE)
 	cd $(CODEDIR) ; mkmodule $(PKGNAME) $(VERSION)\
@@ -161,6 +169,9 @@ $(CODEFILE) : $(DOCSRC) $(DOCPARTS)
 	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $@ $(DOCSRC)
 
 $(TESTFILE) : $(DOCSRC) $(DOCPARTS)
+	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $@ $(DOCSRC)
+
+$(MANFILE) : $(DOCSRC) $(DOCPARTS)
 	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $@ $(DOCSRC)
 
 $(IMAGEDIR)/%.pdf : %.uxf
