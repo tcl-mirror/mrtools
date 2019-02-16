@@ -135,7 +135,7 @@ TESTOPTS =\
 	-level notice\
 	$(NULL)
 
-.PHONY : all doc code test module man clean
+.PHONY : all doc code runtests module man clean
 
 all : doc module man
 
@@ -151,7 +151,7 @@ $(MODULEFILE) : $(CODEFILE)
 	cd $(CODEDIR) ; mkmodule $(PKGNAME) $(VERSION)\
 		-script $(notdir $(CODEFILE))
 
-runtests : $(TESTFILE) code
+runtests : $(TESTFILE) code $(TESTDIR)/test-server.tcl
 	cd $(TESTDIR) ; tclsh $(notdir $(TESTFILE)) $(TESTOPTS)
 
 clean :
@@ -169,6 +169,9 @@ $(CODEFILE) : $(DOCSRC) $(DOCPARTS)
 	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $@ $(DOCSRC)
 
 $(TESTFILE) : $(DOCSRC) $(DOCPARTS)
+	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $@ $(DOCSRC)
+
+$(TESTDIR)/test-server.tcl : $(DOCSRC) $(DOCPARTS)
 	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $@ $(DOCSRC)
 
 $(MANFILE) : $(DOCSRC) $(DOCPARTS)

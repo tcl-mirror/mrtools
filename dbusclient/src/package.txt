@@ -80,7 +80,7 @@ a variable and have it automatically imported into each method.
 
 ==== Connection constructor
 
-Construction of a `Connection` is a thin veneer on the underlying
+Construction of a `Connection` is a thin wrapper on the underlying
 `dbus` package command.
 
 [source,tcl]
@@ -191,10 +191,13 @@ Calling the method is a request to perform the function of the method.
 
 The only complication here deals with the signature of the method.
 The `dbus` package documentation describes the details of signatures in DBus,
-but, as you might suspect, it is a means of dealing with DBus typing
-semantics in the face of Tcl _everything is a string_ semantics.
+but, as you might suspect, it is a means of dealing with DBus data typing
+in the face of Tcl insisting that_everything is a string_.
 We interpret an empty string signature as not wishing to pass in the
 signature to the `dbus` command.
+Later we will see that internally,
+[cmd Service] objects always supply the signature because it is
+available from the service introspection.
 
 [source,tcl]
 ----
@@ -315,7 +318,6 @@ although it is possible to get a list of all the bus names on a DBus.
 ----
 <<service class>>=
 ::oo::class create ::dbusclient::Service {
-
     <<service methods>>
 }
 ----
@@ -482,7 +484,8 @@ Objects are given file system path-like names and we use the term _path_
 here to mean an object instance.
 During the introspection,
 we store the data obtained in the `relvars` shown previously,
-effectively caching the introspection data.
+effectively caching the introspection data in a form that is
+easier to query and manipulate.
 
 [source,tcl]
 ----
@@ -526,7 +529,9 @@ constructor {svc conn} {
 ----
 <1> Used for identifying trace requests.
 <2> Recursively introspect the service starting at the root path.
-Note the is done in a relvar transaction.
+Note the introspection is done in a relvar transaction so we
+can defer enforcing the referential integrity until all the introspection
+is finished.
 <3> Fetch the property values for the discovered object.
 <4> Set up signal handlers for the internal mechanisms used to keep the
 local cache of properties and interfaces up to date.
@@ -589,7 +594,7 @@ method Introspect {path}  {
 
     set svcxml [$connId call $svcName $path\
             org.freedesktop.DBus.Introspectable Introspect {}]
-    log::debug "xml for $path: \"$svcxml\""
+    log::debug "xml for $path:\n$svcxml"
 
     set svcdoc [dom parse -simple $svcxml]
     set svcroot [$svcdoc documentElement]
@@ -826,24 +831,28 @@ and use file system-like naming for the paths.
 ----
 <<service methods>>=
 method CreateNodes {path root} {
-    set nodeNodes [$root getElementsByTagName node]
-    foreach nodeNode $nodeNodes {
-        set nodeName [$nodeNode getAttribute name]
-        set fullpath [file join $path $nodeName]
-        my Introspect $fullpath ;                   # <1>
+    set childNodes [$root getElementsByTagName node]
+    foreach childNode $childNodes {
+        set nodeName [$childNode getAttribute name]
+        set fullpath [file join $path $nodeName] ;      # <1>
+        my Introspect $fullpath ;                       # <2>
     }
 }
 ----
-<1> Here is the recursive introspection to obtain the information for
+<1> File join does the right thing here, particularly if `path`
+is set to "/".
+Better than just sandwiching a "/" between the path and its child node
+name using sting concatenation.
+<2> Here is the recursive introspection to obtain the information for
 child nodes.
 
 Once we know all the paths and interfaces in a service and know
 which interfaces are implemented by which paths,
-then we can create values for the properties that are associated with
+then we can *PropertyValue* tuples for the properties that are associated with
 a given path.
 At this point,
-we don't know the values of the properties.
-So, each property value is set to the empty string and marked as invalid.
+we don't know the values of the properties,
+so each property value is set to the empty string and marked as invalid.
 
 [source,tcl]
 ----
@@ -856,11 +865,23 @@ method CreatePropertyValues {} {
         relation rename ~ Name Property |
         relation extend ~ exTup Value string {""} Valid boolean {"false"} |
         relvar set PropertyValue ~
-    }
+    } ;                                                                 # <1>
 
     return
 }
 ----
+<1> The strategy behind this query starts with realizing that we intend to
+set a new value for the *PropertyValue* relvar.
+So, we need all the tuples in that value.
+Since *PropertyValue* is a correlation between *Property* and *Implementation*,
+we can derive a new value by joining the two, projecting the identifiers
+and then adding the attributes, by extension,
+required for *PropertyValue*.
+As long as we get the correct header, then we can set the value of the
+relvar just like any other variable.
+In this way,
+the new value is generated as a complete set and no explicit iteration is
+required.
 
 After introspection is completed,
 we can then request the property values and place those values in
@@ -1064,6 +1085,8 @@ introspection,
 the following methods can be used to obtain access to some of the
 service metadata accumulated during construction.
 
+===== connectedTo method
+
 [source,tcl]
 ----
 <<service methods>>=
@@ -1099,13 +1122,17 @@ test Service-introspection-1.0 {
 } -result $conn
 ----
 
+===== pathList method
+
 [source,tcl]
 ----
 <<service methods>>=
 method pathList {} {
-    return [relation list [relvar set Path] Name]
+    return [relation list [relvar set Path] Name] ;         # <1>
 }
 ----
+<1> Since `Name` is an identifier for *Path*, we are assured that
+the returned list is actually a set.
 
 /////////
 ----
@@ -1132,6 +1159,8 @@ test Service-introspection-2.0 {
     DBus pathList
 } -result {/ /org/freedesktop/DBus} -match set
 ----
+
+===== findPathsByPropertyValue method
 
 [source,tcl]
 ----
@@ -1195,6 +1224,8 @@ returns the object whose path is [cmd /org/freedesktop/DBus].
 ----
 /////////
 
+===== pathInterfaces method
+
 [source,tcl]
 ----
 <<service methods>>=
@@ -1206,6 +1237,10 @@ method pathInterfaces {path} {
     }]
 }
 ----
+
+For these tests, we want to be able to compare sets for equality.
+Fortunately, `tcllib` provides all the need commands and
+`tcltest` allows us to define custom matching procedures.
 
 .Tests
 
@@ -1249,6 +1284,8 @@ implemented for [arg path].
 ----
 /////////
 
+===== pathProperties method
+
 [source,tcl]
 ----
 <<service methods>>=
@@ -1271,6 +1308,8 @@ The [method pathProperties] method returns a list of property names that are
 implemented by [arg interface] for the object specified by [arg path].
 ----
 /////////
+
+===== interfaceMethods method
 
 [source,tcl]
 ----
@@ -1311,6 +1350,8 @@ by the specified [arg interface].
 ----
 /////////
 
+===== methodSignature method
+
 [source,tcl]
 ----
 <<service methods>>=
@@ -1348,6 +1389,8 @@ The [method methodSignature] method returns the DBus signature
 string for the specified [arg interface] and [arg method].
 ----
 /////////
+
+===== interfaceProperties method
 
 [source,tcl]
 ----
@@ -1388,6 +1431,8 @@ by [arg interface].
 ----
 /////////
 
+===== interfaceSignals method
+
 [source,tcl]
 ----
 <<service methods>>=
@@ -1426,6 +1471,94 @@ The [method interfaceSignals] method returns a list of signals defined
 by [arg interface].
 ----
 /////////
+
+==== A test server
+
+It is convenient to put up our own service against which we can test.
+Fortunately,
+the [package dbif] package, also by Schelte Bron, provides some
+convenient commands to do that.
+In this section we show a test server build using
+the [package dbif] package.
+This server is then used for testing other parts of this package.
+
+[source,tcl]
+----
+<<test-server.tcl>>=
+package require dbif
+
+puts stderr "test server starting"
+
+dbif connect -bus session -noqueue -replace com.modelrealization.test
+
+<<test server methods>>
+<<test server properties>>
+<<test server signals>>
+
+vwait forever
+----
+
+[source,tcl]
+----
+<<test server methods>>=
+dbif method /com/modelrealization/test AddToCounter {cnt} {i} {
+    incr ::Counter $cnt
+    dbif return $msgid $::Counter
+}
+
+dbif method /com/modelrealization/test Quit {
+    dbif return $msgid {}
+    puts stderr "test server exiting"
+    exit
+}
+
+dbif method /com/modelrealization/test Trigger {
+    dbif generate $::AttnSigId
+}
+----
+
+[source,tcl]
+----
+<<test server properties>>=
+dbif property -attributes {Property.EmitsChangedSignal true}\
+        /com/modelrealization/test Counter:i Counter
+set ::Counter 0
+
+dbif property /com/modelrealization/test Name:s Name
+set ::Name "Test Server"
+
+dbif property -access read\
+        /com/modelrealization/test Source:s Source
+set ::Source "Model Realization"
+----
+
+[source,tcl]
+----
+<<test server signals>>=
+set ::AttnSigId [dbif signal /com/modelrealization/test Attention\
+        {Count:i Identity:s} {} {
+    return [list $::Counter $::Source]
+}]
+----
+
+[source,tcl]
+----
+<<test utilities>>=
+exec tclsh test-server.tcl &
+----
+
+[source,tcl]
+----
+<<test utilities>>=
+proc killServer {} {
+    set conn [Connection create sessionBus session]
+    Service create tserver com.modelrealization.test $conn
+    tserver call /com/modelrealization/test com.modelrealization.test\
+            Quit
+
+    $conn destroy
+}
+----
 
 ==== Calling methods
 
@@ -1735,38 +1868,38 @@ method property {path interface property args} {
 [source,tcl]
 ----
 <<service tests>>=
-test network-property-1.0 {
-    Get an network manager property
+test property-1.0 {
+    Get a property from the test server
 } -setup {
-    set conn [Connection create sysBus system]
-    Service create net org.freedesktop.NetworkManager $conn
+    set conn [Connection create sessionBus session]
+    Service create tserver com.modelrealization.test $conn
 } -cleanup {
-    sysBus destroy
+    sessionBus destroy
 } -body {
-    set hostname1 [net property /org/freedesktop/NetworkManager/Settings\
-        org.freedesktop.NetworkManager.Settings Hostname]
-    set hostname2 [exec hostname]
-    expr {$hostname1 eq $hostname2}
-} -result {1}
+    tserver property\
+            /com/modelrealization/test com.modelrealization.test Counter
+} -result {0}
 ----
 
 [source,tcl]
 ----
 <<service tests>>=
-test bluez-property-1.0 {
-    Set an bluez adapter property
+test property-2.0 {
+    Set an property value
 } -setup {
-    set conn [Connection create sysBus system]
-    Service create bluez org.bluez $conn
+    set conn [Connection create sessionBus session]
+    Service create tserver com.modelrealization.test $conn
 } -cleanup {
-    bluez waitForProperty org.bluez.Adapter1 DiscoverableTimeout\
-        /org/bluez/hci0 {bluez property /org/bluez/hci0 org.bluez.Adapter1\
-            DiscoverableTimeout 0}
-    sysBus destroy
+    tserver waitForProperty com.modelrealization.test Counter\
+        /com/modelrealization/test\
+        {tserver property /com/modelrealization/test\
+            com.modelrealization.test Counter 100}
+    sessionBus destroy
 } -body {
-    set chng [bluez waitForProperty org.bluez.Adapter1 DiscoverableTimeout\
-        /org/bluez/hci0 {bluez property /org/bluez/hci0 org.bluez.Adapter1\
-            DiscoverableTimeout 100}]
+    set chng [tserver waitForProperty com.modelrealization.test Counter\
+        /com/modelrealization/test\
+        {tserver property /com/modelrealization/test\
+            com.modelrealization.test Counter 100}]
     dict get $chng value
 } -result {100}
 ----
@@ -1893,24 +2026,6 @@ method trace {operation args} {
     }
     return $result
 }
-----
-
-[source,tcl]
-----
-<<service tests>>=
-test bluez-property-trace-1.0 {
-    set up property trace
-} -setup {
-    set conn [Connection create sysBus system]
-    Service create bluez org.bluez $conn
-} -cleanup {
-    bluez trace remove $traceid
-    sysBus destroy
-} -body {
-    set traceid [bluez trace add property org.bluez.Adapter1\
-            Discovering /org/bluez/hci0 [namespace code propertyChanged]]
-    dict get [bluez trace info $traceid] Property
-} -result {Discovering}
 ----
 
 [source,tcl]
@@ -2044,6 +2159,7 @@ method RmTrace {traceid} {
     if {[relation isnotempty $trace]} {
         relation assign $trace
 
+        variable connId
         relvar eval {
             relvar deleteone Trace TraceId $traceid
             if {[relation isnotempty $Path]} {
@@ -2080,21 +2196,28 @@ method InfoTrace {traceid} {
                 relation project $trace PathMatch CmdPrefix Path |
                 relation ungroup ~ Path
             }]
+            set tracetype path
         } elseif {[relation isnotempty $Signal]} {
             set result [pipe {
                 relation project $trace PathMatch CmdPrefix Signal |
                 relation ungroup ~ Signal
             }]
+            set tracetype signal
         } elseif {[relation isnotempty $Property]} {
             set result [pipe {
                 relation project $trace PathMatch CmdPrefix Property |
                 relation ungroup ~ Property
             }]
+            set tracetype property
         }
         log::debug "Info Trace result:\n[relformat $result]"
+        set result [lindex [relation body $result] 0]
+        lappend result Type $tracetype
+        return $result
+    } else {
+        set msg "unknown trace, \"$traceid\""
+        throw [list INFO UNKNOWNTRACE $msg] $msg
     }
-
-    return [lindex [relation body $result] 0]
 }
 ----
 
@@ -2103,19 +2226,104 @@ method InfoTrace {traceid} {
 <<man service methods>>=
 [call [cmd "[arg svcobj] trace"] [arg operation] [arg type] [arg [opt args]]]
 
+The [method trace] method causes Tcl commands to be executed when
+certain conditions on the DBus are met.
+The interface for this method is modeled after the core [cmd trace] command.
+Legal [arg operation] argument values are:
+
 [list_begin definitions]
 [call [cmd "[arg svcobj] trace add"] [arg type] [arg [opt args]]]
+The legal values for the [arg type] trace type are [var path],
+[var signal], or [var property].
+The return value of the command is a trace identifier,
+which can be used to remove or query the trace.
+Multiple traces may be added of any type and the parameters of the
+trace may be the same.
+Traces are executed in order from youngest (most recently added) to
+oldest.
 
 [list_begin definitions]
 [call [cmd "[arg svcobj] trace add path"] [arg pathpattern] [arg cmdprefix]]
+Arranges for [arg cmdprefix] to be invoked whenever an object instance
+whose name matches [arg pathpattern] is added or removed from the service.
+The matching against [arg pathpattern] is done in the same manner as
+the [cmd "string match"] command.
+When invoked, [arg cmdprefix] is supplied with two additional arguments,
+a [arg status], which has a value of either [var added] or [var removed],
+and the name of the added or removed path.
+
 [call [cmd "[arg svcobj] trace add signal"] [arg interface]\
         [arg signal] [arg pathpattern] [arg cmdprefix]]
+
+Arranges for [arg cmdprefix] to be invoked when the [arg signal] from
+[arg interface] on an object instance matching [arg pathpattern]
+is detected on the bus.
+The matching against [arg pathpattern] is done in the same manner as
+the [cmd "string match"] command.
+When invoked, [arg cmdprefix] is supplied with additional arguments.
+The first argument is a dictionary of event information as described
+in the Event Handlers section of the [package dbus] package documentation.
+Any arguments of the signal itself follow.
+
 [call [cmd "[arg svcobj] trace add property"] [arg interface]\
         [arg property] [arg pathpattern] [arg cmdprefix]]
+
+Arranges for [arg cmdprefix] to be invoked when the [arg property] associated
+with [arg interface] for an object instance matching [arg pathpattern]
+is reported.
+The matching against [arg pathpattern] is done in the same manner as
+the [cmd "string match"] command.
+When invoked,
+[arg cmdprefix] is supplied with up to five additional arguments.
+The first argument is a status value of [var changed] or [var invalidated],
+indicating if the property value has changed or is no longer valid.
+The second argument is the path name of the object instance whose
+property was affected.
+The third argument is the name of the interface of which the property was
+part.
+The fourth argument is the name of the property that was affected.
+If the status was [var changed], a fifth argument is supplied giving the
+new value of the property.
 [list_end]
 
 [call [cmd "[arg svcobj] trace remove"] [arg traceid]]
+Removes the trace identified by [arg traceid].
+It is not an error to remove a non-existant trace.
+
 [call [cmd "[arg svcobj] trace info"] [arg traceid]]
+Returns a dictionary containing information about the trace specified
+by [arg traceid].
+The keys of the dictionary are:
+
+[list_begin definitions]
+[def Type]
+Specifies the type of trace as either [var path], [var signal],
+or [var property].
+[def PathMatch]
+Specifies the pattern that object instance path names must match
+to trigger the trace.
+[def CmdPrefix]
+Specifies the command prefix to invoke when the trace performed.
+[list_end]
+
+For [var signal] type traces additional keys are:
+[list_begin definitions]
+[def Interface]
+Specifies the interface that will trigger the trace.
+[def Signal]
+Specifies the name of the signal that will trigger the trace.
+[list_end]
+
+For [var property] type traces additional keys are:
+[list_begin definitions]
+[def Interface]
+Specifies the interface that will trigger the trace.
+[def Property]
+Specifies the name of the property that will trigger the trace.
+[list_end]
+
+For [var path] type traces no additional information is provided.
+
 [list_end]
 ----
 /////////
@@ -2172,6 +2380,7 @@ to occur.
 If [arg timeout] is specified it is the number of milliseconds to
 wait for the property change notification.
 A [arg timeout] value of 0 is interpreted to mean to wait forever.
+The default [arg timeout] value is 5000.
 If [arg trigger] executes successfully and the DBus notification is
 received before any timeout,
 then the return value of the command is a dictionary giving the details
@@ -2223,6 +2432,47 @@ method PropertySyncTimeout {} {
 }
 ----
 
+/////////
+----
+<<man service methods>>=
+[call [cmd "[arg svcobj] waitForSignal"] [arg interface] [arg signal]\
+    [arg pathpattern] [arg trigger] [arg [opt timeout]]]
+
+The [method waitForSignal] method establishes a signal trace on the
+[arg signal] signal in [arg interface] matching [arg pathpattern].
+These arguments are interpreted in the same manner as for the
+[method "trace add"] method.
+Then the script specified by [arg trigger] is executed in the
+call stack of the caller.
+Then the Tcl event loop is entered waiting for the signal notification
+to occur.
+If [arg timeout] is specified it is the number of milliseconds to
+wait for the property change notification.
+A [arg timeout] value of 0 is interpreted to mean to wait forever.
+The default [arg timeout] value is 5000.
+If [arg trigger] executes successfully and the DBus signal is
+received before any timeout,
+then the return value of the command is a dictionary giving the details
+of the signal.
+The keys to the dictionary are:
+
+[list_begin definitions]
+[def path]
+The path name of the object to which the change occurred.
+[def interface]
+The interface of the changed property.
+[def signal]
+The name of the received signal.
+[def sender]
+The sender of the signal.
+[def signature]
+The argument signature of the signal.
+[def args]
+A list of argument values that came with the signal.
+[list_end]
+----
+/////////
+
 [source,tcl]
 ----
 <<service methods>>=
@@ -2258,11 +2508,47 @@ method waitForSignal {interface signal pathpattern trigger {timeout 5000}} {
 
 [source,tcl]
 ----
+<<service tests>>=
+test signal-1.0 {
+    Wait for a signal
+} -setup {
+    set conn [Connection create sessionBus session]
+    Service create tserver com.modelrealization.test $conn
+} -cleanup {
+    sessionBus destroy
+} -body {
+    set chng [tserver waitForSignal com.modelrealization.test Attention\
+        /com/modelrealization/test\
+        {tserver call /com/modelrealization/test\
+            com.modelrealization.test Trigger}]
+    dict get $chng args
+} -result {100 {Model Realization}}
+----
+
+[source,tcl]
+----
+<<service tests>>=
+test signal-2.0 {
+    Wait for a signal -- timeout
+} -setup {
+    set conn [Connection create sessionBus session]
+    Service create tserver com.modelrealization.test $conn
+} -cleanup {
+    sessionBus destroy
+} -body {
+    tserver waitForSignal com.modelrealization.test Attention\
+        /com/modelrealization/test {} 500
+} -result {timed out waiting for signal change:*}\
+    -match glob -returnCodes error
+----
+
+[source,tcl]
+----
 <<service methods>>=
-method SignalSync {eventinfo args} {
+method SignalSync {eventInfo args} {
     set [my varname sigSync] [dict create\
-        path [dict get $eventinfo path]\
-        interface [dict get $eventinfo interface]\
+        path [dict get $eventInfo path]\
+        interface [dict get $eventInfo interface]\
         signal [dict get $eventInfo member]\
         sender [dict get $eventInfo sender]\
         signature [dict get $eventInfo signature]\
@@ -2289,7 +2575,7 @@ method waitForPath {pathpattern trigger {timeout 5000}} {
     if {$timeout != 0} {
         set timerid [::after $timeout [mymethod PathSyncTimeout]]
     }
-    set traceId [my trace add path {} {} $pathpattern [mymethod PathSync]]
+    set traceId [my trace add path $pathpattern [mymethod PathSync]]
     set result [uplevel 1 $trigger]
 
     vwait [my varname pathSync]
@@ -2323,6 +2609,7 @@ to occur.
 If [arg timeout] is specified it is the number of milliseconds to
 wait for the property change notification.
 A [arg timeout] value of 0 is interpreted to mean to wait forever.
+The default [arg timeout] value is 5000.
 If [arg trigger] executes successfully and the DBus notification is
 received before any timeout,
 then the return value of the command is a dictionary giving the details
