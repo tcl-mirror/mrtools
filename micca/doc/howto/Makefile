@@ -26,9 +26,11 @@ DOCPARTS =\
 	processing.txt\
 	bridge.txt\
 	codeorg.txt\
+	bibliography.txt\
 	$(NULL)
 
 DIAGRAMS =\
+	micca-translation.uxf\
 	$(NULL)
 
 IMAGES =\
