@@ -37,6 +37,10 @@ IMAGES =\
 	$(patsubst %.uxf,$(IMAGEDIR)/%.pdf,$(DIAGRAMS))\
 	$(NULL)
 
+GENIMAGES=\
+     	$(patsubst %.txt,%__*.png,$(DOCSRC))\
+	$(NULL)
+
 PDF 	=\
      	$(patsubst %.txt,%.pdf,$(DOCSRC))\
      	$(NULL)
@@ -44,12 +48,13 @@ PDF 	=\
 CLEANFILES =\
 	$(IMAGES)\
 	$(PDF)\
+     	$(GENIMAGES)\
 	$(NULL)
 
 A2XOPTS =\
+	--verbose\
 	$(NULL)
 
-#	--verbose
 
 
 ATANGLEOPTS =\
@@ -105,6 +110,7 @@ $(PDF) : $(DOCSRC) $(DOCPARTS) $(EXTRAS) $(IMAGES)
 %.pdf : %.txt
 	a2x $(A2XOPTS) --doctype=article  --format=pdf\
 	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) $<
+	$(RM) $(GENIMAGES)
 
 %.pdf : %.uxf
 	umlet -action=convert -format=pdf\
