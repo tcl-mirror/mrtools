@@ -1,8 +1,9 @@
 #
 #*++
 # PROJECT:
-#	Tools
+#	dbusclient
 # MODULE:
+#	Make file for dbusclient package
 #
 # ABSTRACT:
 #
@@ -148,6 +149,7 @@ module : $(MODULEFILE)
 man : $(MANFILE)
 
 $(MODULEFILE) : $(CODEFILE)
+	@mkdir -p $(CODEDIR)
 	cd $(CODEDIR) ; mkmodule $(PKGNAME) $(VERSION)\
 		-script $(notdir $(CODEFILE))
 
@@ -160,21 +162,27 @@ clean :
 $(DOCSRC) : $(DOCPARTS)
 
 $(DOCFILE) : $(DOCSRC) $(DOCPARTS) $(EXTRAS) $(IMAGES)
+	@mkdir -p $(DOCDIR)
 	a2x $(A2XOPTS) --doctype=article  --format=pdf\
 	    --destination-dir=$(DOCDIR)\
 	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) $<
 	$(RM) $(DOCDIR)/*__[0-9].pdf
 
 $(CODEFILE) : $(DOCSRC) $(DOCPARTS)
+	@mkdir -p $(CODEDIR)
 	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $@ $(DOCSRC)
 
 $(TESTFILE) : $(DOCSRC) $(DOCPARTS)
+	@mkdir -p $(TESTDIR)
 	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $@ $(DOCSRC)
 
 $(TESTDIR)/test-server.tcl : $(DOCSRC) $(DOCPARTS)
+	@mkdir -p $(TESTDIR)
 	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $@ $(DOCSRC)
+	chmod +x $@
 
 $(MANFILE) : $(DOCSRC) $(DOCPARTS)
+	@mkdir -p $(MANDIR)
 	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $@ $(DOCSRC)
 
 $(IMAGEDIR)/%.pdf : %.uxf
