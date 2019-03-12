@@ -65,8 +65,8 @@ DBLATEX_PARAMS =\
 	index.numbered=0\
 	doc.publisher.show=0\
 	doc.toc.show=1\
-	doc.lot.show=figure,table\
-	toc.section.depth=2\
+	doc.lot.show=figure,table,example\
+	toc.section.depth=4\
 	doc.section.depth=0\
 	$(NULL)
 
