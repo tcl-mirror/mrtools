@@ -9,46 +9,119 @@ state models and domain activities are added.
 Getting the foundations in data correct are essential to the
 remaining parts of the translation and so they must be done first.
 
-=== How memory is handled
+A `micca` domain specification starts with the `domain` command.
+For brevity,
+the examples in this section assume they are placed in the
+domain script definition of a `domain` command.
+The following shows a sketch of how a domain script could be structured.
+The order of commands in a domain configuration script is arbitrary.
+`Micca` reads and parses the entire script before attempting to generate
+code.
+Consequently,
+you need not be concerned about forward declarations or insuring that
+things are some how _defined_ before they are _used_.
+The `micca` DSL is a specification language and not an executable language.
 
+.Domain command example
+==============
+----
+domain atc {
+    # Domain commands define the characteristics of a domain.
+    # These are:
+    #       class
+    #       association
+    #       generalization
+    #       domainop
+    #       eentity
+    #       typealias
+    #       interface
+    #       prologue
+    #       epilogue
+
+    class Controller {
+        # Class commands define the implementation classes.
+        # These are:
+        #       attribute
+        #       classop
+        #       instop
+        #       statemodel
+        #       polymorphic
+        #       constructor
+        #       destructor
+    }
+
+    association R1 Station 0..1--1 Controller
+
+    # ...
+    # and so on, giving the platform specific description of the domain
+}
+----
+==============
+
+
+=== How memory is managed
+
+When translating the data portion of an XUML model,
+it is helpful to understand the platform specifics on which the
+translated code is run.
 `Micca` assumes that all domain data is held in the primary memory of
-a processor and the memory is directly addressable.
-This is a common situation, but it is important to realize that
-there is no assumption of secondary storage such as a disk drive.
+a processor and, consequently, the memory is directly addressable.
+This is a common situation, but it is important to emphasize that
+there is no assumption of secondary storage such as a disk drive
+and no presumed persistance as might be provided by a database
+management system.
+The execution architecture provide by `micca` is _not_ targeted
+at the class of applications which would require external data storage.
 
-`Micca` also assumes that the maximum number of instances of each class
+`Micca` also insists that the maximum number of instances of each class
 is defined at compile time.
-The `micca` run-time does no no dynamic allocation of memory space
-off of a system heap, _i.e._ there are no calls to `malloc()`.
-Each class has its own pool of memory from which instances are created.
-That pool must be sized for the worst case number of instances the
-class will ever have and that size is known when the ``C'' code
+The `micca` run-time does no dynamic memory allocation
+from a system heap, _i.e._ there are no calls to `malloc()`.
+Each class has its own pool of memory where instances are either part of
+the initial instance population or are created at run-time.
+The memory pool is declared as a ``C'' variable of array type.
+Initial instances differ from dynamically created instances by
+providing initial values for each attribute.
+The memory pool for a class must be sized for the worst case number of
+instances the class will ever have and that size is known when the ``C'' code
 for the translation is compiled.
 Memory is handled in this way to make it more deterministic.
+
+The most important concepts about how data is structured by `micca` are:
+
+. Each implementation class definition is converted into a ``C'' structure
+    definition.
+. The instances of a class are stored in an array of structures corresponding
+    to the implementation class definition and the size of the
+    array is fixed at compile time.
 
 For programmers who are more accustomed to dynamic memory allocation,
 worst case memory sizing may seem restrictive or sub-optimal.
 In practice,
 it is slightly more work to consider the number of instances a class
 may have,
-but rarely are _arbitrary_ numbers of class instances required.
-
+but rarely are an _arbitrary_ number of class instances required.
 For example,
 one may consider wanting an arbitrary number of network connections.
 In truth,
 operating systems do not allow processes to consume extremely large
 numbers of resources and even if the resources were available,
-at some time the ability service connections runs up against the
+at some time the ability to service connections runs up against the
 compute power of the processor.
 It may seem like an arbitrary number are required, but what if that
 number were 7 million?
 In practice,
 the number of instances of a class are typically small.
+Furthermore,
+if your application truly makes demands for very large numbers of class
+instances,
+them you should choose a different target translation platform
+than `micca` provides.
 
 Because all data is held in primary memory and the size of that
 memory is known at compile time,
 the platform specific model that `micca` targets has two characteristics
-that significantly help the implementation.
+that are particularly helpful to the implementation.
 
 . All class instances have an architecturally generated identifier
     that consists of its address in primary memory.
@@ -60,17 +133,25 @@ that significantly help the implementation.
     The external identifier is the index in the storage pool array
     of a class.
     It is integer valued and unique within a given class.
-    To uniquely identify a class instance outside of a domain,
+    To uniquely identify an instance outside of a domain,
     we must know both the class to which the instance belongs and its
     external identifying integer value.
+    `Micca` automatically generates pre-processor symbols for this
+    information.
 
-Neither of the previous characteristics is profound.
+Neither of the previous characteristics is particularly profound.
 Most programs that use data from primary memory use a _pointer_ or
 _object id_ as a reference handle.
 Accessing the class indirectly through a reference is a fundamental
 mechanism supported by the addressing modes of all modern processors.
 The mechanism is so common that we often forget that we are imposing
 an identification scheme on the underlying classes.
+However,
+it is important to note that the use of a memory address as a class
+instance identifier does _not_ enforce any identity constraints
+imposed by identifying attributes of a class.
+This limitation is considered below when we discuss the processing
+associated with instance creation.
 
 === Translating data types
 
@@ -84,7 +165,8 @@ we are overloading the term _class_ to have different meanings.
 A model class and a platform-specific class are two distinct things.
 They are related.
 They are counterparts of each other in the model and platform realms,
-but they are very different entities, logically.
+but they are logically different entities
+and that distinction must be clear in the translators thinking.
 In this section,
 we discuss how to transform the logic of a model class into the
 specifications of an platform-specific class.
@@ -101,7 +183,7 @@ model class are declared using `attribute` commands.
 For example,
 a model class might appear as:
 
-["plantuml",title="Pump class in a model"]
+["plantuml",title="Pump model class"]
 ----
 @startuml
 hide methods
@@ -134,16 +216,322 @@ class Pump {
 }
 ----
 
-Note, attribute names must be value ``C'' identifiers and we assume
-that the `MPa_t` and `LpM_t` type aliases have been defined.
+[NOTE]
+Class names and attribute names must be valid ``C''
+identifiersfootnote:[A valid ``C'' identifier must start with a
+letter or underscore and be followed by any number of letters,
+underscores or decimal digits.
+Note, some ``C'' compilers may limit the number of characters
+in an identifier that are considered significant.
+Most modern ``C'' compilers to not have such limitations.].
+These names are passed along to the ``C'' compiler to name structures
+and structure members.
+Analysts may name entities as they wish for the clarity of the analytical
+model.
+Translation must take the names and make them suitable for the
+target platform.
+In this case,
+it usually suffices to replace any characters that cannot be in a
+``C'' identifier with the underscore (`_`) character.
+It is important *not* to obfuscate the correspondence between the
+attribute name in the model and the one used in the implementation.
+We also assume
+that the `MPa_t` and `LpM_t` type aliases have been defined as discussed
+previously.
 
+===== Default attribute values
 
+An attribute may be given a default value.
+If the analyst provides a default value specification in the model
+it can be used as a default value for the translation by
+given the `attribute` command the `-default` option.
+
+For the previous example,
+if the class had appeared as:
+
+["plantuml",title="Pump model class with default attribute"]
+----
+@startuml
+hide methods
+hide circle
+skinparam class {
+    BackgroundColor yellow
+    BorderColor black
+}
+
+class Pump {
+    Pump ID : ID    {I}
+    Max pressure : MPa
+    Min pressure : MPa   = 15
+    Flow rate : Liters per minute
+}
+@enduml
+----
+
+We can specify the default value as:
+
+.Pump platform class 
+----
+class Pump {
+    attribute Max_pressure MPa_t
+    attribute Min_pressure MPa_t -default 15
+    attribute Flow_rate LpM_t
+}
+----
+
+Attributes which have a default value can be omitted when creating
+an instance, either at run-time or as part of the initial instance population.
+
+===== Zero initialized attributes
+
+The `attribute` command also takes an optional `-zeroinit` option
+which gives the attribute a default value of all bits being zero.
+Like an attribute with a default value,
+an attribute declared as `-zeroinit` need not have a value provided when
+it is created.
+
+===== Dependent attributes
+
+An `attribute` may be modeled as _mathematically dependent_.
+For those attributes,
+the analysis model must provide a _formula_ in action language that
+computes the value of the attribute.
+The formula must then be translated into ``C''.
+The following is a brief example of a dependent attribute translation.
+
+["plantuml",title="Model class with dependent attribute"]
+----
+@startuml
+hide methods
+hide circle
+skinparam class {
+    BackgroundColor yellow
+    BorderColor black
+}
+skinparam note {
+    BackgroundColor white
+    BorderColor black
+}
+
+class Extent {
+    ID : unique        {I}
+    Height : numeric
+    Width : numeric
+    Area : numeric   {M}
+}
+
+note bottom : Area = Height * Width
+@enduml
+----
+
+We can specify the attribute as dependent and supply the
+code necessary to compute the formula.
+
+.Pump platform class 
+----
+class Extent {
+    attribute Height unsigned
+    attribute Width unsigned
+    attribute Area -dependent {
+        *Area = self->Height * self->Width ;
+    }
+}
+----
+
+We consider how the ``C'' code is specified in a following section.
+
+==== Identifying attributes
+
+Since `micca` is providing an identifier for each instance,
+our goal is to eliminate identifying attributes whenever possible.
+Attributes that are system generated and serve only an
+identifying or referential role may simply be elided.
+In the previous examples,
+the model attributes, *Pump.Pump ID* and *Extent.ID* were not
+present in the corresponding specifications for the platform class.
+
+In the following situations identifying attributes may *not* be eliminated:
+
+* The attribute serves a descriptive role for the processing and it's value
+    is read and used in a computation.
+* The attribute value is needed to insure an identity constraint.
+
+In both these cases, the attribute,
+with an appropriate ``C'' data type,
+must be included in the platform class definition.
+
+==== Referential attributes
+
+Once again, the platform specific choice of `micca` to provide an
+identifier for a class instance,
+means that identifier can be used in place of referential attributes
+to manage relationships.
+As we see in the following section,
+`micca` is able to provide the necessary storage and operations
+on class instance references to implement relationships.
+So, again our intent is to eliminate referential attributes when possible.
+
+There is a situation where this is _not_ possible.
+
+* If the model reads a referential attribute and treats it descriptively,
+  _i.e._ uses the attribute value in some computation,
+  then it is necessary to translate that attribute access into a
+  relationship navigation that ultimately terminates at the identifier
+  value to which the attribute refers.
+
+Consider the following class model fragment.
+
+["plantuml",title="Model class with referential attribute"]
+----
+@startuml
+hide methods
+hide circle
+skinparam class {
+    BackgroundColor yellow
+    BorderColor black
+}
+
+class Part {
+    Manufacturer : name    {I,R1}
+    Model Number : name   {I,R1}
+    Serial Number : string  {I}
+}
+
+class "Part Description" {
+    Manufacturer : name  {I}
+    Model Number : name {I}
+    Color : color
+}
+
+Part "1..*" -- "1" "Part Description" : R1
+
+@enduml
+----
+
+Assume that there is an activity in the model which determines the
+the serial numbers of all the *Parts* manufactured by the Acme company.
+That activity is a search of the *Part* instances finding those
+whose *Manufacturer* attribute equals "Acme".
+In this situation,
+*Part.Manufacturer* can be eliminated from the platform class,
+but *Part Description.Manufacturer* must be retained.
+The search must then be coded to navigate the *R1* association
+to obtain the value of the *Manufacturer* attribute.
+We know that referential attributes refer to identifying attributes and
+by following the relationship (perhaps multiple relationships) we must
+eventually arrive at an identifying attribute value.
+
+So the above situation might be translated as:
+
+----
+class Part_Description {
+    attribute Manufacturer : {char[25]}
+    attribute Model_Number : {char[25]}
+    attribute Color : unsigned
+}
+
+class Part {
+    attribute Serial_Number {char[25]}
+
+    classop MRT_InstSet findByManufacturer {manuf {char const *}} {
+    <%  Part instset matchedParts                                       %>
+    <%  Part foreachInstance partRef                                    %>
+            // This statement navigates R1 from Part to Part Description
+    <%      instance partRef findOneRelated descRef R1                  %>
+            if (strcmp(descRef->Manufacturer, manuf) == 0) {
+    <%          instset matchedParts add partRef                        %>
+            }
+    <%  end                                                             %>
+        return matchedParts ;
+    }
+}
+
+association R1 Part 1..*--1 Part_Description
+----
+
+For the moment,
+don't be startled by the contents of the `classop`.
+We will cover translating actions into ``C'' later.
+For now,
+we want to emphasize that the search for *Part* instances to match a given
+manufacture's name does not use a *Part* attribute.
+Rather,
+the value of the *Manufacturer* is obtained from the *Part Description*
+by navigating the *R1* association.
+So, no *Manufacturer* attribute is stored in a *Part* and any
+time the *Manufacture* attribute value is needed,
+it is obtained by navigating the relationship.
 
 === Translating relationships
 
-* names as "C" identifiers
+* no NULLs and the necessity of associative classes
+* one-to-many associations as composition
 
-* data type translation
+=== Populating the data
+
+The final step in translating the data model for a domain is to
+specify its population.
+Populating the data model consists of specifying _initial instances_
+and the amount of storage to allocate for each platform class.
+Initial instances are those class instances that exist before the
+domain runs.
+As dicussed previously,
+each platform class has its own storage pool for instances.
+In addition to initial instances,
+you can specify the number of additional slots to allocate to the
+storage pool.
+The total number of instances is then the sum of the initial instances
+and the number of additional slots allocated for run-time usage.
+Note, if an initial instance is deleted at run-time, then
+its storage slot becomes available for subsequent use by a run-time
+create instance.
+
+It is advisable to keep the population of a domain in a file separate
+from its configuration.
+As translated domains are tested,
+it is convenient to use a variety of different populations
+to drive the code execution paths for testing.
+`Micca` will read multiple files for a domain, so keeping
+test populations separate from production populations is convenient.
+
+The analytical materials supply for translation must include
+a population of the data model.
+The recommended practice is to supply the population in
+tabular notation, one set of class instances per page,
+similar to a page in a spreadsheet.
+Values for all attributes are supplied.
+It is possible to specify the model level population purely by
+data values.
+
+The `micca` `population` command is used to define the storage
+requirements and any initial instances for the domain.
+One of the few command ordering requirements for `micca` is that
+the `population` command must follow the domain definition given
+by the `domain` command.
+The following shows a brief sketch of a population.
+
+.Domain command example
+==============
+----
+population atc {
+    # Population commands define the data values in a domain
+    # These are:
+    #       class
+    #       assigner
+
+    class Controller {
+        # Class commands the instances of a single class.
+        # These are:
+        #       instance
+        #       table
+        #       allocate
+    }
+
+    # ...
+    # and so on, giving the population of the domain
+}
+----
+==============
 
 
 // vim:syntax=asciidoc:

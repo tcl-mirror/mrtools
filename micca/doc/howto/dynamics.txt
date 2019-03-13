@@ -3,8 +3,176 @@
 The second facet of the model to translate is that of the dynamics.
 Translating the dynamics of the model requires the least amount of
 transformation of the three model facets.
-The semantics of the Moore state models used in XUML are directly
+The semantics of the
+https://en.wikipedia.org/wiki/Moore_machine[Moore]
+state models used in XUML are directly
 mapped to `micca` commands.
+
+=== How execution sequencing works
+
+Just as in translating data,
+it is helpful to understand the platform specifics of execution
+sequencing when constructing the translation of the state models.
+In this section we give a overview of the major concepts in how
+`micca` sequences execution.
+This section is not a complete description of the execution run-time.
+That may be found in the `micca`
+http://repos.modelrealization.com/cgi-bin/fossil/mrtools/doc/trunk/micca/doc/micca.pdf[literate program]
+document.
+Here we only present the concepts that help in understanding the
+intent of the translation commands.
+
+Broadly speaking,
+there are three forms of execution sequencing that happen when
+a `micca` translated model runs.
+
+Synchronous execution::
+    A domain activity may invoke an ordinary ``C'' function.
+    Control is transferred to the function and when it returns
+    execution continues where it left off.
+    Synchronous execution is the usual, familiar, sequential flow of control.
+    We don't discuss this any further since it is fully supported
+    by ``C'' language primitives.
+    When invoking a function in ``C'',
+    the compiler arranges to pass control to the function and arranges
+    for the function to return back to the subsequent code.
+    The `micca` run-time is not involved.
+Asynchronous execution::
+    A domain activity executes until it needs to wait on other
+    actions in the domain.
+    Other actions use _events_ to signal synchronization points
+    and these signals can cause an activity to resume executing
+    in a particular location.
+    Asynchronous execution is accomplished by a state machine dispatch
+    mechanism.
+    We explain the details of how the `micca` run-time performs
+    state machine dispatch in the following section.
+Preemptive execution::
+    During the execution of any domain activity,
+    it is possible to suspend the execution of the activity, preemptively,
+    run a body of code, and return to the preempted activity to continue.
+    Preemptive execution is non-deterministic in that you don't
+    know when it may happen and have only limited means to control
+    periods of time when it is _not_ allowed to happen.
+    Preemptive execution corresponds to _interrupts_ when running natively
+    on a computer or _signals_ footnote:[The POSIX version of the
+    `micca` run-time treats the change of state of a file descriptor
+    in the same manner as signals.]
+    in a POSIX environment.
+    The `micca` run-time provides a means to synchronize preemptive
+    execution with the other forms.
+    We discuss this aspect when we take up bridging of domains.
+
+The `micca` run-time supports a single thread of execution on which
+both synchronous and asynchronous domain activities execute.
+The nature of the execution architecture is completely event-driven.
+Any domain activity that blocks waiting for some condition,
+prevents all but preemptive execution from running.
+This approach is well suited to applications which react to external
+conditions by performing a time-bound computation.
+Clearly,
+there are certain types of applications for which this execution
+model is not well suited.
+The `micca` run-time is not _universal_ in the sense of applicable
+to every conceivable application,
+but an event-driven, reactive execution model accomodates a broad
+class of applications well.
+
+=== How state machine dispatch works
+
+The execution rules of XUML require that domain activities exhibit
+_run-to-completion_ semantics.
+This means the execution of an activity _appears_ as if it
+runs to its natural end without being preempted by other activities
+that may also be running.
+When state models interact,
+they _signal_ an _event_ to indicate the need to synchronize with
+another condition.
+Consequently when an activity signals an event,
+it continues to run and the act of signaling has no perceived effect on current
+execution of the activity.
+Since `micca` only has a single execution context on which anything
+runs,
+there is no real parallel execution that must accounted for.
+The `micca` run-time uses the conventional mechanism of _queuing_ signaled
+events to allow the signaling activity to continue to its completion.
+Only after an activity which signals an event completes is an
+event considered for dispatch.
+
+Event dispatch follows Moore semantics.
+A transition table is used as a transfer function.
+The current state of the instance receiving the event and the event itself
+determine the new state into which the receiving instance is placed.
+Upon entry into a state,
+any activity associated with the state is executed.
+The transition table is a matrix containing one row for each
+state of the state model and one column for each event to which
+the state model responds.
+The same transition table is used for all instances of a given class
+since all instances of a class exhibit the same behavior.
+The entry at the intersection of state rows and event columns is the
+new state into which the transition is made.
+XUML semantics also support the notion that an event can be ignored
+or is an error condition and these situations are also encoded
+in the transition matrix cell.
+
+The `micca` run-time distinguishes between two contexts in which
+an event may be signaled.
+
+. The event is signaled from within a state activity, _i.e._ one
+    state machine is signaling and event to another state machine
+    (potentially signaling an event to itself).
+. The event is signaled outside a state activity either as a signal
+    from outside the domain or as a result of requesting the system
+    to signal the event at some future time (a _delayed_ signal).
+
+This distinction defines the concept of a _thread of control_ as follows:
+
+* An event signaled from outside the domain starts a thread of control.
+* The thread of control continues until all the events (if any)
+  signaled by state activities initiated by the thread of control
+  are delivered.
+* After all the events precipitated by the thread of control event
+  are dispatched,
+  the next thread of control event is considered.
+
+So, the `micca` run-time actually as two event queues.
+One queue is used to store events that come from outside of a state
+machine context and start a thread of control
+The other queue is used to store events that arise during the
+execution of a single thread of control.
+
+All the effects of a signaled event which starts a thread of control
+are realized before starting another thread of control.
+This is important because at the end of each thread of control,
+the `micca` run-time will check the referential integrity
+of the data model.
+The associations and generalizations defined by the class model
+and encoded in the data translation define a set of constraints
+on whether and how many class instances are related to each other.
+Any activity that either creates or deletes instances or
+otherwise rearranges the related instances must insure that
+the data model is consistent with the constraints implied by the
+associations and generalizations of the class model.
+This means that any activity that modifies relationships must:
+
+.. perform any compensitory action required to make the data model consistent
+    within in the same activity that modified the relationship instances, or
+.. signal an event that when dispatched will eventually cause some state
+    activity to run which makes the data model consistent before the
+    thread of control ends.
+
+The archetypical example of data consistency is two classes which
+participate in a one-to-one unconditional association.
+Creating an instance of one class necessarily implies that an instance of
+the other class must also be created.
+The creation of the second class instance is the compensitory action
+required to make the data model consistent.
+That instance creation may happen in the same state activity or an event
+may be signaled which results in another state activity eventually creating the
+required class instance.
+
+=== Translating state models
 
 Note at this stage we are _not_ translating the action language of the
 activities associated with any state model.
@@ -38,16 +206,12 @@ Two things must be defined for a state model.
     constructed.
 . The transitions between states must be associated to the events which
     cause those transitions.
-    When an event is recieved, it causes:
+    When an event is received, it causes:
     .. A transition to a state (possibly the same state receiving the event).
     .. Is ignored. This is given the symbol, *IG*.
     .. Is an error conditions because it is logically impossible for
         the event to be received in the state, _i.e._ it can't happen.
         This is given the symbol *CH*.
-
-In this section,
-we do not discuss translating the code for state activities.
-We consider that in the next section.
 
 === Defining states
 
@@ -108,6 +272,8 @@ The other aspect of a state model translation is to specify all the state
 transitions.
 The starting point for translating the state transitions is,
 naturally enough, the transition matrix of each state model.
+The analytical model must provide a complete state transition
+matrix in addition to the state model diagram for each state model.
 Consider the transition matrix for our simple light bulb model.
 Each state has a row in the matrix.
 Each event has a column in the matrix.
@@ -147,6 +313,8 @@ You can put all the `transition` command first or mix them around
 in any way you wish.
 One common organization is to list the _outgoing_ transitions
 for a state immediately after the `state` command defining the state.
+Project should decide their own conventions for specifying
+the states and transitions.
 
 === Default transitions
 
@@ -162,7 +330,8 @@ Any transition _not_ mentioned in a `transition` command is assigned
 the default transition.
 
 Normally, the default transition is *CH* (for some very good reasons
-a default of *CH* catches many errors).
+a default of *CH* catches many errors and generally the default
+transition should be kept as *CH*).
 However,
 some state models, assigners in particular, 
 ignore most events that do not cause an explicit transition to a state.
@@ -188,7 +357,7 @@ statemodel {
 ----
 <1> Note the spaces around the `-` and `->` characters.
 This is _syntactic sugar_ intended to be mnemonic of the transition
-and is required.
+and its presence is required.
 
 Some find this manner of specifying the state model clearer.
 Note also the `defaulttrans` command may appear anywhere and need not
@@ -326,6 +495,7 @@ To indicate a final state,
 ----
 statemodel {
     # state and transition definitions
+    # ...
 
     final Finished
 }
@@ -464,7 +634,7 @@ our concern is translation.
 The usual convention in model diagrams marks polymorphic events by
 pre-pending an asterisk, _i.e._ **Run*.
 This is done as an aid in keeping track of things in the model.
-`Micca` does not use such conventions.
+`Micca` does _not_ use such conventions.
 
 `Micca` requires that a polymorphic event be defined as part of the
 class specification for the superclass.
@@ -493,7 +663,12 @@ class Torpedo {
 Defining a polymorphic event is similar in syntax to defining an ordinary
 event.
 The main difference is that the polymorphic event is defined as part of
-the `class` command script and _not_ as part of the `statemodel`.
+the `class` command script and _not_ as part of the
+`statemodel` footnote:[Polymorphic commands have no effect on any
+state behavior of the superclass.
+The superclass may have its own state model which is unaffected by
+any polymorphic events defined in the superclass.
+Polymorphic events only affect subclass behavior.].
 A child class consumes the polymorphic event,
 when an event of the same name as the polymorphic event is used in a
 `transition` command within a `statemodel` script.
@@ -537,17 +712,20 @@ The name of the creation event must be supplied as part of
 the process of asynchronously creating an instance.
 The event may have parameters or not depending upon what the analytical
 model has specified.
+It is also possible that the *Go* event is used in transitions other
+than the one from the pseudo-initial state.
 
 === Assigner state models [[assigner-state-models]]
 
 The nature of some associations between classes is competitive.
-The concurrency rules of XUML imply that instances of the relationship
+The concurrency rules of XUML imply that instances of a competing relationship
 must be created by serializing the actions involved.
 This is accomplished by associating a state model to the relationship
 itself and those state models are called _assigner_ state models.
 The archetypal example for assigner state models is the assignment
 of store clerks to service customers:
 
+Consider the following model fragment.
 
 ["plantuml",title="Clerk / Customer Association"]
 ----
@@ -578,7 +756,7 @@ Clerk "0..1" - "0..1" Customer
 
 Since the state model is bound to the association,
 it is specified as part of the association definition.
-For the previous example:
+For this example:
 
 ----
 domain operations {

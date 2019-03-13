@@ -24,6 +24,7 @@ DOCPARTS =\
 	data.txt\
 	dynamics.txt\
 	processing.txt\
+	lesser.txt\
 	bridge.txt\
 	codeorg.txt\
 	bibliography.txt\
