@@ -60,10 +60,7 @@ runtests : micca_rt_test
 	$(MAKE) --directory posix runtests
 
 coverage : runtests
-	lcov --quiet --capture --directory .\
-	    --output-file test_results.info
-	genhtml --quiet --title 'micca rt test coverage'\
-	    --output-directory test_results test_results.info
+	gcovr -r . --html-details -o test_results/micca_rt_test.html
 
 micca_rt_test : LOADLIBES = $(HOME)/local/lib/libcunit.a --coverage
 
