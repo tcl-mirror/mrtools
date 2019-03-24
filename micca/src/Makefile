@@ -12,10 +12,11 @@
 DOCDIR	= ../doc
 TESTDIR = ../tests
 PKGDIR	= ../../packages
+MODULEDIR = ../../modules
 IMAGEDIR = ./images
 CODEDIR	= ../code
 
-VERSION=1.1.4
+VERSION=1.1.5
 
 vpath %.pdf $(DOCDIR)
 vpath %.html $(DOCDIR)
@@ -29,6 +30,11 @@ DOCSRC 	=\
 CODEFILE =\
 	  $(CODEDIR)/tcl/micca.tcl\
 	  $(CODEDIR)/tcl/micca_main.tcl\
+	  $(NULL)
+
+MODULEFILES =\
+	  $(CODEDIR)/tcl/micca.tcl\
+	  $(CODEDIR)/tcl/typename/typeparser.tcl\
 	  $(NULL)
 
 DOCPARTS=\
@@ -170,9 +176,9 @@ TESTOPTS =\
 	-level debug\
 	$(NULL)
 
-.PHONY : all doc code tests runtests package
+.PHONY : all doc code tests runtests package module
 
-all : doc code tests package
+all : doc code tests package module
 
 doc : $(PDF)
 
@@ -187,6 +193,14 @@ package : $(PKGDIR)/package-micca-$(VERSION)-tcl.zip
 
 $(PKGDIR)/package-micca-$(VERSION)-tcl.zip : $(CODEFILE) $(CODEDIR)/tcl/pkgIndex.tcl
 	teapot-pkg generate --output $(PKGDIR) $(CODEDIR)/tcl
+
+module : $(MODULEDIR)/micca-$(VERSION).tm
+
+$(MODULEDIR)/micca-$(VERSION).tm : $(CODEDIR)/tcl/typename/typeparser.tcl\
+	$(CODEDIR)/tcl/micca.tcl
+	mkmodule micca $(VERSION) -outdir $(MODULEDIR)\
+		-script $(CODEDIR)/tcl/typename/typeparser.tcl\
+		-script $(CODEDIR)/tcl/micca.tcl\
 
 clean :
 	$(RM) $(CLEANFILES)

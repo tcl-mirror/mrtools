@@ -8825,5 +8825,4 @@ oo::class create typeparser {
 # # ## ### ##### ######## ############# #####################
 ## Ready
 
-package provide typeparser 1
-return
+package provide typeparser 1.0

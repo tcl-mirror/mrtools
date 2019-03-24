@@ -11,7 +11,7 @@ CFLAGS	=\
 	 -march=armv7-m\
 	 -mthumb\
 	 $(NULL)
-SSTUDIO=/home/andrewm/opt/silabs/SimplicityStudio_v4/developer/sdks/exx32/v5.0.0.0
+SSTUDIO=/home/andrewm/opt/silabs/SimplicityStudio_v4/developer/sdks/gecko_sdk_suite/v2.2
 CPPFLAGS =\
 	 -D_ISOC11_SOURCE\
 	 -DMRT_SWO_OUTPUT\

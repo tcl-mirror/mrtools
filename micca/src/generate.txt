@@ -73,7 +73,7 @@ This follows the same pattern we used for the configuration command.
 ----
 <<generation commands namespace>>=
 namespace eval @Gen@ {
-    logger::initNamespace [namespace current]
+    ::logger::import -all -force -namespace log micca
 
     <<tclral imports>>
 
@@ -235,7 +235,7 @@ try {
         assignAttribute $domainRef {Name domain} {Interface interface}\
             {Prologue prologue} {Epilogue epilogue}
 
-        GatherDomainProperties $domain
+        GatherClassProperties $domain
 
         lappend genfiles $domain.h
         <<miccaGenerate: generate header file>>
@@ -306,114 +306,279 @@ try {
 }
 ----
 
-=== Common Domain Queries
+=== Common Class Queries
 
-There are a number of queries about the properties of domains that
-are common and frequent enough to warrant factoring the queries into a
+There are a number of queries about the properties of the classes in a domain
+that are common and frequent enough to warrant factoring the queries into a
 more convenient form.
+We store these class properties in a relation value that is held in
+an ordinary namespace variable.
+The required query is quite complex.
+We intend to hold everything in a single relation value and this will
+cover both assigners and classes,
+the two being very similar in this context.
 
-We start by accumulating some common properties of a domain.
-We will store these properties in a relation value that are held in
-an ordinary namespace variables
-
-(((micca,Helpers,GatherDomainProperties)))
+(((micca,Helpers,GatherClassProperties)))
 [source,tcl]
 ----
 <<generation helper commands>>=
-proc GatherDomainProperties {domain} {
-    variable ClassProperties
-
-    set assigners [pipe {
-        AssignerStateModel findWhere {$Domain eq $domain} |
-        deRef ~ |
-        ralutil::rvajoin ~ $::micca::SingleAssigner Single |
-        ralutil::rvajoin ~ $::micca::MultipleAssigner Multiple |
-        relation tag ~ Number -ascending Association |
-        relation extend ~ stup\
-            Declaration string {"struct [tuple extract $stup Association]"}\
-            Reference string {"struct [tuple extract $stup Association] *"}\
-            ConstReference string\
-                    {"struct [tuple extract $stup Association] const *"}\
-            StorageVariable string {"[tuple extract $stup Association]__POOL"}\
-            ClassVariable string {"${domain}__ASSIGNERS"}
-    }]
-
-    set sassigners [pipe {
-        relation restrictwith $assigners {[relation isnotempty $Single]} |
-        relation eliminate ~ Domain Single Multiple |
-        relation rename ~ Association Name |
-        relation extend ~ stup\
-            Allocation int {0}\
-            InitialInstance int {1}\
-            TotalInstance int {1}
-    }]
-    # puts [relformat $sassigners sassigners]
-
-    set massigners [pipe {
-        relation restrictwith $assigners {[relation isnotempty $Multiple]} |
-        relation rename ~ Number AssignerNumber |
-        ralutil::rvajoin ~ $::micca::MultipleAssignerInstance Instances |
-        relation ungroup ~ Multiple |
-        relation join ~ $::micca::ClassPopulation |
-        relation extend ~ stup\
-            InitialInstance int\
-                {[relation cardinality [tuple extract $stup Instances]]}\
-            TotalInstance int {
-                [relation cardinality [tuple extract $stup Instances]] +
-                [tuple extract $stup Allocation]} |
-        relation eliminate ~ Domain Single Class Instances |
-        relation rename ~ Association Name AssignerNumber Number
-    }]
-    # puts [relformat $massigners massigners]
-
-    set classRefs [Class findWhere {$Domain eq $domain}]
-    set allocs [pipe {
-        findRelated $classRefs R104 {~R101 ElementPopulation}\
-            {~R105 ClassPopulation} |
-        deRef % |
-        relation project % Class Allocation |
-        relation rename % Class Name
-    } {} |%]
-
-    set insts [pipe {
-        findRelated $classRefs R104 {~R101 ElementPopulation}\
-            {~R105 ClassPopulation} ~R102 |
-        deRef % |
-        relation project % Class Number |
-        relation rename % Class Name
-    } {} |%]
-
-    set ClassProperties [pipe {
-        deRef $classRefs |
-        relation project ~ Name Number |
-        relation rename ~ Number ClassNumber |
-        relation extend ~ stup\
-            Declaration string {"struct [tuple extract $stup Name]"}\
-            Reference string {"struct [tuple extract $stup Name] *"}\
-            ConstReference string {"struct [tuple extract $stup Name] const *"}\
-            StorageVariable string {"[tuple extract $stup Name]__POOL"}\
-            ClassVariable string {"${domain}__CLASSES"} |
-        ralutil::rvajoin ~ $allocs Allocations |
-        relation extend ~ atup Allocation int {
-            [relation isempty [tuple extract $atup Allocations]] ?\
-            0 : [relation extract [tuple extract $atup Allocations] Allocation]
-        } |
-        relation eliminate ~ Allocations |
-        ralutil::rvajoin ~ $insts Instances |
-        relation extend ~ itup\
-            InitialInstance int {
-                [relation cardinality [tuple extract $itup Instances]]} \
-            TotalInstance int {
-                [relation cardinality [tuple extract $itup Instances]] +
-                [tuple extract $itup Allocation]} |
-        relation eliminate ~ Instances |
-        relation rename ~ ClassNumber Number |
-        relation union ~ $sassigners $massigners
-    }]
-    # puts [relformat $ClassProperties ClassProperties]
+proc GatherClassProperties {domain} {
+    <<GatherClassProperties: gather assigner properties>>
+    <<GatherClassProperties: gather class properties>>
+    <<GatherClassProperties: union all properties>>
 
     return
 }
+----
+
+The query for the assigners can be grouped as common items that
+apply to both single and multi assigners
+and those properties specifice to each type.
+
+[source,tcl]
+----
+<<GatherClassProperties: gather assigner properties>>=
+<<GatherClassProperties: common assigner properties>>
+<<GatherClassProperties: single assigner properties>>
+<<GatherClassProperties: multi assigner properties>>
+----
+
+The common properties query starts at the *AssignerStateModel* and
+uses `rvajoin` to obtain the information in *R53* as relation
+valued attributes.
+Note the assigners are tagged by ascending value of the Association
+name.
+This number is used as part of assigning assigner ID's for external use.
+
+[source,tcl]
+----
+<<GatherClassProperties: common assigner properties>>=
+set assigners [pipe {
+    AssignerStateModel findWhere {$Domain eq $domain} |
+    deRef ~ |
+    ralutil::rvajoin ~ $::micca::SingleAssigner Single |
+    ralutil::rvajoin ~ $::micca::MultipleAssigner Multiple |
+    relation tag ~ Number -ascending Association |
+    relation extend ~ stup\
+        Declaration string {"struct [tuple extract $stup Association]"}\
+        Reference string {"struct [tuple extract $stup Association] *"}\
+        ConstReference string\
+                {"struct [tuple extract $stup Association] const *"}\
+        StorageVariable string {"[tuple extract $stup Association]__POOL"}\
+        ClassVariable string {"${domain}__ASSIGNERS"}
+}]
+----
+
+Single assigners have a single instance defined automatically.
+
+[source,tcl]
+----
+<<GatherClassProperties: single assigner properties>>=
+set sassigners [pipe {
+    relation restrictwith $assigners {[relation isnotempty $Single]} |
+    relation eliminate ~ Domain Single Multiple |
+    relation rename ~ Association Name |
+    relation extend ~ stup\
+        Allocation int {0}\
+        InitialInstance int {1}\
+        TotalInstance int {1}
+}]
+# puts [relformat $sassigners sassigners]
+----
+
+Multi assigners have population values specified during configuration.
+
+[source,tcl]
+----
+<<GatherClassProperties: multi assigner properties>>=
+set massigners [pipe {
+    relation restrictwith $assigners {[relation isnotempty $Multiple]} |
+    relation rename ~ Number AssignerNumber |
+    ralutil::rvajoin ~ $::micca::MultipleAssignerInstance Instances |
+    relation ungroup ~ Multiple |
+    relation join ~ $::micca::ClassPopulation |
+    relation extend ~ stup\
+        InitialInstance int\
+            {[relation cardinality [tuple extract $stup Instances]]}\
+        TotalInstance int {
+            [relation cardinality [tuple extract $stup Instances]] +
+            [tuple extract $stup Allocation]} |
+    relation eliminate ~ Domain Single Class Instances |
+    relation rename ~ Association Name AssignerNumber Number
+}]
+# puts [relformat $massigners massigners]
+----
+
+For classes,
+we, as usual,
+must distinguish between union-based subclass and all other classes.
+Because union subclasses are stored in the same memory allocated
+to the superclass,
+we need to set the allocation for them differently than for
+non-union based classes.
+For non-union classes,
+the population specifies exactly the required storage.
+For union subclasses, we must use the population characteristics
+of the superclass.
+
+[source,tcl]
+----
+<<GatherClassProperties: gather class properties>>=
+<<GatherClassProperties: non-union subclass properties>>
+<<GatherClassProperties: union subclass properties>>
+----
+
+Like other queries of this type,
+the strategy is to the `rvajoin` to deal with information that
+might be missing.
+In this case,
+we need to deal with the face that there may not be any initial instances
+defined for a class.
+Since one property we are interested in is the total number of slots
+to allocate in the class storage pool,
+we want to be able to treat an empty instance population as requiring
+zero additional storage slots.
+The `rvajoin` allows us to do that, where a normal join would
+delete the class from the result.
+
+[source,tcl]
+----
+<<GatherClassProperties: non-union subclass properties>>=
+set classRefs [FindNonUnionSubclasses $domain]
+set cpopRefs [findRelated $classRefs R104 {~R101 ElementPopulation}\
+        {~R105 ClassPopulation}]
+
+set allocs [pipe {
+    deRef $cpopRefs |
+    relation project % Class Allocation |
+    relation rename % Class Name
+} {} |%]
+
+set insts [pipe {
+    findRelated $cpopRefs ~R102 |
+    deRef % |
+    relation project % Class Number |
+    relation rename % Class Name
+} {} |%]
+
+set classes [pipe {
+    deRef $classRefs |
+    relation project ~ Name Number |
+    relation rename ~ Number ClassNumber |
+    relation extend ~ stup\
+        Declaration string {"struct [tuple extract $stup Name]"}\
+        Reference string {"struct [tuple extract $stup Name] *"}\
+        ConstReference string {"struct [tuple extract $stup Name] const *"}\
+        StorageVariable string {"[tuple extract $stup Name]__POOL"}\
+        ClassVariable string {"${domain}__CLASSES"} |
+    relation join ~ $allocs |
+    ralutil::rvajoin ~ $insts Instances |
+    relation extend ~ itup\
+        InitialInstance int {
+            [relation cardinality [tuple extract $itup Instances]]} \
+        TotalInstance int {
+            [relation cardinality [tuple extract $itup Instances]] +
+            [tuple extract $itup Allocation]} |
+    relation eliminate ~ Instances |
+    relation rename ~ ClassNumber Number
+}]
+# puts [relformat $classes classes]
+----
+
+For union subclasses,
+the situation is that we want to total allocation for the subclass
+to be the same as the ultimate superclass of the generalization.
+We say, ultimate superclass, since generalizations may extend multiple
+levels and it is the subclass at the ``top'' which determine the
+storage requirements.
+
+We start the query by finding the ultimate superclasses for
+union generalizations.
+A union superclass is an ultimate superclass if it does not also
+serve a role as a union subclass.
+Then we can compute the transitive closure of the union subclasses over
+all union superclasses.
+The result of the transitive closure can then be joined against the
+ultimate superclasses to give us the name of the class that governs
+the total allocation for the union subclass.
+
+[source,tcl]
+----
+<<GatherClassProperties: union subclass properties>>=
+set usubRefs [UnionSubclass findWhere {$Domain eq $domain}]
+set usubs [pipe {
+    deRef $usubRefs |
+    relation eliminate ~ Domain Role
+}]
+# puts [relformat $usubs "Union Subclasses"]
+set usupers [pipe {
+    UnionSuperclass findWhere {$Domain eq $domain} |
+    deRef ~ |
+    relation eliminate ~ Domain Role |
+    relation rename ~ Class Superclass
+}]
+# puts [relformat $usupers "Union Superclasses"]
+set ultimate_supers [pipe {
+    relation semiminus $usubs $usupers -using {Class Superclass} |
+    relation join ~ $classes -using {Superclass Name} |
+    relation project ~ Superclass TotalInstance
+}]
+# puts [relformat $ultimate_supers "Ultimate Union Superclasses"]
+
+# We need this to join back on the class number after the transitive closure
+set domclasses [pipe {
+    Class findWhere {$Domain eq $domain} |
+    deRef ~ |
+    relation eliminate ~ Domain
+}]
+
+set subinsts [pipe {
+    findRelated $usubRefs R47 R40 R41 R104 {~R101 ElementPopulation}\
+        {~R105 ClassPopulation} ~R102 |
+    deRef % |
+    relation project % Class Number |
+    relation rename % Class Name
+} {} |%]
+# puts [relformat $subinsts "Union Subclass instances"]
+
+set subclasses [pipe {
+    relation join $usubs $usupers\
+            -using {Relationship Relationship} |
+    relation project ~ Class Superclass |
+    relation tclose ~ |
+    relation join ~ $ultimate_supers |
+    relation eliminate ~ Superclass |
+    relation join $domclasses ~ -using {Name Class} |
+    relation extend ~ stup\
+        Declaration string {"struct [tuple extract $stup Name]"}\
+        Reference string {"struct [tuple extract $stup Name] *"}\
+        ConstReference string {"struct [tuple extract $stup Name] const *"}\
+        StorageVariable string {""}\
+        ClassVariable string {"${domain}__CLASSES"} |
+    relation rename ~ Number ClassNumber |
+    ralutil::rvajoin ~ $subinsts Instances |
+    relation extend ~ itup\
+        Allocation int {"0"}\
+        InitialInstance int {
+            [relation cardinality [tuple extract $itup Instances]]} |
+    relation eliminate ~ Instances |
+    relation rename ~ ClassNumber Number
+}]
+# puts [relformat $subclasses "Union Subclass"]
+----
+
+Finally,
+the set of class properties is just the union of the four
+cases we just computed.
+
+[source,tcl]
+----
+<<GatherClassProperties: union all properties>>=
+variable ClassProperties
+
+set ClassProperties [relation union $classes $subclasses\
+        $sassigners $massigners]
+# puts [relformat $ClassProperties ClassProperties]
 ----
 
 We need some procedures to access the properties.
@@ -466,7 +631,7 @@ our usual pattern of imports, command path and contents.
 ----
 <<generation header namespace>>=
 namespace eval GenHeader {
-    logger::initNamespace [namespace current]
+    ::logger::import -all -force -namespace log micca
 
     <<tclral imports>>
 
@@ -1344,7 +1509,7 @@ template expansion commands.
 ----
 <<generation code namespace>>=
 namespace eval GenCode {
-    logger::initNamespace [namespace current]
+    ::logger::import -all -force -namespace log micca
 
     <<tclral imports>>
 
@@ -6033,7 +6198,7 @@ we define the namespace for the generation of the embedded macros.
 ----
 <<generation support namespace>>=
 namespace eval GenSupport {
-    logger::initNamespace [namespace current]
+    ::logger::import -all -force -namespace log micca
 
     <<tclral imports>>
     namespace import ::ral::relvar
@@ -6101,7 +6266,7 @@ available to them, we will namespace ensembles to obtain the
 <<generation commands>>=
 proc CreateActivityCommands {domain} {
     namespace eval GenActivity {
-        logger::initNamespace [namespace current]
+        ::logger::import -all -force -namespace log micca
     }
 
     set currns [namespace current]
@@ -8439,9 +8604,6 @@ test codegen-40.0 {
             }
             class Y {
                 instance y1 R1 s1
-            }
-            class Z {
-                allocate 1
             }
         }
     }
@@ -11523,12 +11685,6 @@ test codegen-65.0 {
             }
         }
         population codegen65 {
-            class X {
-                allocate 4
-            }
-            class Y {
-                allocate 4
-            }
             class S {
                 allocate 4
             }
@@ -13339,7 +13495,7 @@ endif::showtests[]
 ----
 <<generation helpers namespace>>=
 namespace eval Helpers {
-    logger::initNamespace [namespace current]
+    ::logger::import -all -force -namespace log micca
 
     <<tclral imports>>
 
