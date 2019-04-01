@@ -56,8 +56,6 @@ A2XOPTS =\
 	--verbose\
 	$(NULL)
 
-
-
 ATANGLEOPTS =\
 	$(NULL)
 
@@ -69,6 +67,8 @@ DBLATEX_PARAMS =\
 	doc.lot.show=figure,table,example\
 	toc.section.depth=4\
 	doc.section.depth=0\
+	draft.mode=yes\
+	draft.watermark=1\
 	$(NULL)
 
 # draft.mode=yes
