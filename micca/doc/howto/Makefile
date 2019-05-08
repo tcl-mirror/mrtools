@@ -40,6 +40,7 @@ IMAGES =\
 
 GENIMAGES=\
      	$(patsubst %.txt,%__*.png,$(DOCSRC))\
+     	$(patsubst %.txt,%__*.svg,$(DOCSRC))\
 	$(NULL)
 
 PDF 	=\
@@ -53,8 +54,9 @@ CLEANFILES =\
 	$(NULL)
 
 A2XOPTS =\
-	--verbose\
 	$(NULL)
+
+# --verbose
 
 ATANGLEOPTS =\
 	$(NULL)
