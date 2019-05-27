@@ -99,7 +99,7 @@ ASCIIDOC_OPTS =\
 	$(patsubst %,--attribute=%,$(ASCIIDOC_ATTRS))\
 	$(NULL)
 
-.PHONY : all doc clean
+.PHONY : all doc clean publish
 
 all : doc
 
@@ -107,6 +107,10 @@ doc : $(PDF)
 
 clean :
 	$(RM) $(CLEANFILES)
+
+publish : $(PDF)
+	fossil unversioned add $(PDF) --as micca/doc/howto/howto.pdf
+	fossil unversioned sync
 
 $(PDF) : $(DOCSRC) $(DOCPARTS) $(EXTRAS) $(IMAGES)
 
