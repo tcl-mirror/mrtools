@@ -32,6 +32,7 @@ DOCPARTS =\
 
 DIAGRAMS =\
 	micca-translation.uxf\
+	assoc-relationship-nav.uxf\
 	$(NULL)
 
 IMAGES =\
