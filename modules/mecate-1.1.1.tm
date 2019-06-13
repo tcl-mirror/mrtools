@@ -64,7 +64,7 @@ namespace eval ::mecate {
             -appenderArgs {-conversionPattern {\[%c\] \[%p\] '%m'}}
     ::logger::import -all -force -namespace log mecate
 
-    variable version 1.1
+    variable version 1.1.1
 }
 
 ::oo::class create ::mecate::rein {
@@ -459,7 +459,7 @@ namespace eval ::mecate {
                 lappend uml "create \"$Target\""
                 lappend uml "\"$Source\" -> \"$Target\" : $Event <<create>>"
             } elseif {[relation isnotempty $Polymorphic]} {
-                relation assign Polymorphic
+                relation assign $Polymorphic
                 lappend uml "\"$Source\" --> \"$Target\" :\
                         $Event <<poly \[$Relationship\]>>"
             }
@@ -720,7 +720,7 @@ namespace eval ::mecate {
                     ]
                 }
                 polymorphic {
-                    relvar insert PolymorphiceTrace [list\
+                    relvar insert PolymorphicTrace [list\
                         TraceId         $traceId\
                         Relationship    [dict get $respValue relationship]\
                         NewEvent        [dict get $respValue newevent]\
@@ -875,4 +875,5 @@ proc ::mecate::fatalTraceFormat {trace} {
 }
 
 package provide mecate $::mecate::version
+
 
