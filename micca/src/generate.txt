@@ -387,22 +387,50 @@ set sassigners [pipe {
 ----
 
 Multi assigners have population values specified during configuration.
+The computation of the storage for multiple assigners is a bit different.
+The total number of multiple assigner instances is always the
+same number of instances as the class which partitions the multiple
+assigner.
+Multiple assigner instances can be created as part of the initial
+instance population.
+The `allocation` command is not supported for multiple assigners,
+so there is an implied value of the allocation which is the total number
+of instances minus those defined as part of the initial instance population.
+Here we compute all the fields just like a class or single assigner
+only with the previous rules for the differences for multiple assigners.
 
 [source,tcl]
 ----
 <<GatherClassProperties: multi assigner properties>>=
+# First we need the total instances for the paritioning class.
+
+set partClassPop [pipe {
+    MultipleAssigner findWhere {$Domain eq $domain} |
+    findRelated % R54 R104 {~R101 ElementPopulation} {~R105 ClassPopulation} |
+    deRef % |
+    ralutil::rvajoin % $::micca::ClassInstance Instances |
+    relation extend %  itup TotalInstance int {
+            [tuple extract $itup Allocation] +\
+                [relation cardinality [tuple extract $itup Instances]]} |
+    relation eliminate % Instances Allocation
+} {} |%]
+# puts [relformat $partClassPop partClassPop]
+
+# Then we can find the number of intial instances of the multiple assigner
+# and deduce what the "implied" allocation for non-initial instances
+# would have been.
 set massigners [pipe {
     relation restrictwith $assigners {[relation isnotempty $Multiple]} |
     relation rename ~ Number AssignerNumber |
     ralutil::rvajoin ~ $::micca::MultipleAssignerInstance Instances |
     relation ungroup ~ Multiple |
-    relation join ~ $::micca::ClassPopulation |
+    relation join ~ $partClassPop |
     relation extend ~ stup\
         InitialInstance int\
-            {[relation cardinality [tuple extract $stup Instances]]}\
-        TotalInstance int {
-            [relation cardinality [tuple extract $stup Instances]] +
-            [tuple extract $stup Allocation]} |
+            {[relation cardinality [tuple extract $stup Instances]]} |
+    relation extend ~ atup\
+        Allocation int {[tuple extract $atup TotalInstance] -\
+            [tuple extract $atup InitialInstance]} |
     relation eliminate ~ Domain Single Class Instances |
     relation rename ~ Association Name AssignerNumber Number
 }]
@@ -3185,16 +3213,16 @@ proc storageDeclarations {} {
     set singles [SingleAssigner findWhere {$Domain eq $domain}]
     forAllRefs single $singles {
         assignAttribute $single Association
-        append result "static struct ${Association} ${Association}__POOL\[1\] ;\n"
+        set var [GetClassProperty $Association StorageVariable]
+        set totalinsts [GetClassProperty $Association TotalInstance]
+        append result "static struct ${Association} $var\[$totalinsts\] ;\n"
     }
 
-    # Total number of multiple assigner instances is the same as the
-    # total number of instances of the id class
     set multis [MultipleAssigner findWhere {$Domain eq $domain}]
     forAllRefs multi $multis {
-        assignAttribute $multi Association {Class idclass}
+        assignAttribute $multi Association
         set var [GetClassProperty $Association StorageVariable]
-        set totalinst [GetClassProperty $idclass TotalInstance]
+        set totalinsts [GetClassProperty $Association TotalInstance]
         append result "static struct ${Association} $var\[$totalinsts\] ;\n"
     }
 
@@ -13359,6 +13387,7 @@ test codegen-62.0 {
             population codegen62 {
                 class department {
                     instance shoes name {"shoes"}
+                    instance ladies name {"ladies"}
                 }
                 class clerk {
                     instance fred
