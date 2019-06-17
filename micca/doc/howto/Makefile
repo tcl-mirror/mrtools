@@ -32,6 +32,7 @@ DOCPARTS =\
 
 DIAGRAMS =\
 	micca-translation.uxf\
+	assoc-relationship-nav.uxf\
 	$(NULL)
 
 IMAGES =\
@@ -40,6 +41,7 @@ IMAGES =\
 
 GENIMAGES=\
      	$(patsubst %.txt,%__*.png,$(DOCSRC))\
+     	$(patsubst %.txt,%__*.svg,$(DOCSRC))\
 	$(NULL)
 
 PDF 	=\
@@ -53,10 +55,9 @@ CLEANFILES =\
 	$(NULL)
 
 A2XOPTS =\
-	--verbose\
 	$(NULL)
 
-
+# --verbose
 
 ATANGLEOPTS =\
 	$(NULL)
@@ -69,6 +70,8 @@ DBLATEX_PARAMS =\
 	doc.lot.show=figure,table,example\
 	toc.section.depth=4\
 	doc.section.depth=0\
+	draft.mode=yes\
+	draft.watermark=1\
 	$(NULL)
 
 # draft.mode=yes
@@ -97,7 +100,7 @@ ASCIIDOC_OPTS =\
 	$(patsubst %,--attribute=%,$(ASCIIDOC_ATTRS))\
 	$(NULL)
 
-.PHONY : all doc clean
+.PHONY : all doc clean publish
 
 all : doc
 
@@ -105,6 +108,10 @@ doc : $(PDF)
 
 clean :
 	$(RM) $(CLEANFILES)
+
+publish : $(PDF)
+	fossil unversioned add $(PDF) --as micca/doc/howto/howto.pdf
+	fossil unversioned sync
 
 $(PDF) : $(DOCSRC) $(DOCPARTS) $(EXTRAS) $(IMAGES)
 
