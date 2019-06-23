@@ -70,35 +70,35 @@ namespace eval ::mkmodule {
     # This is the code placed in the module file that does the
     # heavy lifting to copy the binary extension to the native file
     # system and execute the "load" command on the result.
-    variable loadScript {proc __copyAndLoad__ {offset size package} {
-    set mchan [open [info script] rb]
-    set lchan [file tempfile tempname]
-    chan configure $lchan -translation binary
-    try {
-        chan seek $mchan $offset start
-        chan copy $mchan $lchan -size $size
-    } finally {
-        chan close $mchan
-        chan close $lchan
-    }
+    variable loadBinary {{offset size package} {
+        set mchan [open [info script] rb]
+        set lchan [file tempfile tempname]
+        chan configure $lchan -translation binary
+        try {
+            chan seek $mchan $offset start
+            chan copy $mchan $lchan -size $size
+        } finally {
+            chan close $mchan
+            chan close $lchan
+        }
 
-    try {
-        load $tempname $package
-    } finally {
-        catch {file delete $tempname}
-    }
-}}
+        try {
+            load $tempname $package
+        } finally {
+            catch {file delete $tempname}
+        }
+    }}
 
     # This is the Tcl sequence to load a binary extension for a given
     # OS platform.
     variable loadTemplate {if {$::tcl_platform(os) eq "%s"} {
-    __copyAndLoad__ %ld %ld %s
+    ::apply $__loadBinary__ %ld %ld %s
 }}
     # This value must be larger than the number of characters in "loadTemplate"
     # when it is substituted with its parameters. Here we are being generous,
     # but if the value of "loadTemplate" expands, make sure it either
     # is smaller than this quantity or increase the "templateSize" value.
-    variable templateSize 256
+    variable templateSize 128
 }
 
 proc ::mkmodule::module {package version args} {
@@ -160,20 +160,24 @@ proc ::mkmodule::module {package version args} {
     set tmchan [open [file join $outdir ${package}-${version}.tm] w]
 
     variable templateSize
-    set slackSpace [expr {[dict size $binaries] * $templateSize}]
+    variable loadBinary
+    # This slack space computation is approximate. It accounts for the big
+    # pieces, but "templateSize" should be generous to account for the small
+    # pieces that aren't included.
+    set slackSpace [expr {([dict size $binaries] * $templateSize) +\
+            [string length $loadBinary]}]
 
     try {
         set loadOffset 0
         # First we output the text needed to load binary extensions.
-        # There is a proc that is used.
         if {[dict size $binaries] != 0} {
-            variable loadScript
-            puts $tmchan $loadScript
-            # Block of blanks allocate space for the code that
-            # invokes the binary loading.
-            # Later we come back and fill in the actual invocations.
-            # We do it this way because at this time we don't know the
-            # file offsets to the binaries.
+            puts $tmchan "set __loadBinary__ [list $loadBinary]"
+            # Write a block of blanks allocate space for the code that invokes
+            # the binary loading.  Later we come back and fill in the actual
+            # invocations.  We do it this way because at this point
+            # in building the output module file, we don't
+            # know the file offsets to the binaries and we want to load the
+            # binaries first.
             set loadOffset [chan tell $tmchan]
             puts $tmchan [string repeat { } $slackSpace]
         }
@@ -228,7 +232,7 @@ proc ::mkmodule::module {package version args} {
             chan puts $tmchan {    error "no binary found for\
                     $::tcl_platform(os)"}
             chan puts $tmchan "\}"
-            puts $tmchan "catch {rename __copyAndLoad__ {}}"
+            puts $tmchan "catch {unset __loadBinary__}"
             # Check that the overwriting didn't destroy anything.
             if {[chan tell $tmchan] - $loadOffset > $slackSpace} {
                 error "panic, overwrote space allocated for loading script"
