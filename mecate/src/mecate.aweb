@@ -136,6 +136,12 @@ constructor {args} {
     my variable fatalPrefix
     set fatalPrefix {}
 
+    my variable seqDiagConfig
+    set seqDiagConfig [dict create\
+        -showstates false\
+        -participants {}\
+    ]
+
     namespace import ::ral::*
     namespace import ::ralutil::*
 
@@ -537,7 +543,7 @@ test version-1.0 {
 } -cleanup {
 } -body {
     ::apptest version
-} -result {1.2}
+} -result {1.2.1}
 ----
 
 == Harness Introspection
@@ -1703,7 +1709,7 @@ The UML sequence diagram can be used for this purpose.
 `Mecate` does not perform the graphical rendering of the sequence diagram.
 That task is delegated to a program named, `plantuml`.
 `Plantuml` accepts a text file describing the instances and events
-in the sequence diagram and it perfrom the layout and graphical
+in the sequence diagram and it performs the layout and graphical
 generation.
 The role of `mecate` is to format the state machine traces into text
 that is acceptable to `plantuml`.
@@ -1725,26 +1731,50 @@ given to `plantuml` to create a graphical representation of the
 state machine traces as a UML sequence diagram.
 *****
 
-When `planuml` lays out a sequence diagram, the order of defining the
+When `plantuml` lays out a sequence diagram, the order of defining the
 participants is important.
-`Planuml` places the race track headings for the instances in a left to right
+`Plantuml` places the race track headings for the instances in a left to right
 order as they are declared.
-To keep the general flow of the diagram to be left to right,
-we want to declare the race trace headings to `plantuml` in the
+To keep the general flow of the diagram as left to right,
+by default the _seqDiag_ method
+declares the race track headings to `plantuml` in the
 same sequence as they occur in the set of traces being displayed.
 The complication comes in that an instance heading may first occur as either
 a *Source* of an event or as the *Target* of an event.
+
+Alternatively,
+the order of the swimlane headings and the instances which are shown
+in the sequence diagram can be specified.
+See the
+<<seqdiagconfig-method,`seqDiagConfig`>>
+method for how this is done.
 
 [source,tcl]
 .Implementation
 ----
 <<rein configuration>>=
 method seqDiag {{begin 1} {finish end}} {
+    my variable seqDiagConfig
     lappend uml "@startuml"
+    lappend uml "!pragma teoz true"
 
     set traces [my RestrictTraces $begin $finish Trace]
 
-    <<seqDiag: declare participants in event order>>
+    set participants [dict get $seqDiagConfig -participants]
+    if {[llength $participants] == 0} {
+        <<seqDiag: arrange participants in event order>>
+    } else {
+        set insts $participants
+    }
+
+    set extlabel BOUNDARY ;        # <1>
+    <<seqDiag: declare participants>>
+
+    puts "insts = [list $insts]"
+
+    if {[dict get $seqDiagConfig -showstates]} {
+        <<seqDiag: indicate initial state of each participant>>
+    }
 
     set traces [pipe {
         rvajoin $traces [relvar set TransitionTrace] Transition |
@@ -1759,8 +1789,26 @@ method seqDiag {{begin 1} {finish end}} {
             set Source $extlabel
         }
 
+        if {!($Source in $insts && $Target in $insts)} {
+            continue
+        }
+
         if {[relation isnotempty $Transition]} {
+            relation assign $Transition
             lappend uml "\"$Source\" --> \"$Target\" : $Event"
+            if {[dict get $seqDiagConfig -showstates]} {
+                switch -exact -- $New {
+                    CH {
+                        lappend uml "hnote over \"$Target\" #red : Can't Happen!"
+                    }
+                    IG {
+                        lappend uml "hnote over \"$Target\" #yellow : Ignored"
+                    }
+                    default {
+                        lappend uml "rnote over \"$Target\" : $New"
+                    }
+                }
+            }
         } elseif {[relation isnotempty $Creation]} {
             lappend uml "create \"$Target\""
             lappend uml "\"$Source\" -> \"$Target\" : $Event <<create>>"
@@ -1776,6 +1824,8 @@ method seqDiag {{begin 1} {finish end}} {
     return [join $uml "\n"]
 }
 ----
+<1> We use a label more informative than ``?.?'' to show events coming from
+outside of a state machine context.
 
 The strategy to find all the participants is to project both the *Source*
 and *Target* of an event and take the union of the two projections.
@@ -1783,9 +1833,9 @@ To insure that a *Target* appears after a *Source*, we will add one to
 its *TraceId*.
 The *TraceId* attribute is then used to order the result.
 
-[source,c]
+[source,tcl]
 ----
-<<seqDiag: declare participants in event order>>=
+<<seqDiag: arrange participants in event order>>=
 set srcInsts [pipe {
     relation project $traces TraceId Source |
     relation rename ~ Source Name
@@ -1801,15 +1851,6 @@ set insts [pipe {
     relation summarizeby ~ Name s First int {rmin($s, "TraceId")} |
     relation list ~ Name -ascending First
 }] ;                                                                    # <3>
-
-set extlabel BOUNDARY
-foreach inst $insts {
-    if {$inst eq "?.?"} {
-        lappend uml "boundary \"$extlabel\"" ;                          # <4>
-    } else {
-        lappend uml "participant \"$inst\""
-    }
-}
 ----
 <1> We change the name of the *Source* attribute to be *Name* to enable
 the union operation below.
@@ -1820,8 +1861,125 @@ group of names. That *TraceId* is the first event where the instances
 is mentioned.
 Creating a list of names in ascending order of first appearance gives us
 the order we want `plantuml` to display the race track headings.
-<4> We use a label more informative than ``?.?'' to show events coming from
-outside of a state machine context.
+
+Given a set of participants, either derived from the traces or
+specified as an option,
+we can declare to `plantuml` what the race track heading is to be.
+
+[source,tcl]
+----
+<<seqDiag: declare participants>>=
+set bdindex [lsearch -exact $insts {?.?}]
+if {$bdindex != -1} {
+    set insts [lreplace $insts $bdindex $bdindex $extlabel]
+}
+foreach inst $insts {
+    set ptype [expr {$inst eq $extlabel ? "boundary" : "participant"}]
+    lappend uml "$ptype \"$inst\""
+}
+----
+
+The strategy is to find the chronologically first transition for each 
+*Target* and then emit the value of the current state, *Current*, for each one.
+
+[source,c]
+----
+<<seqDiag: indicate initial state of each participant>>=
+set initialTransitions [pipe {
+    relation join $traces [relvar set TransitionTrace] |
+    relation summarizeby ~ Target s TraceId int {rmin($s, "TraceId")} |
+    relation join ~ [relvar set TransitionTrace]
+}] ;                                                                      # <1>
+
+set initialStatePrefix {} ;
+relation foreach trans $initialTransitions {
+    relation assign $trans
+    if {$Target ni $insts} {
+        continue
+    }
+    if {$Current ne "@"} {
+        lappend uml "$initialStatePrefix rnote over \"$Target\" : $Current" ; # <2>
+        set initialStatePrefix & ;                                         # <3>
+    }
+}
+----
+<1> The `summarizeby` operation finds the transition for a particular *Target*
+with the minimum *TraceId* value, leaving us with the *TraceId* of the 
+chronologically first transition for each target instance.  One more join with
+Transitions then produces the collection of initial transitions for each *Target*.
+<2> Emit a note indicating the initial state of each participant.
+Notice we check that the initial state is *not* the creation pseudo-state.
+The pseudo state does not tell us much and the creation event will be labeled
+as such anyway.
+<3> Prefixing the second and all subsequent lines with this character instructs
+the `teoz` layout engine of `plantuml` to place all initial states on the same
+line, implying the same time slot.
+
+[[seqdiagconfig-method]]
+(((rein,method,seqDiagConfig)))
+
+*****
+_reinobj_ `seqDiagConfig` _?option1 value1 option2 value2 ...?_
+
+`optionN`::
+    An option name used to control details of how sequence diagrams
+    are rendered.
+    Valid options are:
+    `-showstates`;;
+        A boolean option which determines if state information is shown
+        in the swim langes.
+        It set to `true`, the initial states of the instances are
+        shown at the top of the swimlane and each new state caused
+        by an event transition is shown.
+        Also, the non-transitioning states of *IG* and *CH* are shown
+        when they occur.
+        If set to `false`, then no state information is displayed
+        in the swimlanes.
+    `-participants`;;
+        This option is a list of names of class instances which are
+        to be included in the sequence diagram.
+        Rather than rendering all the events in the sequence diagram,
+        this option provides a way to control which events are shown
+        in the diagram.
+        Only events that are signaled between participants are shown
+        in the diagram.
+        Participant names are of the form `class.instance`,
+        where `class` is the name of a class and `instance`
+        is either a named instance of the initial population or
+        an instance number for dynamically created instances.
+        The special instance, `BOUNDARY`, is used to show
+        events signaled from outside a state machine context.
+`valueN`::
+    The value of the corresponding option. The type of `value` depends
+    upon the the option as described previously.
+
+The `seqDiagConfig` method sets one or more options used to
+control the manner in which sequence diagrams are rendered.
+The return value of the method is the current configuration
+which is a dictionary of option name keys with corresponding option values.
+*****
+
+[source,tcl]
+.Implementation
+----
+<<rein configuration>>=
+method seqDiagConfig {args} {
+    if {[llength $args] % 2 != 0} {
+        my Throw "options must be given as name / value pairs, got \"$args\""
+    }
+    my variable seqDiagConfig
+
+    foreach {optname optvalue} $args {
+        if {[dict exists $seqDiagConfig $optname]} {
+            dict set seqDiagConfig $optname $optvalue
+        } else {
+            my Throw "unknown sequence diagram option, \"$optname\""
+        }
+    }
+
+    return $seqDiagConfig
+}
+----
 
 (((rein,method,seqDiagToChan)))
 
@@ -2108,7 +2266,7 @@ where _instr_ is a dictionary with the instrumentation information.
 If missing, then no changes are made to the notification command.
 In both cases, the current value of the notification command prefix
 is returned.
-Setting the _prefix_ to the empty string, disables instrumenation notification.
+Setting the _prefix_ to the empty string, disables instrumentation notification.
 *****
 
 [source,tcl]
@@ -2127,7 +2285,7 @@ method instrNotify {args} {
 ----
 
 We must also provide a command that the event handler can use to
-notify when instrumenation arrived.
+notify when instrumentation arrived.
 
 (((rein,method,NotifyInstrArrived)))
 
@@ -2376,7 +2534,7 @@ where _fatal_ is a dictionary with the fatal error information.
 If missing, then no changes are made to the notification command.
 In both cases, the current value of the notification command prefix
 is returned.
-Setting the _prefix_ to the empty string, disables fatalumenation notification.
+Setting the _prefix_ to the empty string, disables fatal error notification.
 *****
 
 [source,tcl]
@@ -2978,7 +3136,7 @@ the response as the return value of the command.
 
 Finally, we have a small utility for error handling that insures
 that a reasonable error code is available.
-This eases programatic error handling.
+This eases programmatic error handling.
 
 (((rein,method,Throw)))
 
@@ -3217,6 +3375,11 @@ test scenario-5.0.1 {
 } -cleanup {
 } -body {
     ::apptest seqDiagToFile scenario-seq.txt
+    ::apptest seqDiagConfig -showstates true
+    ::apptest seqDiagToFile scenario-seq-showstate.txt
+    ::apptest seqDiagConfig\
+            -participants {BOUNDARY ShoppingCart.1 Order.0 Shipment.0 ShippingClerk.fs}
+    ::apptest seqDiagToFile scenario-seq-part.txt
 } -result {}
 ----
 
@@ -3333,7 +3496,7 @@ namespace eval ::mecate {
             -appenderArgs {-conversionPattern {\[%c\] \[%p\] '%m'}}
     ::logger::import -all -force -namespace log mecate
 
-    variable version 1.1.1
+    variable version 1.2
 }
 
 <<mecate commands>>
@@ -3428,7 +3591,7 @@ We also provide a root chunk to extract a package index file.
 
 ----
 <<pkgIndex.tcl>>=
-package ifneeded mecate 1.1 [list source [file join $dir mecate.tcl]]
+package ifneeded mecate 1.2 [list source [file join $dir mecate.tcl]]
 ----
 
 === Template
