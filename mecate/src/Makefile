@@ -9,7 +9,7 @@
 #*--
 #
 
-VERSION = 1.1.1
+VERSION = 1.2
 
 DOCDIR	= ../doc
 CODEDIR	= ../code/tcl
@@ -50,8 +50,8 @@ CLEANFILES =\
 	$(NULL)
 
 A2XOPTS =\
-	--verbose\
 	$(NULL)
+# --verbose
 
 ATANGLEOPTS	=\
 	$(NULL)

@@ -64,7 +64,7 @@ namespace eval ::mecate {
             -appenderArgs {-conversionPattern {\[%c\] \[%p\] '%m'}}
     ::logger::import -all -force -namespace log mecate
 
-    variable version 1.1.1
+    variable version 1.2
 }
 
 ::oo::class create ::mecate::rein {
@@ -100,6 +100,12 @@ namespace eval ::mecate {
         set instrPrefix {}
         my variable fatalPrefix
         set fatalPrefix {}
+    
+        my variable seqDiagConfig
+        set seqDiagConfig [dict create\
+            -showstates false\
+            -participants {}\
+        ]
     
         namespace import ::ral::*
         namespace import ::ralutil::*
@@ -411,32 +417,62 @@ namespace eval ::mecate {
         }
     }
     method seqDiag {{begin 1} {finish end}} {
+        my variable seqDiagConfig
         lappend uml "@startuml"
+        lappend uml "!pragma teoz true"
     
         set traces [my RestrictTraces $begin $finish Trace]
     
-        set srcInsts [pipe {
-            relation project $traces TraceId Source |
-            relation rename ~ Source Name
-        }] ;                                                                    # <1>
-        set trgInsts [pipe {
-            relation project $traces TraceId Target |
-            relation rename ~ Target Name |
-            relation update ~ t {1} {
-                tuple update $t TraceId [expr {[tuple extract $t TraceId] + 1}]}
-        }] ;                                                                    # <2>
-        set insts [pipe {
-            relation union $srcInsts $trgInsts |
-            relation summarizeby ~ Name s First int {rmin($s, "TraceId")} |
-            relation list ~ Name -ascending First
-        }] ;                                                                    # <3>
-        
-        set extlabel BOUNDARY
+        set participants [dict get $seqDiagConfig -participants]
+        if {[llength $participants] == 0} {
+            set srcInsts [pipe {
+                relation project $traces TraceId Source |
+                relation rename ~ Source Name
+            }] ;                                                                    # <1>
+            set trgInsts [pipe {
+                relation project $traces TraceId Target |
+                relation rename ~ Target Name |
+                relation update ~ t {1} {
+                    tuple update $t TraceId [expr {[tuple extract $t TraceId] + 1}]}
+            }] ;                                                                    # <2>
+            set insts [pipe {
+                relation union $srcInsts $trgInsts |
+                relation summarizeby ~ Name s First int {rmin($s, "TraceId")} |
+                relation list ~ Name -ascending First
+            }] ;                                                                    # <3>
+        } else {
+            set insts $participants
+        }
+    
+        set extlabel BOUNDARY ;        # <1>
+        set bdindex [lsearch -exact $insts {?.?}]
+        if {$bdindex != -1} {
+            set insts [lreplace $insts $bdindex $bdindex $extlabel]
+        }
         foreach inst $insts {
-            if {$inst eq "?.?"} {
-                lappend uml "boundary \"$extlabel\"" ;                          # <4>
-            } else {
-                lappend uml "participant \"$inst\""
+            set ptype [expr {$inst eq $extlabel ? "boundary" : "participant"}]
+            lappend uml "$ptype \"$inst\""
+        }
+    
+        puts "insts = [list $insts]"
+    
+        if {[dict get $seqDiagConfig -showstates]} {
+            set initialTransitions [pipe {
+                relation join $traces [relvar set TransitionTrace] |
+                relation summarizeby ~ Target s TraceId int {rmin($s, "TraceId")} |
+                relation join ~ [relvar set TransitionTrace]
+            }] ;                                                                      # <1>
+            
+            set initialStatePrefix {} ;
+            relation foreach trans $initialTransitions {
+                relation assign $trans
+                if {$Target ni $insts} {
+                    continue
+                }
+                if {$Current ne "@"} {
+                    lappend uml "$initialStatePrefix rnote over \"$Target\" : $Current" ; # <2>
+                    set initialStatePrefix & ;                                         # <3>
+                }
             }
         }
     
@@ -453,8 +489,26 @@ namespace eval ::mecate {
                 set Source $extlabel
             }
     
+            if {!($Source in $insts && $Target in $insts)} {
+                continue
+            }
+    
             if {[relation isnotempty $Transition]} {
+                relation assign $Transition
                 lappend uml "\"$Source\" --> \"$Target\" : $Event"
+                if {[dict get $seqDiagConfig -showstates]} {
+                    switch -exact -- $New {
+                        CH {
+                            lappend uml "hnote over \"$Target\" #red : Can't Happen!"
+                        }
+                        IG {
+                            lappend uml "hnote over \"$Target\" #yellow : Ignored"
+                        }
+                        default {
+                            lappend uml "rnote over \"$Target\" : $New"
+                        }
+                    }
+                }
             } elseif {[relation isnotempty $Creation]} {
                 lappend uml "create \"$Target\""
                 lappend uml "\"$Source\" -> \"$Target\" : $Event <<create>>"
@@ -468,6 +522,22 @@ namespace eval ::mecate {
         lappend uml "@enduml"
     
         return [join $uml "\n"]
+    }
+    method seqDiagConfig {args} {
+        if {[llength $args] % 2 != 0} {
+            my Throw "options must be given as name / value pairs, got \"$args\""
+        }
+        my variable seqDiagConfig
+    
+        foreach {optname optvalue} $args {
+            if {[dict exists $seqDiagConfig $optname]} {
+                dict set seqDiagConfig $optname $optvalue
+            } else {
+                my Throw "unknown sequence diagram option, \"$optname\""
+            }
+        }
+    
+        return $seqDiagConfig
     }
     method seqDiagToChan {channel {begin 1} {finish end}} {
         chan puts $channel [my seqDiag $begin $finish]

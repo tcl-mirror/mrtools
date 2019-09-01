@@ -2,7 +2,7 @@
 # -- Tcl Module
 
 # @@ Meta Begin
-# Package mecate 1.0
+# Package mecate 1.2
 # Meta description Mecate is a package that provides a set of command to
 # Meta description interact with bosal generated test harnesses.
 # Meta platform    tcl
@@ -29,7 +29,7 @@ package require struct::queue
 
 # ACTIVESTATE TEAPOT-PKG BEGIN DECLARE
 
-package provide mecate 1.0
+package provide mecate 1.2
 
 # ACTIVESTATE TEAPOT-PKG END DECLARE
 # ACTIVESTATE TEAPOT-PKG END TM
@@ -78,6 +78,8 @@ package provide mecate 1.0
 
 package require Tcl 8.6
 package require logger
+package require logger::utils
+package require logger::appender
 package require ral
 package require ralutil
 package require oo::util
@@ -85,18 +87,24 @@ package require struct::queue
 
 namespace eval ::mecate {
     namespace export rein
+    namespace export eventTraceFormat
+    namespace export instrTraceFormat
+    namespace export fatalTraceFormat
     namespace ensemble create
 
-    logger::initNamespace [namespace current]
+    set logger [::logger::init mecate]
+    set appenderType [expr {[dict exist [fconfigure stdout] -mode] ?\
+            "colorConsole" : "console"}]
+    ::logger::utils::applyAppender -appender $appenderType -serviceCmd $logger\
+            -appenderArgs {-conversionPattern {\[%c\] \[%p\] '%m'}}
+    ::logger::import -all -force -namespace log mecate
 
-    variable version 1.0
+    variable version 1.2
 }
 
 ::oo::class create ::mecate::rein {
     constructor {args} {
-        set svcname mecate[self]
-        ::logger::init $svcname
-        ::logger::import -all -namespace log $svcname
+        ::logger::import -all -namespace log mecate
     
         set timeout 2000
         foreach {option value} $args {
@@ -127,6 +135,12 @@ namespace eval ::mecate {
         set instrPrefix {}
         my variable fatalPrefix
         set fatalPrefix {}
+    
+        my variable seqDiagConfig
+        set seqDiagConfig [dict create\
+            -showstates false\
+            -participants {}\
+        ]
     
         namespace import ::ral::*
         namespace import ::ralutil::*
@@ -283,7 +297,7 @@ namespace eval ::mecate {
         return [my Command signal $domain $class $inst $event {*}$args]
     }
     method delaysignal {domain class inst delay event args} {
-        return [my Command signal $domain $class $inst $delay $event {*}$args]
+        return [my Command delaysignal $domain $class $inst $delay $event {*}$args]
     }
     method cancel {domain class inst event} {
         return [my Command cancel $domain $class $inst $event]
@@ -312,7 +326,7 @@ namespace eval ::mecate {
                 if {[my MatchTrace $actual $expect]} {
                     return $actual
                 } else {
-                    log::notice "discarding trace, \"$actual\":\
+                    log::debug "discarding trace, \"$actual\":\
                             failed to match, \"$expect\""
                 }
             }
@@ -438,32 +452,62 @@ namespace eval ::mecate {
         }
     }
     method seqDiag {{begin 1} {finish end}} {
+        my variable seqDiagConfig
         lappend uml "@startuml"
+        lappend uml "!pragma teoz true"
     
         set traces [my RestrictTraces $begin $finish Trace]
     
-        set srcInsts [pipe {
-            relation project $traces TraceId Source |
-            relation rename ~ Source Name
-        }] ;                                                                    # <1>
-        set trgInsts [pipe {
-            relation project $traces TraceId Target |
-            relation rename ~ Target Name |
-            relation update ~ t {1} {
-                tuple update $t TraceId [expr {[tuple extract $t TraceId] + 1}]}
-        }] ;                                                                    # <2>
-        set insts [pipe {
-            relation union $srcInsts $trgInsts |
-            relation summarizeby ~ Name s First int {rmin($s, "TraceId")} |
-            relation list ~ Name -ascending First
-        }] ;                                                                    # <3>
-        
-        set extlabel BOUNDARY
+        set participants [dict get $seqDiagConfig -participants]
+        if {[llength $participants] == 0} {
+            set srcInsts [pipe {
+                relation project $traces TraceId Source |
+                relation rename ~ Source Name
+            }] ;                                                                    # <1>
+            set trgInsts [pipe {
+                relation project $traces TraceId Target |
+                relation rename ~ Target Name |
+                relation update ~ t {1} {
+                    tuple update $t TraceId [expr {[tuple extract $t TraceId] + 1}]}
+            }] ;                                                                    # <2>
+            set insts [pipe {
+                relation union $srcInsts $trgInsts |
+                relation summarizeby ~ Name s First int {rmin($s, "TraceId")} |
+                relation list ~ Name -ascending First
+            }] ;                                                                    # <3>
+        } else {
+            set insts $participants
+        }
+    
+        set extlabel BOUNDARY ;        # <1>
+        set bdindex [lsearch -exact $insts {?.?}]
+        if {$bdindex != -1} {
+            set insts [lreplace $insts $bdindex $bdindex $extlabel]
+        }
         foreach inst $insts {
-            if {$inst eq "?.?"} {
-                lappend uml "boundary \"$extlabel\"" ;                          # <4>
-            } else {
-                lappend uml "participant \"$inst\""
+            set ptype [expr {$inst eq $extlabel ? "boundary" : "participant"}]
+            lappend uml "$ptype \"$inst\""
+        }
+    
+        puts "insts = [list $insts]"
+    
+        if {[dict get $seqDiagConfig -showstates]} {
+            set initialTransitions [pipe {
+                relation join $traces [relvar set TransitionTrace] |
+                relation summarizeby ~ Target s TraceId int {rmin($s, "TraceId")} |
+                relation join ~ [relvar set TransitionTrace]
+            }] ;                                                                      # <1>
+            
+            set initialStatePrefix {} ;
+            relation foreach trans $initialTransitions {
+                relation assign $trans
+                if {$Target ni $insts} {
+                    continue
+                }
+                if {$Current ne "@"} {
+                    lappend uml "$initialStatePrefix rnote over \"$Target\" : $Current" ; # <2>
+                    set initialStatePrefix & ;                                         # <3>
+                }
             }
         }
     
@@ -480,13 +524,31 @@ namespace eval ::mecate {
                 set Source $extlabel
             }
     
+            if {!($Source in $insts && $Target in $insts)} {
+                continue
+            }
+    
             if {[relation isnotempty $Transition]} {
+                relation assign $Transition
                 lappend uml "\"$Source\" --> \"$Target\" : $Event"
+                if {[dict get $seqDiagConfig -showstates]} {
+                    switch -exact -- $New {
+                        CH {
+                            lappend uml "hnote over \"$Target\" #red : Can't Happen!"
+                        }
+                        IG {
+                            lappend uml "hnote over \"$Target\" #yellow : Ignored"
+                        }
+                        default {
+                            lappend uml "rnote over \"$Target\" : $New"
+                        }
+                    }
+                }
             } elseif {[relation isnotempty $Creation]} {
                 lappend uml "create \"$Target\""
                 lappend uml "\"$Source\" -> \"$Target\" : $Event <<create>>"
             } elseif {[relation isnotempty $Polymorphic]} {
-                relation assign Polymorphic
+                relation assign $Polymorphic
                 lappend uml "\"$Source\" --> \"$Target\" :\
                         $Event <<poly \[$Relationship\]>>"
             }
@@ -495,6 +557,22 @@ namespace eval ::mecate {
         lappend uml "@enduml"
     
         return [join $uml "\n"]
+    }
+    method seqDiagConfig {args} {
+        if {[llength $args] % 2 != 0} {
+            my Throw "options must be given as name / value pairs, got \"$args\""
+        }
+        my variable seqDiagConfig
+    
+        foreach {optname optvalue} $args {
+            if {[dict exists $seqDiagConfig $optname]} {
+                dict set seqDiagConfig $optname $optvalue
+            } else {
+                my Throw "unknown sequence diagram option, \"$optname\""
+            }
+        }
+    
+        return $seqDiagConfig
     }
     method seqDiagToChan {channel {begin 1} {finish end}} {
         chan puts $channel [my seqDiag $begin $finish]
@@ -524,7 +602,7 @@ namespace eval ::mecate {
                 if {[my MatchTrace $actual $expect]} {
                     return $actual
                 } else {
-                    log::notice "discarding trace, \"$actual\":\
+                    log::debug "discarding trace, \"$actual\":\
                             failed to match, \"$expect\""
                 }
             }
@@ -604,7 +682,7 @@ namespace eval ::mecate {
                 if {[my MatchTrace $actual $expect]} {
                     return $actual
                 } else {
-                    log::notice "discarding trace, \"$actual\":\
+                    log::debug "discarding trace, \"$actual\":\
                             failed to match, \"$expect\""
                 }
             }
@@ -747,7 +825,7 @@ namespace eval ::mecate {
                     ]
                 }
                 polymorphic {
-                    relvar insert PolymorphiceTrace [list\
+                    relvar insert PolymorphicTrace [list\
                         TraceId         $traceId\
                         Relationship    [dict get $respValue relationship]\
                         NewEvent        [dict get $respValue newevent]\
@@ -860,6 +938,44 @@ namespace eval ::mecate {
     }
     method Throw {message} {
         tailcall uplevel 1 [list throw [list {*}[self caller] $message] $message]
+    }
+}
+proc ::mecate::eventTraceFormat {trace} {
+    dict with trace {
+        switch -exact -- $type {
+            transition {
+                return [format\
+                    "%s: Transition: %s - %s -> %s: %s ==> %s"\
+                    $time $source $event $target $currstate $newstate\
+                ]
+            }
+            polymorphic {
+                return [format\
+                    "%s: Polymorphic: %s - %s -> %s: %s - %s -> %s"\
+                    $time $source $event $target $relationship $newevent\
+                    $subclass\
+                ]
+            }
+            creation {
+                return [format\
+                    "%s: Creation: %s - %s -> %s"\
+                    $time $source $event $target\
+                ]
+            }
+            default {
+                my Throw "unknown trace type, \"$type\""
+            }
+        }
+    }
+}
+proc ::mecate::instrTraceFormat {trace} {
+    dict with trace {
+        return [format "%s: Instr: %s" $time $message]
+    }
+}
+proc ::mecate::fatalTraceFormat {trace} {
+    dict with trace {
+        return [format "%s: Fatal: %s" $time $message]
     }
 }
 
