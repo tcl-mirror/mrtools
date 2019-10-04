@@ -64,7 +64,7 @@ namespace eval ::mecate {
             -appenderArgs {-conversionPattern {\[%c\] \[%p\] '%m'}}
     ::logger::import -all -force -namespace log mecate
 
-    variable version 1.2
+    variable version 1.2.1
 }
 
 ::oo::class create ::mecate::rein {
@@ -453,8 +453,6 @@ namespace eval ::mecate {
             set ptype [expr {$inst eq $extlabel ? "boundary" : "participant"}]
             lappend uml "$ptype \"$inst\""
         }
-    
-        puts "insts = [list $insts]"
     
         if {[dict get $seqDiagConfig -showstates]} {
             set initialTransitions [pipe {

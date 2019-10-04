@@ -2,7 +2,7 @@
 # -- Tcl Module
 
 # @@ Meta Begin
-# Package mecate 1.2
+# Package mecate 1.2.1
 # Meta description Mecate is a package that provides a set of command to
 # Meta description interact with bosal generated test harnesses.
 # Meta platform    tcl
@@ -29,7 +29,7 @@ package require struct::queue
 
 # ACTIVESTATE TEAPOT-PKG BEGIN DECLARE
 
-package provide mecate 1.2
+package provide mecate 1.2.1
 
 # ACTIVESTATE TEAPOT-PKG END DECLARE
 # ACTIVESTATE TEAPOT-PKG END TM
@@ -99,7 +99,7 @@ namespace eval ::mecate {
             -appenderArgs {-conversionPattern {\[%c\] \[%p\] '%m'}}
     ::logger::import -all -force -namespace log mecate
 
-    variable version 1.2
+    variable version 1.2.1
 }
 
 ::oo::class create ::mecate::rein {
@@ -488,8 +488,6 @@ namespace eval ::mecate {
             set ptype [expr {$inst eq $extlabel ? "boundary" : "participant"}]
             lappend uml "$ptype \"$inst\""
         }
-    
-        puts "insts = [list $insts]"
     
         if {[dict get $seqDiagConfig -showstates]} {
             set initialTransitions [pipe {
