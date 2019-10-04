@@ -9,7 +9,7 @@
 #*--
 #
 
-VERSION = 1.2
+VERSION = 1.2.1
 
 DOCDIR	= ../doc
 CODEDIR	= ../code/tcl
