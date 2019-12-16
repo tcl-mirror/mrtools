@@ -6719,6 +6719,7 @@ in order to have consistent symbol names in the generated code.
 ----
 <<generation support data>>=
 variable symcounter 0
+variable labelcounter 0
 ----
 
 Looking up a symbol returns a dictionary of the symbol attributes.
@@ -6845,6 +6846,11 @@ proc CreateTempSymbol {args} {
     set name [CreateTempSymbolName]
     InsertSymbol Name $name {*}$args
     return $name
+}
+
+proc CreateLabelName {} {
+    variable labelcounter
+    return l__L[incr labelcounter]
 }
 ----
 
@@ -7120,6 +7126,7 @@ proc ExpandActivity {name body parameters} {
     } finally {
         relvar set Symbol [relation emptyof [relvar set Symbol]]
         variable symcounter 0
+        variable labelcounter 0
     }
 }
 ----
@@ -9154,6 +9161,7 @@ proc InstanceFindRelatedWhere {startref instref where args} {
     set startlevel [GetBlock]
     set where [string trim $where]
     set endref [CreateTempSymbolName]
+    set endlabel [CreateLabelName]
 
     set chaincode [TraverseRelChain $startref $endref $args]
     set endsym [LookUpSymbol $endref]
@@ -9164,7 +9172,7 @@ proc InstanceFindRelatedWhere {startref instref where args} {
     ]]
     PushBlock
 
-    append chaincode [IndentToBlock "break ;\n"]
+    append chaincode [IndentToBlock "goto $endlabel ;\n"] ; # <1>
     PopBlock
 
     append chaincode [IndentToBlock "\} else \{\n"]
@@ -9177,6 +9185,7 @@ proc InstanceFindRelatedWhere {startref instref where args} {
         PopBlock
         append chaincode [IndentToBlock "\}\n"]
     }
+    append chaincode [IndentToBlock "${endlabel}: ;\n"] ;   # <2>
 
     set result [IndentToBlock [string cat\
         [linecomment "instance $startref findRelatedWhere\
@@ -9188,6 +9197,12 @@ proc InstanceFindRelatedWhere {startref instref where args} {
     return [append result $chaincode]
 }
 ----
+<1> We use a naked `goto` here because we may be many levels deep
+in a loop to accomplish the relationships chain traversal.
+Alternatively, we might be traversing a singular relationships.
+The `goto` works for all the cases.
+<2> The semi-colon is necessary because a `goto` must label
+a statement.
 
 ifdef::showtests[]
 [source,tcl]
@@ -9249,12 +9264,192 @@ test codegen-63.0 {
                 t__T1 = t__T4 ;
                 zref = t__T1 ;
                 if (zref->pressure == 42) {
-                    break ;
+                    goto l__L1 ;
                 } else {
                     zref = NULL ;
                 }
             }
         }
+        l__L1: ;
+    }
+} -result {1}
+----
+endif::showtests[]
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-71.0 {
+    find related where for a super to sub class traversal
+} -setup {
+    validateutils genMiccaFile codegen71 {
+        domain codegen71 {
+            class S {
+                attribute size int -default 10
+            }
+            class A {
+                attribute height int -default 5
+            }
+            class B {
+                attribute width int -default 5
+            }
+            generalization R42 -union S A B
+            domainop void findBs {} {
+                <% S findByName s1 sref %>
+                <% instance sref findRelatedWhere bref {bref->width == 5}\
+                        {~R42 B} %>
+            }
+        }
+        population codegen71 {
+            class S {
+                instance s1
+            }
+            class B {
+                instance b1 R42 s1
+            }
+        }
+    }
+} -cleanup {
+    micca clear
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen71.c
+    validateutils matchLines codegen71.c {
+        struct B *bref ;
+        bref = NULL ;
+        struct B *t__T2 = &sref->R42.B ; // ~R42 B
+        if (t__T2->base__INST.classDesc == &codegen71__CLASSES[2]) {
+            struct B *t__T1 ;
+            t__T1 = t__T2 ;
+            bref = t__T1 ;
+            if (bref->width == 5) {
+                goto l__L1 ;
+            } else {
+                bref = NULL ;
+            }
+        }
+        l__L1: ;
+    }
+} -result {1}
+----
+endif::showtests[]
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-72.0 {
+    find related where for simple singular association
+} -setup {
+    validateutils genMiccaFile codegen72 {
+        domain codegen72 {
+            class A {
+                attribute height int -default 5
+            }
+            class B {
+                attribute width int -default 5
+            }
+            association R12 A 1--1 B
+            domainop void findBs {} {
+                <% A findByName a1 aref %>
+                <% instance aref findRelatedWhere bref {bref->width == 5} R12 %>
+            }
+        }
+        population codegen72 {
+            class A {
+                instance a1 R12 b1
+            }
+            class B {
+                instance b1
+            }
+        }
+    }
+} -cleanup {
+    micca clear
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen72.c
+    validateutils matchLines codegen72.c {
+        struct B *bref ;
+        bref = NULL ;
+        struct B *t__T2 = aref->R12 ; // R12
+        struct B *t__T1 ;
+        t__T1 = t__T2 ;
+        bref = t__T1 ;
+        if (bref->width == 5) {
+            goto l__L1 ;
+        } else {
+            bref = NULL ;
+        }
+        l__L1: ;
+    }
+} -result {1}
+----
+endif::showtests[]
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-73.0 {
+    find related where for multiple and singular chain
+} -setup {
+    validateutils genMiccaFile codegen73 {
+        domain codegen73 {
+            class A {
+                attribute height int -default 5
+            }
+            class B {
+                attribute width int -default 7
+            }
+            class C {
+                attribute area int -default 10
+            }
+            association R12 A 1..*--1 B
+            association R13 B 1..*--1 C
+            domainop void findBs {} {
+                <% C findByName c1 cref %>
+                <% instance cref findRelatedWhere aref {aref->height == 5} ~R13 ~R12 %>
+            }
+        }
+        population codegen73 {
+            class A {
+                instance a1 R12 b1
+            }
+            class B {
+                instance b1 R13 c1
+            }
+            class C {
+                instance c1
+            }
+        }
+    }
+} -cleanup {
+    micca clear
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen73.c
+    validateutils matchLines codegen73.c {
+        struct A *aref ;
+        aref = NULL ;
+        for (MRT_LinkRef *t__T2 = mrtLinkRefBegin(&cref->R13__BACK) ; t__T2 != mrtLinkRefEnd(&cref->R13__BACK) ;) {
+            struct B *t__T3 = (struct B *)((uintptr_t)t__T2 - offsetof(struct B, R13__BLINKS)) ;
+            t__T2 = t__T2->next ;
+            for (MRT_LinkRef *t__T4 = mrtLinkRefBegin(&t__T3->R12__BACK) ; t__T4 != mrtLinkRefEnd(&t__T3->R12__BACK) ;) {
+                struct A *t__T5 = (struct A *)((uintptr_t)t__T4 - offsetof(struct A, R12__BLINKS)) ;
+                t__T4 = t__T4->next ;
+                struct A *t__T1 ;
+                t__T1 = t__T5 ;
+                aref = t__T1 ;
+                if (aref->height == 5) {
+                    goto l__L1 ;
+                } else {
+                    aref = NULL ;
+                }
+            }
+        }
+        l__L1: ;
     }
 } -result {1}
 ----
@@ -9515,6 +9710,71 @@ test codegen-48.0 {
                 t__T2 = t__T2->next ;
                 struct Z *t__T4 = t__T3->R2__BACK ; // ~R2
                 if (t__T4 != NULL) {
+                    struct Z *t__T1 ;
+                    t__T1 = t__T4 ;
+                    mrt_InstSetAddInstance(&zset, t__T1) ;
+                }
+            }
+        }]}
+} -result {1}
+----
+endif::showtests[]
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-74.0 {
+    Generated code file to select related instances
+} -setup {
+    validateutils genMiccaFile codegen74 {
+        domain codegen74 {
+            class S {
+                attribute color int -default 20
+            }
+            class A {
+                attribute temp int -default 30
+            }
+            class B {
+            }
+            generalization R1 -union S A B
+            class Z {
+                attribute pressure int -default 40
+            }
+            association R2 Z 1..*--1 B
+            domainop void find {} {
+                <%S findByName s1 sref%>
+                <%instance sref selectRelated zset {~R1 B} ~R2%>
+            }
+        }
+        population codegen74 {
+            class S {
+                instance s1
+            }
+            class B {
+                instance b1 R1 s1
+            }
+            class Z {
+                instance z1 R2 b1 pressure 41
+                instance z2 R2 b1 pressure 42
+                instance z3 R2 b1 pressure 43
+            }
+        }
+    }
+} -cleanup {
+    micca clear
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen74.c
+    testConditions\
+        {[validateutils matchLines codegen74.c {
+            MRT_InstSet zset ;
+            mrt_InstSetInitialize(&zset, &codegen74__CLASSES[3]) ;
+            struct B *t__T2 = &sref->R1.B ; // ~R1 B
+            if (t__T2->base__INST.classDesc == &codegen74__CLASSES[2]) {
+                for (MRT_LinkRef *t__T3 = mrtLinkRefBegin(&t__T2->R2__BACK) ; t__T3 != mrtLinkRefEnd(&t__T2->R2__BACK) ;) {
+                    struct Z *t__T4 = (struct Z *)((uintptr_t)t__T3 - offsetof(struct Z, R2__BLINKS)) ;
+                    t__T3 = t__T3->next ;
                     struct Z *t__T1 ;
                     t__T1 = t__T4 ;
                     mrt_InstSetAddInstance(&zset, t__T1) ;
