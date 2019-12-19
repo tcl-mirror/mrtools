@@ -230,19 +230,19 @@ $(DOCDIR)/%.pdf : %.aweb
 
 $(IMAGEDIR)/platform-%.pdf : platform-%.uxf
 	umlet -action=convert -format=pdf\
-		-filename=$< -output=$(basename $@)
+		-filename=$< -output=$(basename $@)-cvt
+	pdftk $(basename $@)-cvt.pdf cat 1left output $@
+	$(RM) $(basename $@)-cvt.pdf
 	#umlet -action=convert -format=pdf\
-	#	-filename=$< -output=$(basename $@)-cvt
-	#pdftk $(basename $@)-cvt.pdf cat 1left output $@
-	#$(RM) $(basename $@)-cvt.pdf
+	#	-filename=$< -output=$(basename $@)
 
 $(IMAGEDIR)/%-translation.pdf : %-translation.uxf
 	umlet -action=convert -format=pdf\
-		-filename=$< -output=$(basename $@)
+		-filename=$< -output=$(basename $@)-cvt
+	pdftk $(basename $@)-cvt.pdf cat 1left output $@
+	$(RM) $(basename $@)-cvt.pdf
 	#umlet -action=convert -format=pdf\
-	#	-filename=$< -output=$(basename $@)-cvt
-	#pdftk $(basename $@)-cvt.pdf cat 1left output $@
-	#$(RM) $(basename $@)-cvt.pdf
+	#	-filename=$< -output=$(basename $@)
 
 $(IMAGEDIR)/%.pdf : %.uxf
 	umlet -action=convert -format=pdf\
