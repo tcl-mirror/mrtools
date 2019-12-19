@@ -16,7 +16,7 @@ MODULEDIR = ../../modules
 IMAGEDIR = ./images
 CODEDIR	= ../code
 
-VERSION=1.1.6
+VERSION=1.1.7
 
 vpath %.pdf $(DOCDIR)
 vpath %.html $(DOCDIR)
@@ -223,7 +223,7 @@ $(DOCDIR)/%.pdf : %.aweb
 	a2x $(A2XOPTS) --doctype=book  --format=pdf\
 	    --destination-dir=$(DOCDIR)\
 	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) $<
-	$(RM) $(DOCDIR)/*__[0-9].pdf
+	$(RM) $(DOCDIR)/*__[0-9].*
 
 %.test : %.aweb
 	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $(TESTDIR)/$@ $<
@@ -233,12 +233,16 @@ $(IMAGEDIR)/platform-%.pdf : platform-%.uxf
 		-filename=$< -output=$(basename $@)-cvt
 	pdftk $(basename $@)-cvt.pdf cat 1left output $@
 	$(RM) $(basename $@)-cvt.pdf
+	#umlet -action=convert -format=pdf\
+	#	-filename=$< -output=$(basename $@)
 
 $(IMAGEDIR)/%-translation.pdf : %-translation.uxf
 	umlet -action=convert -format=pdf\
 		-filename=$< -output=$(basename $@)-cvt
 	pdftk $(basename $@)-cvt.pdf cat 1left output $@
 	$(RM) $(basename $@)-cvt.pdf
+	#umlet -action=convert -format=pdf\
+	#	-filename=$< -output=$(basename $@)
 
 $(IMAGEDIR)/%.pdf : %.uxf
 	umlet -action=convert -format=pdf\
