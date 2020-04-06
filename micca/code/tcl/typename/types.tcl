@@ -1,6 +1,7 @@
 set types {
     {int (*)()}
     {int (*)(void)}
+    {int (*)(void *)}
     {char (*)(int, int)}
     {char *const}
     {char *const*}
