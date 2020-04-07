@@ -9790,7 +9790,7 @@ rosea configure {
 rosea generate micca
 
 namespace eval ::micca {
-    variable version 1.1.7
+    variable version 1.1.8
 
     set logger [::logger::init micca]
     set appenderType [expr {[dict exist [fconfigure stdout] -mode] ?\
@@ -12575,7 +12575,7 @@ namespace eval ::micca {
                 variable DomainName
                 CheckDuplicate TypeAlias typealias Domain $DomainName TypeName $aliasname
                 TypeAlias create Domain $DomainName TypeName $aliasname\
-                    TypeDefinition $typename
+                    TypeDefinition [string trim $typename]
             
                 return
             }
@@ -16082,6 +16082,7 @@ namespace eval ::micca {
                 set classDesc [GetClassDescriptor $domain $relName]
                 set iter [CreateTempSymbol Ctype {MRT_InstIterator}\
                         Type InstanceIterator Class $relName]
+                set asgnref [CreateTempSymbolName]
                 set result [IndentToBlock [string cat\
                     [linecomment "$relName findByIdInstance $idinst $instref"]\
                     [CreateInstRefSymbol $relName $instref]\
@@ -16093,19 +16094,20 @@ namespace eval ::micca {
                 ]]
                 PushBlock
                 append result [IndentToBlock [string cat\
-                    "$instref = mrt_InstIteratorGet(&$iter) ;\n"\
-                    "if ($instref->idinstance == $idinst) \{\n"\
+                    [CreateInstRefSymbol $relName $asgnref]\
+                    "$asgnref = mrt_InstIteratorGet(&$iter) ;\n"\
+                    "if ($asgnref->idinstance == $idinst) \{\n"\
                 ]]
             
                 PushBlock
-                append result [IndentToBlock "break ;\n"]
+                append result [IndentToBlock [string cat\
+                    "$instref = $asgnref ;\n"\
+                    "break ;\n"\
+                ]]
                 PopBlock
                 append result [IndentToBlock "\}\n"]
                 PopBlock
-                append result [IndentToBlock [string cat\
-                    "\}\n"\
-                    "$instref = mrt_InstIteratorMore(&$iter) ? $instref : NULL ;\n"\
-                ]]
+                append result [IndentToBlock "\}\n"]
             
                 return $result
             }
