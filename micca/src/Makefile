@@ -16,7 +16,7 @@ MODULEDIR = ../../modules
 IMAGEDIR = ./images
 CODEDIR	= ../code
 
-VERSION=1.1.7
+VERSION=1.1.8
 
 vpath %.pdf $(DOCDIR)
 vpath %.html $(DOCDIR)
