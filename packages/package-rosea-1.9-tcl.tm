@@ -2,7 +2,7 @@
 # -- Tcl Module
 
 # @@ Meta Begin
-# Package rosea 1.8
+# Package rosea 1.9
 # Meta description Rosea is a data and execution architecture for
 # Meta description translating XUML models using Tcl as the implementation
 # Meta description language.
@@ -30,7 +30,7 @@ package require lambda
 
 # ACTIVESTATE TEAPOT-PKG BEGIN DECLARE
 
-package provide rosea 1.8
+package provide rosea 1.9
 
 # ACTIVESTATE TEAPOT-PKG END DECLARE
 # ACTIVESTATE TEAPOT-PKG END TM
@@ -113,7 +113,7 @@ namespace eval ::rosea {
     
     namespace ensemble create
 
-    variable version 1.8
+    variable version 1.9
 
     logger::initNamespace [namespace current]
 
@@ -2573,7 +2573,7 @@ namespace eval ::rosea {
                 }
                 dict set eventInfo dst $dstref ; # <2>
                 ::rosea::Trace::TraceCreation [dict get $eventInfo src]\
-                    [dict get $eventInfo event] $dstref
+                    [dict get $eventInfo event] $dstref [dict get $eventInfo params]
             }
             set dstref [dict get $eventInfo dst]
             lassign $dstref relvar ref
@@ -2727,10 +2727,13 @@ namespace eval ::rosea {
                         set related [relation semijoin $inst\
                             [relvar set ${domain}::$DstClass] -using $Attrs]
                         if {[relation isnotempty $related]} {
-                            set dstreference [ToRef ${domain}::$DstClass $related]
-                            ::rosea::Trace::TracePolymorphic $srcref\
-                                $event $dstreference ${domain}::SrcClass $Name
-                            {*}$frwdcmd $srcref $dstreference $event $arglist ; # <1>
+                            set dstreference [ToRef ${domain}::${DstClass} $related]
+                            set target [ToRef $dstrelvar $inst]
+                            ::rosea::Trace::TracePolymorphic $srcref $event $target $dstreference $Name\
+                                    $arglist
+                            if {![MapPolymorphicEvent $frwdcmd $srcref $dstreference $event $arglist]} {
+                                {*}$frwdcmd $srcref $dstreference $event $arglist ; # <1>
+                            }
                             break
                         }
                     }
@@ -5082,6 +5085,7 @@ namespace eval ::rosea {
             Source      list
             Event       string
             Target      list
+            Params      list
         } Trace_Id
         
         relvar create Creation {
@@ -5090,7 +5094,7 @@ namespace eval ::rosea {
         
         relvar create Polymorphic {
             Trace_Id    int
-            SuperClass  string
+            SubInst     string
             Linkage     string
         } Trace_Id
         
@@ -5098,7 +5102,6 @@ namespace eval ::rosea {
             Trace_Id    int
             CurrState   string
             NewState    string
-            Params      list
         } Trace_Id
         
         relvar partition R1 Trace Trace_Id\
@@ -5132,11 +5135,11 @@ namespace eval ::rosea {
             variable targetCmpFunc
             return [relation restrictwith $Trace {[{*}$targetCmpFunc $targets $Target]}]
         }
-        proc TraceCreation {source event target} {
+        proc TraceCreation {source event target params} {
             variable traceState
             if {$traceState} {
                 relvar eval {
-                    set trace [NewTrace $source $event $target]
+                    set trace [NewTrace $source $event $target $params]
                     relvar insert Creation [list\
                         Trace_Id    [relation extract $trace Trace_Id]\
                     ]
@@ -5144,14 +5147,14 @@ namespace eval ::rosea {
                 LogTrace $trace
             }
         }
-        proc TracePolymorphic {source event target super link} {
+        proc TracePolymorphic {source event target sub link params} {
             variable traceState
             if {$traceState} {
                 relvar eval {
-                    set trace [NewTrace $source $event $target]
+                    set trace [NewTrace $source $event $target $params]
                     relvar insert Polymorphic [list\
                         Trace_Id    [relation extract $trace Trace_Id]\
-                        SuperClass  $super\
+                        SubInst     $sub\
                         Linkage     $link\
                     ]
                 }
@@ -5162,18 +5165,17 @@ namespace eval ::rosea {
             variable traceState
             if {$traceState} {
                 relvar eval {
-                    set trace [NewTrace $source $event $target]
+                    set trace [NewTrace $source $event $target $params]
                     relvar insert Transition [list\
                         Trace_Id    [relation extract $trace Trace_Id]\
                         CurrState   $curr\
                         NewState    $new\
-                        Params      $params\
                     ]
                 }
                 LogTrace $trace
             }
         }
-        proc NewTrace {src event target} {
+        proc NewTrace {src event target params} {
             variable traceNumber
             return [relvar insert Trace [list\
                 Trace_Id    [incr traceNumber]\
@@ -5181,6 +5183,7 @@ namespace eval ::rosea {
                 Source      $src\
                 Event       $event\
                 Target      $target\
+                Params      $params\
             ]]
         }
         proc LogTrace {trace} {
@@ -5207,6 +5210,7 @@ namespace eval ::rosea {
                     source  $Source\
                     event   $Event\
                     target  $Target\
+                    params  $Params\
                     class   [lindex $Target 0]\
                 ] ; # <3>
                 if {[relation isnotempty $Transition]} { # <4>
@@ -5214,11 +5218,10 @@ namespace eval ::rosea {
                     dict set labeled type transition
                     dict set labeled current $CurrState
                     dict set labeled new $NewState
-                    dict set labeled params $Params
                 } elseif {[relation isnotempty $Polymorphic]} {
                     relation assign $Polymorphic
                     dict set labeled type polymorphic
-                    dict set labeled super $SuperClass
+                    dict set labeled sub $SubInst
                     dict set labeled link $Linkage
                 } elseif {[relation isnotempty $Creation]} {
                     dict set labeled type creation
@@ -5244,23 +5247,21 @@ namespace eval ::rosea {
                     transition {
                         append result\
                             "Transition: "\
-                            "[FormatInstRef $source] - $event"\
-                            [expr {[llength $params] != 0 ?\
-                                "\([join $params {, }]\)" : {}}]\
-                            " -> [FormatInstRef $target] ==> "\
-                            "$current -> $new"
+                            [FormatTransition $source $event $params $target]\
+                            " ==> $current -> $new"
                     }
                     polymorphic {
                         append result\
                             "Polymorphic : "\
-                            "[FormatInstRef $source] - $event -> $super ==> "\
-                            "$link -> [FormatInstRef $target]"
+                            [FormatTransition $source $event $params $target]\
+                            " ==> $link -> [FormatInstRef $sub]"
                     }
                     creation {
                         append result\
                             "Creation: "\
-                            "[FormatInstRef $source] - $event -> $class ==>\
-                                [FormatInstRef $target]"
+                            "[FormatInstRef $source] - "\
+                            "[FormatEvent $event $params] -> $class\
+                            " ==> [FormatInstRef $target]"
                     }
                     default {
                         DeclError BAD_TRACETYPE $type
@@ -5268,6 +5269,16 @@ namespace eval ::rosea {
                 }
             }
             return $result
+        }
+        proc FormatTransition {source event params target} {
+            return "[FormatInstRef $source] - [FormatEvent $event $params] ->\
+                [FormatInstRef $target]"
+        }
+        proc FormatEvent {event params} {
+            return [string cat\
+                $event\
+                [expr {[llength $params] != 0 ? "\([join $params {, }]\)" : {}}]\
+            ]
         }
         proc FormatInstRef {instref} {
             lassign $instref relvar inst
@@ -5313,15 +5324,12 @@ namespace eval ::rosea {
                     set Source [namespace tail [lindex $Source 0]]
                 }
                 set Target [namespace tail [lindex $Target 0]]
-                if {[relation isnotempty $Transition]} {
-                    relation assign $Transition Params
-                    set evtlabel $Event[expr {[llength $Params] != 0 ?\
-                        "\([join $Params {, }]\)" : {}}]
-                } elseif {[relation isnotempty $Polymorphic]} {
+                set evtlabel [FormatEvent $Event $Params]
+                if {[relation isnotempty $Polymorphic]} {
                     relation assign $Transition Linkage
-                    set evtlabel "$Event <<Polymorphic $Linkage>>"
+                    append evtlabel " <<Polymorphic $Linkage>>"
                 } elseif {[relation isnotempty $Creation]} {
-                    set evtlabel "$Event <<Creation>>"
+                    append evtlabel " <<Creation>>"
                 }
                 append result "    $Source ->> $Target \[label=\"$evtlabel\"\];\n"
             }

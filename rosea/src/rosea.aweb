@@ -6900,7 +6900,7 @@ if {[dict get $eventInfo type] eq "creation"} {
     }
     dict set eventInfo dst $dstref ; # <2>
     ::rosea::Trace::TraceCreation [dict get $eventInfo src]\
-        [dict get $eventInfo event] $dstref
+        [dict get $eventInfo event] $dstref [dict get $eventInfo params]
 }
 ----
 <1> Here is where the new instance is created in the pseudo-initial, `@`,
@@ -7810,10 +7810,13 @@ superclass instance because the partition constraint guarantees that.
 set related [relation semijoin $inst\
     [relvar set ${domain}::$DstClass] -using $Attrs]
 if {[relation isnotempty $related]} {
-    set dstreference [ToRef ${domain}::$DstClass $related]
-    ::rosea::Trace::TracePolymorphic $srcref\
-        $event $dstreference ${domain}::SrcClass $Name
-    {*}$frwdcmd $srcref $dstreference $event $arglist ; # <1>
+    set dstreference [ToRef ${domain}::${DstClass} $related]
+    set target [ToRef $dstrelvar $inst]
+    ::rosea::Trace::TracePolymorphic $srcref $event $target $dstreference $Name\
+            $arglist
+    if {![MapPolymorphicEvent $frwdcmd $srcref $dstreference $event $arglist]} {
+        {*}$frwdcmd $srcref $dstreference $event $arglist ; # <1>
+    }
     break
 }
 ----
@@ -20062,6 +20065,7 @@ relvar create Trace {
     Source      list
     Event       string
     Target      list
+    Params      list
 } Trace_Id
 
 relvar create Creation {
@@ -20070,7 +20074,7 @@ relvar create Creation {
 
 relvar create Polymorphic {
     Trace_Id    int
-    SuperClass  string
+    SubInst     string
     Linkage     string
 } Trace_Id
 
@@ -20078,7 +20082,6 @@ relvar create Transition {
     Trace_Id    int
     CurrState   string
     NewState    string
-    Params      list
 } Trace_Id
 
 relvar partition R1 Trace Trace_Id\
@@ -20515,11 +20518,11 @@ and logging the trace instance.
 [source,tcl]
 ----
 <<trace commands>>=
-proc TraceCreation {source event target} {
+proc TraceCreation {source event target params} {
     variable traceState
     if {$traceState} {
         relvar eval {
-            set trace [NewTrace $source $event $target]
+            set trace [NewTrace $source $event $target $params]
             relvar insert Creation [list\
                 Trace_Id    [relation extract $trace Trace_Id]\
             ]
@@ -20533,14 +20536,14 @@ proc TraceCreation {source event target} {
 [source,tcl]
 ----
 <<trace commands>>=
-proc TracePolymorphic {source event target super link} {
+proc TracePolymorphic {source event target sub link params} {
     variable traceState
     if {$traceState} {
         relvar eval {
-            set trace [NewTrace $source $event $target]
+            set trace [NewTrace $source $event $target $params]
             relvar insert Polymorphic [list\
                 Trace_Id    [relation extract $trace Trace_Id]\
-                SuperClass  $super\
+                SubInst     $sub\
                 Linkage     $link\
             ]
         }
@@ -20557,12 +20560,11 @@ proc TraceTransition {source event target curr new params} {
     variable traceState
     if {$traceState} {
         relvar eval {
-            set trace [NewTrace $source $event $target]
+            set trace [NewTrace $source $event $target $params]
             relvar insert Transition [list\
                 Trace_Id    [relation extract $trace Trace_Id]\
                 CurrState   $curr\
                 NewState    $new\
-                Params      $params\
             ]
         }
         LogTrace $trace
@@ -20577,7 +20579,7 @@ factored to a separate procedure.
 [source,tcl]
 ----
 <<trace commands>>=
-proc NewTrace {src event target} {
+proc NewTrace {src event target params} {
     variable traceNumber
     return [relvar insert Trace [list\
         Trace_Id    [incr traceNumber]\
@@ -20585,6 +20587,7 @@ proc NewTrace {src event target} {
         Source      $src\
         Event       $event\
         Target      $target\
+        Params      $params\
     ]]
 }
 ----
@@ -20911,6 +20914,7 @@ proc TracesToRecords {traces} {
             source  $Source\
             event   $Event\
             target  $Target\
+            params  $Params\
             class   [lindex $Target 0]\
         ] ; # <3>
         if {[relation isnotempty $Transition]} { # <4>
@@ -20918,11 +20922,10 @@ proc TracesToRecords {traces} {
             dict set labeled type transition
             dict set labeled current $CurrState
             dict set labeled new $NewState
-            dict set labeled params $Params
         } elseif {[relation isnotempty $Polymorphic]} {
             relation assign $Polymorphic
             dict set labeled type polymorphic
-            dict set labeled super $SuperClass
+            dict set labeled sub $SubInst
             dict set labeled link $Linkage
         } elseif {[relation isnotempty $Creation]} {
             dict set labeled type creation
@@ -21275,23 +21278,21 @@ proc FormatTraceRec {rec} {
             transition {
                 append result\
                     "Transition: "\
-                    "[FormatInstRef $source] - $event"\
-                    [expr {[llength $params] != 0 ?\
-                        "\([join $params {, }]\)" : {}}]\
-                    " -> [FormatInstRef $target] ==> "\
-                    "$current -> $new"
+                    [FormatTransition $source $event $params $target]\
+                    " ==> $current -> $new"
             }
             polymorphic {
                 append result\
                     "Polymorphic : "\
-                    "[FormatInstRef $source] - $event -> $super ==> "\
-                    "$link -> [FormatInstRef $target]"
+                    [FormatTransition $source $event $params $target]\
+                    " ==> $link -> [FormatInstRef $sub]"
             }
             creation {
                 append result\
                     "Creation: "\
-                    "[FormatInstRef $source] - $event -> $class ==>\
-                        [FormatInstRef $target]"
+                    "[FormatInstRef $source] - "\
+                    "[FormatEvent $event $params] -> $class\
+                    " ==> [FormatInstRef $target]"
             }
             default {
                 DeclError BAD_TRACETYPE $type
@@ -21299,6 +21300,28 @@ proc FormatTraceRec {rec} {
         }
     }
     return $result
+}
+----
+
+(((rosea,Trace,FormatTransition)))
+[source,tcl]
+----
+<<trace commands>>=
+proc FormatTransition {source event params target} {
+    return "[FormatInstRef $source] - [FormatEvent $event $params] ->\
+        [FormatInstRef $target]"
+}
+----
+
+(((rosea,Trace,FormatEvent)))
+[source,tcl]
+----
+<<trace commands>>=
+proc FormatEvent {event params} {
+    return [string cat\
+        $event\
+        [expr {[llength $params] != 0 ? "\([join $params {, }]\)" : {}}]\
+    ]
 }
 ----
 
@@ -21394,15 +21417,12 @@ proc DiagTraces {traces args} {
             set Source [namespace tail [lindex $Source 0]]
         }
         set Target [namespace tail [lindex $Target 0]]
-        if {[relation isnotempty $Transition]} {
-            relation assign $Transition Params
-            set evtlabel $Event[expr {[llength $Params] != 0 ?\
-                "\([join $Params {, }]\)" : {}}]
-        } elseif {[relation isnotempty $Polymorphic]} {
+        set evtlabel [FormatEvent $Event $Params]
+        if {[relation isnotempty $Polymorphic]} {
             relation assign $Transition Linkage
-            set evtlabel "$Event <<Polymorphic $Linkage>>"
+            append evtlabel " <<Polymorphic $Linkage>>"
         } elseif {[relation isnotempty $Creation]} {
-            set evtlabel "$Event <<Creation>>"
+            append evtlabel " <<Creation>>"
         }
         append result "    $Source ->> $Target \[label=\"$evtlabel\"\];\n"
     }
@@ -23045,7 +23065,7 @@ The figure below shows the trace information in sequence diagram form.
 This diagram was produced using +rosea diagram all+ to generate
 a file suitable for the +seqdiag+ program to render a graphic.
 
-image::wmctrl-seqdiag.pdf[title="Example Sequence Diagram"]
+image::wmctrl-seqdiag.png[title="Example Sequence Diagram"]
 
 The track labeled *EXTERNAL* shows events that originate outside of the
 domain.
@@ -23136,7 +23156,7 @@ namespace eval ::rosea {
     <<rosea exports>>
     namespace ensemble create
 
-    variable version 1.8
+    variable version 1.9
 
     logger::initNamespace [namespace current]
 
@@ -23160,7 +23180,7 @@ We also provide a root chunk to extract a package index file.
 [source,tcl]
 ----
 <<pkgIndex.tcl>>=
-package ifneeded rosea 1.8 [list source [file join $dir rosea.tcl]]
+package ifneeded rosea 1.9 [list source [file join $dir rosea.tcl]]
 ----
 
 === Unit Tests
@@ -23274,14 +23294,14 @@ rosea populate {
 [source,tcl]
 ----
 <<rosea.man>>=
-[manpage_begin rosea n 1.8]
+[manpage_begin rosea n 1.9]
 [comment {
 <<copyright info>>
 }]
 [moddesc "XUML Data and Execution Architecture"]
 [titledesc "Relation Oriented Software Execution Architecture"]
-[copyright "2014-2015 by G. Andrew Mangogna"]
-[require rosea [opt 1.8]]
+[copyright "2014-2020 by G. Andrew Mangogna"]
+[require rosea [opt 1.9]]
 [description]
 <<manual description>>
 [section "Package Commands"]
