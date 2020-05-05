@@ -12,6 +12,7 @@
 DOCDIR	= ../doc
 TESTDIR = ../tests
 PKGDIR	= ../../packages
+MODULEDIR = ../../modules
 IMAGEDIR = ./images
 
 vpath %.pdf $(DOCDIR)
@@ -19,10 +20,11 @@ vpath %.html $(DOCDIR)
 vpath %.test $(TESTDIR)
 vpath %.uxf $(IMAGEDIR)
 
-VERSION=1.8
+PROGNAME = rosea
+VERSION=1.9
 
 DOCSRC 	=\
-	rosea.aweb\
+	$(PROGNAME).aweb\
 	$(NULL)
 
 DIAGRAMS =\
@@ -59,7 +61,7 @@ IMAGES =\
 	$(NULL)
 
 SEQIMAGES=\
-	$(patsubst %.diag,$(IMAGEDIR)/%.pdf,$(SEQDIAG))\
+	$(patsubst %.diag,$(IMAGEDIR)/%.png,$(SEQDIAG))\
 	$(NULL)
 
 TCLSRC	=\
@@ -134,9 +136,9 @@ ASCIIDOC_OPTS =\
 	$(patsubst %,--attribute=%,$(ASCIIDOC_ATTRS))\
 	$(NULL)
 
-.PHONY : all doc code tests runtests example clean package
+.PHONY : all doc code tests runtests example clean package module
 
-all : doc code tests example manual package
+all : doc code tests example manual package module
 
 doc : $(PDF)
 
@@ -148,9 +150,16 @@ example : $(TCLSRC) runwm.tcl
 
 manual : $(MANDOC)
 
-package : $(PKGDIR)/package-rosea-$(VERSION)-tcl.tm
+package : $(PKGDIR)/package-$(PROGNAME)-$(VERSION)-tcl.tm
 
-$(PKGDIR)/package-rosea-$(VERSION)-tcl.tm : $(TCLSRC) teapot.txt
+module : $(MODULEDIR)/$(PROGNAME)-$(VERSION).tm
+
+$(MODULEDIR)/$(PROGNAME)-$(VERSION).tm : $(TCLSRC)
+	@mkdir -p $(MODULEDIR)
+	mkmodule $(PROGNAME) $(VERSION) -script $^
+	mv $(PROGNAME)-$(VERSION).tm $(MODULEDIR)
+
+$(PKGDIR)/package-$(PROGNAME)-$(VERSION)-tcl.tm : $(TCLSRC) teapot.txt
 	teapot-pkg generate --output $(PKGDIR) .
 
 runtests : tests
@@ -210,8 +219,8 @@ $(IMAGEDIR)/%.pdf : %.uxf
 	umlet -action=convert -format=pdf\
 		-filename=$< -output=$(basename $@)
 
-$(IMAGEDIR)/%.pdf : $(IMAGEDIR)/%.diag
-	seqdiag --antialias -T pdf -o $@ $<
+$(IMAGEDIR)/%.png : $(IMAGEDIR)/%.diag
+	seqdiag --antialias -T png -o $@ $<
 
 $(MANSRC) : $(DOCSRC)
 	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $@ $<
@@ -222,7 +231,7 @@ $(MANDOC) : $(MANSRC)
 builddoc :
 	a2x $(A2XOPTS) --doctype=book  --format=pdf\
 	    --destination-dir=$(DOCDIR)\
-	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) rosea.aweb
+	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) $(PROGNAME).aweb
 
 #
 # vim :set sw=8 ts=8 sts=8 noexpandtab:
