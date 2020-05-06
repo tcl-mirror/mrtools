@@ -77,7 +77,7 @@ namespace eval ::rosea {
     
     namespace ensemble create
 
-    variable version 1.9
+    variable version 1.9.1
 
     logger::initNamespace [namespace current]
 
@@ -2695,8 +2695,8 @@ namespace eval ::rosea {
                             set target [ToRef $dstrelvar $inst]
                             ::rosea::Trace::TracePolymorphic $srcref $event $target $dstreference $Name\
                                     $arglist
-                            if {![MapPolymorphicEvent $frwdcmd $srcref $dstreference $event $arglist]} {
-                                {*}$frwdcmd $srcref $dstreference $event $arglist ; # <1>
+                            if {![MapPolymorphicEvent $frwdcmd $target $dstreference $event $arglist]} {
+                                {*}$frwdcmd $target $dstreference $event $arglist ; # <1>
                             }
                             break
                         }
@@ -5240,16 +5240,16 @@ namespace eval ::rosea {
         }
         proc FormatEvent {event params} {
             return [string cat\
-                $event\
-                [expr {[llength $params] != 0 ? "\([join $params {, }]\)" : {}}]\
+                "$event"\
+                [expr {[llength $params] != 0 ? " \([join $params {, }]\)" : {}}]\
             ]
         }
         proc FormatInstRef {instref} {
             lassign $instref relvar inst
             if {$relvar eq {}} {
-                return {{}}
+                return {()}
             } else {
-                return "$relvar\{[tuple get [relation tuple $inst]]\}"
+                return "$relvar \([tuple get [relation tuple $inst]]\)"
             }
         }
         proc FormatTimestamp {time} {
@@ -5290,7 +5290,7 @@ namespace eval ::rosea {
                 set Target [namespace tail [lindex $Target 0]]
                 set evtlabel [FormatEvent $Event $Params]
                 if {[relation isnotempty $Polymorphic]} {
-                    relation assign $Transition Linkage
+                    relation assign $Polymorphic Linkage
                     append evtlabel " <<Polymorphic $Linkage>>"
                 } elseif {[relation isnotempty $Creation]} {
                     append evtlabel " <<Creation>>"
