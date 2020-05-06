@@ -21,7 +21,7 @@ vpath %.test $(TESTDIR)
 vpath %.uxf $(IMAGEDIR)
 
 PROGNAME = rosea
-VERSION=1.9
+VERSION=1.9.1
 
 DOCSRC 	=\
 	$(PROGNAME).aweb\
