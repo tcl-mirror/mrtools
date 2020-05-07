@@ -77,7 +77,7 @@ namespace eval ::rosea {
     
     namespace ensemble create
 
-    variable version 1.9.1
+    variable version 1.9.2
 
     logger::initNamespace [namespace current]
 
@@ -2695,8 +2695,8 @@ namespace eval ::rosea {
                             set target [ToRef $dstrelvar $inst]
                             ::rosea::Trace::TracePolymorphic $srcref $event $target $dstreference $Name\
                                     $arglist
-                            if {![MapPolymorphicEvent $frwdcmd $target $dstreference $event $arglist]} {
-                                {*}$frwdcmd $target $dstreference $event $arglist ; # <1>
+                            if {![MapPolymorphicEvent $frwdcmd $srcref $dstreference $event $arglist]} {
+                                {*}$frwdcmd $srcref $dstreference $event $arglist ; # <1>
                             }
                             break
                         }
