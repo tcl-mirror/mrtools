@@ -21,7 +21,7 @@ vpath %.test $(TESTDIR)
 vpath %.uxf $(IMAGEDIR)
 
 PROGNAME = rosea
-VERSION=1.9.2
+VERSION=1.10
 
 DOCSRC 	=\
 	$(PROGNAME).aweb\
@@ -163,7 +163,7 @@ $(PKGDIR)/package-$(PROGNAME)-$(VERSION)-tcl.tm : $(TCLSRC) teapot.txt
 	teapot-pkg generate --output $(PKGDIR) .
 
 runtests : tests
-	cd $(TESTDIR) ; tclsh $(TESTS) -verbose bet -level info
+	cd $(TESTDIR) ; tclsh $(TESTS) -verbose bet -level debug
 
 runexample : example
 	tclsh runwm.tcl | tee wmctrl-trace.txt
