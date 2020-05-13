@@ -77,7 +77,7 @@ namespace eval ::rosea {
     
     namespace ensemble create
 
-    variable version 1.10
+    variable version 1.10.1
 
     logger::initNamespace [namespace current]
 
@@ -874,6 +874,8 @@ namespace eval ::rosea {
                             ::rosea::RelCmds::signalMultiAssigner $rpath]
                         dict set ensemblemap create [list\
                             ::rosea::RelCmds::createMultiAssigner $rpath]
+                        dict set ensemblemap delete [list\
+                            ::rosea::RelCmds::deleteMultiAssigner $rpath]
                     }
                 }
                 namespace ensemble create -command $rpath -map $ensemblemap
