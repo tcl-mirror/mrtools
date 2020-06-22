@@ -77,7 +77,7 @@ namespace eval ::rosea {
     
     namespace ensemble create
 
-    variable version 1.10.1
+    variable version 1.10.2
 
     logger::initNamespace [namespace current]
 
@@ -1906,7 +1906,7 @@ namespace eval ::rosea {
             
             lassign $instref relvar insts
             if {[relation cardinality $insts] != 1} {
-                tailcall MUST_BE_SINGULAR $relvar [relation cardinality $insts]
+                tailcall DeclError MUST_BE_SINGULAR $relvar [relation cardinality $insts]
             }
             set idattrs [list]
             foreach identifier [relvar identifiers $relvar] {
@@ -1934,7 +1934,7 @@ namespace eval ::rosea {
             
             lassign $instref relvar insts
             if {[relation cardinality $insts] != 1} {
-                tailcall MUST_BE_SINGULAR $relvar [relation cardinality $insts]
+                tailcall DeclError MUST_BE_SINGULAR $relvar [relation cardinality $insts]
             }
             
             set body [lindex $args end]
@@ -2092,7 +2092,7 @@ namespace eval ::rosea {
                     $referringClass $referencedClass
             }
             if {[relation cardinality $toinst] != 1} {
-                tailcall MUST_BE_SINGULAR $torelvar [relation cardinality $toinst]
+                tailcall DeclError MUST_BE_SINGULAR $torelvar [relation cardinality $toinst]
             }
             set refedvalue [relation semijoin $toinst [relvar set $torelvar]]
             set tovalues [pipe {
@@ -3051,7 +3051,7 @@ namespace eval ::rosea {
                 RequiresStateModel  false
             } {
                 Name                findUnrelated
-                Command             ::rosea::InstCmds::findById
+                Command             ::rosea::InstCmds::findUnrelated
                 RequiresStateModel  false
             } {
                 Name                findRelatedWhere
@@ -3754,8 +3754,11 @@ namespace eval ::rosea {
             RefClass            TransitionPlace
             RefType             refnone
             Format              {in domain, \"$Domain\", the state model for,\
-                                \"$Model\", contains a transition for event,\
-                                \"$Event\", but $Event was a polymorphic event\
+                                \"$Model\", contains a transition from state,\
+                                \"$State\", caused by event, \"$Event\",\
+                                but either $State is not defined or\
+                                $Event is not defined or\
+                                $Event was a polymorphic event\
                                 consumed by a superclass of $Model}
         } {
             Relationship        R72
