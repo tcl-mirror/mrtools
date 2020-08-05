@@ -55,6 +55,8 @@ DOCPARTS =\
 DIAGRAMS =\
 	Sample_Set.pdf\
 	Conduit.pdf\
+	Conduit_span.pdf\
+	Conduit_dfs.pdf\
 	Discovered_Sensor.pdf\
 	$(NULL)
 

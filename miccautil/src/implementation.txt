@@ -51,13 +51,19 @@ specific model.
 
 `miccautil model new` _savefile_
 
-`savefile`::
+[horizontal]
+_objname_::
+    The name of the command to be created which represents the model.
+    The `new` version of the constructor creates a name automatically.
+_savefile_::
     The name of a file saved from a micca run.
     This file should be saved in TclRAL native serialization.
 
 The `create` and `new` methods create an instance of a `model` object.
 The _savefile_ argument is mandatory and is the name of a file
 produced by a run of `micca` with the `-save` option.
+The return value of the function is a fully qualified command that
+may be used with the methods given below.
 *****
 
 .Implementation
@@ -85,6 +91,9 @@ constructor {savefile} {
 
     my variable domain_name
     set domain_name [lindex $domains 0]
+
+    my variable recording_state
+    set recording_state off
 }
 ----
 
@@ -120,7 +129,8 @@ test constructor-2.0 {
 *****
 _modelobj_ domainName
 
-Returns the name of the domain represented by _modelobj_.
+The `domainName` method returns the name of the domain represented by
+_modelobj_.
 *****
 
 .Implementation
@@ -152,8 +162,8 @@ test domainName-1.0 {
 *****
 _modelobj_ classes
 
-Returns a list of the names of the classes defined in the domain represented
-by _modelobj_.
+The `classes` method returns a list of the names of the classes defined in the
+domain represented by _modelobj_.
 *****
 
 .Implementation
@@ -187,15 +197,16 @@ test classes-1.0 {
 *****
 _modelobj_ states _class_
 
-class::
-    The name of a class or assigner in the domain.
+[horizontal]
+_class_::
+    The name of a class or assigner in the domain represented by _modelobj_.
 
-Returns a list of state names for _class_.
+The `states` method returns a list of state names for _class_.
 If _class_ does not exist in the domain or if class does not have a state model,
 an empty list is returned.
 
 A state name of, `@`, indicates the pseudo-initial state
-from which creation events transition.
+out from which creation events transition.
 *****
 
 .Implementation
@@ -241,10 +252,11 @@ test states-1.1 {
 *****
 _modelobj_ events _class_
 
-class::
-    The name of a class or assigner in the domain.
+[horizontal]
+_class_::
+    The name of a class or assigner in the domain represented by _modelobj_.
 
-Returns a list of event names for _class_.
+The `events` method returns a list of event names for _class_.
 If _class_ does not exist in the domain or if class does not have a state model
 or any polymorphic events,
 an empty list is returned.
@@ -293,16 +305,17 @@ test events-1.1 {
 
 === State model transitions
 
-(((domain,method,transitions)))
+(((model,method,transitions)))
 
 *****
 _modelobj_ transitions _class_
 
-class::
-    The name of a class or assigner in the domain.
+[horizontal]
+_class_::
+    The name of a class or assigner in the domain represented by _modelobj_.
 
 The `transitions` method returns a relation value that contains
-a the values of all the state transitions for _class_.
+the values of all the state transitions for _class_.
 The heading of the returned relation value is:
 
 [width="75%",options="header",cols="6*^",grid="cols"]
@@ -343,11 +356,13 @@ where:
 [horizontal]
 *Name*:: is the name of the parameter.
 *Position*:: is the order of the parameter carried in _Event_.
-    _Position_ values start at zero and increase monotonically for each tuple
+    _Position_ values start at zero and sequentially increase for each tuple
     in _Params_.
 
 The cardinality of the returned relation is _states_ times _events_ where
-_states_ (including the pseudo-initial state if present)
+_states_
+(including the pseudo-initial state for a creation event,
+if present in the model)
 is the number of states in the model and _events_ is the
 number of events.
 The cardinality of the returned relation is zero if the class has no
@@ -362,94 +377,24 @@ _states_ by _events_ transition matrix with _NewState_ as the cell value.
 ----
 <<model class definition>>=
 method transitions {class_name} {
-    my variable domain_name
-
-    set sm [relvar restrictone StateModel Domain $domain_name Model $class_name]
-    if {[relation isempty $sm]} {
-        return [relation create {
-            Domain string
-            Model string
-            State string
-            Event string
-            NewState string
-            Params {Relation {Name string Position int}}
-        }]
-    }
-
-    set tplaces [pipe {
-        relvar set TransitionPlace |
-        relation semijoin $sm ~
-    }]
-    # log::debug \n[relformat $tplaces tplaces]
-    
-    set statetrans [pipe {
-        relation join $tplaces [relvar set StateTransition] |
-        relation eliminate ~ ASigID |
-        relation join ~ [relvar set StatePlace]\
-            -using {Domain Domain Model Model NewState Name} |
-        relation eliminate ~ Number
-    }] ;                                                            # <1>
-    # log::debug \n[relformat $statetrans statetrans]
-    
-    set nontrans [pipe {
-        relation join $tplaces [relvar set NonStateTransition] |
-        relation extend ~ ntup\
-            NewState string {[tuple extract $ntup TransRule]} |
-        relation eliminate ~ TransRule
-    }] ;                                                            # <2>
-    # log::debug \n[relformat $nontrans nontrans]
-
-
-    set srcstates [pipe {
-        relation semijoin $sm [relvar set StatePlace] |
-        relation eliminate ~ Number |
-        relation rename ~ Name State
-    }]
-    # log::debug \n[relformat $srcstates srcstates]
-
-    set events [relation semijoin $sm [relvar set TransitioningEvent] ]
-    # log::debug \n[relformat $events events]
-    
-    set defrule [relation extract $sm DefaultTrans]
-    # log::debug "defrule = \"$defrule\""
-    
-    set deftrans [pipe {
-        relation join $srcstates $events |
-        relation minus ~ $tplaces |
-        relation extend ~ dtup NewState string {$defrule} |
-        relation update ~ ftup {[tuple extract $ftup State] eq "@"}\
-            {tuple update $ftup NewState CH}
-    }] ;                                                            # <3>
-    # log::debug \n[relformat $deftrans deftrans]
-
     set params [pipe {
         relvar set Parameter |
         relation eliminate ~ ASigID
     }]
-    set transmatrix [pipe {
-        relation union $statetrans $nontrans $deftrans |
-        relation join ~ [relvar set StatePlace]\
-                -using {Domain Domain Model Model State Name} |
-        relation eliminate ~ Number |
+
+    set transitions [pipe {
+        my GetTransitionCells |
+        relation restrictwith ~ {$Model eq $class_name} |
         relation join ~ [relvar set Event] |
         relation eliminate ~ Number |
         rvajoin ~ $params Params |
         relation eliminate ~ PSigID
     }]
-    log::debug \n[relformat $transmatrix transmatrix]
+    # log::debug \n[relformat $transitions transitions]
 
-    return $transmatrix
+    return $transitions
 }
 ----
-<1> These are the state transitions specified explicitly in the `micca` source
-that cause transitions to actual states.
-<2> These are the state transition specified explicitly in the `micca` source
-that do not cause transitions since they are either ignored or an error
-situation.
-<3> These are the unspecified transitions which receive the default
-transition.
-Also note, that the pseudo-initial state has a fixed default transition
-of `CH`.
 
 .Tests
 [source,tcl]
@@ -496,10 +441,246 @@ test transitions-2.1 {
 } -result {90}
 ----
 
-=== State model as graph
+[source,tcl]
+----
+<<model class definition>>=
+method GetTransitionCells {} {
+    set state_places [pipe {
+        relvar set StatePlace |
+        relation eliminate ~ Number |
+        relation rename ~ Name State
+    }]
+    set possible_trans [pipe {
+        relvar set TransitioningEvent |
+        relation join $state_places ~
+    }]
+    # log::debug \n[relformat $possible_trans possible_trans]
+
+    set trans [pipe {
+        relvar set StateTransition |
+        relation eliminate ~ ASigID
+    }]
+    set non_trans [pipe {
+        relvar set NonStateTransition |
+        relation rename ~ TransRule NewState
+    }]
+
+    set spec_trans [relation union $trans $non_trans]
+    # log::debug \n[relformat $spec_trans spec_trans]
+
+    set defrule [pipe {
+        relvar set StateModel |
+        relation project ~ Domain Model DefaultTrans |
+        relation rename ~ DefaultTrans NewState
+    }]
+    # log::debug \n[relformat $defrule defrule]
+
+    set non_spec_trans [pipe {
+        relation project $spec_trans Domain Model State Event |
+        relation minus $possible_trans ~ |
+        relation join ~ $defrule |
+        relation update ~ ftup {[tuple extract $ftup State] eq "@"}\
+            {tuple update $ftup NewState CH}
+    }]
+    # log::debug \n[relformat $non_spec_trans non_spec_trans]
+
+    set trans_records [relation union $spec_trans $non_spec_trans]
+    # log::debug \n[relformat $trans_records trans_records]
+
+    return $trans_records
+}
+----
+
+=== Recording event dispatch
+
+`Micca` generated domains can be wrapped in an automatically generated
+test harness by using the `bosal` program.
+When the resulting test harness is operated using the `mecate` package,
+event transitions can be captured.
+The methods in this section facilitate counting transitions
+and creating summaries of the state and transition coverage.
+
+The following methods create a transition recording session.
+The semantics are similar to files, _i.e._ you first start the recording,
+then call a method to record each state transition, and finally
+you can stop the recording.
+At any time after starting a recording,
+you may request the event dispatch information.
+
+==== Starting a transition recording session
+
+(((model,method,startTransitionRecording)))
+
+*****
+_modelobj_ startTransitionRecording
+
+The `startTransitionRecording` method initializes internal
+data structures in preparation for recording event transitions in
+the domain represented by _modelobj_.
+In particular,
+any previous event transition counts are reset back to zero.
+Attempting to start an already running session is silently ignored.
+The method returns the empty string.
+*****
+
+[source,tcl]
+----
+<<model class definition>>=
+method startTransitionRecording {} {
+    my variable recording_state
+    if {$recording_state eq "on"} {
+        return
+    }
+
+    if {![relvar exists __Event_Record__]} {
+        set trans [my GetEventRecord]
+        relvar create __Event_Record__ [relation heading $trans]\
+            {Domain Model State Event}
+        relvar set __Event_Record__ $trans
+    } else {
+        relvar update __Event_Record__ ertup true {
+            tuple update $ertup TransCount 0
+        }
+    }
+    set recording_state on
+
+    return
+}
+----
+
+==== Stopping a transition recording session
+
+(((model,method,stopTransitionRecording)))
+
+*****
+_modelobj_ stopTransitionRecording
+
+The `stopTransitionRecording` method closes an ongoing event
+transition recording session.
+The information gathered during the session is not modified.
+Attempting to stop an already stopped session is silently ignored.
+The method returns the empty string.
+*****
+
+[source,tcl]
+----
+<<model class definition>>=
+method stopTransitionRecording {} {
+    my variable recording_state
+    set recording_state off
+
+    return
+}
+----
+
+==== Recording an event transition
+
+(((model,method,recordEventTransition)))
+
+*****
+_modelobj_ recordEventTransition _class_ _currstate_ _event_
+
+[horizontal]
+_class_::
+    The name of a class or assigner in the domain represented by _modelobj_.
+_currstate_::
+    The name of the state in _class_ which is the source state in
+    a transition.
+_event_::
+    The name of an event in _class_ which caused a transition from _currstate_.
+
+The `recordEventTransition` method counts the transition which
+occurred in _class_ was in _currstate_ and received _event_.
+It is necessary to start the event transition recording session
+by invoking the `startTransitionRecording` method before invoking
+this method.
+The method returns a boolean value indicated if the update occurred,
+_i.e._ if the _currstate_ / _event_ is a valid transition in _class_.
+*****
+
+[source,tcl]
+----
+<<model class definition>>=
+method recordEventTransition {class_name currstate event} {
+    my variable recording_state
+    if {$recording_state eq "off"} {
+        error "event transition recording is stopped"
+    }
+
+    my variable domain_name
+    set updated [relvar updateone __Event_Record__ ertup\
+            [list Domain $domain_name Model $class_name State $currstate\
+            Event $event] {
+        tuple update $ertup TransCount\
+                [expr {[tuple extract $ertup TransCount] + 1}]
+    }]
+
+    return [relation isnotempty $updated]
+}
+----
+
+==== Event transition reporting
+
+[source,tcl]
+----
+<<model class definition>>=
+method reportEventTransitions {class_name} {
+    my variable domain_name
+
+    return [pipe {
+        relvar set __Event_Record__ |
+        relation restrictwith ~\
+                {$Domain eq $domain_name && $Model eq $class_name}
+    }]
+}
+----
+
+[source,tcl]
+----
+<<model class definition>>=
+method GetEventRecord {} {
+    return [pipe {
+        my GetTransitionCells |
+        relation extend ~ sptup TransCount int 0
+    }]
+}
+----
+
+[source,tcl]
+----
+<<method tests>>=
+test recordEventTransition-1.0 {
+    record event dispatch
+} -body {
+    sio startTransitionRecording
+    sio recordEventTransition Sample_Set IDLE Start
+    sio recordEventTransition Sample_Set RUNNING Point_ready
+    sio recordEventTransition Sample_Set RUNNING Point_ready
+    set trans [sio reportEventTransitions Sample_Set]
+    set trans_chan [open  Sample_Set.csv w]
+    try {
+        chan puts -nonewline $trans_chan [csv $trans]
+    } finally {
+        chan close $trans_chan
+    }
+} -result {}
+----
+
+[format="csv",cols="6*^",options="header"]
+|==============================================
+include::../test/Sample_Set.csv[]
+|==============================================
+
+=== State model as a graph
+
+(((model,method,stateModelGraph)))
 
 *****
 _modelobj_ stateModelGraph _class_
+
+[horizontal]
+_class_::
+    The name of a class or assigner in the domain represented by _modelobj_.
 
 The `stateModelGraph` method returns a _graph_ command from the `struct::graph`
 package in Tcllib that represents the state model for _class_ as a graph.
@@ -671,87 +852,20 @@ test stateModelGraph-2.1 {
 } -result {Connect}
 ----
 
-[source,tcl]
-----
-<<required packages>>=
-package require struct::tree
-package require lambda
-----
-
-[source,tcl]
-----
-<<method tests>>=
-proc classifyTransitions {graph} {
-    set nodes [$graph nodes]
-    foreach node $nodes {
-        $graph node set $node pre 0
-        $graph node set $node rpost 0
-    }
-    variable preorder 1
-    variable postorder [llength $nodes]
-    classifyNode $graph [$graph get initialstate]
-    return
-}
-
-proc classifyNode {graph node} {
-    variable preorder
-    $graph node set $node pre [set thisPre $preorder]
-    incr preorder
-    set arcList [$graph arcs -out $node]
-        
-    foreach arc $arcList {
-        set succ [$graph arc target $arc]
-        set succPre [$graph node get $succ pre]
-        if {$succPre == 0} {
-            $graph arc set $arc type tree
-            classifyNode $graph $succ
-        } elseif {[$graph node get $succ rpost] == 0} {
-            $graph arc set $arc type back
-        } elseif {$thisPre < $succPre} {
-            $graph arc set $arc type frwd
-        } else {
-            $graph arc set $arc type cross
-        }
-    }
-    variable postorder
-    $graph node set $node rpost $postorder
-    incr postorder -1
-
-    return
-}
-----
-
-[source,tcl]
-----
-<<method tests>>=
-test stateModelGraph-2.2 {
-    Check the state model graph for the Conduit class
-} -cleanup {
-    $conduit_graph destroy
-} -body {
-    set conduit_graph [aggrmgmt stateModelGraph Conduit]
-    classifyTransitions $conduit_graph
-
-    set dfsproc [lambda {action graph node} {
-        foreach outarc [$graph arcs -out $node] {
-            set target [$graph arc target $outarc]
-            puts "$node - [$graph arc get $outarc event] -> $target\
-                ==> [$graph arc get $outarc type]"
-        }
-    }]
-    $conduit_graph walk [$conduit_graph get initialstate]\
-        -order pre -type bfs -dir forward -command $dfsproc
-} -result {}
-----
-
 === State model with Tcldot
+
+(((model,method,stateModelDot)))
 
 *****
 _modelobj_ stateModelDot _class_
 
+[horizontal]
+_class_::
+    The name of a class or assigner in the domain represented by _modelobj_.
+
 The `stateModelDot` method returns a
 https://graphviz.org/pdf/tcldot.3tcl.pdf[`Tcldot`]
-command handle to the state model graph of _class_.
+command handle to the state model of _class_.
 The command handle can be used to render an image of
 the state model graph using the
 https://graphviz.org/doc/info/lang.html[`dot`]
@@ -780,6 +894,8 @@ method stateModelDot {class_name} {
         }
 
         $dot setnodeattributes shape box
+        $dot setnodeattributes style filled
+        $dot setnodeattributes fillcolor yellow
 
         set cr_state [pipe {
             relvar set CreationState |
@@ -921,6 +1037,12 @@ test stateModelDot-2.0 {
 
 image::Conduit.pdf[title="Conduit state model rendered by dot"]
 
+As a comparison,
+the following figure show the original layout of the Conduit state model
+done during the analysis effort.
+
+image::Conduit_umlet.pdf[title="Original Conduit state model from Umlet"]
+
 [source,tcl]
 ----
 <<method tests>>=
@@ -945,7 +1067,385 @@ test stateModelDot-2.1 {
 
 image::Discovered_Sensor.pdf[title="Discovered Sensor state model rendered by dot"]
 
-== Logging
+== Functions on state model graphs
+
+In this section,
+we show `miccautil` ensemble subcommands which
+operate on graphs.
+These are convenience commands and are provided as procedures
+which take a `struct::graph` command handle.
+Invoking the `stateModelGraph` method yields a suitable graph command.
+
+=== Depth first search of a state model graph
+
+(((command,dfs)))
+
+*****
+::miccautil dfs _graph_ ?_start_?
+
+[horizontal]
+_graph_::
+    a graph command as returned from `struct::graph`,
+    usually obtained by invoking, _modelobj_ stateModelGraph _class_.
+_start_::
+    the name of node where the search is to start.
+    If _start_ is not given,
+    then the search starts at node given by the *initialstate*
+    attribute of the graph.
+
+The `dfs` subcommand performs a depth first search (DFS) of _graph_.
+_graph_ is a command as returned from `struct::graph`,
+usually obtained by invoking the `stateModelGraph` method with the
+desired class name.
+The return value of the command is the empty string.
+
+During the DFS,
+each node in the graph is annotated with the following addition attributes:
+
+[horizontal]
+*pre*::
+    the pre-order number of the node, starting at 1.
+    This is the order in which the node was visited during the DFS.
+*rpost*::
+    the reverse post-order number of the node, starting at 1.
+    This is the order the node would be visited in a reverse post-order
+    traversal.
+    For graphs that do _not_ contain cycles,
+    the *rpost* numbers form a topological sort.
+    Graphs which have no edges classified as *back* edges (see following)
+    also have no cycles.
+
+Each edge in the graph is annotated with one additional attribute:
+
+[horizontal]
+*type*::
+    the type of the graph edge.
+    The *type* attribute has one of the following values:
+tree:::
+    the edge is part of a spanning tree for the graph,
+    _i.e._ the target node is visited for the first time when the
+    edge is traversed.
+forw:::
+    the edge is a forward directed,
+    _i.e._ the target node is a decendent of the source node.
+back:::
+    the edge is a back edge,
+    _i.e._ the target node is an ancestor of the source node.
+cross:::
+    the edge is a cross edge.
+    All edges which are not classified as *tree*, *forw,* or *back* are
+    classified as cross edges.
+*****
+
+[source,tcl]
+----
+<<package exports>>=
+namespace export dfs
+----
+
+.Implementation
+[source,tcl]
+----
+<<miccautil commands>>=
+proc ::miccautil::dfs {graph {start {}}} {
+    if {$start eq {}} {
+        set start [$graph get initialstate]
+    }
+
+    set nodes [$graph nodes]
+    foreach node $nodes {
+        $graph node set $node pre 0
+        $graph node set $node rpost 0
+    }
+    variable preorder 1
+    variable postorder [llength $nodes]
+    ClassifyNode $graph $start
+    return
+}
+----
+
+[source,tcl]
+----
+<<miccautil commands>>=
+proc ::miccautil::ClassifyNode {graph node} {
+    variable preorder
+    set thisPre $preorder
+    $graph node set $node pre $thisPre
+    incr preorder
+    set arcList [$graph arcs -out $node]
+
+    foreach arc $arcList {
+        set succ [$graph arc target $arc]
+        set succPre [$graph node get $succ pre]
+        if {$succPre == 0} {
+            $graph arc set $arc type tree
+            ClassifyNode $graph $succ
+        } elseif {[$graph node get $succ rpost] == 0} {
+            $graph arc set $arc type back
+        } elseif {$thisPre < $succPre} {
+            $graph arc set $arc type frwd
+        } else {
+            $graph arc set $arc type cross
+        }
+    }
+    variable postorder
+    $graph node set $node rpost $postorder
+    incr postorder -1
+
+    return
+}
+----
+
+The following figure shows the `dfs` annotations applied to the
+Conduit state model.
+
+image::Conduit_dfs.pdf[title="DFS annotations for Conduit state model"]
+
+.Tests
+[source,tcl]
+----
+<<method tests>>=
+test dfs-1.0 {
+    DFS on the state model graph for the Conduit class
+} -cleanup {
+    $conduit_graph destroy
+} -body {
+    set conduit_graph [aggrmgmt stateModelGraph Conduit]
+    miccautil dfs $conduit_graph
+
+    set walkproc [lambda {action graph node} {
+        foreach outarc [$graph arcs -out $node] {
+            set target [$graph arc target $outarc]
+            puts "$node - [$graph arc get $outarc event] -> $target\
+                ==> [$graph arc get $outarc type]"
+        }
+    }]
+    $conduit_graph walk [$conduit_graph get initialstate]\
+        -order pre -type bfs -dir forward -command $walkproc
+} -result {}
+----
+
+=== Spanning tree of a state model
+
+(((command,spanningTree)))
+
+*****
+::miccautil spanningTree _graph_
+
+[horizontal]
+_graph_::
+    a graph command as returned from `struct::graph`,
+    usually obtained by invoking, _modelobj_ stateModelGraph _class_.
+_start_::
+    the name of node where the tree is to start.
+    If _start_ is not given,
+    then the tree starts at node given by the *initialstate*
+    attribute of the graph.
+
+The `spanningTree` subcommand returns a `graph` command handle
+as obtained from the `struct::graph` package in Tcllib.
+The returned graph contains a spanning tree of the _graph_ argument.
+The spanning tree returned is the sub-graph of `graph` where only
+*tree* type edges are retained.
+The call is responsible for invoking the `destroy` method on the
+returned graph command when it is no longer needed.
+It is not necessary to have previously run the `dfs` command on
+_graph_ as that will be done by `spanningTree`.
+*****
+
+[source,tcl]
+----
+<<package exports>>=
+namespace export spanningTree
+----
+
+[source,tcl]
+----
+<<required packages>>=
+package require lambda
+----
+
+.Implementation
+[source,tcl]
+----
+<<miccautil commands>>=
+proc ::miccautil::spanningTree {graph {start {}}} {
+    set span [::struct::graph]
+    $span = $graph
+    dfs $span $start
+
+    # Find all the arcs with a non-tree type.
+    # Using a lamda function as the filter.
+    set ffunc [lambda {graph arc} {
+        expr {[$graph arc get $arc type] ne "tree"}
+    }]
+    set non_tree [$span arcs -key type -filter $ffunc]
+    $span arc delete {*}$non_tree
+
+    return $span
+}
+----
+
+The following figure shows the spanning tree of the Conduit state model.
+
+image::Conduit_span.pdf[title="Spanning tree of Conduit state model"]
+
+.Tests
+[source,tcl]
+----
+<<method tests>>=
+test spanning-1.0 {
+    Spanning tree for the state model graph of the Conduit class
+} -cleanup {
+    $conduit_graph destroy
+    $span_tree destroy
+} -body {
+    set conduit_graph [aggrmgmt stateModelGraph Conduit]
+    miccautil dfs $conduit_graph
+    set span_tree [miccautil spanningTree $conduit_graph]
+
+    variable tree_nodes 0
+
+    set walkproc [lambda@ [namespace current] {action graph node} {
+        variable tree_nodes
+        foreach outarc [$graph arcs -out $node] {
+            set node_type [$graph arc get $outarc type]
+            if {$node_type eq "tree"} {
+                incr tree_nodes
+            }
+            set target [$graph arc target $outarc]
+            log::debug "$node - [$graph arc get $outarc event] -> $target\
+                ==> $node_type"
+        }
+    }]
+    $conduit_graph walk [$conduit_graph get initialstate]\
+        -order pre -type bfs -dir forward -command $walkproc
+
+    return $tree_nodes
+} -result {10}
+----
+
+=== Dot view of a graph
+
+(((command,graphToDot)))
+
+*****
+::miccautil graphToDot _graph_ ?_edgekeys_? ?_nodekeys_?
+
+[horizontal]
+_graph_::
+    a graph command as returned from `struct::graph`,
+    usually obtained by invoking, _modelobj_ stateModelGraph _class_.
+_edgekeys_::
+    a list of key names which will be included as the label of an edge.
+_nodekeys_::
+    a list of key names which will be included in the label of a node.
+
+The `graphToDot` subcommand returns a `Tcldot` command handle which is
+the `dot` representation of _graph_.
+The edges of the dot drawing are annotated with the values given
+by the edge attribute keys contained in the _edgekeys_ list.
+Similarly,
+the nodes of the dot drawing are annotated with the values given
+by the node attribute keys contained in the _nodekeys_ list.
+The command handle can be used in the same way as those returned
+by the `stateModelDot` method.
+
+Note that invoking `graphToDot` with the return value of
+`stateModelGraph` does _not_ yield the same rendering as
+the `stateModelDot` method.
+The later method insures the rendered state model appears more in line
+with usual UML notation.
+*****
+
+[source,tcl]
+----
+<<package exports>>=
+namespace export graphToDot
+----
+
+(((command,graphToDot)))
+
+.Implementation
+[source,tcl]
+----
+<<miccautil commands>>=
+proc ::miccautil::graphToDot {graph {edgekeys {}} {nodekeys {}}} {
+    set dot_graph [dotnew digraph]
+    $dot_graph setnodeattributes shape box
+    $dot_graph setnodeattributes style filled
+    $dot_graph setnodeattributes fillcolor yellow
+
+    foreach node [$graph nodes] {
+        set dot_node [$dot_graph addnode $node]
+        if {$node eq "@"} {
+            $dot_node setattributes shape circle
+        }
+        set label_value $node
+        set node_attrs [$graph node keys $node]
+        foreach nodekey $nodekeys {
+            if {$nodekey in $node_attrs} {
+                append label_value "\\n"\
+                        $nodekey=[$graph node get $node $nodekey]
+            }
+        }
+        $dot_node setattributes label $label_value
+    }
+
+    foreach arc [$graph arcs] {
+        set source [$graph arc source $arc]
+        set target [$graph arc target $arc]
+        set dot_edge [$dot_graph addedge $source $target]
+        set label_value {}
+        set nl {}
+        set edge_attrs [$graph arc keys $arc]
+        foreach edgekey $edgekeys {
+            if {$edgekey in $edge_attrs} {
+                append label_value $nl\
+                        ${edgekey}=[$graph arc get $arc $edgekey]
+                set nl "\\n"
+            }
+        }
+        $dot_edge setattributes label $label_value
+    }
+
+    return $dot_graph
+}
+----
+
+.Tests
+[source,tcl]
+----
+<<method tests>>=
+test graphToDot-1.0 {
+    Draw spanning tree for the state model graph of the Conduit class
+} -cleanup {
+    $conduit_graph destroy
+    $span_tree destroy
+    chan close $span_file
+    chan close $dfs_file
+    rename $span_dot {}
+    rename $dfs_dot {}
+} -body {
+    set conduit_graph [aggrmgmt stateModelGraph Conduit]
+    miccautil dfs $conduit_graph
+    set span_tree [miccautil spanningTree $conduit_graph]
+
+    set span_dot [miccautil graphToDot $span_tree event]
+
+    set span_file [open Conduit_span.pdf w]
+    $span_dot write $span_file pdf
+
+    miccautil dfs $conduit_graph
+    set dfs_dot [miccautil graphToDot $conduit_graph type {pre rpost}]
+    set dfs_file [open Conduit_dfs.pdf w]
+    $dfs_dot write $dfs_file pdf
+} -result {}
+----
+
+== Test procedures
+
+=== Logging
 
 [source,tcl]
 ----
