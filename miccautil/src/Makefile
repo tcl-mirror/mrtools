@@ -29,7 +29,7 @@ _MKDIRS := $(shell for d in $(REQUIRED_DIRS) ;	\
 	       [ -d $$d ] || mkdir -p $$d ;	\
 	     done)
 
-VERSION=1.0a1
+VERSION=1.0
 
 vpath %.pdf $(DOCDIR)
 vpath %.html $(DOCDIR)
@@ -54,6 +54,12 @@ DOCPARTS =\
 
 DIAGRAMS =\
 	Sample_Set.pdf\
+	Sample_Set_dfs.pdf\
+	Sample_Set_trans.csv\
+	Sample_Set.csv\
+	Sample_Set_noigch.csv\
+	Sample_Set_missed.csv\
+	Sample_Set_act.csv\
 	Conduit.pdf\
 	Conduit_span.pdf\
 	Conduit_dfs.pdf\
@@ -84,7 +90,7 @@ DBLATEX_PARAMS =\
 	bibliography.numbered=0\
 	index.numbered=0\
 	doc.publisher.show=0\
-	doc.lot.show=figure,table\
+	doc.lot.show=figure,table,example\
 	toc.section.depth=2\
 	doc.section.depth=0\
 	$(NULL)
