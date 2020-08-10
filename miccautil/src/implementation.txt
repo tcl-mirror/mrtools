@@ -18,6 +18,8 @@ The
 http://repos.modelrealization.com/cgi-bin/fossil/tclral/wiki?name=Downloads[`ral` and `ralutil`]
 packages are essential and hold the relational schema that is the platform
 specific model.
+Several procedures in the package return relation values which can be
+further manipulated using `ral` procedures.
 
 We also need to configure the logger output.
 
@@ -263,11 +265,9 @@ an empty dictionary is returned.
 ----
 <<model class definition>>=
 method attributes {class} {
-    my variable domain_name
-
     return [pipe {
         relvar set Attribute |
-        relation restrictwith ~ {$Domain eq $domain_name && $Class eq $class} |
+        relation restrictwith ~ {$Class eq $class} |
         relation dict ~ Name DataType
     }]
 }
@@ -320,11 +320,9 @@ out from which creation events transition.
 ----
 <<model class definition>>=
 method states {class} {
-    my variable domain_name
-
     return [pipe {
         relvar set StatePlace |
-        relation restrictwith ~ {$Domain eq $domain_name && $Model eq $class} |
+        relation restrictwith ~ {$Model eq $class} |
         relation project ~ Name |
         relation list
     }]
@@ -378,11 +376,9 @@ and these names would be returned.
 ----
 <<model class definition>>=
 method events {class} {
-    my variable domain_name
-
     return [pipe {
         relvar set Event |
-        relation restrictwith ~ {$Domain eq $domain_name && $Model eq $class} |
+        relation restrictwith ~ {$Model eq $class} |
         relation project ~ Event |
         relation list
     }]
@@ -420,14 +416,14 @@ _modelobj_ transitions _class_
 _class_::
     The name of a class or assigner in the domain represented by _modelobj_.
 
-The `transitions` method returns a relation value that contains
-the values of all the state transitions for _class_.
+The `transitions` method returns a relation value that contains the state
+transitions for _class_.
 The heading of the returned relation value is:
 
 [width="75%",options="header",cols="6*^",grid="cols"]
 |============
 |Domain |Model  |State  |Event  |NewState   |Params
-|string |string |string |string |string     |Relation
+h|string h|string h|string h|string h|string     h|Relation
 |============
 
 where:
@@ -439,22 +435,23 @@ where:
     A _State_ name of, `@`, indicates the pseudo-initial state out of
     which creation events transition.
 *Event*:: is the name of an event which causes a transition out of _State_.
-*NewState*:: The name of the state entered by the transition caused
+*NewState*:: is the name of the state entered by the transition caused
     when _Event_ is received in _State_.
     A _NewState_ name of `IG` indicates the _Event_ is ignored when it
     is received in _State_.
     A _NewState_ name of `CH` indicates it is logically impossible to
     receive _Event_ in _State_ (_i.e._ _can't happen_) and at run time
     will cause a _panic_ condition.
-*Params*:: is a relation valued attribute giving the parameters of _Event_.
+*Params*:: is a relation valued attribute giving the parameters of _Event_
+    (and hence the arguments to *NewState*).
     The cardinality of the _Params_ attribute is zero if the event
-    carries no supplemental event parameters.
-    _Params_ attribute has the heading:
+    carries no supplemental event data.
+    The _Params_ attribute has the heading:
 
-[width="25%",options="header",cols="2*^",grid="cols"]
+[width="35%",options="header",cols="3*^",grid="cols"]
 |============
-|Name       |Position
-|string     |int
+|Name       |Position   |DataType
+h|string     h|int        h|string
 |============
 
 where:
@@ -464,6 +461,7 @@ where:
 *Position*:: is the order of the parameter carried in _Event_.
     _Position_ values start at zero and sequentially increase for each tuple
     in _Params_.
+*DataType*:: is the ``C'' type name for the parameter.
 
 The cardinality of the returned relation is _states_ times _events_ where
 _states_
@@ -485,8 +483,10 @@ _states_ by _events_ transition matrix with _NewState_ as the cell value.
 method transitions {class_name} {
     set params [pipe {
         relvar set Parameter |
+        relation join ~ [relvar set Argument] |
         relation eliminate ~ ASigID
     }]
+    # log::debug \n[relformat $params params]
 
     set transitions [pipe {
         my GetTransitionCells |
@@ -568,10 +568,9 @@ to suit its needs.
 
 In `micca`,
 there is a concept of default transitions.
-This is either `IG` or `CH` and is used as the target for a transition
-which is not otherwise specified.
-So the strategy for the queries below is to compute all possible
-transitions.
+This can be either `IG` or `CH` and the default transition is used as the
+target for a transition which is not otherwise specified explicitly.
+The strategy for the queries below is to compute all possible transitions.
 Then the transitions which were specified are subtracted from the
 possible set.
 The difference is then the unspecified transitions which are
@@ -657,7 +656,6 @@ _modelobj_ startTransitionRecording
 The `startTransitionRecording` method initializes internal
 data structures in preparation for recording event transitions in
 the domain represented by _modelobj_.
-Attempting to start an already ongoing session is silently ignored.
 In particular,
 any previous event transition counts are reset back to zero.
 Attempting to start an already running session is silently ignored.
@@ -674,7 +672,10 @@ method startTransitionRecording {} {
     }
 
     if {![relvar exists __Event_Record__]} {                        # <1>
-        set trans [my GetEventRecord]
+        set trans [pipe {
+            my GetTransitionCells |
+            relation extend ~ sptup TransCount int 0
+        }]
         relvar create __Event_Record__ [relation heading $trans]\
             {Domain Model State Event}
         relvar set __Event_Record__ $trans
@@ -688,24 +689,10 @@ method startTransitionRecording {} {
     return
 }
 ----
-<1> First time through, we must create the relvar to hold the counts.
+<1> We record the event transition information in a relvar which consists of
+the transition matrix cell values and a new column to hold the counts.
+First time through, we must create the relvar to hold the counts.
 Next time through, we can just zero out the counts.
-
-We record the event transition information in a relvar which
-is set to the value returned from the following method.
-The method simply computes the transition matrix cell values and
-adds a new column to hold the counts.
-
-[source,tcl]
-----
-<<model class definition>>=
-method GetEventRecord {} {
-    return [pipe {
-        my GetTransitionCells |
-        relation extend ~ sptup TransCount int 0
-    }]
-}
-----
 
 ==== Stopping a transition recording session
 
@@ -734,10 +721,10 @@ method stopTransitionRecording {} {
 
 ==== Recording an event transition
 
-(((model,method,recordEventTransition)))
+(((model,method,recordTransition)))
 
 *****
-_modelobj_ recordEventTransition _class_ _currstate_ _event_
+_modelobj_ recordTransition _class_ _currstate_ _event_
 
 [horizontal]
 _class_::
@@ -748,7 +735,7 @@ _currstate_::
 _event_::
     The name of an event in _class_ which caused a transition from _currstate_.
 
-The `recordEventTransition` method counts the transition which
+The `recordTransition` method counts the transition which
 occurred when _class_ was in _currstate_ and received _event_.
 It is necessary to start the event transition recording session
 by invoking the `startTransitionRecording` method before invoking
@@ -760,7 +747,7 @@ _i.e._ if _currstate_ and _event_ form a valid transition in _class_.
 [source,tcl]
 ----
 <<model class definition>>=
-method recordEventTransition {class currstate event} {
+method recordTransition {class currstate event} {
     my variable recording_state
     if {$recording_state eq "off"} {
         error "event transition recording is stopped"
@@ -783,20 +770,21 @@ method recordEventTransition {class currstate event} {
 (((model,method,reportTransitions)))
 
 *****
-_modelobj_ reportTransitions _class_
+_modelobj_ reportTransitions _pattern_
 
 [horizontal]
-_class_::
-    The name of a class or assigner in the domain represented by _modelobj_.
+_pattern_::
+    A pattern of the format used by the `string match` command for the names of
+    classes or assigners in the domain represented by _modelobj_.
 
 The `reportTransitions` method returns a relation value containing
-the transition counts for _class_.
+the transition counts for all classes whose names match _pattern_.
 The heading of the returned relation value is:
 
 [width="75%",options="header",cols="6*^",grid="cols"]
 |============
 |Domain |Model  |State  |Event  |NewState   |TransCount
-|string |string |string |string |string     |int
+h|string h|string h|string h|string h|string     h|int
 |============
 
 where:
@@ -815,20 +803,17 @@ where:
     A _NewState_ name of `CH` indicates it is logically impossible to
     receive _Event_ in _State_ (_i.e._ _can't happen_) and at run time
     will cause a _panic_ condition.
-*TransCount*:: The number of times recorded when *Model* was in
+*TransCount*:: The number of times recorded when *Model* was in a given
     *State* and *Event* was received.
 *****
 
 [source,tcl]
 ----
 <<model class definition>>=
-method reportEventTransitions {class} {
-    my variable domain_name
-
+method reportTransitions {pattern} {
     return [pipe {
         relvar set __Event_Record__ |
-        relation restrictwith ~\
-                {$Domain eq $domain_name && $Model eq $class}
+        relation restrictwith ~ {[string match $pattern $Model]}
     }]
 }
 ----
@@ -844,12 +829,12 @@ test reportTransitions-1.0 {
     report event transitions
 } -body {
     sio startTransitionRecording
-    sio recordEventTransition Sample_Set IDLE Start
-    sio recordEventTransition Sample_Set RUNNING Point_ready
-    sio recordEventTransition Sample_Set RUNNING Point_ready
+    sio recordTransition Sample_Set IDLE Start
+    sio recordTransition Sample_Set RUNNING Point_ready
+    sio recordTransition Sample_Set RUNNING Point_ready
     sio stopTransitionRecording
 
-    set trans [sio reportEventTransitions Sample_Set]
+    set trans [sio reportTransitions Sample_Set]
     ral::csvToFile $trans Sample_Set.csv
     return [relation cardinality $trans]
 } -result {16}
@@ -882,7 +867,7 @@ test reportTransitions-1.1 {
     report event dispatch which are not IG or CH
 } -body {
     set trans [pipe {
-        sio reportEventTransitions Sample_Set |
+        sio reportTransitions Sample_Set |
         relation restrictwith ~ {$NewState ne "IG" && $NewState ne "CH"}
     }]
     ral::csvToFile $trans Sample_Set_noigch.csv
@@ -912,7 +897,7 @@ test reportTransitions-1.2 {
     report event dispatch which are not IG or CH
 } -body {
     set trans [pipe {
-        sio reportEventTransitions Sample_Set |
+        sio reportTransitions Sample_Set |
         relation restrictwith ~\
             {$NewState ne "IG" && $NewState ne "CH" && $TransCount == 0}
     }]
@@ -947,7 +932,7 @@ test reportTransitions-2.0 {
     report state activity execution
 } -body {
     set trans [pipe {
-        sio reportEventTransitions Sample_Set |
+        sio reportTransitions Sample_Set |
         relation restrictwith ~ {$NewState ne "IG" && $NewState ne "CH"} |
         relation summarizeby ~ {Domain Model NewState} sa_rel\
                 Executed int {rsum($sa_rel, "TransCount")} |
@@ -982,10 +967,10 @@ trace arrives from the test harness.
 The following methods serve as _glue_ code between the `mecate` interface and
 the `miccautil` transition recording.
 
-(((model,method,startMecateTraceNotify)))
+(((model,method,startMecateTransitionCount)))
 
 *****
-_modelobj_ startMecateTraceNotify _reinobj_
+_modelobj_ startMecateTransitionCount _reinobj_
 
 _reinobj_::
     An object command as returned from the `rein` command of
@@ -993,9 +978,9 @@ _reinobj_::
     A _reinobj_ represents a `bosal` generated test harness and methods
     of the object allow for operations on the test harness.
 
-The `startMecateTraceNotify` method starts capturing event transitions
+The `startMecateTransitionCount` method starts capturing event transitions
 as they arrive from a `bosal` generated test harness.
-This method uses the `traceNotify` method of athe _reinobj_ to install
+This method uses the `traceNotify` method of the _reinobj_ to install
 a callback handler for when event traces arrive.
 
 Note this method does *not* turn on event tracing in the test harness.
@@ -1007,19 +992,19 @@ before any events will be received and counted.
 [source,tcl]
 ----
 <<model class definition>>=
-method startMecateTraceNotify {reinobj} {
+method startMecateTransitionCount {reinobj} {
     my startTransitionRecording
 
     my variable previous_callback
     set previous_callback [$reinobj traceNotify]
-    $reinobj traceNotify [mymethod RecordMecateTrace]
+    $reinobj traceNotify [mymethod RecordMecateTransition]
 }
 ----
 
-(((model,method,stopMecateTraceNotify)))
+(((model,method,stopMecateTransitionCount)))
 
 *****
-_modelobj_ stopMecateTraceNotify _reinobj_
+_modelobj_ stopMecateTransitionCount _reinobj_
 
 _reinobj_::
     An object command as returned from the `rein` command of
@@ -1027,7 +1012,7 @@ _reinobj_::
     A _reinobj_ represents a `bosal` generated test harness and methods
     of the object allow for operations on the test harness.
 
-The `stopMecateTraceNotify` method stops capturing event transitions
+The `stopMecateTransitionCount` method stops capturing event transitions
 as they arrive from a `bosal` generated test harness.
 The previous _reinobj_ callback handler is re-instated.
 *****
@@ -1037,7 +1022,7 @@ The previous _reinobj_ callback handler is re-instated.
 ----
 <<model class definition>>=
 
-method stopMecateTraceNotify {reinobj} {
+method stopMecateTransitionCount {reinobj} {
     my variable previous_callback
     $reinobj traceNotify $previous_callback
 
@@ -1045,10 +1030,10 @@ method stopMecateTraceNotify {reinobj} {
 }
 ----
 
-(((model,method,recordMecateTrace)))
+(((model,method,RecordMecateTransition)))
 
 *****
-_modelobj_ recordMecateTrace _trace_
+_modelobj_ RecordMecateTransition _trace_
 
 _trace_::
     A dictionary of the form generated by a `bosal` test harness
@@ -1056,7 +1041,7 @@ _trace_::
     See the `mecate` man pages for a detailed description of a _trace_
     dictionary contents.
 
-The `recordMecateTrace` method examines the information in _trace_ and uses it
+The `RecordMecateTransition` method examines the information in _trace_ and uses it
 to count transition of the state machines in _modelobj_.
 *****
 
@@ -1064,15 +1049,16 @@ to count transition of the state machines in _modelobj_.
 [source,tcl]
 ----
 <<model class definition>>=
-method recordMecateTrace {trace} {
+method RecordMecateTransition {trace} {
     if {[dict get $trace type] eq "transition"} {
         set target_class [lindex [split [dict get $trace target] .] 0] ; # <1>
-        my recordEventTransition $target_class\
+        my recordTransition $target_class\
             [dict get $trace currstate] [dict get $trace event]
     }
 
     return
 }
+export RecordMecateTransition
 ----
 <1> In the trace data,
 the _target_ of the event is given in the form: _<class>.<instance>_.
@@ -1082,7 +1068,7 @@ Here we only want the class name part.
 [source,tcl]
 ----
 <<method tests>>=
-test recordMecateTrace-1.0 {
+test RecordMecateTransition-1.0 {
     record event dispatch using mecate trace data
 } -cleanup {
     sio stopTransitionRecording
@@ -1095,16 +1081,16 @@ test recordMecateTrace-1.0 {
         currstate RUNNING\
         event Point_ready\
     ]
-    sio recordMecateTrace $trace_info
+    sio RecordMecateTransition $trace_info
 
     dict set trace_info currstate RUNNING
     dict set trace_info event Point_ready
-    sio recordMecateTrace $trace_info
-    sio recordMecateTrace $trace_info
+    sio RecordMecateTransition $trace_info
+    sio RecordMecateTransition $trace_info
 
-    set report [sio reportEventTransitions Sample_Set]
+    set report [sio reportTransitions Sample_Set]
     return [pipe {
-        sio reportEventTransitions Sample_Set |
+        sio reportTransitions Sample_Set |
         relation summarize ~ $::ralutil::DEE rpt_rel\
                 TotalCount int {rsum($rpt_rel, "TransCount")} |
         relation extract ~ TotalCount
@@ -1141,10 +1127,10 @@ where:
 
 The heading of the *Defaults* attribute is:
 
-[width="35%",options="header",cols="2*^",grid="cols"]
+[width="40%",options="header",cols="3*^",grid="cols"]
 |============
-|Attribute      |Value
-^h|string     ^h|string
+|Attribute      |Value      |DataType
+h|string        h|string    h|string
 |============
 
 where:
@@ -1152,6 +1138,7 @@ where:
 [horizontal]
 *Attribute*:: is the name of the attribute of the instance.
 *Value*:: is the value of the attribute in the instance.
+*DataType*:: is the ``C'' type name for the attribute.
 *****
 
 .Implementation
@@ -1161,7 +1148,9 @@ where:
 method defaultAttributeValues {} {
     return [pipe {
         relvar set DefaultValue |
-        relation group ~ Defaults Attribute Value
+        relation join ~ [relvar set Attribute]\
+                -using {Domain Domain Class Class Attribute Name} |
+        relation group ~ Defaults Attribute Value DataType
     }]
 }
 ----
@@ -1174,7 +1163,6 @@ test defaultAttributeValues-1.0 {
     list default attributes
 } -body {
     set def_attr [sio defaultAttributeValues]
-
     log::debug \n[relformat $def_attr]
 
     return [relation cardinality $def_attr]
@@ -1348,7 +1336,7 @@ Arcs are annotated by the following *key* / value attributes:
 
 [horizontal]
 *event*:: the name of the event causing the transition.
-*params*:: a list of event parameter names additional values
+*params*:: a list of event parameter names giving the additional values
     carried by the event.
 *****
 
@@ -1498,25 +1486,19 @@ _class_::
     The name of a class or assigner in the domain represented by _modelobj_.
 
 The `stateModelDot` method returns a
-https://graphviz.org/pdf/tcldot.3tcl.pdf[`Tcldot`]
+http://graphviz.org/pdf/tcldot.3tcl.pdf[`Tcldot`]
 command handle to the state model of _class_.
 The command handle can be used to render an image of
-the state model graph using the
-https://graphviz.org/doc/info/lang.html[`dot`]
-program (along with many other uses).
+the state model graph (along with many other uses).
 *****
-
-[source,tcl]
-----
-<<required packages>>=
-package require Tcldot
-----
 
 .Implementation
 [source,tcl]
 ----
 <<model class definition>>=
 method stateModelDot {class_name} {
+    package require Tcldot ;                                        # <1>
+
     my variable domain_name
 
     set dot [dotnew digraph]
@@ -1580,7 +1562,7 @@ method stateModelDot {class_name} {
             set initialstate [relation extract $smodel InitialState]
             set edge(@,$initialstate)\
                     [$dot addedge $node(@) $node($initialstate)]
-        } ;                                                             # <1>
+        } ;                                                             # <2>
 
         set params [pipe {
             relvar set Parameter |
@@ -1615,7 +1597,12 @@ method stateModelDot {class_name} {
     }
 }
 ----
-<1> If there is no creation state,
+<1> Since `Tcldot` is not a common package,
+we do the `package require` here to minimize the dependency upon
+`Tcldot`.
+Other commands and methods can be used without having to have `Tcldot`
+installed.
+<2> If there is no creation state,
 we connect the pseudo-initial state to the default initial state
 with no event label.
 This is a convenient indication of the default initial state.
@@ -1675,7 +1662,7 @@ image::Conduit.pdf[title="Conduit state model rendered by dot"]
 
 As a comparison,
 the following figure shows the original layout of the Conduit state model
-drawn during the analysis effort.
+drawn manually during the analysis effort.
 The
 https://www.umlet.com/[Umlet]
 program was used to draw the state model.
@@ -1728,7 +1715,7 @@ Invoking the `stateModelGraph` method yields a suitable graph command.
 [horizontal]
 _graph_::
     a graph command as returned from `struct::graph`,
-    usually obtained by invoking, _modelobj_ stateModelGraph _class_.
+    usually obtained by invoking, _modelobj_ `stateModelGraph` _class_.
 _start_::
     the name of node where the search is to start.
     If _start_ is not given,
@@ -1753,15 +1740,14 @@ each node in the graph is annotated with the following additional attributes:
     This is the order the node would be visited in a reverse post-order
     traversal.
     For graphs that do _not_ contain cycles,
-    the *rpost* numbers form a topological sort.
-    Graphs which have no edges classified as *back* edges (see following)
-    also have no cycles.
+    the *rpost* numbers form a topological sort of the graph.
+    Graphs which have no *back* edges (see following) have no cycles.
 
 Each edge in the graph is annotated with one additional attribute:
 
 [horizontal]
 *type*::
-    the type of the graph edge.
+    the classification of the graph edge.
     The *type* attribute has one of the following values:
 tree:::
     the edge is part of a spanning tree for the graph,
@@ -1805,6 +1791,11 @@ proc ::miccautil::dfs {graph {start {}}} {
     return
 }
 ----
+
+The classification algorithm is the convention recursive algorithm.
+The classification of the graph arcs is accomplished by
+examining the pre and post order numbering to determine when the
+node under consideration has been seen.
 
 [source,tcl]
 ----
@@ -1892,14 +1883,14 @@ image::Sample_Set_dfs.pdf[title="DFS annotations for Sample Set state model"]
 (((command,spanningTree)))
 
 *****
-::miccautil spanningTree _graph_
+::miccautil spanningTree _graph_ _start_
 
 [horizontal]
 _graph_::
     a graph command as returned from `struct::graph`,
     usually obtained by invoking, _modelobj_ stateModelGraph _class_.
 _start_::
-    the name of node where the tree is to start.
+    the name of node where the DFS for the tree is to start.
     If _start_ is not given,
     then the tree starts at node given by the *initialstate*
     attribute of the graph.
@@ -1911,7 +1902,7 @@ The spanning tree returned is the sub-graph of `graph` where only
 *tree* type edges are retained.
 The caller is responsible for invoking the `destroy` method on the
 returned graph command when it is no longer needed.
-It is not necessary to have previously run the `dfs` command on
+It is not necessary to have run the `dfs` command previously on
 _graph_ as that will be done by `spanningTree`.
 *****
 
@@ -1936,8 +1927,6 @@ proc ::miccautil::spanningTree {graph {start {}}} {
     $span = $graph
     dfs $span $start
 
-    # Find all the arcs with a non-tree type.
-    # Using a lamda function as the filter.
     set ffunc [lambda {graph arc} {
         expr {[$graph arc get $arc type] ne "tree"}
     }]
@@ -1987,7 +1976,7 @@ test spanning-1.0 {
 } -result {10}
 ----
 
-=== Dot view of a graph
+=== Graphviz view of a graph
 
 (((command,graphToDot)))
 
@@ -2033,6 +2022,8 @@ namespace export graphToDot
 ----
 <<miccautil commands>>=
 proc ::miccautil::graphToDot {graph {edgekeys {}} {nodekeys {}}} {
+    package require Tcldot
+
     set dot_graph [dotnew digraph]
     $dot_graph setnodeattributes shape box
     $dot_graph setnodeattributes style filled
