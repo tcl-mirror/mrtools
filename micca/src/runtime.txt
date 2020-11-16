@@ -1,4 +1,4 @@
-// vim:set syntax=asciidoc:
+// vim:set syntax=asciidoc spell:
 
 = Runtime Support
 
@@ -701,6 +701,7 @@ mrtRunThreadOfControl(void)
     mrtFinishThreadOfControl() ;                            // <1>
 
     bool startedtoc = mrtProcessOneEvent(&tocEventQueue) ;
+
     if (startedtoc) {
         mrtFinishThreadOfControl() ;
     }
@@ -3329,21 +3330,203 @@ The transaction concept is necessary because we must be able to defer
 the integrity check until such time as the domain activities can insure
 that the integrity constraints are met.
 For example,
-consider two classes in a one-to-one unconditional relationship.
+consider two classes in a one-to-one unconditional association.
 If an instance of one class is created we do not want to check referential
 integrity until the code has had an opportunity to create a corresponding
 instance of the associated class.
 
-The precise rules of data integrity are that each state activity must
-leave the domain data in a consistent state or signal one or more events
-that, when dispatched, will ultimately bring the domain data into a
-consistent state.
-The later phrase of this rule implies that there is a _thread of control_
-which determines the boundary of when data consistency is checked.
-We will describe how threads of control work later.
+There are two situations where we must enforce referential integrity:
+
+. After completion of a _thread of control_.
+. After completion of a _domain operation_.
+
+We will describe how threads of control work
+<<event-dispatch,later>>.
 For now,
 we are concerned with data transactions as a means of deciding when
 data integrity is to be verified.
+
+For execution sequencing by event dispatch,
+the data integrity rules require each state activity to
+leave the domain data in a consistent state or to signal one or more events
+that, when dispatched, will ultimately bring the domain data into a
+consistent state.
+The later phrase of this rule implies that there a time where the domain
+data is allowed to be inconsistent while execution continues
+to bring it into a consistent state.
+For us,
+this implies that thread of control is allowed to complete before
+the domain data is evaluated for consistency.
+
+A domain operation is a form of synchronous service supplied by
+a domain.
+Like state activities, synchronous services exhibit run to completion
+semantics.
+Domain operations have full access to the underlying domain data and
+may also signal events which eventually initiate a new thread of control.
+Thus, domain operations  must leave the domain data in a consistent state.
+However, there is a complication associated with domain operations.
+
+* While executing a thread of control, an activity may invoke a domain
+  operation. At that time, the domain data may be inconsistent.
+  Note that threads of control do not _nest_, _i.e._ there is only
+  ever one thread of control executing at any time because there is
+  only one thread of control queue.
+* Domain operations are not so restricted.
+  Considering external entity operations, it is not possible to predict
+  the chain of invocations of domain operations.
+* Finally, the `micca` run time does not have any concept of a domain.
+  Surprising as that may seem,
+  from the point of view of the `micca` run time,
+  the world is big flat and governed only by the
+  addresses of descriptive data.
+
+The implications of these considerations imply
+that data transactions must be nestable.
+Domain operations must start a new nested transaction and end it
+when they are done.
+Thread of control need not bother since they are not nestable in the
+single threaded `micca` run time.
+The code generator for `micca` does handle the nesting requirement,
+so there is no additional information required for the translation.
+It is just a matter of putting all domain operations within a
+nested data transaction and the code generation accomplished that.
+
+==== Synchronous Service Support
+
+Two additional external functions are supplied by the run time to
+support synchronous operations on the domain, e.g. domain operations.
+
+. `mrt_BeginSyncService` marks the beginning of the synchronous service.
+. `mrt_EndSyncService` marks the end of the synchronous service
+  and is the indication to the run time code that the referential
+  integrity of the domain data is to be checked.
+
+Normally, translated models do not have to use these functions.
+`Micca` generates code to surround automatically each domain operation with
+a start / end pair.
+However, bridge operations may choose to use them, particularly
+in conjunction with the `micca` portal operations.
+Portal operations do not enforce referential integrity and so
+bridges which use the portal operations that can potentially
+affect the data integrity
+must use these functions to mark a data transaction boundary.
+
+******
+[source,c]
+----
+<<mrt external interfaces>>=
+extern void mrt_BeginSyncService(void) ;
+----
+
+The `mrt_BeginSyncService` function informs the run time that
+synchronous operations are starting on the domain.
+******
+
+The implementation of the `mrt_BeginSyncService` just
+increments a variable that contains the current transaction level.
+
+(((micca,Run Time Function,mrt_BeginSyncService)))
+[source,c]
+----
+<<mrt external functions>>=
+void
+mrt_BeginSyncService(void)
+{
+    mrtIncrTransLevel() ;
+}
+----
+
+******
+[source,c]
+----
+<<mrt external interfaces>>=
+extern void mrt_EndSyncService(void) ;
+----
+
+The `mrt_EndSyncService` function informs the run time that
+synchronous operations are ended on the domain.
+The run time uses this indication to enforce integrity constraints on
+the domain data.
+******
+
+The implementation of `mrt_EndSyncService` invokes
+`mrtEndTransaction()` to verify the referential integrity of the domain
+data.
+The transaction level is decremented to indicate that the
+nested transaction is complete.
+
+(((micca,Run Time Function,mrt_EndSyncService)))
+[source,c]
+----
+<<mrt external functions>>=
+void
+mrt_EndSyncService(void)
+{
+    mrtEndTransaction() ;
+}
+----
+
+We keep track of the transaction level as a simple unsigned counter.
+
+(((micca,Run Time Data,MRT_LevelCount)))
+[source,c]
+----
+<<mrt implementation simple types>>=
+typedef uint16_t MRT_LevelCount ;
+
+<<mrt implementation constants>>=
+#define TRANS_LEVEL_MAX UINT16_MAX
+----
+
+A file static variable holds the current transaction level.
+
+(((micca,Run Time Data,MRT_TransLevel)))
+[source,c]
+----
+<<mrt static data>>=
+static MRT_LevelCount mrtTransLevel ;
+----
+
+(((micca,Run Time Function,mrtIncrTransLevel)))
+[source,c]
+----
+<<mrt implementation static inlines>>=
+static inline
+void
+mrtIncrTransLevel(void)
+{
+    if (mrtTransLevel == TRANS_LEVEL_MAX) {
+        mrtFatalError(mrtTransOverflow) ;       // <1>
+    }
+    mrtTransLevel += 1 ;
+}
+----
+<1> Overflowing the transaction level counter indicates
+a serious problem.
+
+(((micca,Run Time Function,mrtDecrTransLevel)))
+[source,c]
+----
+<<mrt implementation static inlines>>=
+static inline
+void
+mrtDecrTransLevel(void)
+{
+    if (mrtTransLevel != 0) {
+        mrtTransLevel -= 1 ;        // <1>
+    }
+}
+----
+<1> We allow for unbalanced decrements.
+This is important to the transaction level algorithm
+since threads of control don't adjust the transaction
+nesting level.
+Most of the time a TOC will run at level 0.
+At the end it will attempt to decrement the level.
+We must make sure the transaction level does not underflow.
+
+==== Recording Transaction Details
 
 Each time a relationship is manipulated, by:
 
@@ -3356,39 +3539,162 @@ the relationship pointer references must be verified.
 As described below,
 the run-time provides functions to perform the relationship pointer
 operations.
-During a transaction,
-we want to save a reference to the relationship information
-for each relationship that is manipulated.
-We save the affected relationships in the following structure.
+When a transaction is ongoing,
+we save a reference to the relationship information along with
+the current transaction level for each relationship that is manipulated.
+The affected relationships are stored in the following structure.
 
+(((micca,Run Time Data,MRT_TransLevel)))
 [source,c]
 ----
 <<mrt implementation aggregate types>>=
-struct mrtTransaction {
-    unsigned count ;
-    MRT_Relationship const *relationships[MRT_TRANSACTION_SIZE] ;
-} ;
+typedef struct mrtTransEntry {
+    struct mrtTransEntry *next ;
+    MRT_LevelCount level ;
+    MRT_Relationship const *relationship ;
+} MRT_TransEntry ;
+----
+
+The individual transaction entries are managed on a linked list.
+We'll follow our usual pattern and have a free list and an
+in-use list.
+
+(((micca,Run Time Data,mrtTransEntries)))
+[source,c]
+----
+<<mrt static data>>=
+static MRT_TransEntry *mrtFreeTransEntries ;
+static MRT_TransEntry *mrtTransEntries ;
+----
+
+Storage for the transaction entries is allocated as an array.
+
+(((micca,Run Time Data,mrtTransStorage)))
+[source,c]
+----
+<<mrt static data>>=
+static MRT_TransEntry mrtTransStorage[MRT_TRANSACTION_SIZE] ;
 ----
 
 Like all run-time resources,
-the memory allocated to them is fixed at compile time.
+the memory allocated to them is fixed at compile time and
+can be changed via a compile time pre-processor symbol.
 
 (((micca,Run Time Constant,MRT_TRANSACTION_SIZE)))
 [source,c]
 ----
 <<mrt interface constants>>=
 #ifndef MRT_TRANSACTION_SIZE
-#   define MRT_TRANSACTION_SIZE 64
+#   define MRT_TRANSACTION_SIZE 16
 #endif /* MRT_TRANSACTION_SIZE */
 ----
 
-We use a static variable to hold the transaction relationships.
+To manage the transaction entries,
+we need functions to initialize the various lists
+and preform the usual list manipulations.
 
-(((micca,Run Time Data,mrtTransaction)))
+(((micca,Run Time Function,mrtInsertTrans)))
 [source,c]
 ----
-<<mrt static data>>=
-static struct mrtTransaction mrtTransaction ;
+<<mrt implementation static inlines>>=
+static inline
+void
+mrtInsertTrans(
+    MRT_TransEntry **list,
+    MRT_TransEntry *entry)
+{
+    assert(list != NULL) ;
+    assert(entry != NULL) ;
+
+    entry->next = *list ;
+    *list = entry ;
+}
+----
+
+(((micca,Run Time Function,mrtRemoveTrans)))
+[source,c]
+----
+<<mrt implementation static inlines>>=
+static inline
+MRT_TransEntry *
+mrtRemoveTrans(
+    MRT_TransEntry **list)
+{
+    assert(list != NULL) ;
+
+    MRT_TransEntry *entry = *list ;
+    if (entry != NULL) {
+        *list = entry->next ;
+        entry->next = NULL ;                // <1>
+    }
+
+    return entry ;
+}
+----
+<1> Not strictly necessary, but useful during debugging.
+
+After checking the referential integrity of an entry,
+it is discarded by removing it from the set of check entries
+and queue the entry back to the free queue for later use.
+
+(((micca,Run Time Function,mrtDiscardTrans)))
+[source,c]
+----
+<<mrt implementation static inlines>>=
+static inline
+void
+mrtDiscardTrans(void)
+{
+    MRT_TransEntry *entry = mrtRemoveTrans(&mrtTransEntries) ;
+    assert(entry != NULL) ;                                     // <1>
+    if (entry != NULL) {
+        mrtInsertTrans(&mrtFreeTransEntries, entry) ;
+    }
+}
+----
+<1> We shouldn't be _over_ discarding, but will tolerate it
+in a release build.
+
+(((micca,Run Time Function,mrtTransactionsInit)))
+[source,c]
+----
+<<mrt static functions>>=
+static void
+mrtTransactionsInit(void)
+{
+    mrtFreeTransEntries = NULL ;
+    mrtTransEntries = NULL ;
+    mrtTransLevel = 0 ;
+
+    MRT_TransEntry const *end = mrtTransStorage + MRT_TRANSACTION_SIZE ;
+    for (MRT_TransEntry *iter = mrtTransStorage ;
+            iter < end ; iter++) {
+        mrtInsertTrans(&mrtFreeTransEntries, iter) ;
+    }
+}
+----
+
+Adding a relationship to the set to be checked is done by
+obtaining a free entry and inserting it onto the
+list of transaction entries to check.
+
+(((micca,Run Time Function,mrtAddRelToCheck)))
+[source,c]
+----
+<<mrt static functions>>=
+static void
+mrtAddRelToCheck(
+    MRT_Relationship const *rel)
+{
+    MRT_TransEntry *entry = mrtRemoveTrans(&mrtFreeTransEntries) ;
+    if (entry == NULL) {
+        mrtFatalError(mrtTransOverflow) ;
+    }
+
+    entry->level = mrtTransLevel ;
+    entry->relationship = rel ;
+    mrtInsertTrans(&mrtTransEntries, entry) ;
+}
 ----
 
 During a transaction,
@@ -3407,6 +3713,33 @@ more than once.
 We wish to save that computation and consequently will search the
 marked relationships to eliminate any duplicate mark.
 
+(((micca,Run Time Function,mrtFindRelEntry)))
+[source,c]
+----
+<<mrt static functions>>=
+static bool
+mrtFindRelEntry(
+    MRT_Relationship const *const rel)
+{
+    for (MRT_TransEntry *iter = mrtTransEntries ;
+            iter != NULL && iter->level >= mrtTransLevel ;  // <1>
+            iter = iter->next) {
+        if (iter->relationship == rel) {
+            return true ;
+        }
+        // N.B. no "else"
+    }
+
+    return false ;
+}
+----
+<1> The search can be stopped when we cross over a transaction
+boundary. It is possible to have the same relationship modified
+in two different transactions, but there is no harm.
+We will just end up doing an extraneous check.
+It is more important to discovery any integrity problems in
+the current ongoing transaction.
+
 [source,c]
 ----
 <<mrt forward references>>=
@@ -3415,6 +3748,11 @@ mrtMarkRelationship(
     MRT_Relationship const *const *rel,
     unsigned relCount) ;
 ----
+
+Marking a relationship to be checked means searching
+the current set of marked relationships and,
+if we have not already added it,
+then it is inserted into our set to check.
 
 (((micca,Run Time Function,mrtMarkRelationship)))
 [source,c]
@@ -3426,36 +3764,35 @@ mrtMarkRelationship(
     unsigned relCount)
 {
     for ( ; relCount != 0 ; relCount--, rel++) {
-        bool found = false ;
-        MRT_Relationship const **marked = mrtTransaction.relationships ;
-        for (unsigned markedCount = mrtTransaction.count ; markedCount != 0 ;
-                markedCount--, marked++) { // <1>
-            if (*marked == *rel) {
-                found = true ;
-                break ;
-            }
-        }
-
+        bool found = mrtFindRelEntry(*rel) ;
         if (!found) {
-            if (mrtTransaction.count >= COUNTOF(mrtTransaction.relationships)) {
-                mrtFatalError(mrtTransOverflow) ; // <2>
-            }
-            mrtTransaction.relationships[mrtTransaction.count++] = *rel ;
+            mrtAddRelToCheck(*rel) ;
         }
     }
 }
 ----
-<1> First we iterate over the set of relationship description pointers
-already marked to see if we can find a match to the one we are trying
-to insert.
-<2> Since we are about to insert a new relationship description,
-we have to check for overflow.
-As usual, exceeding resource limits is a fatal error.
 
 At the end of a transaction,
-we iterate across all the relationship descriptions that were
-saved during the transaction and check the referential integrity
-of the stored pointers.
+we successively examine entries in our list and
+determine if they pass referential integrity.
+We perform the examination on the head of the list.
+If that succeeds, we discard the entry and continue
+looking by examining the entry left at the head.
+We are also only going to examine entries that are
+part of the current transaction.
+
+The first failing check stops the whole process with a
+fatal error.
+The entry containing the relationship in error is
+left on the list.
+This is done because it is possible for applications to
+supply fatal error handlers which `longjmp()` out of the
+event loopfootnote:[Test programs benefit from this arrangement].
+The integrity problem still exists and could be repaired.
+In any case, we want that relationship to be evaluated
+again if we reenter the event loop.
+It is also useful for debugging since the faulting
+relationship is always at the head of the list.
 
 (((micca,Run Time Function,mrtEndTransaction)))
 [source,c]
@@ -3467,34 +3804,30 @@ static void mrtEndTransaction(void) ;
 static void
 mrtEndTransaction(void)
 {
-    MRT_Relationship const **rships = mrtTransaction.relationships ;
-    for (unsigned count = 0 ; count < mrtTransaction.count ; count++, rships++) {
-        MRT_Relationship const *rel = *rships ;
-
-        if (!mrtCheckRelationship(rel)) {
-            mrtTransaction.count -= count ;
-            memmove(mrtTransaction.relationships, rships,
-                mrtTransaction.count * sizeof(*rships)) ; // <1>
-            mrtRefIntegrityError(rel) ;
+    for (MRT_TransEntry *rentry = mrtTransEntries ;
+            rentry != NULL && rentry->level >= mrtTransLevel ;  // <1>
+            rentry = mrtTransEntries) {
+        if (mrtCheckRelationship(rentry->relationship)) {
+            mrtDiscardTrans() ;
+        } else {
+            mrtDecrTransLevel() ;                               // <2>
+            mrtRefIntegrityError(rentry->relationship) ;
         }
     }
-    mrtTransaction.count = 0 ;
+    mrtDecrTransLevel() ;                                       // <3>
 }
 ----
-<1> We "shuffle up" the contents of the transaction relationships array
-before giving up with a fatal error.
-The reason for this is that it is possible to install a fatal error handler
-that long jumps out of the event loop.
-We don't want to remove the relationship that failed from the transaction list,
-but all those that have passed the integrity check need to be discarded.
-It is possible for a fatal error that has long jumped out of the event
-loop to repair the damage and want to continue on.
-This is certainly the case when we are testing the run-time code itself.
-Test cases know what problem they have created and can correct it
-so that subsequenct tests can proceed along.
-However, the failed relationships will still be checked at the next
-end of transaction time.
-So we insure that any recovery of the integrity check happened correctly.
+<1> Again, we stop processing the entries in the list when
+we cross the boundary of a transaction.
+<2> Since the integrity failure is a fatal error,
+we want to decrement the transaction level to show this
+evaluation is over.
+Some bridges, for testing specifically, will want to fix the
+integrity problem and be able to proceed on.
+This implies that failed checks become part of the next
+nested transaction or are caught when a thread of control terminates.
+<3> We finish successfully and can mark the end of the transaction
+by decrementing the level.
 
 ==== Verifying Referential Integrity
 
@@ -3711,8 +4044,9 @@ for (unsigned subcount = gen->subclassCount ; subcount != 0 ;
 mrtCountGenRefs(gen) ;
 
 result = mrtCheckRefCounts(gen->superclass.classDesc, mrtExactlyOne) ;
+
 subclass = gen->subclasses ;
-for (unsigned subcount = gen->subclassCount ; subcount != 0 && result ;
+for (unsigned subcount = gen->subclassCount ; result && subcount != 0 ;
         subcount--, subclass++) {
     result = mrtCheckRefCounts(subclass->classDesc, mrtExactlyOne) ;
 }
@@ -3723,6 +4057,8 @@ there are no reference pointers.
 So we don't have to follow any pointers to get to the subclass.
 Rather, the subclass in part of the superclass storage and
 pointer arithmetic computes the address of the subclass instance.
+However, the process is much the same as for reference generalizations.
+What is different is the way the references are counted.
 
 [source,c]
 ----
@@ -3730,25 +4066,24 @@ pointer arithmetic computes the address of the subclass instance.
 MRT_UnionGeneralization const *gen = &rel->relInfo.unionGeneralization ;
 
 mrtZeroRefCounts(gen->superclass.classDesc) ;
-assert(gen->subclassCount != 0) ;
-mrtZeroRefCounts(*gen->subclasses) ;                                    // <1>
 
-mrtCountUnionRefs(gen) ;                                                // <2>
+MRT_Class const *const *subclass = gen->subclasses ;
+for (unsigned subcount = gen->subclassCount ; subcount != 0 ;
+        subcount--, subclass++) {
+    mrtZeroRefCounts(*subclass) ;
+}
 
-result = mrtCheckRefCounts(gen->superclass.classDesc, mrtExactlyOne) &&
-        mrtCheckRefCounts(*gen->subclasses, mrtExactlyOne) ;            // <3>
+mrtCountUnionRefs(gen) ;                                                // <1>
+
+result = mrtCheckRefCounts(gen->superclass.classDesc, mrtExactlyOne) ;
+
+subclass = gen->subclasses ;
+for (unsigned subcount = gen->subclassCount ; result && subcount != 0 ;
+        subcount--, subclass++) {
+    result = mrtCheckRefCounts(*subclass, mrtExactlyOne) ;
+}
 ----
-<1> Since we know that the subclass storage is allocated as part of
-the superclass instance, we only have to zero out the reference
-counter for one of the subclasses.
-This is because all the subclasses are at the same address and all
-start with a `MRT_Instance` structure.
-<2> We need a different counting strategy to account for the union storage.
-<3> Again, since all the subclasses are stored in the same place
-and all begin with a `MRT_Instance` structure, we only have to
-count for one subclass.
-Compare this to the reference case, where we have visit each subclass
-instance and follow its reference back to the superclass instance
+<1> We need a different counting strategy to account for the union storage.
 
 [float]
 ===== Zero Reference Counts
@@ -3931,7 +4266,30 @@ three of them actually contain pointer values that refer to class instances.
 The differences in the manner in which the three pointer references are
 organized leads us have separate functions for each type.
 
-First we consider counting the references in a simple association.
+We use some common code to count the references made by an instance.
+
+(((micca,Run Time Function,mrtIncrRefCount)))
+[source,c]
+----
+<<mrt implementation static inlines>>=
+static inline
+uint8_t
+mrtIncrRefCount(
+    uint8_t count)
+{
+    return (count == UINT8_MAX) ? 2 : count + 1 ;       // <1>
+}
+----
+<1> We want to avoid the possibility of overflow of the reference counter.
+It is only an unsigned 8-bit quantity.
+Should it overflow, we could misinterpret the count.
+If we are at its max value, then we set it back to 2.
+Why 2? Zero and one are significant in this case and we know the values
+has already passed two, so we resume our count from there.
+Any value greater than 1 will yield the same conclusion about
+the referential integrity.
+
+First, we consider counting the references in a simple association.
 
 [source,c]
 ----
@@ -4033,8 +4391,7 @@ mrtCountSingularRefs(
         if ((void *)targetInst >= targetiab->storageStart &&
                 (void *)targetInst < targetiab->storageFinish &&
                 targetInst->alloc > 0) { // <1>
-            targetInst->refCount = targetInst->refCount == UINT8_MAX ?
-                    2 : targetInst->refCount + 1 ; // <2>
+            targetInst->refCount = mrtIncrRefCount(targetInst->refCount) ;
         }
     }
 }
@@ -4042,14 +4399,6 @@ mrtCountSingularRefs(
 <1> Validate that the reference pointer value actually points into
 target instance storage. This will eliminate any NULL values also.
 Note we also insist that the target instance be active.
-<2> We want to avoid the possibility of overflow of the reference counter.
-It is only an unsigned 8-bit quantity.
-Should it overflow, we could misinterpret the count.
-If we are at its max value, then we set it back to 2.
-Why 2? Zero and one are significant in this case and we know the values
-has already passed two, so we resume our count from there.
-Any value greater than 1 will yield the same conclusion about
-the referential integrity.
 
 For array references, the references are an array of pointers to the related
 class instance.
@@ -4102,8 +4451,7 @@ mrtCountArrayRefs(
             if ((void *)targetInst >= targetiab->storageStart &&
                     (void *)targetInst < targetiab->storageFinish &&
                     targetInst->alloc > 0) {
-                targetInst->refCount = targetInst->refCount == UINT8_MAX ?
-                        2 : targetInst->refCount + 1 ;
+                targetInst->refCount = mrtIncrRefCount(targetInst->refCount) ;
             }
         }
     }
@@ -4172,8 +4520,7 @@ mrtCountLinkedListRefs(
             if ((void *)targetInst >= targetiab->storageStart &&
                     (void *)targetInst < targetiab->storageFinish &&
                     targetInst->alloc > 0) {
-                targetInst->refCount = targetInst->refCount == UINT8_MAX ?
-                        2 : targetInst->refCount + 1 ;
+                targetInst->refCount = mrtIncrRefCount(targetInst->refCount) ;
             }
         }
     }
@@ -4276,8 +4623,7 @@ mrtCountGenRefs(
             if ((void *)subInst >= subiab->storageStart &&
                     (void *)subInst < subiab->storageFinish &&
                     subInst->alloc > 0) {
-                subInst->refCount = subInst->refCount == UINT8_MAX ?
-                        2 : subInst->refCount + 1 ;
+                subInst->refCount = mrtIncrRefCount(subInst->refCount) ;
             }
         }
     }
@@ -4291,7 +4637,7 @@ mrtCountGenRefs(
 }
 ----
 <1> Start by iterating over the instances of the superclass.
-<2> The refernces from the subclass to the superclass is just an ordinary
+<2> The references from the subclass to the superclass is just an ordinary
 singular pointer reference.
 We already know how to count them.
 
@@ -4319,29 +4665,37 @@ mrtCountUnionRefs(
     MRT_UnionGeneralization const *gen)
 {
     MRT_Class const *const superClass = gen->superclass.classDesc ;
-    MRT_InstIterator iter ;
-    for (mrt_InstIteratorStart(&iter, superClass) ;
-            mrt_InstIteratorMore(&iter) ; mrt_InstIteratorNext(&iter)) {
-        MRT_Instance *instref = mrt_InstIteratorGet(&iter) ;
-        instref->refCount = instref->refCount == UINT8_MAX ?            // <1>
-                2 : instref->refCount + 1 ;
-
+    MRT_InstIterator superIter ;
+    for (mrt_InstIteratorStart(&superIter, superClass) ;
+            mrt_InstIteratorMore(&superIter) ;
+            mrt_InstIteratorNext(&superIter)) {
+        MRT_Instance *superInst = mrt_InstIteratorGet(&superIter) ;
         MRT_Instance *subInst = (MRT_Instance *)
-                ((uintptr_t)instref + gen->superclass.storageOffset) ;  // <2>
-        if (subInst->alloc > 0) {                                       // <3>
-            subInst->refCount = subInst->refCount == UINT8_MAX ?
-                    2 : subInst->refCount + 1 ;
+                ((uintptr_t)superInst + gen->superclass.storageOffset) ;
+
+        if (subInst->alloc > 0) {
+            subInst->refCount = mrtIncrRefCount(subInst->refCount) ;
+        }
+    }
+
+    MRT_Class const *const *subclass = gen->subclasses ;
+    for (unsigned subcount = gen->subclassCount ; subcount != 0 ;
+            subcount--, subclass++) {
+        MRT_InstIterator subIter ;
+        for (mrt_InstIteratorStart(&subIter, *subclass) ;
+                mrt_InstIteratorMore(&subIter) ;
+                mrt_InstIteratorNext(&subIter)) {
+            MRT_Instance *subInst = mrt_InstIteratorGet(&subIter) ;
+            MRT_Instance *superInst = (MRT_Instance *)
+                    ((uintptr_t)subInst - gen->superclass.storageOffset) ;
+
+            if (superInst->alloc > 0) {
+                superInst->refCount = mrtIncrRefCount(superInst->refCount) ;
+            }
         }
     }
 }
 ----
-<1> Since the instance iterater skips any unallocated slots,
-we can unconditionally update the reference counter of the superclass
-instance.
-<2> While we have a pointer to the superclass instance,
-we can compute the pointer to the subclass instance.
-<3> Here we must test that the subclass instance slot is actually in use.
-If it is, then this constitutes a "reference" to the superclass instance.
 
 === Operations on Relationship Instances
 
@@ -5375,9 +5729,9 @@ if (instclass != gen->superclass.classDesc) {
             ((uintptr_t)inst + gen->subclasses[subclassCode].storageOffset) ;
     MRT_Instance *superInst = *p_superInst ;
     *p_superInst = NULL ;
-    assert(superInst != NULL) ;
     // NULL out the pointer in the superclass instance pointing to the subclass
-    // instance.
+    // instance. Watch for a NULL reference to the superclass instances.
+    // This can happen if the subclass was simply created on it's on.
     if (superInst != NULL && superInst->alloc > 0) {
         void **p_subInst = (void **)
                 ((uintptr_t)superInst + gen->superclass.storageOffset) ;
@@ -7359,7 +7713,7 @@ Here are the constraints on the timing services:
     Activity must be strictly event driven and that implies that
     we can get positive notification when a time period has elapsed.
 
-=== Event Dispatch
+=== Event Dispatch   [[event-dispatch]]
 
 Finally, we arrive at the point where we can discuss event dispatching.
 Up until this time,
@@ -12772,6 +13126,7 @@ mrt_Initialize(void)
 {
     mrtPlatformInit() ;
     mrtECBPoolInit() ;
+    mrtTransactionsInit() ;
     mrtInitSysTimer() ;
     mrtInitFDService() ;
     setvbuf(stdout, NULL, _IOLBF, 0) ; // <1>
@@ -13024,6 +13379,7 @@ mrt_Initialize(void)
 {
     mrtPlatformInit() ;
     mrtECBPoolInit() ;
+    mrtTransactionsInit() ;
     mrtInitSysTimer() ;
 #       if !(defined(MRT_NO_TRACE) || defined(MRT_NO_STDIO))
     mrt_RegisterTraceHandler(mrtPrintTraceInfo) ;
@@ -14057,6 +14413,7 @@ void
 mrt_Initialize(void)
 {
     mrtECBPoolInit() ;
+    mrtTransactionsInit() ;
     mrtInitSysTimer() ;
 }
 ----

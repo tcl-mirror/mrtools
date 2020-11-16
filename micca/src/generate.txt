@@ -323,119 +323,20 @@ the two being very similar in this context.
 ----
 <<generation helper commands>>=
 proc GatherClassProperties {domain} {
-    <<GatherClassProperties: gather assigner properties>>
+    variable ClassProperties
+
     <<GatherClassProperties: gather class properties>>
-    <<GatherClassProperties: union all properties>>
+    <<GatherClassProperties: gather assigner properties>>
 
     return
 }
 ----
 
-The query for the assigners can be grouped as common items that
-apply to both single and multi assigners
-and those properties specifice to each type.
+_N.B._ that we calculate the properties of ordinary classes first.
+This is important because our calculations for
+<<multiple-assigner-properties,multiple assigners>>
+depends upon knowledge that we gather about ordinary classes.
 
-[source,tcl]
-----
-<<GatherClassProperties: gather assigner properties>>=
-<<GatherClassProperties: common assigner properties>>
-<<GatherClassProperties: single assigner properties>>
-<<GatherClassProperties: multi assigner properties>>
-----
-
-The common properties query starts at the *AssignerStateModel* and
-uses `rvajoin` to obtain the information in *R53* as relation
-valued attributes.
-Note the assigners are tagged by ascending value of the Association
-name.
-This number is used as part of assigning assigner ID's for external use.
-
-[source,tcl]
-----
-<<GatherClassProperties: common assigner properties>>=
-set assigners [pipe {
-    AssignerStateModel findWhere {$Domain eq $domain} |
-    deRef ~ |
-    ralutil::rvajoin ~ $::micca::SingleAssigner Single |
-    ralutil::rvajoin ~ $::micca::MultipleAssigner Multiple |
-    relation tag ~ Number -ascending Association |
-    relation extend ~ stup\
-        Declaration string {"struct [tuple extract $stup Association]"}\
-        Reference string {"struct [tuple extract $stup Association] *"}\
-        ConstReference string\
-                {"struct [tuple extract $stup Association] const *"}\
-        StorageVariable string {"[tuple extract $stup Association]__POOL"}\
-        ClassVariable string {"${domain}__ASSIGNERS"}
-}]
-----
-
-Single assigners have a single instance defined automatically.
-
-[source,tcl]
-----
-<<GatherClassProperties: single assigner properties>>=
-set sassigners [pipe {
-    relation restrictwith $assigners {[relation isnotempty $Single]} |
-    relation eliminate ~ Domain Single Multiple |
-    relation rename ~ Association Name |
-    relation extend ~ stup\
-        Allocation int {0}\
-        InitialInstance int {1}\
-        TotalInstance int {1}
-}]
-# puts [relformat $sassigners sassigners]
-----
-
-Multi assigners have population values specified during configuration.
-The computation of the storage for multiple assigners is a bit different.
-The total number of multiple assigner instances is always the
-same number of instances as the class which partitions the multiple
-assigner.
-Multiple assigner instances can be created as part of the initial
-instance population.
-The `allocation` command is not supported for multiple assigners,
-so there is an implied value of the allocation which is the total number
-of instances minus those defined as part of the initial instance population.
-Here we compute all the fields just like a class or single assigner
-only with the previous rules for the differences for multiple assigners.
-
-[source,tcl]
-----
-<<GatherClassProperties: multi assigner properties>>=
-# First we need the total instances for the paritioning class.
-
-set partClassPop [pipe {
-    MultipleAssigner findWhere {$Domain eq $domain} |
-    findRelated % R54 R104 {~R101 ElementPopulation} {~R105 ClassPopulation} |
-    deRef % |
-    ralutil::rvajoin % $::micca::ClassInstance Instances |
-    relation extend %  itup TotalInstance int {
-            [tuple extract $itup Allocation] +\
-                [relation cardinality [tuple extract $itup Instances]]} |
-    relation eliminate % Instances Allocation
-} {} |%]
-# puts [relformat $partClassPop partClassPop]
-
-# Then we can find the number of intial instances of the multiple assigner
-# and deduce what the "implied" allocation for non-initial instances
-# would have been.
-set massigners [pipe {
-    relation restrictwith $assigners {[relation isnotempty $Multiple]} |
-    relation rename ~ Number AssignerNumber |
-    ralutil::rvajoin ~ $::micca::MultipleAssignerInstance Instances |
-    relation ungroup ~ Multiple |
-    relation join ~ $partClassPop |
-    relation extend ~ stup\
-        InitialInstance int\
-            {[relation cardinality [tuple extract $stup Instances]]} |
-    relation extend ~ atup\
-        Allocation int {[tuple extract $atup TotalInstance] -\
-            [tuple extract $atup InitialInstance]} |
-    relation eliminate ~ Domain Single Class Instances |
-    relation rename ~ Association Name AssignerNumber Number
-}]
-# puts [relformat $massigners massigners]
-----
 
 For classes,
 we, as usual,
@@ -453,8 +354,15 @@ of the superclass.
 ----
 <<GatherClassProperties: gather class properties>>=
 <<GatherClassProperties: non-union subclass properties>>
+set ClassProperties $classes
+
 <<GatherClassProperties: union subclass properties>>
+set ClassProperties [relation union $ClassProperties $subclasses]
 ----
+
+Also note here, that we are storing the calculated properties
+into a variable as they are determined.
+Again this lets us use past results for the next phases.
 
 Like other queries of this type,
 the strategy is to the `rvajoin` to deal with information that
@@ -472,7 +380,7 @@ delete the class from the result.
 [source,tcl]
 ----
 <<GatherClassProperties: non-union subclass properties>>=
-set classRefs [FindNonUnionSubclasses $domain]
+set classRefs [FindNonUnionSubclasses $domain] ;                    # <1>
 set cpopRefs [findRelated $classRefs R104 {~R101 ElementPopulation}\
         {~R105 ClassPopulation}]
 
@@ -512,23 +420,25 @@ set classes [pipe {
 }]
 # puts [relformat $classes classes]
 ----
+<1> This finds all classes which are *not* a subclass of a
+union-based generalization.
 
-For union subclasses,
-the situation is that we want to total allocation for the subclass
+For classes which *are* a subclass of a union-based generalization,
+we want the total allocation for the subclass
 to be the same as the ultimate superclass of the generalization.
 We say, ultimate superclass, since generalizations may extend multiple
 levels and it is the subclass at the ``top'' which determine the
 storage requirements.
 
-We start the query by finding the ultimate superclasses for
-union generalizations.
-A union superclass is an ultimate superclass if it does not also
+We start the query by finding the set of ultimate superclasses for
+the union generalizations.
+A union superclass is an ultimate superclass if it does *not* also
 serve a role as a union subclass.
 Then we can compute the transitive closure of the union subclasses over
 all union superclasses.
 The result of the transitive closure can then be joined against the
 ultimate superclasses to give us the name of the class that governs
-the total allocation for the union subclass.
+the total allocation for the union-based generalization.
 
 [source,tcl]
 ----
@@ -539,6 +449,7 @@ set usubs [pipe {
     relation eliminate ~ Domain Role
 }]
 # puts [relformat $usubs "Union Subclasses"]
+
 set usupers [pipe {
     UnionSuperclass findWhere {$Domain eq $domain} |
     deRef ~ |
@@ -546,6 +457,9 @@ set usupers [pipe {
     relation rename ~ Class Superclass
 }]
 # puts [relformat $usupers "Union Superclasses"]
+
+# The use of semiminus here gives the set of union-bases superclasses
+# which are *not* also used as subclasses.
 set ultimate_supers [pipe {
     relation semiminus $usubs $usupers -using {Class Superclass} |
     relation join ~ $classes -using {Superclass Name} |
@@ -553,7 +467,9 @@ set ultimate_supers [pipe {
 }]
 # puts [relformat $ultimate_supers "Ultimate Union Superclasses"]
 
-# We need this to join back on the class number after the transitive closure
+# We need this relation to recover the class number after the
+# transitive closure. TCLRal insists (as a probable mis-feature)
+# that a transitive close be performed on a binary relation.
 set domclasses [pipe {
     Class findWhere {$Domain eq $domain} |
     deRef ~ |
@@ -595,21 +511,146 @@ set subclasses [pipe {
 # puts [relformat $subclasses "Union Subclass"]
 ----
 
-Finally,
-the set of class properties is just the union of the four
-cases we just computed.
+The query for the assigners can be grouped as common items that
+apply to both single and multi assigners
+and those properties specifice to each type.
 
 [source,tcl]
 ----
-<<GatherClassProperties: union all properties>>=
-variable ClassProperties
+<<GatherClassProperties: gather assigner properties>>=
+<<GatherClassProperties: common assigner properties>>
 
-set ClassProperties [relation union $classes $subclasses\
-        $sassigners $massigners]
-# puts [relformat $ClassProperties ClassProperties]
+<<GatherClassProperties: single assigner properties>>
+set ClassProperties [relation union $ClassProperties $sassigners]
+
+<<GatherClassProperties: multi assigner properties>>
+set ClassProperties [relation union $ClassProperties $massigners]
 ----
 
-We need some procedures to access the properties.
+The common properties query starts at the *AssignerStateModel* and
+uses `rvajoin` to obtain the information in *R53* as relation
+valued attributes.
+This is an easy technique for discriminating a generalization.
+Note the assigners are tagged by ascending value of the Association
+name.
+This number is used as part of assigning assigner ID's for external use.
+
+[source,tcl]
+----
+<<GatherClassProperties: common assigner properties>>=
+set assigners [pipe {
+    AssignerStateModel findWhere {$Domain eq $domain} |
+    deRef ~ |
+    ralutil::rvajoin ~ $::micca::SingleAssigner Single |
+    ralutil::rvajoin ~ $::micca::MultipleAssigner Multiple |
+    relation tag ~ Number -ascending Association |
+    relation extend ~ stup\
+        Declaration string {"struct [tuple extract $stup Association]"}\
+        Reference string {"struct [tuple extract $stup Association] *"}\
+        ConstReference string\
+                {"struct [tuple extract $stup Association] const *"}\
+        StorageVariable string {"[tuple extract $stup Association]__POOL"}\
+        ClassVariable string {"${domain}__ASSIGNERS"}
+}]
+# puts "assigners =\n$assigners"
+----
+
+Single assigners have a single instance defined automatically.
+
+[source,tcl]
+----
+<<GatherClassProperties: single assigner properties>>=
+set sassigners [pipe {
+    relation restrictwith $assigners {[relation isnotempty $Single]} |
+    relation eliminate ~ Domain Single Multiple |
+    relation rename ~ Association Name |
+    relation extend ~ stup\
+        Allocation int {0}\
+        InitialInstance int {1}\
+        TotalInstance int {1}
+}]
+# puts [relformat $sassigners sassigners]
+----
+
+[[multiple-assigner-properties]]
+Multiple assigners can have population values specified during configuration
+creating instances which form the initial instance population for the
+assigner.
+The computation of the storage for multiple assigners is a bit different.
+The total number of multiple assigner instances is always the
+same number of instances as the class which partitions the multiple
+assigner.
+The `allocation` command is not supported for multiple assigners,
+so there is an implied value of the allocation which is the total number
+of instances minus those defined as part of the initial instance population.
+Here we compute all the fields just like a class or single assigner
+but with consideration of the rules for the differences in multiple assigners.
+
+The computation of the total number of multiple assigner instances
+is complicated by a couple of considerations.
+
+. There may be no initial population of the multi assigner
+  and we must deduce that the total number of instances is just that
+  of the partitioning class.
+. If the multiple assigner is partitioned by a union subclass, then
+  it is possible that the union subclass has no initial instances
+  and has no allocation defined for it in the configuration.
+  This is allowed for union subclasses since their storage is tied
+  to the ultimate superclass of the generalization (indeed there
+  is a warning issued of there is an `allocation` for a union
+  subclass in the population).
+. Even if there is an initial instance population for the multiple
+  assigner instances, computing the total instance allocation must
+  account for the previous consideration.
+
+The easiest implementation technique is to use the class property
+information we have already gathered.
+In particular,
+we have already calculated the total allocation information for
+ordinary classes, including union subclasses.
+So the strategy here is to compute the `TotalInstance` information
+knowing the partitioning class,
+find any initial multiple assigner instances and
+subtract that count from the total to compute what would have
+been the required allocation count.
+
+[source,tcl]
+----
+<<GatherClassProperties: multi assigner properties>>=
+set partClassPop [pipe {
+    MultipleAssigner findWhere {$Domain eq $domain} |
+    findRelated ~ R54 |
+    deRef ~ |
+    relation eliminate ~ Number |
+    relation rename ~ Name Class |
+    relation extend ~ itup TotalInstance int {
+            [GetClassProperty [tuple extract $itup Class] TotalInstance]}
+}]
+# puts [relformat $partClassPop partClassPop]
+
+# Then we can find the number of intial instances of the multiple assigner
+# and deduce what the "implied" allocation for non-initial instances
+# would have been.
+set massigners [pipe {
+    relation restrictwith $assigners {[relation isnotempty $Multiple]} |
+    relation rename ~ Number AssignerNumber |
+    ralutil::rvajoin ~ $::micca::MultipleAssignerInstance Instances |
+    relation ungroup ~ Multiple |
+    relation join ~ $partClassPop |
+    relation extend ~ stup\
+        InitialInstance int\
+            {[relation cardinality [tuple extract $stup Instances]]} |
+    relation extend ~ atup\
+        Allocation int {[tuple extract $atup TotalInstance] -\
+            [tuple extract $atup InitialInstance]} |
+    relation eliminate ~ Domain Single Class Instances |
+    relation rename ~ Association Name AssignerNumber Number
+}]
+# puts [relformat $massigners massigners]
+----
+
+Having computed all the properties,
+we need some procedures to access them.
 
 (((micca,Helpers,GetClassProperty)))
 [source,tcl]
@@ -1390,6 +1431,7 @@ set assigners [pipe {
     deRef ~ |
     relation tag ~ Number -ascending Association
 }]
+# puts [relformat ${::micca::@Gen@::Helpers::ClassProperties} ClassProperties]
 relation foreach assigner $assigners {
     relation assign $assigner
     append result [comment "Assigner: $Association"]
@@ -5890,6 +5932,7 @@ proc domainCtorDefinition {} {
 proc domainOpDefinitions {} {
     variable domain
     set result [comment "Domain Operation Definitions"]
+    set extern {}
 
     set ops [pipe {
         DomainOperation findWhere {$Domain eq $domain} |
@@ -5900,29 +5943,47 @@ proc domainOpDefinitions {} {
 
     relation foreach op $ops {
         relation assign $op
-        append result\
-            "$ReturnDataType\n${domain}_${Operation}"
+        set code "$ReturnDataType\n${domain}_${Operation}"
+        append result "static ${code}__SS"
+        append extern $code
+
+        if {$ReturnDataType eq "void"} {
+            set invocation {}
+            set retstmt {}
+        } else {
+            set invocation \
+                "[typeCheck composeDeclaration $ReturnDataType result] = "
+            set retstmt "return result ;\n"
+        }
+        append invocation "${domain}_${Operation}__SS\("
 
         if {[relation isempty $Parameters]} {
             set decl "\(void\)\n"
             append result $decl
+            append extern $decl
+            append invocation "\) ;\n"
             set syms [relation create {
                 Name string Ctype string Type string Class string
             }]
         } else {
             set pdecls {}
+            set pinvoke {}
             relation foreach param $Parameters -ascending Number {
                 relation assign $param
                 append pdecls\
                     [typeCheck composeDeclaration $DataType $Name]\
                     ,\n
+                append pinvoke $Name ", "
             }
             set pdecls [string trimright $pdecls ",\n"]\)\n
+            set pinvoke [string trimright $pinvoke ", "]
             set decl [string cat\
                 "\(\n"\
                 [indentCode $pdecls]\
             ]
             append result $decl
+            append extern $decl
+            append invocation "$pinvoke\) ;\n"
             set syms [pipe {
                 relation project $Parameters Name DataType |
                 relation rename ~ DataType Ctype |
@@ -5939,7 +6000,15 @@ proc domainOpDefinitions {} {
             [linedirective $Line $File]\
             [ExpandActivity "$Operation domain operation" $Body $syms]\
             "\}\n"
+        append extern\
+            "\{\n"\
+            "    mrt_BeginSyncService() ;\n"\
+            "    $invocation"\
+            "    mrt_EndSyncService() ;\n"\
+            [expr {$retstmt eq {} ? {} : "    $retstmt"}]\
+            "\}\n"
     }
+    append result $extern
 
     return $result
 }
@@ -13776,6 +13845,73 @@ test codegen-47.0 {
         struct R1 *r1ref ;
         r1ref = mrt_CreateInstance(&codegen47__ASSIGNERS[0], MRT_StateCode_IG) ;
         r1ref->idinstance = deptref ;
+    }
+} -result {1}
+----
+endif::showtests[]
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-75.0 {
+    Create a multi assigner partitioned by union subclass
+} -setup {
+    validateutils genMiccaFile codegen75 {
+        micca configure {
+            domain codegen75 {
+                class connection {}
+                class requested {}
+                class established {}
+                class service {}
+                class connect_usage {}
+
+                generalization R1 -union connection\
+                    requested established
+
+                association R2 -associator connect_usage\
+                    established 0..1--0..1 service {
+                    identifyby established
+                    statemodel {
+                        defaulttrans IG
+
+                        state waitingForConnection {} {
+                        }
+                        transition waitingForConnection - connReady -> waitingForService
+
+                        state waitingForService {} {
+                        }
+                        transition waitingForService - serviceReady -> assigningConn
+
+                        state assigningConn {} {
+                        }
+                        transition assigningConn - connAssigned -> waitingForConnection
+                    }
+                }
+            }
+            population codegen75 {
+                class connection {
+                    allocate 2
+                }
+                class service {
+                    allocate 2
+                }
+                class connect_usage {
+                    allocate 2
+                }
+            }
+        }
+    }
+} -cleanup {
+    micca clear
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen75.c
+    validateutils matchLines codegen75.c {
+        static struct connection connection__POOL [2] ;
+        static struct service service__POOL [2] ;
+        static struct connect_usage connect_usage__POOL [2] ;
+        static struct R2 R2__POOL[2] ;
     }
 } -result {1}
 ----
