@@ -63,12 +63,15 @@ MICCAFLAGS =\
 
 .PHONY : all doc runtests
 
+all : runtests coverage
+
 runtests : micca_gen_test
 	./micca_gen_test
 
-all : runtests doc
+coverage : runtests
+	gcovr -r . --html-details -o test_results/micca_gen_test.html
 
-micca_gen_test : LOADLIBES = $(HOME)/local/lib/libcunit.a
+micca_gen_test : LOADLIBES = $(HOME)/local/lib/libcunit.a --coverage
 
 micca_gen_test : micca_gen_test.o gendomain.o micca_rt.o
 
@@ -85,6 +88,8 @@ gendomain.c gendomain.h : gendomain.micca
 
 gendomain.micca : $(DOCSRC)
 	atangle $(ATANGLEOPTS) -root $@ -output $@ $<
+
+micca_rt.o : CFLAGS += --coverage
 
 doc : $(PDF)
 
