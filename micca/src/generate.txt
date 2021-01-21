@@ -1030,8 +1030,17 @@ proc domainOpDeclarations {} {
         if {$Comment ne {}} {
             append result [comment $Comment]
         }
-        set plist [relation list $Parameters DataType -ascending Number]
-        set pdecl [expr {[llength $plist] == 0 ? "void" : [join $plist {, }]}]
+        if {[relation isempty $Parameters]} {
+            set pdecl void
+        } else {
+            set plist [list]
+            relation foreach op_param $Parameters -ascending Number {
+                relation assign $op_param Name DataType
+                lappend plist [typeCheck composeDeclaration $DataType $Name]
+            }
+            set pdecl [join $plist {, }]
+        }
+
         append result "extern $ReturnDataType\
                 ${Domain}_${Operation}\($pdecl\) ;\n" ; # <1>
     }
@@ -1066,6 +1075,7 @@ test headergen-3.0 {
             eentity ext {
                 operation void ext1 {b int c {void *}}
                 operation void ext2 {d char e unsigned}
+                operation void ext3 {cap unsigned v {uint8_t[cap]}}
             }
             class c1 {
                 attribute color int -default 20
@@ -1085,13 +1095,13 @@ test headergen-3.0 {
             /*
              * two parameters
              */
-            extern int header3_op1(int, char) ;
+            extern int header3_op1(int a, char b) ;
         }]}\
         {[validateutils matchLines header3.h {
             /*
              * pointer type parameters
              */
-            extern int header3_op2(char *, uint8_t *) ;
+            extern int header3_op2(char * a, uint8_t * b) ;
         }]}
 } -result {1}
 ----
@@ -1125,8 +1135,17 @@ proc externalOpDeclarations {} {
         if {$Comment ne {}} {
             append result [comment [string trim $Comment \n]]
         }
-        set plist [relation list $Parameters DataType -ascending Number]
-        set pdecl [expr {[llength $plist] == 0 ? "void" : [join $plist {, }]}]
+        if {[relation isempty $Parameters]} {
+            set pdecl void
+        } else {
+            set plist [list]
+            relation foreach op_param $Parameters -ascending Number {
+                relation assign $op_param Name DataType
+                lappend plist [typeCheck composeDeclaration $DataType $Name]
+            }
+            set pdecl [join $plist {, }]
+        }
+
         append result "extern $ReturnDataType\
                 ${Domain}_${Entity}_${Operation}__EOP\($pdecl\) ;\n" ; # <1>
     }
@@ -1149,10 +1168,10 @@ test headergen-3.1 {
 } -body {
     testConditions\
         {[validateutils matchLines header3.h {
-            extern void header3_ext_ext1__EOP(int, void *) ;
+            extern void header3_ext_ext1__EOP(int b, void * c) ;
         }]}\
         {[validateutils matchLines header3.h {
-            extern void header3_ext_ext2__EOP(char, unsigned) ;
+            extern void header3_ext_ext2__EOP(char d, unsigned e) ;
         }]}
 } -result {1}
 ----
@@ -3045,17 +3064,19 @@ proc operationDeclarations {} {
 
     relation foreach op $ops {
         relation assign $op
-        append result\
-            "static $ReturnDataType ${Class}_$Operation\("
-
         if {[relation isempty $Parameters]} {
-            append result void
+            set pdecl void
         } else {
-            append result [join\
-                [relation list $Parameters DataType -ascending Number] {, }]
+            set plist [list]
+            relation foreach op_param $Parameters -ascending Number {
+                relation assign $op_param Name DataType
+                lappend plist [typeCheck composeDeclaration $DataType $Name]
+            }
+            set pdecl [join $plist {, }]
         }
 
-        append result "\) ;\n"
+        append result\
+            "static $ReturnDataType ${Class}_$Operation\($pdecl\) ;\n"
     }
 
     return $result
@@ -6621,6 +6642,7 @@ set cmdmap [dict create\
     assign ${suppns}::InstanceAssign\
     signal ${suppns}::InstanceSignal\
     delaysignal ${suppns}::InstanceDelaySignal\
+    periodicsignal ${suppns}::InstancePeriodicSignal\
     canceldelayed ${suppns}::InstanceCancelSignal\
     delayremaining ${suppns}::InstanceRemainingTime\
     delete ${suppns}::InstanceDelete\
@@ -6652,6 +6674,7 @@ set cmdmap [dict create\
     assign [list ${suppns}::InstanceAssign self]\
     signal [list ${suppns}::InstanceSignal self]\
     delaysignal [list ${suppns}::InstanceDelaySignal self]\
+    periodicsignal [list ${suppns}::InstancePeriodicSignal self]\
     canceldelayed [list ${suppns}::InstanceCancelSignal self]\
     delayremaining [list ${suppns}::InstanceRemainingTime self]\
     delete [list ${suppns}::InstanceDelete self]\
@@ -10354,6 +10377,111 @@ test codegen-68.0 {
         strncpy(t__T2->newname, "bar", 3) ;
         t__T2->newname[3] = '\0' ;
         mrt_PostDelayedEvent(t__T1, 200) ;
+    }
+} -result {1}
+----
+endif::showtests[]
+
+==== Periodic Signaling of an Event
+
+*****
+`<%instance` _instvar_ `periodicsignal` _initial_ _rollover_ _event_ `%>`
+
+instvar::
+    The name of a ``C'' variable containing an instance reference
+    which is to be signaled.
+initial::
+    The minimum number of milliseconds that are to elapse before
+    the event is signaled the first time.
+rollover::
+    The minimum number of milliseconds that are to elapse before
+    the event is signaled the second and all subsequent times.
+
+The `periodicsignal` subccommand generates ``C'' statements
+to arrange for _event_ to be signaled repeatedly to the instance referenced by the
+_instvar_ variable.
+The _event_ is signaled the first time after _initial_ milliseconds
+elapses.
+The _event_ is signaled after _rollover_ milliseconds on the second
+and all subsequent times.
+The value of _initial_ may be zero, in which case the event is signaled
+immediately.
+The value of _rollover_ may be zero, in which case the event is signaled
+only once and has the same behavior as a delayed event.
+Any given name / value pairs are passed as the parameters of the event.
+
+Note that periodic events are not allowed to have parameters.
+The rational is that since there is no reliable way to change the pararameter
+values between event dispatches,
+any data that might be a parameter is still available in the domain
+when the event is received.
+*****
+
+(((micca,Activity Generation,delaysignal)))
+[source,tcl]
+----
+<<generation support commands>>=
+proc InstancePeriodicSignal {instref initial rollover event} {
+    set result\
+        [linecomment "instance $instref periodicsignal $initial $rollover $event"]
+    set eventRef [VerifyEvent $event $instref]
+    set params [VerifyEventParams $eventRef {}]
+    if {[relation isempty $params]} {
+        set eventNum [readAttribute $eventRef Number]
+        set sourceinst [expr {[LookUpSymbol self] eq {} ? "NULL" : "self"}]
+        append result "mrt_SignalPeriodicEvent($initial, $rollover,\
+                $eventNum, $instref, $sourceinst) ; // $event\n"
+    } else {
+        error "event, $event, requires parameters, [relation list $params Name],\
+                and cannot be used periodically"
+    }
+    return [IndentToBlock $result]
+}
+----
+
+ifdef::showtests[]
+[source,tcl]
+----
+<<generate command tests>>=
+test codegen-76.0 {
+    Signal a periodic event
+} -setup {
+    validateutils genMiccaFile codegen67 {
+        domain codegen67 {
+            class X {
+                attribute temp int -default 20
+
+                statemodel {
+                    state Idle {} {
+                    }
+                    transition Idle - E1 -> Running
+
+                    state Running {} {
+                        <%my attr temp%> += 10 ;
+                    }
+                    transition Running - E1 -> Running ;
+                }
+            }
+
+            domainop void startx1 {} {
+                <%X findByName x1 xref%>
+                <%instance xref periodicsignal 50 100 E1%>
+            }
+        }
+        population codegen67 {
+            class X {
+                instance x1
+            }
+        }
+    }
+} -cleanup {
+    micca clear
+    validateutils forgetFiles
+} -body {
+    validateutils compileFiles codegen67.c
+    validateutils matchLines codegen67.c {
+        // instance xref periodicsignal 50 100 E1
+        mrt_SignalPeriodicEvent(50, 100, 0, xref, NULL) ; // E1
     }
 } -result {1}
 ----
