@@ -6071,6 +6071,7 @@ typedef struct mrtecb {
     MRT_Instance *targetInst ;
     MRT_Instance *sourceInst ;
     MRT_DelayTime delay ;
+    MRT_DelayTime reload ;
     alignas(max_align_t) MRT_EventParams eventParameters ;
 } MRT_ecb ;
 ----
@@ -6103,6 +6104,11 @@ typedef struct mrtecb {
     More on that later.
 `delay`::
     The number of milliseconds to delay before the event is posted.
+`reload`::
+    The number of milliseconds to delay for the second and subsequent times
+    the event is signaled.
+    For one-shot delayed events, `reload` is set to zero.
+    For periodic delayed events, `reload` contains periodic delay interval.
 `eventParameters`::
     Storage for any parameter values passed along with the event.
     We discuss event parameter data storage <<event-parameter-storage, below>>.
@@ -6240,7 +6246,7 @@ Therefore,
 there is no danger of a long complicated chain of event dispatching cycling
 back around to alter the state of the instance or potentially modify some data
 value that the state activity accesses after generating the event.
-The guaranteed of run-to-completion for state activity execution is very
+The guarantee of run-to-completion for state activity execution is very
 important.
 We now examine the code that performs the queueing.
 
@@ -6324,7 +6330,7 @@ static inline bool
 mrtEventQueueEmpty(
     MRT_EventQueue *queue)
 {
-    return queue->next == (MRT_ecb *)queue ;
+    return mrtEventQueueBegin(queue) == mrtEventQueueEnd(queue) ;
 }
 ----
 
@@ -6388,7 +6394,7 @@ mrtECBPoolInit(void)
      */
     for (MRT_ecb *ecb = mrtECBPool ;
             ecb < mrtECBPool + MRT_EVENT_POOL_SIZE ; ecb++) {
-        mrtEventQueueInsert(ecb, (MRT_ecb *)&freeEventQueue) ;
+        mrtEventQueueInsert(ecb, mrtEventQueueEnd(&freeEventQueue)) ;
     }
 }
 ----
@@ -6521,6 +6527,7 @@ mrt_NewEvent(
     ecb->targetInst = targetInst ;
     ecb->sourceInst = sourceInst ;
     ecb->delay = 0 ;                    // <2>
+    ecb->reload = 0 ;
 
     return ecb ;
 }
@@ -6528,8 +6535,8 @@ mrt_NewEvent(
 <1> Note that we initialize the ECB `alloc` member from the
 target instance. This is an essential part of detecting _event in flight_
 errors.
-<2> Delayed event signaling will overwrite the zero with the requested
-delay time.
+<2> Delayed or periodic event signaling will overwrite the `delay` and
+`reload` members as necessary.
 Most frequently, we are performing immediate signaling.
 
 ==== Posting an Event
@@ -6631,6 +6638,7 @@ mrt_SignalEvent(
     The numerical code for the event.
 `targetInst`::
     A pointer to the instance that is to receive the event.
+    If `targetInst` is `NULL`, then no event is signaled.
 `sourceInst`::
     A pointer to the instance that is sending the event.
     If the event is being sent outside of the context of a class instance,
@@ -6656,6 +6664,10 @@ mrt_SignalEvent(
     void const *eventparams,
     size_t paramsize)
 {
+    if (targetInst == NULL) {
+        return ;                                                    // <1>
+    }
+
     MRT_ecb *ecb = mrt_NewEvent(event, targetInst, sourceInst) ;
 
     if (eventparams != NULL) {
@@ -6668,6 +6680,9 @@ mrt_SignalEvent(
     mrt_PostEvent(ecb) ;
 }
 ----
+<1> We interpret signaling the `NULL` instance as a request to do nothing.
+This can be used to avoid tests against `NULL` when the result of a
+relationship navigation needs to be the target of the event.
 
 === Asynchronous Instance Creation
 
@@ -6976,46 +6991,20 @@ mrt_PostDelayedEvent(
     mrtRemoveDelayedEvent(ecb->sourceInst, ecb->targetInst,
             ecb->eventNumber) ;
 
-    MRT_ecb *qloc ;
-    if (time != 0) {                                                // <2>
+    if (time != 0) {
         ecb->delay = mrtMsecToTicks(time) ;
-        for (qloc = mrtEventQueueBegin(&delayedEventQueue) ;
-                qloc != mrtEventQueueEnd(&delayedEventQueue) ;
-                qloc = qloc->next) {
-            if (ecb->delay < qloc->delay) {                         // <3>
-                qloc->delay -= ecb->delay ;                         // <4>
-                break ;
-            } else {
-                ecb->delay -= qloc->delay ;
-            }
-        }
-        // <5>
+        mrtInsertDelayedEvent(ecb) ;
     } else {
-        qloc = mrtEventQueueEnd(&tocEventQueue) ;                   // <6>
+        mrtEventQueueInsert(ecb, mrtEventQueueEnd(&tocEventQueue)) ;// <2>
     }
-    mrtEventQueueInsert(ecb, qloc) ;
-    mrtStartDelayedQueueTiming() ;                                  // <7>
+
+    mrtStartDelayedQueueTiming() ;                                  // <3>
 }
 ----
 <1> The timing queue must be stopped so we may examine it safely.
-<2> Insert the event if a non-zero delay was requested.
-We walk down the queue to find the correct slot.  That slot is the
-first place in the queue where our delay value is less than the delay
-value at that place in the queue.  As we walk the queue, we subtract
-the delay value of each entry we pass since that entry will have
-expired before the one being inserted.
-<3> By keeping this comparison to be strictly less than, we preserve
-the order of event dispatch to match that of event generation.
-<4> We are going to insert before the entry pointed to by `iter`.
-Therefore, we need to decrease its delay value by the amount of
-time that will have elapsed after the entry we are about to
-insert expires.
-<5> At this point we have found our place in the queue.
-Either we are between entries or this delay was longer than the cumulative
-delays of all the ECB's in the queue. Insert the ECB.
-<6> All delayed events start a new thread of control,
+<2> All delayed events start a new thread of control,
 even those which have a zero delay time.
-<7> Start the timer to expire for the first event on the queue.
+<3> Start the timer to expire for the first event on the queue.
 
 We see here the distinction between posting a delayed event and
 the ordinary posting of an event.
@@ -7051,9 +7040,66 @@ If one is found then it is removed.
 queue.
 . Finally, the timing of the delayed queue is started.
 
+==== Posting A Periodic Event
+
+*****
+[source,c]
+----
+<<mrt internal external interfaces>>=
+extern void
+mrt_PostPeriodicEvent(
+    MRT_ecb *ecb,
+    MRT_DelayTime initial,
+    MRT_DelayTime reload) ;
+----
+
+`ecb`::
+    A pointer to an Event Control Block (ECB) that is to be queued
+    for dispatch.
+`initial`::
+    The minimum number of milliseconds of time that must elapse before
+    the event given by `ecb` is first posted for dispatch.
+`reload`::
+    The minimum number of milliseconds of time that must elapse after
+    the first posting of the `ecb` before it is reposted periodically
+    after each `reload` interval.
+
+The `mrt_PostPeriodicEvent` function requests that the event given by
+`ecb` be dispatched no sooner than `initial` milliseconds from now
+and that the `ecb` be reposted `reload` milliseconds after that.
+Reposting in `reload` milliseconds continues until the event is cancelled.
+The value of the `initial` argument may be 0,
+in which case the event is posted for dispatch immediately.
+The value of the `repost` argument must be non-zero if the event is
+to be treated as a periodic event.
+Invoking `mrt_PostPeriodicEvent` with a `repost` value of zero
+results in an delayed event.
+Like delayed events, all periodic events start a new thread of control.
+Any request to post a periodic event of the same event number that
+already exists for some sending / receiving pair of instances results
+in the first event being canceled and the event being posted at the
+given delay time.
+*****
+
+(((micca,Run Time Function,mrt_PostDelayedEvent)))
+[source,c]
+----
+<<mrt external functions>>=
+void
+mrt_PostPeriodicEvent(
+    MRT_ecb *ecb,
+    MRT_DelayTime initial,
+    MRT_DelayTime reload)
+{
+    assert(ecb != NULL) ;
+    ecb->reload = mrtMsecToTicks(reload) ;
+    mrt_PostDelayedEvent(ecb, initial) ;
+}
+----
+
 ==== One Step Delayed Event Signaling
 
-Just as for non-delayed events,
+Just as for immediate events,
 delayed events without additional parameters or for which the parameters
 have been marshalled into a parameter block,
 a single function can both fill in an ECB and post it to the delayed event
@@ -7119,6 +7165,92 @@ mrt_SignalDelayedEvent(
 }
 ----
 
+==== One Step Periodic Event Signaling
+
+Periodic events should not carry any additional parameters.
+It is not possible to change the parameter values between event
+dispatches and any information used for the parameter values
+can be available in the model when the event is received.
+
+*****
+[source,c]
+----
+<<mrt internal external interfaces>>=
+extern void
+mrt_SignalPeriodicEvent(
+    MRT_DelayTime initial,
+    MRT_DelayTime reload,
+    MRT_EventCode event,
+    void *targetInst,
+    void *sourceInst) ;
+----
+
+`initial`::
+    The minimum number of milliseconds of time that must elapse before
+    the event given by `ecb` is first posted for dispatch.
+`reload`::
+    The minimum number of milliseconds of time that must elapse after
+    the first posting of the `ecb` before it is reposted periodically
+    after each `reload` interval.
+`event`::
+    The numerical code for the event.
+`targetInst`::
+    A pointer to the instance that is to receive the event.
+`sourceInst`::
+    A pointer to the instance that is sending the event.
+    If the event is being sent outside of the context of a class instance,
+    then this argument should be set to `NULL`.
+*****
+
+[source,c]
+----
+<<mrt external functions>>=
+void
+mrt_SignalPeriodicEvent(
+    MRT_DelayTime initial,
+    MRT_DelayTime reload,
+    MRT_EventCode event,
+    void *targetInst,
+    void *sourceInst)
+{
+    MRT_ecb *ecb = mrt_NewEvent(event, targetInst, sourceInst) ;
+
+    mrt_PostPeriodicEvent(ecb, initial, reload) ;
+}
+----
+
+==== Inserting Delayed Events
+
+(((micca,Run Time Function,mrtInsertDelayedEvent)))
+[source,c]
+----
+<<mrt static functions>>=
+static void
+mrtInsertDelayedEvent(
+    MRT_ecb *ecb)
+{
+    MRT_ecb *iter = mrtEventQueueBegin(&delayedEventQueue) ;
+    MRT_ecb *const end = mrtEventQueueEnd(&delayedEventQueue) ;
+    for ( ; iter != end ; iter = iter->next) {
+        if (ecb->delay < iter->delay) {                         // <1>
+            iter->delay -= ecb->delay ;                         // <2>
+            break ;
+        } else {
+            ecb->delay -= iter->delay ;
+        }
+    }
+    mrtEventQueueInsert(ecb, iter) ;
+}
+----
+<1> By keeping this comparison to be strictly less than, we preserve
+the order of event dispatch to match that of event generation.
+<2> We are going to insert before the entry pointed to by `iter`.
+Therefore, we need to decrease its delay value by the amount of
+time that will have elapsed after the entry we are about to
+insert expires.
+
+==== Removing Delayed Events
+
 Since removing delayed events is something we do
 when canceling a delayed event,
 we factor out the code into a function.
@@ -7136,19 +7268,17 @@ mrtRemoveDelayedEvent(
     MRT_ecb *found = mrtFindEvent(&delayedEventQueue, sourceInst,
             targetInst, eventNumber) ;                                  // <1>
     if (found != NULL) {
-        if (!(found->delay == MRT_DELAY_EXPIRED ||                      // <2>
-            found->next == mrtEventQueueEnd(&delayedEventQueue))) {
+        if (found->next != mrtEventQueueEnd(&delayedEventQueue)) {      // <2>
             found->next->delay += found->delay ;
         }
     } else {
         found = mrtFindEvent(&tocEventQueue, sourceInst, targetInst,
                 eventNumber) ;
     }
-    if (found != NULL) {
+    if (found != NULL) {                                                // <3>
         mrtEventQueueRemove(found) ;
         mrtECBfree(found) ;
     }
-    // <3>
 }
 ----
 <1> If the event already exists, remove it.
@@ -7158,9 +7288,9 @@ Thread of Control event queue. If we find it in either place, it
 is a duplicate event and it is removed. This is in keeping with our
 interpretation that a duplicate delayed event is a request to cancel
 the first and create one with a new delay time.
-<2> If event is not already expired and the event is not at the end of the
+<2> If the event is not at the end of the
 queue, all the delay from the removed entry is added onto the next
-entry in the queue. This keeps insures that the time associated with
+entry in the queue. This insures that the time associated with
 the deleted event is accounted for when subsequent events expire.
 <3> If we get here and `found` is still `NULL`, then there was no
 delayed event matching the source / target / event and we just do
@@ -7353,113 +7483,19 @@ Essentially, we would like to overlap the timing of the next delayed
 event with the time it takes to complete the current activities and
 execute the timer sync request.
 
-This design chooses to mark the events in the delayed event queue as
-expired and that provides a means of knowing which events in the delayed
-queue are active.
-The question then is how to signify that an event in the delayed event queue
-has expired.
-Since a delay value of 0 is meaningful, we use a delay value of
-the maximum for a delay time as the expired marker.
-We mark the `delay` member of the ECB with a special value to indicated that
-it has expired but not yet been removed from the delayed event queue.
-This allows us to keep track of the state of the ECB in the delayed
-event queue and still find the next timer interval during the timer
-interrupt service routine.
-
-[source,c]
-----
-<<mrt implementation constants>>=
-#define MRT_DELAY_EXPIRED  UINT32_MAX
-----
-
-The `mrtExpireDelayedEvents` function is run to traverse the delayed event
-queue and mark any events that have a delay value of 0 as expired.
-It is used both in the delayed event timer service as well as in the background
-processing of the delayed event queue.
-The return value is pointer to an ECB.
-This will be `NULL` if there are no other events in the delayed queue that
-require timing.
-Otherwise,
-the returned ECB pointer will reference the first unexpired,
-non-zero delay event.
-The semantics are a bit strained,
-but the function is used for two distinct purposes.
-
-[source,c]
-----
-<<mrt forward references>>=
-static MRT_ecb *mrtExpireDelayedEvents(void) ;
-----
-
-(((micca,Run Time Function,mrtExpireDelayedEvents)))
-[source,c]
-----
-<<mrt static functions>>=
-static MRT_ecb *
-mrtExpireDelayedEvents(void)
-{
-    /*
-     * Iterate along the delayed event queue.
-     */
-    for (MRT_ecb *iter = mrtEventQueueBegin(&delayedEventQueue) ;
-            iter != mrtEventQueueEnd(&delayedEventQueue) ;
-            iter = iter->next) {
-        if (iter->delay == 0) {
-            /*
-             * Mark all the events that have zero delay time as expired.
-             */
-            iter->delay = MRT_DELAY_EXPIRED ;
-        } else if (iter->delay != MRT_DELAY_EXPIRED) {
-            /*
-             * Stop at the first non-zero delay time.  This marks the boundary
-             * of events that need additional delay time.  The first such event
-             * is the next amount of time to delay.
-             */
-            return iter ;
-        }
-        /*
-         * else ... Skip any events that might already be expired.
-         */
-    }
-    /*
-     * We have run the queue without finding an unexpired event.
-     */
-    return NULL ;
-}
-----
-
-The function below is then run in the background to re-queue the
-expired events.
-
-(((micca,Run Time Function,mrtTransferExpiredEvents)))
-[source,c]
-----
-<<mrt static functions>>=
-static void
-mrtTransferExpiredEvents(void)
-{
-    /*
-     * Iterate through the delayed event queue looking for those entries that
-     * have been marked as expired.
-     */
-    for (MRT_ecb *iter = mrtEventQueueBegin(&delayedEventQueue) ;
-            iter != mrtEventQueueEnd(&delayedEventQueue) &&
-            iter->delay == MRT_DELAY_EXPIRED ; /* empty 3rd expression */) {
-        /*
-         * Advance the iterator here, because we are about to invalidate it by
-         * removing the entry from the queue.
-         */
-        MRT_ecb *ecb = iter ;
-        iter = iter->next ;
-        /*
-         * Remove the ECB from the delayed queue and insert it into the thread
-         * of control event queue for dispatch.
-         */
-        mrtEventQueueRemove(ecb) ;
-        mrtEventQueueInsert(ecb, mrtEventQueueEnd(&tocEventQueue)) ;
-    }
-}
-----
+This design chooses to remove each expired delayed event and pass the
+ECB as a parameter to a sync function which,
+when it runs, queues the ECB to the TOC event queue.
+Periodic events are handled similarly.
+The ECB is removed from the delayed event queue and a sync function
+is invoked.
+However, the parameters to the sync function are retrieved from the
+ECB rather than passing the ECB pointer itself.
+The ECB delay time is then reset to the reload time and then
+reinserted into the delayed event queue.
+When the sync function for periodic events runs,
+it must allocate a new ECB and fill some of the fields from the
+parameters passed to the sync function.
 
 The concept of starting the delayed event queue timing is
 associated with starting the timing resource with the delay time of the
@@ -7515,46 +7551,9 @@ mrtStopDelayedQueueTiming(void)
          * Stop the timer, obtaining the residual time.
          */
         MRT_DelayTime remain = mrtSysTimerStop() ;
-        /*
-         * There are two cases here. It is possible for the remaining time
-         * returned from mrtSysTimerStop() to be zero. This can happen if the
-         * physical timing resource (which might be running asynchronously to
-         * the processor) happens to expire within a single tick as we are
-         * stopping it.
-         */
-        if (remain == 0) {
-            /*
-             * Since the timer has expired we must mark any events with a zero
-             * delay time value as expired and, since we are running in the
-             * background here, transfer the expired events to be dispatched.
-             */
-            mrtExpireDelayedEvents() ;
-            mrtTransferExpiredEvents() ;
-            /*
-             * At this point, either the delayed event queue is empty, or the
-             * event at the head of the queue has a non-zero delay time.
-             */
-        } else {
-            /*
-             * It is possible that the timing resource expired and its
-             * interrupt service ran just before we could get the timer
-             * stopped. That would mean that there are expired events on the
-             * delayed queue at this point and we need to transfer them off the
-             * delayed queue to be dispatched.
-             */
-            mrtTransferExpiredEvents() ;
-            /*
-             * If any events expired, the delayed event queue might now be
-             * empty. However, if the queue is not empty, we must make sure the
-             * entry at the head preserves the remaining amount of time that
-             * needs to elapse.
-             */
-            if (!mrtEventQueueEmpty(&delayedEventQueue)) {
-                MRT_ecb *ecb = mrtEventQueueBegin(&delayedEventQueue) ;
-                assert(ecb->delay == 0) ;
-                ecb->delay = remain ;
-            }
-        }
+        MRT_ecb *ecb = mrtEventQueueBegin(&delayedEventQueue) ;
+        assert(ecb->delay == 0) ;
+        ecb->delay = remain ;
     }
 }
 ----
@@ -7566,28 +7565,6 @@ So when the the delayed event queue timing is running,
 at least the first ECB on the queue will have a zero delay time.
 When it is stopped, we must insure that the first queued ECB has a non-zero
 delay time.
-
-There is a race condition between the background code executing
-`mrtStopDelayedQueueTiming()` and
-the timer services that may run asynchronously as an interrupt.
-After the return from `mrtSysTimerStop()` the timer will have been stopped
-and will not cause any interrupt.
-However, at any time previous to that the timer interrupt might have gone off
-and expired one or more events.
-Although a sync function will have been posted,
-it will *not* have had an opportunity to run.
-So we must make sure to transfer any expired events to the event queue.
-This insures that the event generation does not get out of order.
-
-The other complication here is that we might stop the timer just the instant
-before it expired.
-In this case the underlying timer services might think that there is no
-time left on the timer, but the timer interrupt did not actually occur.
-This is the case where we just win the race as opposed to the previous
-situation where we just lost the race.
-So, just in case, we transfer any events on the delay queue that happen
-to show zero delay times to the event queue.
-
 
 The `mrt_TimerExpireService` function is provided
 for the asynchronous timer execution to call that performs task of expiring
@@ -7610,35 +7587,55 @@ mrt_TimerExpireService(void) ;
 MRT_DelayTime
 mrt_TimerExpireService(void)
 {
+    MRT_DelayTime next_delay = 0 ;
     /*
-     * Sync to the background to request the expired events be transferred to
-     * the event queue.
+     * Iterate along the delayed event queue.
      */
-    mrt_SyncRequest(mrtExpiredEventService) ;
-    /*
-     * Mark the delayed events as expired, returning a pointer to the first
-     * unexpired event.
-     */
-    MRT_ecb *unexpired = mrtExpireDelayedEvents() ;
-    MRT_DelayTime nextTime ;
-    if (unexpired) {
-        /*
-         * If there is an unexpired event, then its delay time is the next time
-         * to expire. We return that time and zero out the delay time.
-         */
-        assert(unexpired->delay != 0) ;
-        nextTime = unexpired->delay ;
-        unexpired->delay = 0 ;
-    } else {
-        /*
-         * Otherwise, there is nothing else to time.
-         */
-        nextTime = 0 ;
+    MRT_ecb *iter = mrtEventQueueBegin(&delayedEventQueue) ;
+    MRT_ecb *const end = mrtEventQueueEnd(&delayedEventQueue) ;
+    while (iter != end) {
+        if (iter->delay == 0) {
+            MRT_ecb *expired = iter ;
+            iter = iter->next ;                                         // <1>
+            mrtEventQueueRemove(expired) ;
+
+            if (expired->reload == 0) {
+                MRT_DelayedEventParams *params =
+                    (MRT_DelayedEventParams *)mrt_SyncRequest(mrtExpireDelayedEvent) ;
+                params->ecb = expired ;
+            } else {
+                MRT_PeriodicEventParams *params =
+                    (MRT_PeriodicEventParams *)mrt_SyncRequest(mrtExpirePeriodicEvent) ;
+                params->eventNumber = expired->eventNumber ;
+                params->alloc = expired->alloc ;
+                params->targetInst = expired->targetInst ;
+                params->sourceInst = expired->sourceInst ;
+
+                expired->delay = expired->reload ;
+                mrtInsertDelayedEvent(expired) ;
+                iter = mrtEventQueueBegin(&delayedEventQueue) ;         // <2>
+            }
+        } else {
+            /*
+             * Stop at the first non-zero delay time.  This marks the boundary
+             * of events that need additional delay time.  The first such event
+             * is the next amount of time to delay.
+             */
+            next_delay = iter->delay ;
+            iter->delay = 0 ;
+            break ;
+        }
     }
 
-    return nextTime ;
+    return next_delay ;
 }
 ----
+<1> We must advance the iterator before removing the event since the removal
+will invalidate the iterator.
+<2> Once we have reinserted an ECB into the delayed event queue,
+our iterator is invalid.
+So, we start at the beginning of the queue looking for additional
+ECB's which have expired.
 
 . The function assumes it is called from interrupt service level,
 _i.e._ it assumes that it may touch the delayed
@@ -7651,9 +7648,9 @@ If the returned time is zero,
 then the timer facility is not currently needed and should
 remain stopped.
 
-Notice that the function `mrtExpiredEventService` is queued
-as as sync function to perform the last step of moving
-the expired events to the event queue.
+Notice that the function `mrtExpireDelayedEvent` or `mrtExpirePeriodicEvent`
+is queued as as sync function to perform the last step of queuing
+the ECB for dispatch.
 The run-time uses its own internal facilities to post this
 function as a sync function.
 This insures that delayed event posting is no different than
@@ -7661,24 +7658,55 @@ any other interrupt synchronization and preserves the notion that the event
 queues are not accessed by interrupt service code and therefore do
 not need to be guarded by a critical section.
 
-(((micca,Run Time Function,mrtExpiredEventService)))
+[source,c]
+----
+<<mrt implementation aggregate types>>=
+typedef struct mrtdelayedeventparams {
+    MRT_ecb *ecb ;
+} MRT_DelayedEventParams ;
+----
+
+(((micca,Run Time Function,mrtExpireDelayedEvent)))
 [source,c]
 ----
 <<mrt static functions>>=
 static void
-mrtExpiredEventService(
-    MRT_SyncParams const *params) /* Not used */
+mrtExpireDelayedEvent(
+    MRT_SyncParams const *params)
 {
-    /*
-     * Since the expired event queue is accessed here, we must make sure that
-     * the timer interrupt does not go off.
-     */
-    mrtSysTimerMask() ; // <1>
-    mrtTransferExpiredEvents() ;
-    mrtSysTimerUnmask() ;
+    MRT_DelayedEventParams *dep = (MRT_DelayedEventParams *)params ;
+    mrtEventQueueInsert(dep->ecb, mrtEventQueueEnd(&tocEventQueue)) ;
 }
 ----
-<1> We do have to guard the delayed event queue from any timer interrupt.
+
+[source,c]
+----
+<<mrt implementation aggregate types>>=
+typedef struct mrtperiodiceventparams {
+    MRT_AllocStatus alloc ;
+    MRT_EventCode eventNumber ;
+    MRT_Instance *targetInst ;
+    MRT_Instance *sourceInst ;
+} MRT_PeriodicEventParams ;
+----
+
+(((micca,Run Time Function,mrtExpirePeriodicEvent)))
+[source,c]
+----
+<<mrt static functions>>=
+static void
+mrtExpirePeriodicEvent(
+    MRT_SyncParams const *params)
+{
+    MRT_PeriodicEventParams *pep = (MRT_PeriodicEventParams *)params ;
+    MRT_ecb *ecb = mrtECBalloc() ;
+    ecb->eventNumber = pep->eventNumber ;
+    ecb->alloc = pep->alloc ;
+    ecb->targetInst = pep->targetInst ;
+    ecb->sourceInst = pep->sourceInst ;
+    mrtEventQueueInsert(ecb, mrtEventQueueEnd(&tocEventQueue)) ;
+}
+----
 
 ==== Timing Considerations
 
@@ -11609,6 +11637,7 @@ typedef enum {
     mrtStaticRelationship,
     mrtRelationshipLinkage,
     mrtDupAssociator,
+    mrtPanic,
 
 #       ifdef _POSIX_C_SOURCE
     mrtTimerOpFailed,
@@ -11633,6 +11662,7 @@ static char const * const mrtErrorMsgs[] = {
     [mrtInstSetOverflow] = "instance set overflow: instance number %u\n",
     [mrtStaticRelationship] = "attempt to modify static relationship\n",
     [mrtRelationshipLinkage] = "invalid instance linkage operation or value\n",
+    [mrtPanic] = "panic: %s\n",
 
 #       ifndef MRT_NO_NAMES
     [mrtCantHappen] = "can't happen transition: %s.%s: %s - %s -> CH\n",
@@ -11975,7 +12005,7 @@ if necessary.
 Finally,
 `abort()` is called should the error handler return.
 
-== Avoiding Fatalities
+=== Avoiding Fatalities
 
 In this error handling strategy,
 every run-time detected error is fatal.
@@ -12054,7 +12084,7 @@ events.
 of slots and excessive synchronization requests from interrupt service
 routines can fill the queue.
 
-=== Checking for Available Instance Space
+==== Checking for Available Instance Space
 
 The `mrt_CanCreateInstance()` function provides a means determine if there
 is space available to create a new instance of a class.
@@ -12093,7 +12123,7 @@ mrt_CanCreateInstance(
 }
 ----
 
-=== Checking for Event Blocks
+==== Checking for Event Blocks
 
 *****
 [source,c]
@@ -12118,7 +12148,7 @@ mrt_CanSignalEvent(void)
 }
 ----
 
-=== Non-Fatal Background Synchronization
+==== Non-Fatal Background Synchronization
 
 (((micca,Run Time Function,mrt_TrySyncRequest)))
 *****
@@ -12140,7 +12170,57 @@ Otherwise, the return value is non-NULL and points to space where
 the parameters of `syncfunc` may be placed.
 *****
 
-=== Linked List Operations
+==== Causing Fatalities
+
+There are rare cases when executing outside of the state machine
+dispatch mechanism where situations are detected where
+the execution state cannot be resolved and it is necessary
+to assert a _panic_ situation.
+For this situation,
+the run time provides the `mrt_Panic` function.
+
+(((micca,Run Time Function,mrt_Panic)))
+*****
+[source,c]
+----
+<<mrt external interfaces>>=
+extern noreturn void
+mrt_Panic(
+    char const *format,
+    ...) ;
+----
+`format`::
+    A `printf` style format string.
+`...`::
+    A variable length list of arguments matching the `format` string
+    conversion specifiers.
+
+The `mrt_Panic` formats an output string according to the
+`format` argument and the other invocation parameters and
+forces an error situation.
+*****
+
+(((micca,Run Time Function,mrt_Panic)))
+[source,c]
+----
+<<mrt external functions>>=
+noreturn void
+mrt_Panic(
+    char const *format,
+    ...)
+{
+    char outbuf[128] ;
+    va_list ap ;
+
+    va_start(ap, format) ;
+    vsnprintf(outbuf, sizeof(outbuf), format, ap) ;
+    va_end(ap) ;
+
+    mrtFatalError(mrtPanic, outbuf) ;
+}
+----
+
+== Linked List Operations
 
 The run-time supplies a set of linked list operations for use
 in manipulating the lists of instance pointers used to realize and
@@ -13170,6 +13250,7 @@ the files are created by tangling.
 <<edit warning>>
 <<copyright info>>
 
+Micca version:
 <<version info>>
 */
 
@@ -13192,6 +13273,7 @@ the files are created by tangling.
 <<edit warning>>
 <<copyright info>>
 
+Micca version:
 <<version info>>
 */
 
@@ -13699,6 +13781,7 @@ The timestamp is split into a seconds portion and a milliseconds portion.
 <<edit warning>>
 <<copyright info>>
 
+Micca version:
 <<version info>>
 */
 
@@ -13717,6 +13800,7 @@ The timestamp is split into a seconds portion and a milliseconds portion.
 <<edit warning>>
 <<copyright info>>
 
+Micca version:
 <<version info>>
 */
 
@@ -13993,6 +14077,7 @@ mrtTimestamp(void)
 /*
 <<copyright info>>
 
+Micca version:
 <<version info>>
 */
 
@@ -14011,6 +14096,7 @@ mrtTimestamp(void)
 <<edit warning>>
 <<copyright info>>
 
+Micca version:
 <<version info>>
 */
 
@@ -14439,6 +14525,7 @@ mrtTimestamp(void)
 <<edit warning>>
 <<copyright info>>
 
+Micca version:
 <<version info>>
 */
 
@@ -14457,6 +14544,7 @@ mrtTimestamp(void)
 <<edit warning>>
 <<copyright info>>
 
+Micca version:
 <<version info>>
 */
 
@@ -14581,6 +14669,7 @@ needed by bridge code.
 #include <stdbool.h>
 #include <inttypes.h>
 #include <stdarg.h>
+#include <stdnoreturn.h>
 #include <assert.h>
 ----
 
@@ -14591,6 +14680,7 @@ needed by bridge code.
 <<edit warning>>
 <<copyright info>>
 
+Micca version:
 <<version info>>
 */
 

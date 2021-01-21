@@ -30,11 +30,6 @@ PLATFORMS=\
 	msp430\
 	$(NULL)
 
-HARNESS	=\
-	micca_tack.h\
-	micca_tack.c\
-	$(NULL)
-
 RTSRCS=\
         $(patsubst %,%/micca_rt.h,$(PLATFORMS))\
         $(patsubst %,%/micca_rt.c,$(PLATFORMS))\
@@ -43,9 +38,9 @@ RTSRCS=\
 ATANGLEOPTS =\
 	$(NULL)
 
-.PHONY : all doc
+.PHONY : all doc module
 
-all : micca_main.tcl $(RTSRCS) doc
+all : micca_main.tcl $(RTSRCS) doc module
 
 micca.tcl micca_main.tcl : $(ASRC)
 	make --directory $(MICCADIR) code
@@ -64,6 +59,9 @@ msp430/micca_rt.h msp430/micca_rt_internal.h msp430/micca_rt.c : $(ASRC)
 
 doc :
 	$(MAKE) --directory $(DOCDIR)
+
+module :
+	$(MAKE) --directory $(MICCADIR) module
 
 CLEANFILES =\
 	$(NULL)

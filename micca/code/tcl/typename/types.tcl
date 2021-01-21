@@ -26,6 +26,7 @@ set types {
     {char []}
     {char [32]}
     {char [*]}
+    {char [xxx]}
     {char [sizeof(char)]}
     {struct a {int *a ;} *}
     {struct a {int a ;}}

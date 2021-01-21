@@ -9790,7 +9790,8 @@ rosea configure {
 rosea generate micca
 
 namespace eval ::micca {
-    variable version 1.2.0
+    variable version\
+    1.3.0
 
     set logger [::logger::init micca]
     set appenderType [expr {[dict exist [fconfigure stdout] -mode] ?\
@@ -9798,23 +9799,6 @@ namespace eval ::micca {
     ::logger::utils::applyAppender -appender $appenderType -serviceCmd $logger\
             -appenderArgs {-conversionPattern {%c: \[%p\] '%m'}}
     ::logger::import -all -force -namespace log micca
-    
-    if 0 {
-    proc logproc {level txt} {
-        if {[string match {-_logger*} $txt]} {
-            set txt [lindex $txt end]
-        }
-        puts "micca: $level: $txt"
-    }
-    proc errorlogproc {txt} {
-        logproc error $txt
-    }
-    proc warnlogproc {txt} {
-        logproc warn $txt
-    }
-    log::logproc error [namespace current]::errorlogproc
-    log::logproc warn [namespace current]::warnlogproc
-    }
 
     namespace import\
         ::ral::relation\
@@ -14990,6 +14974,22 @@ namespace eval ::micca {
                 }
                 return [IndentToBlock $result]
             }
+            proc InstancePeriodicSignal {instref initial rollover event} {
+                set result\
+                    [linecomment "instance $instref periodicsignal $initial $rollover $event"]
+                set eventRef [VerifyEvent $event $instref]
+                set params [VerifyEventParams $eventRef {}]
+                if {[relation isempty $params]} {
+                    set eventNum [readAttribute $eventRef Number]
+                    set sourceinst [expr {[LookUpSymbol self] eq {} ? "NULL" : "self"}]
+                    append result "mrt_SignalPeriodicEvent($initial, $rollover,\
+                            $eventNum, $instref, $sourceinst) ; // $event\n"
+                } else {
+                    error "event, $event, requires parameters, [relation list $params Name],\
+                            and cannot be used periodically"
+                }
+                return [IndentToBlock $result]
+            }
             proc InstanceCancelSignal {instref event {sourceref {}}} {
                 variable domain
             
@@ -16195,8 +16195,17 @@ namespace eval ::micca {
                     if {$Comment ne {}} {
                         append result [comment $Comment]
                     }
-                    set plist [relation list $Parameters DataType -ascending Number]
-                    set pdecl [expr {[llength $plist] == 0 ? "void" : [join $plist {, }]}]
+                    if {[relation isempty $Parameters]} {
+                        set pdecl void
+                    } else {
+                        set plist [list]
+                        relation foreach op_param $Parameters -ascending Number {
+                            relation assign $op_param Name DataType
+                            lappend plist [typeCheck composeDeclaration $DataType $Name]
+                        }
+                        set pdecl [join $plist {, }]
+                    }
+            
                     append result "extern $ReturnDataType\
                             ${Domain}_${Operation}\($pdecl\) ;\n" ; # <1>
                 }
@@ -16222,8 +16231,17 @@ namespace eval ::micca {
                     if {$Comment ne {}} {
                         append result [comment [string trim $Comment \n]]
                     }
-                    set plist [relation list $Parameters DataType -ascending Number]
-                    set pdecl [expr {[llength $plist] == 0 ? "void" : [join $plist {, }]}]
+                    if {[relation isempty $Parameters]} {
+                        set pdecl void
+                    } else {
+                        set plist [list]
+                        relation foreach op_param $Parameters -ascending Number {
+                            relation assign $op_param Name DataType
+                            lappend plist [typeCheck composeDeclaration $DataType $Name]
+                        }
+                        set pdecl [join $plist {, }]
+                    }
+            
                     append result "extern $ReturnDataType\
                             ${Domain}_${Entity}_${Operation}__EOP\($pdecl\) ;\n" ; # <1>
                 }
@@ -16661,17 +16679,19 @@ namespace eval ::micca {
             
                 relation foreach op $ops {
                     relation assign $op
-                    append result\
-                        "static $ReturnDataType ${Class}_$Operation\("
-            
                     if {[relation isempty $Parameters]} {
-                        append result void
+                        set pdecl void
                     } else {
-                        append result [join\
-                            [relation list $Parameters DataType -ascending Number] {, }]
+                        set plist [list]
+                        relation foreach op_param $Parameters -ascending Number {
+                            relation assign $op_param Name DataType
+                            lappend plist [typeCheck composeDeclaration $DataType $Name]
+                        }
+                        set pdecl [join $plist {, }]
                     }
             
-                    append result "\) ;\n"
+                    append result\
+                        "static $ReturnDataType ${Class}_$Operation\($pdecl\) ;\n"
                 }
             
                 return $result
@@ -18915,6 +18935,7 @@ namespace eval ::micca {
                 assign ${suppns}::InstanceAssign\
                 signal ${suppns}::InstanceSignal\
                 delaysignal ${suppns}::InstanceDelaySignal\
+                periodicsignal ${suppns}::InstancePeriodicSignal\
                 canceldelayed ${suppns}::InstanceCancelSignal\
                 delayremaining ${suppns}::InstanceRemainingTime\
                 delete ${suppns}::InstanceDelete\
@@ -18937,6 +18958,7 @@ namespace eval ::micca {
                 assign [list ${suppns}::InstanceAssign self]\
                 signal [list ${suppns}::InstanceSignal self]\
                 delaysignal [list ${suppns}::InstanceDelaySignal self]\
+                periodicsignal [list ${suppns}::InstancePeriodicSignal self]\
                 canceldelayed [list ${suppns}::InstanceCancelSignal self]\
                 delayremaining [list ${suppns}::InstanceRemainingTime self]\
                 delete [list ${suppns}::InstanceDelete self]\
