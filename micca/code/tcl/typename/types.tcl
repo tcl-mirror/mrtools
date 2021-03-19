@@ -27,6 +27,7 @@ set types {
     {char [32]}
     {char [*]}
     {char [xxx]}
+    {MRT_InstId [capacity]}
     {char [sizeof(char)]}
     {struct a {int *a ;} *}
     {struct a {int a ;}}
