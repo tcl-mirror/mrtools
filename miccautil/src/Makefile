@@ -29,7 +29,7 @@ _MKDIRS := $(shell for d in $(REQUIRED_DIRS) ;	\
 	       [ -d $$d ] || mkdir -p $$d ;	\
 	     done)
 
-VERSION=1.0
+VERSION=1.1
 
 vpath %.pdf $(DOCDIR)
 vpath %.html $(DOCDIR)
