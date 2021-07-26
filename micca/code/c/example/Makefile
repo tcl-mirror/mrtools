@@ -68,7 +68,7 @@ micca_rt.h : $(DOCSRC)
 	    	-output $@ micca.aweb
 	mv $(MICCADIR)/micca_rt.h .
 
-micca_rt_internal.h : $(RTSRC)
+micca_rt_internal.h : $(DOCSRC)
 	cd $(MICCADIR) ; atangle $(ATANGLEOPTS) -root $@ -output $@ micca.aweb
 	mv $(MICCADIR)/micca_rt_internal.h .
 

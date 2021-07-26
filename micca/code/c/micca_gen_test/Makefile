@@ -95,6 +95,8 @@ doc : $(PDF)
 
 CLEANFILES =\
 	core\
+	*.gcda\
+	*.gcno\
 	micca_gen_test\
 	micca_gen_test.c\
 	gendomain.*\
