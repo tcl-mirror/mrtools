@@ -69,7 +69,8 @@ runtests : micca_gen_test
 	./micca_gen_test
 
 coverage : runtests
-	gcovr -r . --html-details -o test_results/micca_gen_test.html
+	gcovr --print-summary --html-details --html-title "Generator Test Coverage"\
+	    --output test_results/micca_gen_test.html
 
 micca_gen_test : LOADLIBES = $(HOME)/local/lib/libcunit.a --coverage
 
@@ -95,6 +96,8 @@ doc : $(PDF)
 
 CLEANFILES =\
 	core\
+	*.gcda\
+	*.gcno\
 	micca_gen_test\
 	micca_gen_test.c\
 	gendomain.*\
