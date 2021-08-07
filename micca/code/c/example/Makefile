@@ -11,7 +11,7 @@
 
 MICCADIR = ../../../src
 
-CFLAGS	= -std=c11 -g -Wall -Og
+CFLAGS	= -std=c11 -g -Wall -O0
 CPPFLAGS = -D_ISOC11_SOURCE
 LDFLAGS = -g
 
