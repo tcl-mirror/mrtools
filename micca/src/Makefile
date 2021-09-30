@@ -10,26 +10,39 @@
 #
 
 DOCDIR	= ../doc
-CODEDIR	= ../code
 TESTDIR = ../tests
 PKGDIR	= ../../packages
+MODULEDIR = ../../modules
 IMAGEDIR = ./images
+CODEDIR	= ../code
+
+VERSION=1.3.2
 
 vpath %.pdf $(DOCDIR)
 vpath %.html $(DOCDIR)
 vpath %.test $(TESTDIR)
 vpath %.uxf $(IMAGEDIR)
-vpath %.tcl $(CODEDIR)/tcl
-vpath %.c $(CODEDIR)/c/posix
 
 DOCSRC 	=\
 	micca.aweb\
 	$(NULL)
 
+CODEFILE =\
+	  $(CODEDIR)/tcl/micca.tcl\
+	  $(CODEDIR)/tcl/micca_main.tcl\
+	  $(NULL)
+
+MODULEFILES =\
+	  $(CODEDIR)/tcl/micca.tcl\
+	  $(CODEDIR)/tcl/typename/typeparser.tcl\
+	  $(NULL)
+
 DOCPARTS=\
 	bibliography.txt\
 	codeorg.txt\
 	configure.txt\
+	example.txt\
+	wmctrl-trace.txt\
 	generate.txt\
 	litprog.txt\
 	platform.txt\
@@ -50,9 +63,31 @@ LSDIAGRAMS =\
 	platform-relation.uxf\
 	platform-statemodel.uxf\
 	platform-transition.uxf\
-	pointer-example.uxf\
-	pointer-set-example.uxf\
+	rel-simp-nr-1-1.uxf\
+	rel-simp-r-1-1.uxf\
+	rel-simp-nr-M-1-dyn.uxf\
+	rel-simp-r-M-1-dyn.uxf\
+	rel-simp-nr-M-1-static.uxf\
+	rel-simp-r-M-1-static.uxf\
+	rel-assoc-nr-1-1.uxf\
+	rel-assoc-r-1-1.uxf\
+	rel-assoc-nr-M-1-dyn.uxf\
+	rel-assoc-r-M-1-dyn.uxf\
+	rel-assoc-nr-M-1-static.uxf\
+	rel-assoc-r-M-1-static.uxf\
+	rel-assoc-nr-M-M-dyn.uxf\
+	rel-assoc-r-M-M-dyn.uxf\
+	rel-assoc-nr-M-M-static.uxf\
+	rel-assoc-r-M-M-static.uxf\
+	rel-gen-ref.uxf\
+	rel-gen-union.uxf\
 	assoc-decompose.uxf\
+	wmc-class-diagram.uxf\
+	wm-states.uxf\
+	ct-states.uxf\
+	main-loop.uxf\
+	auto-translation.uxf\
+	micca-translation.uxf\
 	$(NULL)
 
 IMAGES =\
@@ -64,9 +99,9 @@ TCLSRC	=\
      	$(patsubst %.aweb,%.tcl,$(DOCSRC))\
 	$(NULL)
 
-POSIXH	= $(CODEDIR)/c/posix/mrt_interface.h
-POSIXC	= $(CODEDIR)/c/posix/mrt_implementation.c
-POSIXOBJ	= $(CODEDIR)/c/posix/mrt_implementation.o
+POSIXH	= micca_rt.h
+POSIXC	= micca_rt.c
+POSIXOBJ = micca_rt.o
 
 PDF 	=\
      	$(DOCDIR)/$(patsubst %.aweb,%.pdf,$(DOCSRC))\
@@ -95,8 +130,9 @@ A2XOPTS =\
 	--verbose\
 	$(NULL)
 
+# --verbose\
+
 ATANGLEOPTS =\
-	-report\
 	$(NULL)
 
 DBLATEX_PARAMS =\
@@ -104,9 +140,12 @@ DBLATEX_PARAMS =\
 	index.numbered=0\
 	doc.publisher.show=0\
 	doc.lot.show=figure,table\
-	toc.section.depth=1\
+	toc.section.depth=2\
 	doc.section.depth=0\
 	$(NULL)
+
+# draft.mode=yes
+# draft.watermark=1
 
 DOCINFO	=\
 	$(patsubst %.aweb,%-docinfo.xml,$(DOCSRC))\
@@ -132,35 +171,36 @@ ASCIIDOC_OPTS =\
 	$(patsubst %,--attribute=%,$(ASCIIDOC_ATTRS))\
 	$(NULL)
 
-.PHONY : all doc code tests runtests
-.PHONY : posixcode posixh posixc
+TESTOPTS =\
+	-verbose bet\
+	-level debug\
+	$(NULL)
 
-all : doc code tests ccode
+.PHONY : all doc code tests runtests package module
+
+all : doc code tests package module
 
 doc : $(PDF)
 
-code : $(TCLSRC)
+code : $(CODEFILE)
 
 tests : code $(TESTS)
 
 runtests : tests
-	cd $(TESTDIR) ; tclsh $(TESTS) -verbose bet -level debug
+	cd $(TESTDIR) ; tclsh $(TESTS) $(TESTOPTS)
 
-posixcode : $(POSIXOBJ)
+package : $(PKGDIR)/package-micca-$(VERSION)-tcl.zip
 
-$(POSIXOBJ) : posixc posixh
+$(PKGDIR)/package-micca-$(VERSION)-tcl.zip : $(CODEFILE) $(CODEDIR)/tcl/pkgIndex.tcl
+	teapot-pkg generate --output $(PKGDIR) $(CODEDIR)/tcl
 
-posixc : $(POSIXC)
+module : $(MODULEDIR)/micca-$(VERSION).tm
 
-posixh : $(POSICH)
-
-$(POSIXOBJ) : $(POSIXH) $(POSIXC)
-
-$(POSIXH) : $(DOCSRC) $(DOCPARTS)
-	atangle $(ATANGLEOPTS) -line '#line %l% "%f%"' -root mrt_interface.h -output $@ $<
-
-$(POSIXC) : $(DOCSRC) $(DOCPARTS)
-	atangle $(ATANGLEOPTS) -line '#line %l% "%f%"' -root mrt_posix.c -output $@ $<
+$(MODULEDIR)/micca-$(VERSION).tm : $(CODEDIR)/tcl/typename/typeparser.tcl\
+	$(CODEDIR)/tcl/micca.tcl
+	mkmodule micca $(VERSION) -outdir $(MODULEDIR)\
+		-script $(CODEDIR)/tcl/typename/typeparser.tcl\
+		-script $(CODEDIR)/tcl/micca.tcl\
 
 clean :
 	$(RM) $(CLEANFILES)
@@ -173,28 +213,36 @@ $(TCLSRC) : $(DOCSRC) $(DOCPARTS)
 
 $(TESTS) : $(DOCSRC) $(DOCPARTS)
 
+$(CODEDIR)/tcl/micca.tcl : $(DOCSRC) $(DOCPARTS)
+	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $@ $(DOCSRC)
+
+$(CODEDIR)/tcl/micca_main.tcl : $(DOCSRC) $(DOCPARTS)
+	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $@ $(DOCSRC)
+
 $(DOCDIR)/%.pdf : %.aweb
 	a2x $(A2XOPTS) --doctype=book  --format=pdf\
 	    --destination-dir=$(DOCDIR)\
 	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) $<
-	$(RM) $(DOCDIR)/*__[0-9].pdf
-
-mrt_interface.h : runtime.txt
-
-mrt_implementation.c : runtime.txt
-
-%.tcl : %.aweb
-	atangle $(ATANGLEOPTS) -root $@ -output $(CODEDIR)/tcl/$@ $<
+	$(RM) $(DOCDIR)/*__[0-9].*
 
 %.test : %.aweb
 	atangle $(ATANGLEOPTS) -root $(notdir $@) -output $(TESTDIR)/$@ $<
-
 
 $(IMAGEDIR)/platform-%.pdf : platform-%.uxf
 	umlet -action=convert -format=pdf\
 		-filename=$< -output=$(basename $@)-cvt
 	pdftk $(basename $@)-cvt.pdf cat 1left output $@
 	$(RM) $(basename $@)-cvt.pdf
+	#umlet -action=convert -format=pdf\
+	#	-filename=$< -output=$(basename $@)
+
+$(IMAGEDIR)/%-translation.pdf : %-translation.uxf
+	umlet -action=convert -format=pdf\
+		-filename=$< -output=$(basename $@)-cvt
+	pdftk $(basename $@)-cvt.pdf cat 1left output $@
+	$(RM) $(basename $@)-cvt.pdf
+	#umlet -action=convert -format=pdf\
+	#	-filename=$< -output=$(basename $@)
 
 $(IMAGEDIR)/%.pdf : %.uxf
 	umlet -action=convert -format=pdf\
@@ -211,6 +259,7 @@ builddoc :
 	    --destination-dir=$(DOCDIR)\
 	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) micca.aweb
 
+#atangle $(ATANGLEOPTS) -line '#line %l% "%f%"' -root micca_rt_test.c -output $@ $<
 #
-# vim :set sw=8 ts=8 sts=8 noexpandtab:
+# vim: sw=8 ts=8 sts=8 noexpandtab
 #

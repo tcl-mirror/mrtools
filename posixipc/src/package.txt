@@ -1,0 +1,754 @@
+== Package Considerations
+
+The `posixipc` package contains contains a single ensemble command
+also named `posixipc`.
+There are two sub-commands corresponding to two POSIX IPC mechansims.
+The sub-commands are:
+
+mq::
+    Commands for POSIX message queues.
+shm::
+    Commands for POSIX share memory objects.
+
+Each of the above sub-commands is also an ensemble command with
+sub-commands for the specific operations.
+The `posixipc` sub-commands are also exported from the `posixipc` namespace.
+This allows selective importing to save the amount of typing required
+for simple invocations.
+For example,
+the `mq` sub-commands can be invoked in two ways:
+
+.Example mq command invocations
+======
+`posixipc mq open /foo`
+
+`namespace import ::posixipc::mq`
+
+`mq open /foo`
+======
+
+=== Package Initialization
+
+The Tcl mechanism for dynamic loading uses a naming convention to
+identify the initialization function to invoke to prepare the package
+for use.
+In our case,
+the naming convention requires that
+we supply a function named, `Posixipc_Init`.
+
+The purpose of the initialization function is to define all the
+commands supported by the package and then inform the interpreter
+that the package is loaded and ready for use.
+
+(((chunk,package external function definitions)))
+[source,c]
+----
+<<package external function definitions>>=
+int
+Posixipc_Init(
+    Tcl_Interp *interp)
+{
+#       ifdef USE_TCL_STUBS
+    /*
+     * Stubs have to be initialized first.
+     */
+    if (Tcl_InitStubs(interp, TCL_VERSION, 0) == NULL) {
+        return TCL_ERROR ;
+    }
+#       endif /* USE_TCL_STUBS */
+    /*
+     * Create all the commands for the package.
+     */
+    <<create ipc commands>>
+    /*
+     * Support for package configuration command.
+     */
+    <<register package configuration>>
+    /*
+     * Declare the package as now provided.
+     */
+    Tcl_PkgProvide(interp, PACKAGE_NAME, PACKAGE_VERSION) ;
+
+    return TCL_OK ;
+
+    /*
+     * Release resources on error.
+     */
+    <<shm release>>
+    <<mq release>>
+    <<ipc release>>
+}
+----
+
+==== Creating IPC Commands
+
+Creating the IPC commands is a straight forward, albeit, rather tedious
+set of Tcl API invocations.
+We start with creating a namespace for the package,
+followed by creating the commands for each type of IPC mechanism.
+Finally, a namespace emsemble is used to provide access to the
+entire set of mechanism commands.
+This list of function invocations is packaged as a set of literate
+program chunks to show the sequence.
+
+(((chunk,create ipc commands)))
+[source,c]
+----
+<<create ipc commands>>=
+<<create package namespace>>
+<<create mq command>>
+<<create shm command>>
+<<create ipc command ensemble>>
+----
+
+To create the package namespace,
+we must supply its name.
+
+(((chunk,create package namespace)))
+[source,c]
+----
+<<create package namespace>>=
+static char const pkgNamespace[] = PACKAGE_NS ;     // <1>
+Tcl_Namespace *ipcNs = Tcl_CreateNamespace(interp, pkgNamespace, NULL, NULL) ;
+
+Tcl_Obj *ipcMap = Tcl_NewDictObj() ;                // <2>
+----
+<1> The `PACKAGE_NS` macro is defined in the following section.
+<2> Here and in the following,
+we use a dictionary to accumulate the mapping for namespace ensembles.
+We install the mapping as part of creating the ensemble commands
+for each of the IPC mechanisms.
+This technique allows the ensembles to be extended at the Tcl script level
+if desired.
+
+In the process of creating all the commands and namespaces,
+we need some strings that can be pieced together from components.
+These are used to form the fully qualified names for the commands.
+To accomplish this,
+we use some pre-processor macros to emphasize
+the naming pattern.
+Note that in what follows,
+we use the ablity of the compiler to concatenate consecutive string literals
+into a single string literal.
+
+(((chunk,package macros)))
+[source,c]
+----
+<<package macros>>=
+#define NS_SEP          "::"
+
+#define PACKAGE_NS      NS_SEP PACKAGE_NAME
+#define CMD_NS(n)       PACKAGE_NS NS_SEP #n
+
+#define MQ_NS           CMD_NS(mq)
+#define MQ_SUBCMD(c)    MQ_NS NS_SEP #c
+
+#define SHM_NS          CMD_NS(shm)
+#define SHM_SUBCMD(c)   SHM_NS NS_SEP #c
+----
+
+==== Creating the `mq` command
+
+The following chunk establishes a pattern we use for the other IPC command.
+For the `mq` command and each of the other `posixipc` sub-commands,
+we create a namespace and a dictionary to hold the ensemble mapping.
+Then, each sub-command of `mq` is created.
+The sub-commands are just ordinary Tcl commands implemented as ``C'' functions
+and are entered into the ensemble mapping.
+
+Finally, after all the sub-commands are in place,
+the `mq` command is created as a namespace ensemble.
+The accumulated mapping is installed on the ensemble command and
+the ensemble command is exported.
+
+(((chunk,create mq command)))
+[source,c]
+----
+<<create mq command>>=
+<<create mq namespace>>
+
+<<create mq open command>>
+<<create mq send command>>
+<<create mq receive command>>
+<<create mq unlink command>>
+
+<<create mq ensemble command>>
+----
+
+.mq namespace
+(((chunk,create mq namespace)))
+[source,c]
+----
+<<create mq namespace>>=
+static char const mqNsName[] = MQ_NS ;
+static char const mqStr[] = "mq" ;
+/*
+ * Create the namespace in which the sub-command resides.
+ */
+Tcl_Namespace *mqNs = Tcl_CreateNamespace(interp, mqNsName, NULL, NULL) ;
+/*
+ * Create the ensemble mapping dictionary.
+ */
+Tcl_Obj *mqMap = Tcl_NewDictObj() ;
+----
+
+The code to create the `mq` sub-commands follows a pattern as established
+in the following chunk.
+
+.mq open
+(((chunk,create mq open command)))
+[source,c]
+----
+<<create mq open command>>=
+static char const mqOpenCmdName[] = MQ_SUBCMD(open) ;
+static char const openStr[] = "open" ;
+
+Tcl_CreateObjCommand(interp, mqOpenCmdName, mqOpenCmd, NULL, NULL) ;    // <1>
+if (Tcl_DictObjPut(interp, mqMap, Tcl_NewStringObj(openStr, -1),
+        Tcl_NewStringObj(mqOpenCmdName, -1)) != TCL_OK) {
+    goto release_mq ;                                                   // <2>
+}
+----
+<1> Here, `mqOpenCmd` is a ``C'' function name that implements
+the command.
+We will see this function in a following section.
+<2> Ok, let's get the ``go to'' thing out of the way early.
+Yes, there are `goto` statements in the code.
+But they are used very sparingly and in a specific way.
+All the `goto` statements are always forward jumps in the code
+(backward jumps using `goto` truly disrupt thinking about the program flow)
+and are used only for error clean up.
+With no exceptions in ``C'', a `goto` is often the cleanest way
+to insure that allocated resources are cleaned up properly.
+Yes, it can be done other ways, but those other ways always involve
+either a lot of nesting or more variables or some abuse of the
+pre-processor.
+So, just get over any `goto` hysteria you may have.
+
+.Tests
+(((chunk,package initialization tests)))
+[source,tcl]
+----
+<<package initialization tests>>=
+test package-commands-2.1 {
+    Check that posixipc::mq::open was created
+} -setup {
+} -cleanup {
+} -body {
+    info commands ::posixipc::mq::open
+} -result {::posixipc::mq::open}
+----
+
+.mq send
+(((chunk,create mq send command)))
+[source,c]
+----
+<<create mq send command>>=
+static char const mqSendCmdName[] = MQ_SUBCMD(send) ;
+static char const sendStr[] = "send" ;
+
+Tcl_CreateObjCommand(interp, mqSendCmdName, mqSendCmd, NULL, NULL) ;
+if (Tcl_DictObjPut(interp, mqMap, Tcl_NewStringObj(sendStr, -1),
+        Tcl_NewStringObj(mqSendCmdName, -1)) != TCL_OK) {
+    goto release_mq ;
+}
+----
+
+.Tests
+(((chunk,package initialization tests)))
+[source,tcl]
+----
+<<package initialization tests>>=
+test package-commands-2.2 {
+    Check that posixipc::mq::send was created
+} -setup {
+} -cleanup {
+} -body {
+    info commands ::posixipc::mq::send
+} -result {::posixipc::mq::send}
+----
+
+.mq receive
+(((chunk,create mq receive command)))
+[source,c]
+----
+<<create mq receive command>>=
+static char const mqRecvCmdName[] = MQ_SUBCMD(receive) ;
+static char const recvStr[] = "receive" ;
+
+Tcl_CreateObjCommand(interp, mqRecvCmdName, mqReceiveCmd, NULL, NULL) ;
+if (Tcl_DictObjPut(interp, mqMap, Tcl_NewStringObj(recvStr, -1),
+        Tcl_NewStringObj(mqRecvCmdName, -1)) != TCL_OK) {
+    goto release_mq ;
+}
+----
+
+.Tests
+(((chunk,package initialization tests)))
+[source,tcl]
+----
+<<package initialization tests>>=
+test package-commands-2.3 {
+    Check that posixipc::mq::receive was created
+} -setup {
+} -cleanup {
+} -body {
+    info commands ::posixipc::mq::receive
+} -result {::posixipc::mq::receive}
+----
+
+.mq unlink
+(((chunk,create mq unlink command)))
+[source,c]
+----
+<<create mq unlink command>>=
+static char const mqUnlinkCmdName[] = MQ_SUBCMD(unlink) ;
+static char const unlinkStr[] = "unlink" ;
+
+Tcl_CreateObjCommand(interp, mqUnlinkCmdName, mqUnlinkCmd, NULL, NULL) ;
+if (Tcl_DictObjPut(interp, mqMap, Tcl_NewStringObj(unlinkStr, -1),
+        Tcl_NewStringObj(mqUnlinkCmdName, -1)) != TCL_OK) {
+    goto release_mq ;
+}
+----
+
+.Tests
+(((chunk,package initialization tests)))
+[source,tcl]
+----
+<<package initialization tests>>=
+test package-commands-2.4 {
+    Check that posixipc::mq::unlink was created
+} -setup {
+} -cleanup {
+} -body {
+    info commands ::posixipc::mq::unlink
+} -result {::posixipc::mq::unlink}
+----
+
+.mq ensemble
+(((chunk,create mq ensemble command)))
+[source,c]
+----
+<<create mq ensemble command>>=
+/*
+ * Create an ensemble command on the mq namespace.
+ */
+Tcl_Command mqEnsembleToken = Tcl_CreateEnsemble(interp, mqNsName, mqNs, 0) ;
+if (Tcl_SetEnsembleMappingDict(interp, mqEnsembleToken, mqMap) != TCL_OK) {
+    goto release_mq ;
+}
+/*
+ * Export the newly created ensemble command.
+ */
+if (Tcl_Export(interp, ipcNs, mqStr, 0) != TCL_OK) {
+    goto release_ipc ;
+}
+/*
+ * Add the mq ensemble command to the mapping for the posixipc command.
+ */
+if (Tcl_DictObjPut(interp, ipcMap, Tcl_NewStringObj(mqStr, -1),
+        Tcl_NewStringObj(mqNsName, -1)) != TCL_OK) {
+    goto release_ipc ;
+}
+----
+
+.Tests
+(((chunk,package initialization tests)))
+[source,tcl]
+----
+<<package initialization tests>>=
+test package-commands-2.0.1 {
+    Check that posixipc::mq is a namespace ensemble command
+} -setup {
+} -cleanup {
+} -body {
+    namespace ensemble exists posixipc::mq
+} -result {1}
+----
+
+(((chunk,package initialization tests)))
+[source,tcl]
+----
+<<package initialization tests>>=
+test package-commands-2.0.2 {
+    Verify the ensemble mapping for the mq command
+} -setup {
+} -cleanup {
+} -body {
+    namespace ensemble configure posixipc::mq -map
+} -result {open ::posixipc::mq::open send ::posixipc::mq::send receive ::posixipc::mq::receive unlink ::posixipc::mq::unlink}
+----
+
+(((chunk,package initialization tests)))
+[source,tcl]
+----
+<<package initialization tests>>=
+test package-commands-2.0.3 {
+    Check that posixipc::mq is exported
+} -setup {
+} -cleanup {
+    namespace forget ::posixipc::mq
+} -body {
+    namespace import ::posixipc::mq
+    namespace origin mq
+} -result {::posixipc::mq}
+----
+
+==== Creating the `shm` command
+
+Lastly, we create the `shm` command.
+It follows the pattern previously established.
+
+(((chunk,create shm command)))
+[source,c]
+----
+<<create shm command>>=
+<<create shm namespace>>
+
+<<create shm open command>>
+<<create shm unlink command>>
+
+<<create shm ensemble command>>
+----
+
+.shm namespace
+(((chunk,create shm namespace)))
+[source,c]
+----
+<<create shm namespace>>=
+static char const shmNsName[] = SHM_NS ;
+static char const shmStr[] = "shm" ;
+Tcl_Namespace *shmNs = Tcl_CreateNamespace(interp, shmNsName, NULL, NULL) ;
+
+Tcl_Obj *shmMap = Tcl_NewDictObj() ;
+----
+
+.shm open
+(((chunk,create shm open command)))
+[source,c]
+----
+<<create shm open command>>=
+static char const shmOpenCmdName[] = SHM_SUBCMD(open) ;
+
+Tcl_CreateObjCommand(interp, shmOpenCmdName, shmOpenCmd, NULL, NULL) ;
+if (Tcl_Export(interp, shmNs, openStr, 0) != TCL_OK) {
+    goto release_shm ;
+}
+if (Tcl_DictObjPut(interp, shmMap, Tcl_NewStringObj(openStr, -1),
+        Tcl_NewStringObj(shmOpenCmdName, -1)) != TCL_OK) {
+    goto release_shm ;
+}
+----
+
+.Tests
+(((chunk,package initialization tests)))
+[source,tcl]
+----
+<<package initialization tests>>=
+test package-commands-4.0 {
+    Check that posixipc::shm::open was created
+} -setup {
+} -cleanup {
+} -body {
+    info commands ::posixipc::shm::open
+} -result {::posixipc::shm::open}
+----
+
+.shm unlink
+(((chunk,create shm unlink command)))
+[source,c]
+----
+<<create shm unlink command>>=
+static char const shmUnlinkCmdName[] = SHM_SUBCMD(unlink) ;
+
+Tcl_CreateObjCommand(interp, shmUnlinkCmdName, shmUnlinkCmd, NULL, NULL) ;
+if (Tcl_Export(interp, shmNs, unlinkStr, 0) != TCL_OK) {
+    goto release_shm ;
+}
+if (Tcl_DictObjPut(interp, shmMap, Tcl_NewStringObj(unlinkStr, -1),
+        Tcl_NewStringObj(shmUnlinkCmdName, -1)) != TCL_OK) {
+    goto release_shm ;
+}
+----
+
+.Tests
+(((chunk,package initialization tests)))
+[source,tcl]
+----
+<<package initialization tests>>=
+test package-commands-4.1 {
+    Check that posixipc::shm::unlink was created
+} -setup {
+} -cleanup {
+} -body {
+    info commands ::posixipc::shm::unlink
+} -result {::posixipc::shm::unlink}
+----
+
+.shm ensemble
+(((chunk,create shm ensemble command)))
+[source,c]
+----
+<<create shm ensemble command>>=
+Tcl_Command shmEnsembleToken = Tcl_CreateEnsemble(interp, shmNsName, shmNs, 0) ;
+if (Tcl_SetEnsembleMappingDict(interp, shmEnsembleToken, shmMap) != TCL_OK) {
+    goto release_shm ;
+}
+if (Tcl_Export(interp, ipcNs, shmStr, 0) != TCL_OK) {
+    goto release_ipc ;
+}
+if (Tcl_DictObjPut(interp, ipcMap, Tcl_NewStringObj(shmStr, -1),
+        Tcl_NewStringObj(shmNsName, -1)) != TCL_OK) {
+    goto release_ipc ;
+}
+----
+
+.Tests
+(((chunk,package initialization tests)))
+[source,tcl]
+----
+<<package initialization tests>>=
+test package-commands-4.2.0 {
+    Check that posixipc::shm is a namespace ensemble command
+} -setup {
+} -cleanup {
+} -body {
+    namespace ensemble exists posixipc::shm
+} -result {1}
+----
+
+(((chunk,package initialization tests)))
+[source,tcl]
+----
+<<package initialization tests>>=
+test package-commands-4.2.1 {
+    Verify the ensemble mapping for the shm command
+} -setup {
+} -cleanup {
+} -body {
+    namespace ensemble configure posixipc::shm -map
+} -result {open ::posixipc::shm::open unlink ::posixipc::shm::unlink}
+----
+
+(((chunk,package initialization tests)))
+[source,tcl]
+----
+<<package initialization tests>>=
+test package-commands-4.2.2 {
+    Check that posixipc::shm is exported
+} -setup {
+} -cleanup {
+    namespace forget ::posixipc::shm
+} -body {
+    namespace import ::posixipc::shm
+    namespace origin shm
+} -result {::posixipc::shm}
+----
+
+==== Creating the `posixipc` command
+
+Finally, after we have created all the IPC commands and their sub-commands,
+we can create the top level namespace ensemble command for the package.
+We install the mapping dictionary that has been accumulated for the
+two sub-commands in the package ensemble.
+
+(((chunk,create ipc command ensemble)))
+[source,c]
+----
+<<create ipc command ensemble>>=
+Tcl_Command ipcCmdToken = Tcl_CreateEnsemble(interp, pkgNamespace, ipcNs, 0) ;
+if (Tcl_SetEnsembleMappingDict(interp, ipcCmdToken, ipcMap) != TCL_OK) {
+    goto release_ipc ;
+}
+----
+
+.Tests
+(((chunk,package initialization tests)))
+[source,tcl]
+----
+<<package initialization tests>>=
+test package-commands-1.0 {
+    Check that posixipc is a namespace ensemble command
+} -setup {
+} -cleanup {
+} -body {
+    namespace ensemble exists posixipc
+} -result {1}
+----
+
+==== Releasing acquired resources on error
+
+We must be careful to clean up any acquired resources in the face of
+errors.
+In our case,
+we must deal with the dictionary objects that are used to accumulate
+the namespace ensemble command mappings.
+
+Also, in the case of any failure, we just delete the namespace
+that contains the package level ensemble command and all the children
+and associated commands will be deleted also.
+
+(((chunk,ipc release)))
+[source,c]
+----
+<<ipc release>>=
+release_ipc:
+    Tcl_DecrRefCount(ipcMap) ;
+    Tcl_DeleteNamespace(ipcNs) ;
+    return TCL_ERROR ;
+----
+
+(((chunk,mq release)))
+[source,c]
+----
+<<mq release>>=
+release_mq:
+    Tcl_DecrRefCount(mqMap) ;
+    goto release_ipc ;
+----
+
+(((chunk,shm release)))
+[source,c]
+----
+<<shm release>>=
+release_shm:
+    Tcl_DecrRefCount(shmMap) ;
+    goto release_ipc ;
+----
+
+==== Package Configuration
+
+Tcl supports allowing packages to supply configuration information.
+Registering the package configuration causes a command to be created
+that other Tcl code can use to query some properties of the package.
+
+(((chunk,register package configuration)))
+[source,c]
+----
+<<register package configuration>>=
+static char const posixipc_copyright[] =
+    "This software is copyrighted 2018 by G. Andrew Mangogna."
+    " Terms and conditions for use are distributed with the source code." ;
+
+static Tcl_Config const posixipc_config[] = {
+    [0] = {"pkgname", PACKAGE_NAME},
+    [1] = {"version", PACKAGE_VERSION},
+    [2] = {"copyright", posixipc_copyright},
+    {NULL, NULL}
+} ;
+
+Tcl_RegisterConfig(interp, posixipc_config[0].value, posixipc_config, "utf-8") ;
+----
+
+.Tests
+(((chunk,package initialization tests)))
+[source,tcl]
+----
+<<package initialization tests>>=
+test package-configuration-1.0 {
+    Check that all the configuration info keys are present
+} -setup {
+} -cleanup {
+} -body {
+    posixipc::pkgconfig list
+} -result {pkgname version copyright}
+----
+
+(((chunk,package initialization tests)))
+[source,tcl]
+----
+<<package initialization tests>>=
+test package-configuration-2.0 {
+    Check package name from the configuration
+} -setup {
+} -cleanup {
+} -body {
+    posixipc::pkgconfig get pkgname
+} -result {posixipc}
+----
+
+(((chunk,package initialization tests)))
+[source,tcl]
+----
+<<package initialization tests>>=
+test package-configuration-3.0 {
+    Check package version from the configuration
+} -setup {
+} -cleanup {
+} -body {
+    posixipc::pkgconfig get version
+} -result {1.0}
+----
+
+(((chunk,package initialization tests)))
+[source,tcl]
+----
+<<package initialization tests>>=
+test package-configuration-4.0 {
+    Check package copyright info from the configuration
+} -setup {
+} -cleanup {
+} -body {
+    posixipc::pkgconfig get copyright
+} -result {This software is copyrighted 2018 by G. Andrew Mangogna.\
+Terms and conditions for use are distributed with the source code.}
+----
+
+=== Safe Interpreters
+
+Tcl has the concept of a *safe* interpreter that can be used to run
+unknown or untrusted code.
+Since this package deals with I/O using Unix system programming,
+it is *not* safe for untrusted code.
+Consequently,
+the package will not load in a safe interpreter.
+
+(((chunk,package external function definitions)))
+[source,c]
+----
+<<package external function definitions>>=
+int
+Posixipc_SafeInit(
+    Tcl_Interp *interp)
+{
+    return TCL_ERROR ;      // <1>
+}
+----
+<1> Failing the safe initialization function will prevent the
+package from being loaded into a safe interpreter.
+
+=== Package Unloading
+
+Since Tcl 8.5, it is possible to unload a dynamically loaded package.
+
+(((chunk,package external function definitions)))
+[source,c]
+----
+<<package external function definitions>>=
+#if TCL_MAJOR_VERSION >= 8 && TCL_MINOR_VERSION >= 5
+int
+Posixipc_Unload(
+    Tcl_Interp *interp)
+{
+    // HERE! Do we need to close all the IPC mechanisms?
+    return TCL_OK ;
+}
+#endif
+----
+
+(((chunk,package external function definitions)))
+[source,c]
+----
+<<package external function definitions>>=
+#if TCL_MAJOR_VERSION >= 8 && TCL_MINOR_VERSION >= 5
+int
+Posixipc_SafeUnload(
+    Tcl_Interp *interp)
+{
+    return TCL_ERROR ;
+}
+#endif
+----
+
+// vim:set syntax=asciidoc:

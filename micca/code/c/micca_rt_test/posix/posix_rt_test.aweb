@@ -1,0 +1,249 @@
+// vim:set syntax=asciidoc:
+
+= Micca POSIX Run Time Testing
+
+== CUnit Setup
+
+[source,c]
+----
+<<micca_rt_posixtest.c>>=
+#include <setjmp.h>
+#include "CUnit/CUnit.h"
+#include "CUnit/Basic.h"
+
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+
+#include "posixtestdomain.h"
+
+<<test functions>>
+
+<<suite tests>>
+
+static CU_SuiteInfo suites[] = {
+    <<test suites>>
+    CU_SUITE_INFO_NULL,
+} ;
+
+int
+main(
+    int argc,
+    char **argv)
+{
+    mrt_Initialize() ;
+
+    CU_initialize_registry() ;
+
+    CU_register_suites(suites) ;
+
+    // CU_basic_set_mode(CU_BRM_VERBOSE) ;
+    CU_basic_run_tests() ;
+
+    const CU_pFailureRecord failures = CU_get_failure_list() ;
+    CU_basic_show_failures(failures) ;
+
+    CU_cleanup_registry() ;
+}
+----
+
+== POSIX Test Domain
+
+[source,tcl]
+----
+<<posixtestdomain.micca>>=
+domain posixtestdomain {
+    prologue {
+        #include <CUnit/CUnit.h>
+
+        #include <sys/types.h>
+        #include <sys/stat.h>
+        #include <fcntl.h>
+        #include <unistd.h>
+
+        static void readSlave(int) ;
+    }
+
+    <<posix test domain configuration>>
+
+    domainop void initialize {} {
+    }
+
+    epilogue {
+        static void
+        readSlave(
+            int fd)
+        {
+            int pcode = mrt_PortalSignalEvent(&posixtestdomain__PORTAL,
+                POSIXTESTDOMAIN_HHH_CLASSID,
+                POSIXTESTDOMAIN_HHH_HHH1_INSTID,
+                POSIXTESTDOMAIN_HHH_READ_EVENT,
+                NULL, 0) ;
+            CU_ASSERT(pcode == 0) ;
+            printf("read on %d\n", fd) ;
+        }
+    }
+}
+population posixtestdomain {
+    <<posix test domain population>>
+}
+----
+
+== POSIX File Descriptor Access
+
+[source,c]
+----
+<<test suites>>=
+{"posix I/O", NULL, NULL, NULL, NULL, posixIOSuiteTests},
+----
+
+[source,c]
+----
+<<suite tests>>=
+<<posix io suite tests>>
+
+<<posix io suite tests>>=
+static CU_TestInfo posixIOSuiteTests[] = {
+    <<posix io test cases>>
+    CU_TEST_INFO_NULL,
+} ;
+----
+
+=== Reading Input
+
+[source,tcl]
+----
+<<posix test domain configuration>>=
+class HHH {
+    attribute master_fd int -default -1
+    attribute slave_name {char const *} -default NULL
+    attribute slave_fd int -default -1
+
+    statemodel {
+        state closed {} {
+            mrt_UnregisterFDService(<%my attr slave_fd%>, true, true, true) ;
+            close(<%my attr slave_fd%>) ;
+            close(<%my attr master_fd%>) ;
+        }
+        transition closed - open -> opening
+        transition closed - close -> IG
+
+        state opening {} {
+            <%my update master_fd {posix_openpt(O_RDWR | O_NOCTTY)}%>
+            CU_ASSERT_FATAL(<%my attr master_fd%> != -1) ;
+
+            int master = <%my attr master_fd%> ;
+            int status = grantpt(master) ;
+            CU_ASSERT_FATAL(status == 0) ;
+
+            status = unlockpt(master) ;
+            CU_ASSERT_FATAL(status == 0) ;
+
+            <%my update slave_name ptsname(master)%>
+            CU_ASSERT_PTR_NOT_NULL_FATAL(<%my attr slave_name%>) ;
+            printf("slave device at %s\n", <%my attr slave_name%>) ;
+
+            <%my update slave_fd {open(self->slave_name, O_RDWR | O_NOCTTY)}%>
+            CU_ASSERT_FATAL(<%my attr slave_fd%> != -1) ;
+
+            mrt_RegisterFDService(<%my attr slave_fd%>, readSlave, NULL, NULL) ;
+        }
+        transition opening - write -> writing
+        transition opening - close -> closed
+
+        state writing {ch char} {
+            int status = write(<%my attr master_fd%>, &ch, sizeof(ch)) ;
+            CU_ASSERT_FATAL(status != -1) ;
+        }
+        transition writing - read -> reading
+        transition writing - close -> closed
+
+        state reading {} {
+            char ch ;
+
+            int status = read(<%my attr slave_fd%>, &ch, sizeof(ch)) ;
+            CU_ASSERT_FATAL(status != -1) ;
+
+            if (status > 0) {
+                printf("%s: read '%c'\n", __func__, ch) ;
+            } else {
+                // status == 0
+                <%my signal close%>
+            }
+            mrt_SyncToEventLoop() ;
+        }
+        transition reading - write -> writing
+        transition reading - read -> reading
+        transition reading - close -> closed
+    }
+}
+
+<<posix test domain population>>=
+class HHH {
+    instance hhh1
+}
+----
+
+[source,c]
+----
+<<posix io test cases>>=
+{"read input", mrtTest_ReadInput},
+
+<<test functions>>=
+static void
+mrtTest_ReadInput(void)
+{
+    int pcode ;
+    bool didevent ;
+
+    pcode = mrt_PortalSignalEvent(&posixtestdomain__PORTAL,
+        POSIXTESTDOMAIN_HHH_CLASSID,
+        POSIXTESTDOMAIN_HHH_HHH1_INSTID,
+        POSIXTESTDOMAIN_HHH_OPEN_EVENT,
+        NULL, 0) ;
+    CU_ASSERT(pcode == 0) ;
+    didevent = mrt_DispatchSingleEvent() ;
+    CU_ASSERT_TRUE(didevent) ;
+
+    int fd ;
+    pcode = mrt_PortalReadAttr(&posixtestdomain__PORTAL,
+        POSIXTESTDOMAIN_HHH_CLASSID,
+        POSIXTESTDOMAIN_HHH_HHH1_INSTID,
+        POSIXTESTDOMAIN_HHH_MASTER_FD_ATTRID,
+        &fd, sizeof(fd)) ;
+    CU_ASSERT(pcode == sizeof(fd)) ;
+    CU_ASSERT(fd > 0) ;
+    printf("master fd = %d\n", fd) ;
+
+    pcode = mrt_PortalReadAttr(&posixtestdomain__PORTAL,
+        POSIXTESTDOMAIN_HHH_CLASSID,
+        POSIXTESTDOMAIN_HHH_HHH1_INSTID,
+        POSIXTESTDOMAIN_HHH_SLAVE_FD_ATTRID,
+        &fd, sizeof(fd)) ;
+    CU_ASSERT(pcode == sizeof(fd)) ;
+    CU_ASSERT(fd > 0) ;
+    printf("slave fd = %d\n", fd) ;
+
+    struct posixtestdomain_HHH_write__EPARAMS hw = {
+        .ch = '\r'
+    } ;
+    pcode = mrt_PortalSignalEvent(&posixtestdomain__PORTAL,
+        POSIXTESTDOMAIN_HHH_CLASSID,
+        POSIXTESTDOMAIN_HHH_HHH1_INSTID,
+        POSIXTESTDOMAIN_HHH_WRITE_EVENT,
+        &hw, sizeof(hw)) ;
+    CU_ASSERT(pcode == 0) ;
+
+    mrt_EventLoop() ;
+
+    pcode = mrt_PortalSignalEvent(&posixtestdomain__PORTAL,
+        POSIXTESTDOMAIN_HHH_CLASSID,
+        POSIXTESTDOMAIN_HHH_HHH1_INSTID,
+        POSIXTESTDOMAIN_HHH_CLOSE_EVENT,
+        NULL, 0) ;
+    CU_ASSERT(pcode == 0) ;
+    didevent = mrt_DispatchSingleEvent() ;
+    CU_ASSERT_TRUE(didevent) ;
+}
+----

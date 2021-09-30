@@ -119,10 +119,8 @@ clean :
 	$(RM) $(CLEANFILES)
 
 ../doc/%.pdf : %.aweb
-	aweave -output $*.txt $<
 	a2x $(A2XOPTS) --doctype=article  --format=pdf --destination-dir=../doc\
-	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) $*.txt
-	$(RM) $*.txt
+	    $(ASCIIDOC_OPTS) $(DBLATEX_OPTS) $<
 
 %.tcl : %.aweb
 	atangle $(ATANGLEOPTS) -root $@ -output $@ $<

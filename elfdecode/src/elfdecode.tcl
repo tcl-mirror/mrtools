@@ -41,7 +41,6 @@
 # terms specified in this license.
 
 package require Tcl 8.6
-package require oo::util
 package require logger
 package require ral
 package require ralutil
@@ -52,7 +51,7 @@ namespace eval ::elfdecode {
 
     logger::initNamespace [namespace current]
 
-    variable version 1.0
+    variable version 1.0.1
 }
 
 proc ::oo::Helpers::classns {} {

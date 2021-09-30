@@ -1,0 +1,3602 @@
+== Message Queues
+
+In this section we show the implementation of message queue access in the
+`posixipc` package.
+We wish to take advantage of the fact that in most implementations POSIX
+message queues are implemented in a virtual filesystem and the handle for a
+message queue is actually a file descriptor.
+This fact means that message queues fit reasonably into the Tcl virtual
+channel abstraction.
+We intend to implement message queue access as a Tcl virtual channel
+by providing an implementation of a channel driver.
+
+By making a message queue appear as a Tcl channel,
+we can use all the existing Tcl channel infrastructure.
+For example (for simplicity, we use the `::chan` command rather than the
+older style individual channel oriented commands):
+
+* `::chan puts` can be used to place a message onto a message queue.
+* `::chan read` or `::chan gets` can be used to obtain a message from a message
+  queue.
+* Blocking, buffering, and translation via `::chan configure`
+  operate correctly.
+* Event driven I/O via `::chan event` works correctly.
+
+=== Message Queue Semantics
+
+Of course,
+POSIX message queue semantics do not exactly match those of Tcl channels.
+In particular, there are several areas that require further attention.
+
+. Messages posted to message queues have a priority.
+. Like files, message queues are named and potentially have persistence beyond
+    the lifetime of the creating process.
+    Removing a message queue requires a special action.
+. There is no notion of ``end of file'' for a message queue.
+    A message queue exist until either:
+    .. the system is rebooted or
+    .. the message queue is unlinked and all open file descriptors that
+        reference the message queue are closed.
+        This last condition is just like that of an ordinary file.
+
+==== Message Priority
+
+We will handle message priority in two ways.
+One of the configuration options for a message queue based channel
+is a default priority.
+This can be set via `::chan configure -priority` command and will be used when
+I/O operations on the message queue come via the Tcl virtual channel interface.
+The priority of the last received message is also available as a
+read only configuration option, `-lastpriority`.
+
+However, this arrangement is clumsy for use cases that need frequently to use 
+differing priorities.
+Consequently, a `mq send` command is also provided which will post a message
+to a message queue with the priority provided as an argument.
+We also provide `ms receive` to receive both a message and the priority at
+which it was posted in one command.
+Both these commands operate outside of the Tcl channel driver arrangement.
+
+==== Removing Message Queues
+
+POSIX message queues have names and in the implementation these
+names show up in the filesystem that is usually mounted somewhere
+in the file system (on Linux it is typically at `/dev/mqueue`).
+The names in the filesystem have kernel level persistence and remain
+until explicitly removed or the system is rebooted.
+As a convenience,
+the `mq unlink` command is provided to allow removing message queue
+entities by the name used to create them.
+Note is is also possible to remove the message queue using the conventional
+`::file delete` command, but in that case it is necessary to know the
+fully qualified path name to the message queue (_i.e._ `/dev/mqueue/name`
+rather than just `/name`).
+Depending upon how the system is configured,
+the message queue file system might be mounted in some place other
+than `/dev/mqueue`.
+
+==== Message Queues and Buffering
+
+Messages have distinct boundaries.
+This is a different semantic than streams of bytes and so our
+mapping of a message queue to the abstraction of a Tcl channel is
+not perfect.
+In particular,
+there can be an interaction between Tcl channel buffering and buffer sizes
+and the requirements of a message channel.
+Two characteristics of message queues need to be understood:
+
+. Each low level read from a message queue requires a buffer that is at least
+as big as the maximum message size.
+To avoid I/O errors when reading,
+we must make sure the buffer size is adequate to hold the maximum size that a
+message might be and the maximum message size is determined when the
+message queue is created.
+. Each low level write to a message channel constitutes a message and both the
+channel buffering mode and the channel buffer size can affect when low level
+writes happen.
+
+To help in handling the buffering,
+opening a message queue channel automatically sets the channel buffer size
+to be the same size as the messages for the message queue.
+Note the buffer size is independent of the buffering mode.
+
+The following sections,
+we show some example scripts that demonstrate the
+interactions between Tcl channel buffering properties and POSIX
+message queue.
+The scripts perform double duty.
+Not only are they examples,
+but we use them as test cases for the package tests.
+
+===== Simple text example
+
+In this example,
+we demonstrate a simple client / server arrangement
+where plain text messages are passed between them.
+We want one text record to constitute a message.
+The client simply runs `eval` on whatever it receives.
+This gives the server complete control over the execution of the client.
+
+In the body of the test,
+the server requests the client to echo three text records that consist of
+just a simple decimal number.
+The server receives the echoed response and accumulates a total of the
+received numbers.
+After the arithmetic,
+the client is commanded to break out of its loop resulting in the
+client exiting.
+
+(((chunk,mq examples)))
+[source,tcl]
+----
+<<mq examples>>=
+test text-record-messages-1.0 {
+    Pass simple text records as messages.
+} -body {
+    set total 0
+    foreach num {1 2 3} {
+        chan puts $clientChan "chan puts $num"
+        set response [gets $serverChan]
+        log::debug "server: received, \"$response\""
+
+        set total [expr {$total + $response}]
+    }
+
+    chan puts $clientChan break
+    return $total
+} -setup {
+    set serverQueue /mqtest_txt_server
+    <<trm1: create server message queue>>
+
+    set clientQueue /mqtest_txt_client
+    <<trm1: create client message queue>>
+
+    <<trm1: create client script file>>
+
+    <<trm1: run client script>>
+} -cleanup {
+    chan close $serverChan
+    chan close $clientChan
+
+    mq unlink $clientQueue
+    mq unlink $serverQueue
+} -result {6}
+----
+
+The test setup has more interesting details.
+First, we create a message queue for the server.
+The server will only read from it.
+The `EXCL` flag is used to insure that the queue doesn't exist when
+it is created.
+This insures things got cleaned up properly from the last test run.
+The `-buffering line` buffer mode means that each completed text record is
+immediately sent as a message.
+
+(((chunk,trm1: create server message queue)))
+[source,c]
+----
+<<trm1: create server message queue>>=
+set serverChan [mq open $serverQueue {CREAT EXCL RDONLY}]
+chan configure $serverChan -buffering line
+log::debug "server queue, \"$serverQueue\", open"
+----
+
+Similarly,
+we create the client message queue.
+From the server's perspective,
+the queue is write only for sending commands to the client.
+
+(((chunk,trm1: create client message queue)))
+[source,c]
+----
+<<trm1: create client message queue>>=
+set clientChan [mq open $clientQueue {CREAT EXCL WRONLY}]
+chan configure $clientChan -buffering line
+log::debug "client queue, \"$clientQueue\", open"
+----
+
+The client script must also open both queues.
+But from the clients perspective,
+the client queue is only read and the server queue is only written.
+After getting everything opened,
+the client loops evaluating each record it receives from the server.
+
+(((chunk,trm1: create client script file)))
+[source,c]
+----
+<<trm1: create client script file>>=
+makeFile {
+    if {$::tcl_platform(os) eq "Linux"} {
+        load ../tea/build/x86_64-linux-tcl8.6/libposixipc1.0.so
+    } else {
+        package require posixipc
+    }
+
+    namespace import ::posixipc::mq
+
+    set clientQueue /mqtest_txt_client
+    set clientChan [mq open $clientQueue RDONLY]
+    chan configure $clientChan -buffering line
+
+    set serverQueue /mqtest_txt_server
+    chan close stdout                               ; # <1>
+    set serverChan [mq open $serverQueue WRONLY]
+    chan configure $serverChan -buffering line
+
+    while {[gets $clientChan line] != -1} {
+        try {
+            eval $line
+        } on error {result} {
+            chan puts "error: $result"
+            break
+        }
+    }
+
+    chan close $serverChan
+    chan close $clientChan
+} txt-client.tcl
+----
+<1> This is a bit of trickery here.
+By closing `stdout` before opening the server queue, the Tcl channel
+system will insure that the newly open channel is used as `stdout`.
+This behavior follows the usual behavior for UNIX file descriptors.
+UNIX file descriptors are assigned the lowest number possible.
+This behavior of taking over the `stdout` channel since it was
+closed means the server can send a `chan puts` command without
+a channel specifier and insure that the response is echoed back to the
+server's message queue.
+
+The client is run in the background.
+The server sends an `break` command to force the client to exit.
+
+(((chunk,trm1: run client script)))
+[source,c]
+----
+<<trm1: run client script>>=
+exec tclsh txt-client.tcl &
+log::debug "client started in the background"
+----
+
+===== Multi-record text example
+
+This example is an extension of the previous example.
+Rather than each message being a single text record,
+we will group multiple records together into a message.
+You can think of the multiple records as a type of message header.
+
+We can accomplish sending multiple records in a message by changing the
+`-buffering` option to `full` and then performing a `flush`
+when we have buffered all the records for the message.
+On the receiving side,
+we can still use `line` buffering, since the Tcl channel code
+will read the message as a single block and then parcel it out
+line by line.
+So on the server side we set up the server message queue channel with
+`line` buffering and the client message queue channel with `full` buffering.
+On the client side, we invert the sense, setting the client message
+queue channel to `line` buffering and the server message queue channel
+to `full` buffering.
+
+(((chunk,mq examples)))
+[source,tcl]
+----
+<<mq examples>>=
+test text-record-messages-2.0 {
+    Pass multiple text records as a message.
+} -body {
+    foreach num {3 4 5} {
+        chan puts $clientChan "chan puts $num"
+    }
+    chan puts $clientChan break ; # causes client to break out of its loop
+    chan flush $clientChan
+
+    set total 0
+    for {set i 0} {$i < 3} {incr i} {
+        set response [gets $serverChan]
+        log::debug "server: received, \"$response\""
+        set total [expr {$total + $response}]
+    }
+
+    return $total
+} -setup {
+    set serverQueue /mqtest_mtxt_server
+    <<trm2: create server message queue>>
+
+    set clientQueue /mqtest_mtxt_client
+    <<trm2: create client message queue>>
+
+    <<trm2: create client script file>>
+
+    <<trm2: run client script>>
+} -cleanup {
+    chan close $serverChan
+    chan close $clientChan
+
+    mq unlink $clientQueue
+    mq unlink $serverQueue
+} -result {12}
+----
+
+On the server side,
+the server channel is set to `line` buffering.
+This makes it easy for the server to read each record in the
+message as a single line.
+This happens despite each message containing multiple text records.
+
+(((chunk,trm2: create server message queue)))
+[source,c]
+----
+<<trm2: create server message queue>>=
+set serverChan [mq open $serverQueue {CREAT EXCL RDONLY}]
+chan configure $serverChan -buffering line
+log::debug "server queue, \"$serverQueue\", open"
+----
+
+Still on the server side,
+we make the client channel `full` buffering causing the Tcl channel place
+multiple text records in the same message.
+
+(((chunk,trm2: create client message queue)))
+[source,c]
+----
+<<trm2: create client message queue>>=
+set clientChan [mq open $clientQueue {CREAT EXCL WRONLY}]
+chan configure $clientChan -buffering full
+log::debug "client queue, \"$clientQueue\", open"
+----
+
+The client side inverts the sense of the buffering of the two channels.
+This allows the client to read and evaluate each text record
+on a line by line basis.
+However, the response to the server are batched up.
+
+(((chunk,trm2: create client script file)))
+[source,c]
+----
+<<trm2: create client script file>>=
+makeFile {
+    if {$::tcl_platform(os) eq "Linux"} {
+        load ../tea/build/x86_64-linux-tcl8.6/libposixipc1.0.so
+    } else {
+        package require posixipc
+    }
+
+    namespace import ::posixipc::mq
+
+    set clientQueue /mqtest_mtxt_client
+    set clientChan [mq open $clientQueue RDONLY]
+    chan configure $clientChan -buffering line
+
+    set serverQueue /mqtest_mtxt_server
+    chan close stdout                               ; # <1>
+    set serverChan [mq open $serverQueue WRONLY]
+    chan configure $serverChan -buffering full
+
+    while {[gets $clientChan line] > 0} {
+        try {
+            eval $line
+        } on error {result} {
+            chan puts "error: $result"
+            break
+        }
+    }
+    chan flush stdout   ; # <2>
+
+    chan close $serverChan
+    chan close $clientChan
+} mtxt-client.tcl
+----
+<1> This is the same bit of trickery we used before.
+<2> The `flush` causes the multiple, buffered responses to be sent as a single
+message back to the server.
+
+(((chunk,trm2: run client script)))
+[source,c]
+----
+<<trm2: run client script>>=
+exec tclsh mtxt-client.tcl &
+log::debug "client started in the background"
+----
+
+===== Event driven text example
+
+This example is like the simple single record in a message example,
+except we run the client using event driven I/O.
+
+(((chunk,mq examples)))
+[source,tcl]
+----
+<<mq examples>>=
+test text-record-messages-3.0 {
+    Pass simple text records as messages.
+} -body {
+    set total 0
+    foreach num {7 8 9} {
+        chan puts $clientChan "chan puts $num"
+        set response [gets $serverChan]
+        log::debug "server: received, \"$response\""
+
+        set total [expr {$total + $response}]
+    }
+
+    chan puts $clientChan exit  ; # <1>
+    return $total
+} -setup {
+    set serverQueue /mqtest_edtxt_server
+    <<trm3: create server message queue>>
+
+    set clientQueue /mqtest_edtxt_client
+    <<trm3: create client message queue>>
+
+    <<trm3: create client script file>>
+
+    <<trm3: run client script>>
+} -cleanup {
+    chan close $serverChan
+    chan close $clientChan
+
+    mq unlink $clientQueue
+    mq unlink $serverQueue
+} -result {24}
+----
+<1> Since the client is event driven and not running a loop,
+we require an exit command to terminate.
+
+We set up the server side just as before using `line` buffering.
+
+(((chunk,trm3: create server message queue)))
+[source,c]
+----
+<<trm3: create server message queue>>=
+set serverChan [mq open $serverQueue {CREAT EXCL RDONLY}]
+chan configure $serverChan -buffering line
+log::debug "server queue, \"$serverQueue\", open"
+----
+
+(((chunk,trm3: create client message queue)))
+[source,c]
+----
+<<trm3: create client message queue>>=
+set clientChan [mq open $clientQueue {CREAT EXCL WRONLY}]
+chan configure $clientChan -buffering line
+log::debug "client queue, \"$clientQueue\", open"
+----
+
+The client also uses `line` buffering.
+However,
+the `while` loop is now gone and is replaced by a file event
+which triggers a `proc` to evaluate the line and interact with the
+server.
+
+(((chunk,trm3: create client script file)))
+[source,c]
+----
+<<trm3: create client script file>>=
+makeFile {
+    if {$::tcl_platform(os) eq "Linux"} {
+        load ../tea/build/x86_64-linux-tcl8.6/libposixipc1.0.so
+    } else {
+        package require posixipc
+    }
+
+    namespace import ::posixipc::mq
+
+    set clientQueue /mqtest_edtxt_client
+    set clientChan [mq open $clientQueue RDONLY]
+    chan configure $clientChan -buffering line -blocking false
+
+    set serverQueue /mqtest_edtxt_server
+    chan close stdout
+    set serverChan [mq open $serverQueue WRONLY]
+    chan configure $serverChan -buffering line
+
+    proc ::readMsg {mqchan} {
+        set line [chan gets $mqchan]
+        try {
+            eval $line
+        } on error {result} {
+            chan puts "error: $result"
+            return -code error $result
+        }
+    }
+
+    chan event $clientChan readable [list ::readMsg $clientChan]
+    vwait forever
+} ed-txt-client.tcl
+----
+
+The `chan event` sets up the channel so that `::readMsg` is invoked
+when a message arrives.
+Of course, the event loop must be entered via `vwait` to process
+the I/O events.
+
+(((chunk,trm3: run client script)))
+[source,c]
+----
+<<trm3: run client script>>=
+exec tclsh ed-txt-client.tcl &
+log::debug "client started in the background"
+----
+
+=== Message Queue Channel Driver
+
+A Tcl channel driver consists of a specific set of functions that
+match a fixed API and a Tcl level command to open or create the underlying
+channel.
+In what follows, we present the Tcl channel driver functions first,
+followed by the Tcl level commands.
+
+==== Channel Driver Components
+
+In this section,
+we describe the functions supplied for the Tcl channel driver that
+is used for POSIX message queues.
+The concept behind a channel driver is to delegate specific operations
+to supplied functions so that the generic Tcl channel code can support
+a variety of channel types.
+Whenever the generic code needs a type-specific operation,
+it invokes it via a table of function pointers supplied when the
+channel was created.
+
+The following is an initialized variable of the proper structure
+that is given to `Tcl_CreateChannel()` to define the message queue operations.
+
+(((chunk,mq static data)))
+[source,c]
+----
+<<mq static data>>=
+static Tcl_ChannelType MqChannelType = {
+    .typeName = "mq",           /* The name of the channel type in Tcl
+                                 * commands. This storage is owned by channel
+                                 * type. */
+    .version = TCL_CHANNEL_VERSION_5,
+                                /* Version of the channel type. */
+    .closeProc = mqCloseProc,
+                                /* Function to call to close the channel, or
+                                 * TCL_CLOSE2PROC if the close2Proc should be
+                                 * used instead. */
+    .inputProc = mqInputProc,
+                                /* Function to call for input on channel. */
+    .outputProc = mqOutputProc,
+                                /* Function to call for output on channel. */
+    .seekProc = NULL,
+                                /* Function to call to seek on the channel.
+                                 * May be NULL. */
+    .setOptionProc = mqSetOptionProc,
+                                /* Set an option on a channel. */
+    .getOptionProc = mqGetOptionProc,
+                                /* Get an option from a channel. */
+    .watchProc = mqWatchProc,
+                                /* Set up the notifier to watch for events on
+                                 * this channel. */
+    .getHandleProc = mqGetHandleProc,
+                                /* Get an OS handle from the channel or NULL
+                                 * if not supported. */
+    .close2Proc = NULL,
+                                /* Function to call to close the channel if
+                                 * the device supports closing the read &
+                                 * write sides independently. */
+    .blockModeProc = mqBlockModeProc,
+                                /* Set blocking mode for the raw channel. May
+                                 * be NULL. */
+    /*
+     * Only valid in TCL_CHANNEL_VERSION_2 channels or later
+     */
+    .flushProc = NULL,
+                                /* Function to call to flush a channel. May be
+                                 * NULL. */
+    .handlerProc = NULL,
+                                /* Function to call to handle a channel event.
+                                 * This will be passed up the stacked channel
+                                 * chain. */
+    /*
+     * Only valid in TCL_CHANNEL_VERSION_3 channels or later
+     */
+    .wideSeekProc = NULL,
+                                /* Function to call to seek on the channel
+                                 * which can handle 64-bit offsets. May be
+                                 * NULL, and must be NULL if seekProc is
+                                 * NULL. */
+    /*
+     * Only valid in TCL_CHANNEL_VERSION_4 channels or later
+     * TIP #218, Channel Thread Actions
+     */
+    .threadActionProc = NULL,
+                                /* Function to call to notify the driver of
+                                 * thread specific activity for a channel. May
+                                 * be NULL. */
+
+    /*
+     * Only valid in TCL_CHANNEL_VERSION_5 channels or later
+     * TIP #208, File Truncation
+     */
+    .truncateProc = NULL
+                                /* Function to call to truncate the underlying
+                                 * file to a particular length. May be NULL if
+                                 * the channel does not support truncation. */
+} ;
+----
+
+Notice that not all functions are provided (_i.e._ some members of the
+structure are set to `NULL`).
+Those members are:
+
+seekProc::
+    It is not possible to seek on a message queue.
+    Messages have discrete boundaries and cannot be arbitrarily indexed
+    in the same way that a stream of bytes can.
+close2Proc::
+    It is not possible to close read and write directions independently
+    for a message queue.
+flushProc::
+    This is reserved.
+handlerProc::
+    Used only for stacked drivers.
+wideSeekProc::
+    As previously, seeking is not an allowed operation on a message queue.
+threadActionProc::
+    There is no thread specific driver state.
+truncateProc::
+    The concept of truncation does not have a parallel for a message queue.
+    The maximum number of messages allowed to be queued can only be
+    set when the message queue is created.
+
+When a new Tcl channel is created,
+some instance data for the channel may also be supplied.
+That instance data is then provided as an argument to each of the
+functions for the driver.
+This makes things much more convenient for the driver function code
+to have access to the state of the channel.
+The following data structure defines the information that constitutes
+the state of an individual message queue channel.
+
+(((chunk,mq data types)))
+[source,c]
+----
+<<mq data types>>=
+typedef struct {
+    Tcl_Channel channel ;       // <1>
+    mqd_t mqdes ;               // <2>
+    int tclMask ;               // <3>
+    unsigned lastpriority ;     // <4>
+    unsigned defpriority ;      // <5>
+} MqState ;
+----
+<1> The Tcl channel handle as returned from `Tcl_CreateChannel()`.
+<2> The message queue descriptor. In reality this is
+    an ordinary file descriptor.
+<3> A mask of allowed operations on the channel.
+    This is combination of TCL_READABLE or TCL_WRITABLE.
+<4> The priority of the last received message from the queue.
+<5> The priority to use to post a message to a queue.
+
+There turns out to be a small difference in the way Linux and FreeBSD
+hand a value of type `mqd_t`.
+In Linux, a value of type `mqd_t` is just an ordinary file descriptor.
+In FreeBSD, a value of type `mqd_t` is a pointer to the file
+descriptor.
+So we will use a small inline function to handle the conversion of
+`mqd_t` values to file descriptors.
+
+[source,c]
+----
+<<static inline function definitions>>=
+static inline int
+mqdToFd(mqd_t mq)
+{
+#if defined(__linux__)
+    return (int)mq ;
+#elif defined(__FreeBSD__)
+    return *(int *)mq ;
+# endif
+}
+----
+
+The following sections describe each of the functions supplied as part
+of the message queue channel driver.
+
+===== Block mode procedure
+
+(((chunk,mq forward function declarations)))
+[source,c]
+----
+<<mq forward function declarations>>=
+static int mqBlockModeProc(ClientData instanceData, int mode) ;
+----
+
+The blocking mode of a message queue can be set as one of its
+attributes using `mq_setattr()`.
+
+(((chunk,mq static function definitions)))
+[source,c]
+----
+<<mq static function definitions>>=
+static int
+mqBlockModeProc(
+    ClientData instanceData,
+    int mode)
+{
+    struct mq_attr newattrs = {
+        .mq_flags = mode == TCL_MODE_NONBLOCKING ? O_NONBLOCK : 0,  // <1>
+        .mq_maxmsg = 0,
+        .mq_msgsize = 0,
+        .mq_curmsgs = 0,
+    } ;
+
+    MqState *mqPtr = instanceData ;
+
+    int err = mq_setattr(mqPtr->mqdes, &newattrs, NULL) ;
+    return err < 0 ? errno : err ;
+}
+----
+<1> The only member in `mq_attr` that has any effect when calling
+`mq_setattr()` is `mq_flags`.
+All the other members are ignored, per the man page.
+
+===== Close procedure
+
+(((chunk,mq forward function declarations)))
+[source,c]
+----
+<<mq forward function declarations>>=
+static int mqCloseProc(ClientData instanceData, Tcl_Interp *interp) ;
+----
+
+The close procedure is simply a thin veneer on `mq_close()`.
+However, there is some other clean up required.
+
+(((chunk,mq static function definitions)))
+[source,c]
+----
+<<mq static function definitions>>=
+static int
+mqCloseProc(
+    ClientData instanceData,
+    Tcl_Interp *interp)
+{
+    MqState *mqPtr = instanceData ;
+
+    Tcl_DeleteFileHandler(mqdToFd(mqPtr->mqdes)) ;   // <1>
+
+    int err = mq_close(mqPtr->mqdes) ;
+    ckfree(mqPtr) ;                         // <2>
+
+    return err < 0 ? errno : err ;
+}
+----
+<1> Closing the message queue implies any handlers are also deleted.
+<2> Deallocate the state information as it is not longer required.
+
+===== Input procedure
+
+(((chunk,mq forward function declarations)))
+[source,c]
+----
+<<mq forward function declarations>>=
+static int mqInputProc(ClientData instanceData, char *buf, int bufSize,
+        int *errorCodePtr) ;
+----
+
+Input from a message queue is obtained by calling `mq_receive()`.
+This procedure simply bridges between the different API conventions.
+
+(((chunk,mq static function definitions)))
+[source,c]
+----
+<<mq static function definitions>>=
+static int
+mqInputProc(
+    ClientData instanceData,
+    char *buf,
+    int bufSize,
+    int *errorCodePtr)
+{
+    MqState *mqData = instanceData ;
+
+    int read = mq_receive(mqData->mqdes, buf, bufSize, &mqData->lastpriority) ; // <1>
+    if (read == -1) {
+        *errorCodePtr = errno ;
+    }
+    return read ;
+}
+----
+<1> We save the priority of the last message so it can be queried later
+if desired.
+
+.Tests
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-input-1.0 {
+    Read in non-blocking mode when queue is empty
+} -setup {
+    set queueName /mq-input-1.0
+} -cleanup {
+    chan close $mqchan
+    mq unlink $queueName
+} -body {
+    set mqchan [mq open $queueName {CREAT EXCL RDWR NONBLOCK}]
+    log::debug "mq channel = $mqchan"
+    set nread [chan read $mqchan 1]
+    log::debug "nread, \"$nread\""
+    log::debug "nread length = [string length $nread]"
+    set eof [chan eof $mqchan]
+    log::debug "eof = $eof"
+    return [expr {($nread eq {}) && !$eof}]
+} -result {1}
+----
+
+===== Output procedure
+
+(((chunk,mq forward function declarations)))
+[source,c]
+----
+<<mq forward function declarations>>=
+static int mqOutputProc(ClientData instanceData, char const *buf, int toWrite,
+        int *errorCodePtr) ;
+----
+
+Like the input procedure,
+the output procedure's main function is simply to bridge between
+the message queue system call and the Tcl API requirements.
+
+(((chunk,mq static function definitions)))
+[source,c]
+----
+<<mq static function definitions>>=
+static int
+mqOutputProc(
+    ClientData instanceData,
+    char const *buf,
+    int toWrite,
+    int *errorCodePtr)
+{
+    MqState *mqPtr = instanceData ;
+
+    int err = mq_send(mqPtr->mqdes, buf, toWrite, mqPtr->defpriority) ; // <1>
+    if (err == -1) {
+        *errorCodePtr = errno ;
+        return -1 ;
+    }
+    return toWrite ;
+}
+----
+<1> Note that the `mq_send()` manual page states that 0 length messages
+are allowed.
+Also, since we are in the channel driver,
+we supply the message priority as the default priority.
+
+.Tests
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-output-1.0 {
+    Write in non-blocking mode when queue is full
+} -setup {
+    set queueName /mq-output-1.0
+} -cleanup {
+    chan close $mqchan
+    mq unlink $queueName
+} -body {
+    set mqchan [mq open -maxmsg 1 $queueName {CREAT EXCL RDWR NONBLOCK}]
+    log::debug "mq channel = $mqchan"
+    chan configure $mqchan -buffering line
+    chan puts $mqchan "Hello 1"
+    set second "Hello 2"
+    chan puts $mqchan $second
+    set pending [chan pending output $mqchan]
+    return [expr {$pending == [string length $second] + 1}] ; # +1 for newline
+} -result {1}
+----
+
+===== Configuration options access support
+
+Before we can get to the procedures that get and set configuration options on a
+message queue,
+we build some supporting data structures to look up option names.
+The message queue options fall into two categories:
+
+. Options that can only be set on open.
+. Options that can be set at any time.
+
+Note that all options may be read.
+The restrictions only apply to setting options and those restrictions
+arise from the manner in which the underlying POSIX messages queue
+functions are designed.
+
+It is useful to have a symbolic encoding of the option names
+in addition to the strings that specify the options.
+However, we must be careful about this encoding is created.
+We want increasing sequential numerical order to match the increasing
+alphabetical order of the option names.
+
+(((chunk,mq data types)))
+[source,c]
+----
+<<mq data types>>=
+typedef enum {
+    Mq_curmsgs_opt = 0,
+    Mq_lastpriority_opt,
+    Mq_maxmsg_opt,
+    Mq_msgsize_opt,
+    Mq_priority_opt,
+
+    Mq_OPTION_COUNT             // must be last
+} MqOptionType ;
+----
+
+We build a table of options that we can use to look up option names
+and determine their characteristics.
+
+(((chunk,mq static data)))
+[source,c]
+----
+<<mq static data>>=
+struct MqConfigOpt {
+    char const *optName ;
+    bool setOnOpen ;
+    bool setOnConfig ;
+} const mqOptions[Mq_OPTION_COUNT] = {  // Ordered by ascending option name!
+    [Mq_curmsgs_opt] = {
+        .optName = "-curmsgs",
+        .setOnOpen = false,
+        .setOnConfig = false,
+    },
+    [Mq_lastpriority_opt] = {
+        .optName = "-lastpriority",
+        .setOnOpen = false,
+        .setOnConfig = false,
+    },
+    [Mq_maxmsg_opt] = {
+        .optName = "-maxmsg",
+        .setOnOpen = true,
+        .setOnConfig = false,
+    },
+    [Mq_msgsize_opt] = {
+        .optName = "-msgsize",
+        .setOnOpen = true,
+        .setOnConfig = false,
+    },
+    [Mq_priority_opt] = {
+        .optName = "-priority",
+        .setOnOpen = true,
+        .setOnConfig = true,
+    },
+} ;
+----
+
+Note we have purposely ordered the options in ascending alphabetical
+order since we intend to use a binary search for lookup.
+
+It is also convenient to have a string that is just a list of the
+options without any leading dash (-) characters.
+This is used by Tcl function for constructing error messages in the
+case of a bad channel option.
+Although in theory we could construct such a list at run time from the above
+data,
+it is simpler to just have the list ready at hand and not have the complication
+of determining how much memory is required to hold the list.
+Also,
+placing the list lexically close to the above options array may help
+prevent mistakes in the future if more options are added.
+Well, we can at least hope.
+
+(((chunk,mq static data)))
+[source,c]
+----
+<<mq static data>>=
+static char const mqOptionsList[] =
+        "curmsgs lastpriority maxmsg msgsize priority" ;
+----
+
+We need a function to look up an option and return the information
+we have about the option.
+
+(((chunk,mq forward function declarations)))
+[source,c]
+----
+<<mq forward function declarations>>=
+static struct MqConfigOpt const *lookUpMqOpt(char const *optionName) ;
+----
+
+[[look-Up-Mq-Opt]]
+The `lookUpMqOpt()` function is just a thin wrapper on the standard
+library `bsearch()` function.
+
+(((chunk,mq static function definitions)))
+[source,c]
+----
+<<mq static function definitions>>=
+static struct MqConfigOpt const *
+lookUpMqOpt(
+    char const *optionName)
+{
+    struct MqConfigOpt key = {
+        .optName = optionName
+    } ;
+
+    return bsearch(&key, mqOptions, COUNTOF(mqOptions),
+            sizeof(struct MqConfigOpt), mqOptCompare) ;
+}
+----
+
+We must supply the comparison function needed by `bsearch()`
+
+(((chunk,mq forward function declarations)))
+[source,c]
+----
+<<mq forward function declarations>>=
+static int mqOptCompare(void const *m1, void const *m2) ;
+----
+
+The comparison is based on option names,
+so the standard library `strcmp()` function has the right characteristics.
+
+(((chunk,mq static function definitions)))
+[source,c]
+----
+<<mq static function definitions>>=
+static int
+mqOptCompare(
+    void const *m1,
+    void const *m2)
+{
+    struct MqConfigOpt const *o1 = m1 ;
+    struct MqConfigOpt const *o2 = m2 ;
+
+    return strcmp(o1->optName, o2->optName) ;
+}
+----
+
+===== Get option procedure
+
+(((chunk,mq forward function declarations)))
+[source,c]
+----
+<<mq forward function declarations>>=
+static int mqGetOptionProc(ClientData instanceData, Tcl_Interp *interp,
+        char const *optionName, Tcl_DString *optionValue) ;
+----
+
+The get option procedure has a complication associated with
+the way option names are specified.
+If the _optionName_ argument is `NULL`,
+then this implies that an alternating list of all options and their
+values are to be returned.
+Otherwise, we are returning a single option value.
+
+(((chunk,mq static function definitions)))
+[source,c]
+----
+<<mq static function definitions>>=
+static int
+mqGetOptionProc(
+    ClientData instanceData,
+    Tcl_Interp *interp,
+    char const *optionName,
+    Tcl_DString *optionValue)
+{
+    MqState *mqPtr = instanceData ;
+
+    if (optionName != NULL) {
+        <<mqGetOptionProc: get single option>>
+    } else {
+        <<mqGetOptionProc: get all options>>
+    }
+    return TCL_OK ;
+}
+----
+
+In the case of a single option,
+we must look up the option name and format the option value 
+as a string.
+The value is returned in the Tcl dynamic string provided as an argument.
+
+.Getting a single option
+(((chunk,mqGetOptionProc: get single option)))
+[source,c]
+----
+<<mqGetOptionProc: get single option>>=
+<<mqGetOptionProc: look up option>>
+<<mqGetOptionProc: format option value>>
+
+Tcl_DStringAppendElement(optionValue, buf) ;
+----
+
+The option is looked up by name using the
+<<look-Up-Mq-Opt,lookUpMqOpt()>>
+function we described previously.
+A `NULL` return on the look up implies that the option was not found.
+There is a specific Tcl function provided to channel drivers to
+report bad channel options.
+
+(((chunk,mqGetOptionProc: look up option)))
+[source,c]
+----
+<<mqGetOptionProc: look up option>>=
+struct MqConfigOpt const *optProp = lookUpMqOpt(optionName) ;
+
+if (optProp == NULL) {
+    return Tcl_BadChannelOption(interp, optionName, mqOptionsList) ;
+}
+----
+
+At this point,
+we have a good option name and we need to fetch the value of the
+option and format it.
+There is specific code that needs to be executed for each
+different option.
+Rather than compare the option names all over again,
+the following design computes the array index into the `mqOptions` array.
+The array index is then equated to a value from the `MqOptionType`
+enumeration.
+That enumeration declaration has been purposely contrived to match
+the array index of the corresponding option.
+By that contrivence, 
+we have a convenient symbolic name to use in the code.
+The array index encoded as an enumeration can then be used in a `switch`
+statement to locate the option specific code that fetches and formats the
+option value.
+
+(((chunk,mqGetOptionProc: format option value)))
+[source,c]
+----
+<<mqGetOptionProc: format option value>>=
+struct mq_attr attrs ;                      // retrieved mq attributes
+char buf[TCL_INTEGER_SPACE + 16] ;          // formated option values
+
+static char const getAttrFailedMsg[] = "get option: mq_getattr() failed" ;
+
+MqOptionType whichOpt = (MqOptionType)(optProp - mqOptions) ;
+switch (whichOpt) {
+    case Mq_curmsgs_opt:
+    {
+        <<mqGetOptionProc: format curmsgs value>>
+    }
+        break ;
+    case Mq_lastpriority_opt:
+    {
+        <<mqGetOptionProc: format lastpriority value>>
+    }
+        break ;
+    case Mq_maxmsg_opt:
+    {
+        <<mqGetOptionProc: format maxmsg value>>
+    }
+        break ;
+    case Mq_msgsize_opt:
+    {
+        <<mqGetOptionProc: format msgsize value>>
+    }
+        break ;
+    case Mq_priority_opt:
+    {
+        <<mqGetOptionProc: format priority value>>
+    }
+        break ;
+    default:        // <1>
+        Tcl_Panic("posixipc mq: get option failure: found option named, "
+                "\"%s\", but no code to process the option", optionName) ;
+        break ;
+}
+----
+<1> The default case protects against the circumstance where additions
+are made to the `mqOptions` array, but the `enum` definition is not modified
+to account for the addition.
+Of course, any changes in the `mqOptions` array must be reflected
+in the code here since we have tied finding the correct code for formating an
+option to the layout (_i.e._ the array indices) of the `mqOptions` array.
+
+Now it is just a matter of finding and formatting
+the options values for each particular option.
+Some option values are located in the state data passed in and
+some option values are retrieved by making calls to `mq_getattr()`.
+Each case sorts things out as necessary.
+
+.curmsgs formatting
+(((chunk,mqGetOptionProc: format curmsgs value)))
+[source,c]
+----
+<<mqGetOptionProc: format curmsgs value>>=
+int err = mq_getattr(mqPtr->mqdes, &attrs) ;
+if (err < 0) {
+    return mqFailure(interp, getAttrFailedMsg) ;
+}
+snprintf(buf, sizeof(buf), "%ld", attrs.mq_curmsgs) ;
+----
+
+.lastpriority formatting
+(((chunk,mqGetOptionProc: format lastpriority value)))
+[source,c]
+----
+<<mqGetOptionProc: format lastpriority value>>=
+snprintf(buf, sizeof(buf), "%u", mqPtr->lastpriority) ;
+----
+
+.maxmsg formatting
+(((chunk,mqGetOptionProc: format maxmsg value)))
+[source,c]
+----
+<<mqGetOptionProc: format maxmsg value>>=
+int err = mq_getattr(mqPtr->mqdes, &attrs) ;
+if (err < 0) {
+    return mqFailure(interp, getAttrFailedMsg) ;
+}
+snprintf(buf, sizeof(buf), "%ld", attrs.mq_maxmsg) ;
+----
+
+.msgsize formatting
+(((chunk,mqGetOptionProc: format msgsize value)))
+[source,c]
+----
+<<mqGetOptionProc: format msgsize value>>=
+int err = mq_getattr(mqPtr->mqdes, &attrs) ;
+if (err < 0) {
+    return mqFailure(interp, getAttrFailedMsg) ;
+}
+snprintf(buf, sizeof(buf), "%ld", attrs.mq_msgsize) ;
+----
+
+.priority formatting
+(((chunk,mqGetOptionProc: format priority value)))
+[source,c]
+----
+<<mqGetOptionProc: format priority value>>=
+snprintf(buf, sizeof(buf), "%u", mqPtr->defpriority) ;
+----
+
+.Tests
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-get-option-1.0 {
+    Get message queue options one at a time
+} -setup {
+    set queueName /mq-get-option-1.0
+} -cleanup {
+    chan close $mqchan
+    mq unlink $queueName
+} -body {
+    set mqchan [mq open $queueName w+]
+    log::debug "mq channel = $mqchan"
+
+    set optionNames {-curmsgs -lastpriority -maxmsg -msgsize -priority}
+    foreach opt $optionNames {
+        set optValue($opt) [chan configure $mqchan $opt]
+        log::debug "$opt = $optValue($opt)"
+    }
+
+    array set optExpected {
+        -curmsgs 0
+        -lastpriority 0
+        -maxmsg 10
+        -msgsize 8192
+        -priority 0
+    }
+
+    foreach opt $optionNames {
+        if {$optValue($opt) != $optExpected($opt)} {
+            return 0 ;
+        }
+    }
+    return 1
+} -result {1}
+----
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-get-option-2.0 {
+    Bad option name
+} -setup {
+    set queueName /mq-get-option-2.0
+} -cleanup {
+    chan close $mqchan
+    mq unlink $queueName
+} -body {
+    set mqchan [mq open $queueName w+]
+    log::debug "mq channel = $mqchan"
+
+    chan configure $mqchan -foo
+} -result {bad option "-foo": should be one of -blocking, -buffering,\
+        -buffersize, -encoding, -eofchar, -translation, -curmsgs,\
+        -lastpriority, -maxmsg, -msgsize, or -priority}\
+    -returnCodes error
+----
+
+In the case of gettting all the options with a single command,
+the end result must be a string formatted as an alternating
+list of option name / option value pairs.
+As with the single option case,
+the string is returned via the Tcl dynamic string, `optionValue`,
+passed in as an argument.
+Since we are getting all the options,
+we can start by getting the message queue attributes available
+in the system call, `mq_getattr()`.
+Then the resulting list can be constructed.
+
+.Getting all options
+(((chunk,mqGetOptionProc: get all options)))
+[source,c]
+----
+<<mqGetOptionProc: get all options>>=
+<<mqGetOptionProc: get mq attributes>>
+<<mqGetOptionProc: format all option name/value pairs>>
+----
+
+.Getting message queue options
+(((chunk,mqGetOptionProc: get mq attributes)))
+[source,c]
+----
+<<mqGetOptionProc: get mq attributes>>=
+struct mq_attr attrs ;
+int err = mq_getattr(mqPtr->mqdes, &attrs) ;
+if (err < 0) {
+    return mqFailure(interp, "get option: mq_getattr() failed") ;
+}
+----
+
+===== Failed system calls
+
+In the last code chunk,
+we had to admit to the possiblity that a system call
+(`mq_getattr()` in this case) might fail.
+We want to put together a common scheme to handle such failures.
+Tcl want to have `errno` set properly and it is useful
+to set the result of the command to a meaninful error string.
+The `ipcFailure()` function below handles the error.
+
+(((chunk,mq forward function declarations)))
+[source,c]
+----
+<<mq forward function declarations>>=
+static int ipcFailure(Tcl_Interp *interp, char const *type, char const *msg) ;
+----
+
+(((chunk,mq static function definitions)))
+[source,c]
+----
+<<mq static function definitions>>=
+static int
+ipcFailure(
+    Tcl_Interp *interp,
+    char const *type,
+    char const *msg)
+{
+    Tcl_SetErrno(errno) ;
+    Tcl_Obj *errObj = Tcl_ObjPrintf("posixipc %s: %s: %s", type, msg,
+            Tcl_PosixError(interp)) ;
+    Tcl_SetObjResult(interp, errObj) ;
+    return TCL_ERROR ;                  // <1>
+}
+----
+<1> This is just a convenient, allowing code to return the value
+of `ipcFailure()` as an error.
+
+Since it is a system call that has failed,
+we need a reasonable error message and must make sure to set Tcl's
+notion of `errno` indicating the cause of the error.
+
+We specialize the failure function for message queues.
+We will see an additional specialization for shared memory.
+
+(((chunk,mq forward function declarations)))
+[source,c]
+----
+<<mq forward function declarations>>=
+static int mqFailure(Tcl_Interp *interp, char const *msg) ;
+----
+
+(((chunk,mq static function definitions)))
+[source,c]
+----
+<<mq static function definitions>>=
+static int
+mqFailure(
+    Tcl_Interp *interp,
+    char const *msg)
+{
+    return ipcFailure(interp, "mq", msg) ;
+}
+----
+
+Formatting all the options as name / value pairs is just a long
+sequence of fetching the option value, formatting it and then
+adding it as a list element to the returned string.
+We obtain the option name from the `mqOptions` array,
+since we already have the name stored there.
+We simply march down the array and its order definition
+determines the code we need to run to do the formatting.
+
+(((chunk,mqGetOptionProc: format all option name/value pairs)))
+[source,c]
+----
+<<mqGetOptionProc: format all option name/value pairs>>=
+char buf[TCL_INTEGER_SPACE + 16] ;      // buffer space for the formatting
+struct MqConfigOpt const *optProp = mqOptions ;
+
+<<mqGetOptionProc: format curmsgs name/value pair>>
+<<mqGetOptionProc: format lastpriority name/value pair>>
+<<mqGetOptionProc: format maxmsg name/value pair>>
+<<mqGetOptionProc: format msgsize name/value pair>>
+<<mqGetOptionProc: format priority name/value pair>>
+----
+
+So,
+each option has a small piece of code required to 
+add the option name to the result,
+fetch the option value,
+format the value into a string and the add the value string to the
+accumulated result.
+
+.curmsgs formatting
+(((chunk,mqGetOptionProc: format curmsgs name/value pair)))
+[source,c]
+----
+<<mqGetOptionProc: format curmsgs name/value pair>>=
+Tcl_DStringAppendElement(optionValue, optProp->optName) ;
+optProp++ ;                                                 // <1>
+snprintf(buf, sizeof(buf), "%ld", attrs.mq_curmsgs) ;
+Tcl_DStringAppendElement(optionValue, buf) ;
+----
+<1> After obtaining the name, we point to the next option in the
+array, setting up for the next formatting code.
+
+.lastpriority formatting
+(((chunk,mqGetOptionProc: format lastpriority name/value pair)))
+[source,c]
+----
+<<mqGetOptionProc: format lastpriority name/value pair>>=
+Tcl_DStringAppendElement(optionValue, optProp->optName) ;
+optProp++ ;
+snprintf(buf, sizeof(buf), "%u", mqPtr->lastpriority) ;
+Tcl_DStringAppendElement(optionValue, buf) ;
+----
+
+.maxmsg formatting
+(((chunk,mqGetOptionProc: format maxmsg name/value pair)))
+[source,c]
+----
+<<mqGetOptionProc: format maxmsg name/value pair>>=
+Tcl_DStringAppendElement(optionValue, optProp->optName) ;
+optProp++ ;
+snprintf(buf, sizeof(buf), "%ld", attrs.mq_maxmsg) ;
+Tcl_DStringAppendElement(optionValue, buf) ;
+----
+
+.msgsize formatting
+(((chunk,mqGetOptionProc: format msgsize name/value pair)))
+[source,c]
+----
+<<mqGetOptionProc: format msgsize name/value pair>>=
+Tcl_DStringAppendElement(optionValue, optProp->optName) ;
+optProp++ ;
+snprintf(buf, sizeof(buf), "%ld", attrs.mq_msgsize) ;
+Tcl_DStringAppendElement(optionValue, buf) ;
+----
+
+.priority formatting
+(((chunk,mqGetOptionProc: format priority name/value pair)))
+[source,c]
+----
+<<mqGetOptionProc: format priority name/value pair>>=
+Tcl_DStringAppendElement(optionValue, optProp->optName) ;
+optProp++ ;                                                 // <1>
+snprintf(buf, sizeof(buf), "%u", mqPtr->defpriority) ;
+Tcl_DStringAppendElement(optionValue, buf) ;
+----
+<1> Not strictly necessary since this is the last option.
+But consistency and the possibility of future additions are worth
+a single code statement.
+
+.Tests
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-get-option-3.0 {
+    Get all options for a message queue in one command
+} -setup {
+    set queueName /mq-get-option-3.0
+} -cleanup {
+    chan close $mqchan
+    mq unlink $queueName
+} -body {
+    set mqchan [mq open $queueName w+]
+    log::debug "mq channel = $mqchan"
+
+    set opts [chan configure $mqchan]
+    log::debug "option = $opts"
+    return [dict get $opts -msgsize]
+} -result {8192}
+----
+
+===== Set option procedure
+
+(((chunk,mq forward function declarations)))
+[source,c]
+----
+<<mq forward function declarations>>=
+static int mqSetOptionProc(ClientData instanceData, Tcl_Interp *interp,
+        char const *optionName, char const *newValue) ;
+----
+
+Because of restrictions on when options can be set,
+there is a bit more logic here.
+First, we check if we can look up the option and therefore it is a
+good, known option.
+We next make sure that it is an option that can be set
+as part of a configuration call.
+Finally, we can convert value string to internal representation
+and set the option value.
+
+(((chunk,mq static function definitions)))
+[source,c]
+----
+<<mq static function definitions>>=
+static int
+mqSetOptionProc(
+    ClientData instanceData,
+    Tcl_Interp *interp,
+    char const *optionName,
+    char const *newValue)
+{
+    MqState *mqPtr = instanceData ;
+
+    struct MqConfigOpt const *optProp = lookUpMqOpt(optionName) ;
+    if (optProp == NULL) {
+        return Tcl_BadChannelOption(interp, optionName, mqOptionsList) ;
+    } else if (!optProp->setOnConfig) {
+        Tcl_Obj *errObj = Tcl_ObjPrintf("posixipc mq: set option: "
+                "%s option may not be set by configuration", optionName) ;
+        Tcl_SetObjResult(interp, errObj) ;
+        return TCL_ERROR ;
+    } else {
+        <<mqSetOptionProc: set option to new value>>
+    }
+
+    return TCL_OK ;
+}
+----
+
+Like in the case of `mqGetOptionProc()`,
+we must execute option specific code to set the option value.
+We use the same design strategy here, namely,
+computing the array index into the `mqOptions` array as an integer
+encoding of the option and use an enumeration value that has
+the same integer values.
+A switch statement can then take us to the option specific code.
+As it turns out,
+there is only one option that may be set in a configure command.
+We leave it as a switch statement for future updates.
+
+(((chunk,mqSetOptionProc: set option to new value)))
+[source,c]
+----
+<<mqSetOptionProc: set option to new value>>=
+MqOptionType whichOpt = (MqOptionType)(optProp - mqOptions) ;
+switch (whichOpt) {
+    case Mq_priority_opt:
+    {
+        <<mqSetOptionProc: set priority option>>
+    }
+        break ;
+
+    default:
+        Tcl_Panic("posixipc mq: set option failure: found option named, "
+                "\"%s\", but no code to process the option", optionName) ;
+        break ;
+}
+----
+
+Message priorities are unsigned numbers.
+Tcl provides convenience functions to convert strings to numeric types.
+We need only make sure things are positive.
+
+(((chunk,mqSetOptionProc: set priority option)))
+[source,c]
+----
+<<mqSetOptionProc: set priority option>>=
+int priority ;
+if (Tcl_GetInt(interp, newValue, &priority) != TCL_OK) {
+    return TCL_ERROR ;
+}
+if (priority < 0) {
+    Tcl_Obj *errObj = Tcl_ObjPrintf("posixipc mq: set option: "
+            "invalid negative message priority: %d", priority) ;
+    Tcl_SetObjResult(interp, errObj) ;
+    return TCL_ERROR ;
+}
+mqPtr->defpriority = priority ;
+----
+
+.Tests
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-set-option-1.0 {
+    Set / get priority option on open queue
+} -setup {
+    set queueName /mq-set-option-1.0
+} -cleanup {
+    chan close $mqchan
+    mq unlink $queueName
+} -body {
+    set mqchan [mq open $queueName w+]
+    log::debug "mq channel = $mqchan"
+    chan configure $mqchan -priority 20
+    chan configure $mqchan -priority
+} -result {20}
+----
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-set-option-1.1 {
+    Set priority option to negative number
+} -setup {
+    set queueName /mq-set-option-1.1
+} -cleanup {
+    chan close $mqchan
+    mq unlink $queueName
+} -body {
+    set mqchan [mq open $queueName w+]
+    log::debug "mq channel = $mqchan"
+    chan configure $mqchan -priority -20
+} -result {posixipc mq: set option: invalid negative message priority: -20}\
+  -returnCodes error
+----
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-set-option-2.0 {
+    Attempt to set create time option
+} -setup {
+    set queueName /mq-set-option-2.0
+} -cleanup {
+    chan close $mqchan
+    mq unlink $queueName
+} -body {
+    set mqchan [mq open $queueName w+]
+    log::debug "mq channel = $mqchan"
+    chan configure $mqchan -msgsize 128
+} -result {posixipc mq: set option: -msgsize option may not be set by\
+        configuration}\
+  -returnCodes error
+----
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-set-option-3.0 {
+    Attempt to set bad option
+} -setup {
+    set queueName /mq-set-option-3.0
+} -cleanup {
+    chan close $mqchan
+    mq unlink $queueName
+} -body {
+    set mqchan [mq open $queueName w+]
+    log::debug "mq channel = $mqchan"
+    chan configure $mqchan -foo 128
+} -result {bad option "-foo": should be one of -blocking, -buffering,\
+    -buffersize, -encoding, -eofchar, -translation, -curmsgs, -lastpriority,\
+    -maxmsg, -msgsize, or -priority}\
+  -returnCodes error
+----
+
+===== Watch procedure
+
+(((chunk,mq forward function declarations)))
+[source,c]
+----
+<<mq forward function declarations>>=
+static void mqWatchProc(ClientData instanceData, int mask) ;
+----
+
+The code for the watch procedure was taken directly from the
+Tcl sources for the watch procedure for files.
+Since the message queue descriptor is actually a file descriptor,
+we can use treat the message queue just like a file for the purposes
+of watching.
+
+(((chunk,mq static function definitions)))
+[source,c]
+----
+<<mq static function definitions>>=
+static void
+mqWatchProc(
+    ClientData instanceData,
+    int mask)
+{
+    MqState *mqPtr = instanceData ;
+
+    mask &= mqPtr->tclMask ;
+    if (mask != 0) {
+        Tcl_CreateFileHandler(mqdToFd(mqPtr->mqdes), mask,
+                (Tcl_FileProc *)Tcl_NotifyChannel, mqPtr->channel) ;
+    } else {
+        Tcl_DeleteFileHandler(mqdToFd(mqPtr->mqdes)) ;
+    }
+}
+----
+
+===== Get handle procedure
+
+(((chunk,mq forward function declarations)))
+[source,c]
+----
+<<mq forward function declarations>>=
+static int mqGetHandleProc(ClientData instanceData, int direction,
+        ClientData *handlePtr) ;
+----
+
+The message queue descriptor is the OS handle for the message
+queue, so we simply return it.
+
+(((chunk,mq static function definitions)))
+[source,c]
+----
+<<mq static function definitions>>=
+static int
+mqGetHandleProc(
+    ClientData instanceData,
+    int direction,
+    ClientData *handlePtr)
+{
+    MqState *mqPtr = instanceData ;
+
+    if ((direction & mqPtr->tclMask) == 0) {
+        return TCL_ERROR ;
+    }
+
+    *handlePtr = (ClientData)(intptr_t)(mqPtr->mqdes) ; // <1>
+    return TCL_OK ;
+}
+----
+<1> This little contortion of casts suppresses the compiler warning about
+casting from integers to pointers of different sizes.
+The `ClientData` type is a pointer so we first cast the message
+queue descriptor to be something that will be pointer sized, but still
+integer typed and then, with the right sized object in hand,
+we can cast it to a pointer without generating a warning.
+Tcl sources have macros to do this,
+but they are only in the internal header file,
+which we are scrupulously avoiding in this code.
+
+=== Processing Open Mode Options
+
+Before describing how a message queue channel is opened,
+we must take an aside to deal with processing the mode options for
+opening a channel.
+This option processing also will be used for shared memory opening,
+so we are factoring it into functions that can be used when we
+take up other forms of IPC.
+
+We pattern the option specifications after the Tcl `open` core command.
+This command takes two forms of open mode options.
+The first form is like `fopen(3)` modes and the second form is like
+`open(2)` flags.
+
+==== Processing fopen style modes
+
+First,
+we deal with mode arguments that are patterned after `fopen(3)`.
+We use a data driven approach.
+All possible values of the mode are put into a table that is used to
+map mode name to the flags and other information used in the opening
+of the message queue.
+
+(((chunk,common forward function declarations)))
+[source,c]
+----
+<<common forward function declarations>>=
+static int processFopenModeOption(Tcl_Interp *interp, char const *const mode,
+        int *flags, int *mask, bool *binary) ;
+----
+
+Processing the mode option in this case implies searching for the mode argument.
+We search the initialized array using standard library `bsearch(3)` function.
+Upon finding the mode string,
+then we return the open flags, a mask indicating the direction of data
+flow requested and whether the channel should be put into binary
+translation mode.
+
+(((chunk,common static function definitions)))
+[source,c]
+----
+<<common static function definitions>>=
+static int
+processFopenModeOption(
+    Tcl_Interp *interp,
+    char const *const mode,
+    int *flags,
+    int *mask,
+    bool *binary)
+{
+    <<processFopenModeOption: fopen style modes>>
+
+    struct fopenModeDes const *modeSpec ;
+    <<processFopenModeOption: search for mode match>>
+
+    if (modeSpec == NULL) {
+        Tcl_SetObjResult(interp, Tcl_ObjPrintf("unknown open mode, \"%s\": "
+                "should be one of %s, %s %s, %s, %s, %s, %s, or %s",
+                mode,
+                fopenModes[0].modeName, fopenModes[1].modeName,
+                fopenModes[3].modeName, fopenModes[4].modeName,
+                fopenModes[5].modeName, fopenModes[6].modeName,
+                fopenModes[8].modeName, fopenModes[9].modeName)) ;
+        return TCL_ERROR ;
+    }
+
+    *flags = modeSpec->oFlags ;
+    *mask = modeSpec->tclMask ;
+    *binary = modeSpec->isBinary ;
+
+    return TCL_OK ;
+}
+----
+
+.search for a mode name match
+(((chunk,processFopenModeOption: search for mode match)))
+[source,c]
+----
+<<processFopenModeOption: search for mode match>>=
+struct fopenModeDes key = {
+    .modeName = mode,
+} ;
+
+modeSpec = bsearch(&key, fopenModes, COUNTOF(fopenModes),
+        sizeof(struct fopenModeDes), fopenModeCompare) ;
+----
+
+We define a data structure to hold the mode name string and its associated
+data.
+
+(((chunk,common data types)))
+[source,c]
+----
+<<common data types>>=
+struct fopenModeDes {
+    char const *modeName ;          // <1>
+    int oFlags ;                    // <2>
+    int tclMask ;                   // <3>
+    bool isBinary ;                 // <4>
+} ;
+----
+<1> The string value to indicate the opening mode.
+<2> The flags implied by the mode string. These are the `O_*` flags
+    used for opening the message queue.
+<3> A corresponding set of flags as used by Tcl. We will need to check
+    whether the message is readable or writable.
+<4> Indicates whether the message queue is opened in binary mode.
+    We need to know this so the translation configuration on the channel
+    can be properly set.
+
+We use an initialized array variable to hold the set of possible open
+modes.
+Note there are no _append_ modes since this is not a supported concept.
+Also note, the array must be ordered by ascending `modeName`.
+
+(((chunk,processFopenModeOption: fopen style modes)))
+[source,c]
+----
+<<processFopenModeOption: fopen style modes>>=
+static struct fopenModeDes const fopenModes[] = { // ordered by ascending modeName!
+    {
+        .modeName = "r",
+        .oFlags = O_RDONLY,
+        .tclMask = TCL_READABLE,
+        .isBinary = false,
+    }, {
+        .modeName = "r+",
+        .oFlags = O_RDWR,
+        .tclMask = TCL_READABLE | TCL_WRITABLE,
+        .isBinary = false,
+    }, {
+        .modeName = "r+b",
+        .oFlags = O_RDWR,
+        .tclMask = TCL_READABLE | TCL_WRITABLE,
+        .isBinary = true,
+    }, {
+        .modeName = "rb",
+        .oFlags = O_RDONLY,
+        .tclMask = TCL_READABLE,
+        .isBinary = true,
+    }, {
+        .modeName = "rb+",
+        .oFlags = O_RDWR,
+        .tclMask = TCL_READABLE | TCL_WRITABLE,
+        .isBinary = true,
+    }, {
+        .modeName = "w",
+        .oFlags = O_WRONLY | O_CREAT,
+        .tclMask = TCL_WRITABLE,
+        .isBinary = false,
+    }, {
+        .modeName = "w+",
+        .oFlags = O_RDWR | O_CREAT,
+        .tclMask = TCL_READABLE | TCL_WRITABLE,
+        .isBinary = false,
+    }, {
+        .modeName = "w+b",
+        .oFlags = O_RDWR | O_CREAT,
+        .tclMask = TCL_READABLE | TCL_WRITABLE,
+        .isBinary = true,
+    }, {
+        .modeName = "wb",
+        .oFlags = O_WRONLY | O_CREAT,
+        .tclMask = TCL_WRITABLE,
+        .isBinary = true,
+    }, {
+        .modeName = "wb+",
+        .oFlags = O_RDWR | O_CREAT,
+        .tclMask = TCL_READABLE | TCL_WRITABLE,
+        .isBinary = true,
+    },
+} ;
+----
+
+As required when using `bsearch(3)`,
+we must supply a comparison function.
+
+(((chunk,common forward function declarations)))
+[source,c]
+----
+<<common forward function declarations>>=
+static int fopenModeCompare(void const *m1, void const *m2) ;
+----
+
+Since we are searching based on string values,
+`strcmp(3)` provides the correct interface.
+
+(((chunk,common static function definitions)))
+[source,c]
+----
+<<common static function definitions>>=
+static int
+fopenModeCompare(
+    void const *m1,
+    void const *m2)
+{
+    struct fopenModeDes const *o1 = m1 ;
+    struct fopenModeDes const *o2 = m2 ;
+
+    return strcmp(o1->modeName, o2->modeName) ;
+}
+----
+
+==== Fopen style mode testing
+
+The following are tests to verify the parsing of the fopen style modes.
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test fopen-mode-1.0 {
+    Open the message queue in "w" mode
+} -setup {
+    set queueName /fopen-mode-1.0
+    set queueFile $mqFSMount$queueName
+} -cleanup {
+    chan close $mqchan
+    mq unlink $queueName
+} -body {
+    set mqchan [mq open $queueName w]
+    log::debug "mq channel = $mqchan"
+
+    set fattrs [file attributes $queueFile]
+    log::debug "mq file attributes = $fattrs"
+    set rightUser [expr {[dict get $fattrs -owner] eq $::tcl_platform(user)}]
+
+    set exists [file exists $queueFile]
+
+    return [expr {$rightUser && $exists}]
+} -result {1}
+----
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test fopen-mode-1.1 {
+    Open the message queue in "wb+" mode
+} -setup {
+    set queueName /fopen-mode-1.1
+    set queueFile $mqFSMount$queueName
+} -cleanup {
+    chan close $mqchan
+    mq unlink $queueName
+} -body {
+    set mqchan [mq open $queueName wb+]
+    log::debug "mq channel = $mqchan"
+
+    set fattrs [file attributes $queueFile]
+    log::debug "mq file attributes = $fattrs"
+    set rightUser [expr {[dict get $fattrs -owner] eq $::tcl_platform(user)}]
+
+    set exists [file exists $queueFile]
+
+    set trans [chan configure $mqchan -translation]
+    log::debug "translation = \"$trans\""
+    set isBinary [expr {$trans eq "lf lf"}]
+
+    return [expr {$rightUser && $exists && $isBinary}]
+} -result {1}
+----
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test fopen-mode-2.0 {
+    Open the message queue with bad mode
+} -setup {
+    set queueName /fopen-mode-2.0
+} -cleanup {
+} -body {
+    mq open $queueName a
+} -result {unknown open mode, "a": should be one of r, r+ rb, rb+, w, w+, wb,\
+        or wb+}\
+    -returnCodes error
+----
+
+==== Processing open style modes
+
+The open style modes use a list of key strings to indicate the mode.
+We use the same strategy for processing the options as we did previously
+only now we will have to iterate across a list of key strings.
+A mapping structure is built to map the mode name string to the
+set of properties we need to open a message queue in the specified mode.
+
+(((chunk,common forward function declarations)))
+[source,c]
+----
+<<common forward function declarations>>=
+static int processOpenModeOption(Tcl_Interp *interp, char const *const mode,
+        int *flags, int *mask, bool *binary) ;
+----
+
+The mode argument is a list of flags names to use for opening.
+We must split up the list and then iterate across it to gather
+the set of specified flags.
+The implication of the list is that the various flags implied by
+the list elements are **OR**'ed together.
+
+(((chunk,common static function definitions)))
+[source,c]
+----
+<<common static function definitions>>=
+static int
+processOpenModeOption(
+    Tcl_Interp *interp,
+    char const *const mode,
+    int *flags,
+    int *mask,
+    bool *binary)
+{
+    int resultCode = TCL_OK ;
+
+    <<processOpenModeOption: open style modes>>
+
+    <<processOpenModeOption: split mode items list>>
+
+    <<processOpenModeOption: iterate over mode items>>
+
+    <<processOpenModeOption: check access direction>>
+
+    *flags = oflags ;
+    *mask = tclMask ;
+    *binary = bintrans ;
+
+release_list_items:
+    ckfree(modeItems) ;
+    return resultCode ;
+}
+----
+
+Tcl provides a function to do the heavy lifting of splitting a list.
+
+(((chunk,processOpenModeOption: split mode items list)))
+[source,c]
+----
+<<processOpenModeOption: split mode items list>>=
+int modeCount ;
+char const **modeItems ;
+
+if (Tcl_SplitList(interp, mode, &modeCount, &modeItems) != TCL_OK) {
+    return TCL_ERROR ;
+}
+----
+
+Iterating over each item in the list,
+we search the flags table for a match.
+Finding a match,
+the associated data is **OR**'ed into the variables used to accumulate
+the bit encoded flags.
+
+(((chunk,processOpenModeOption: iterate over mode items)))
+[source,c]
+----
+<<processOpenModeOption: iterate over mode items>>=
+int oflags = 0 ;
+int tclMask = 0 ;
+bool bintrans = false ;
+int accessFlagCount = 0 ;
+
+for (int itemIndex = 0 ; itemIndex < modeCount ; itemIndex++) {
+    struct openFlagDes key = {
+        .modeName = modeItems[itemIndex],
+    } ;
+
+    struct openFlagDes const *flagSpec =
+            bsearch(&key, openFlags, COUNTOF(openFlags),
+            sizeof(struct openFlagDes), openFlagCompare) ;
+
+    if (flagSpec == NULL) {
+        Tcl_SetObjResult(interp,
+                Tcl_ObjPrintf("invalid access mode \"%s\": must be "
+                "%s, %s, %s, %s, %s, %s, or %s", modeItems[itemIndex],
+                openFlags[0].modeName, openFlags[1].modeName,
+                openFlags[2].modeName, openFlags[3].modeName,
+                openFlags[4].modeName, openFlags[5].modeName,
+                openFlags[6].modeName)) ;
+        resultCode = TCL_ERROR ;
+        goto release_list_items ;          // <1>
+    } else {
+        oflags |= flagSpec->oFlags ;
+        tclMask |= flagSpec->tclMask ;
+        bintrans = bintrans || flagSpec->isBinary ;
+        accessFlagCount += flagSpec->isAccessMode ;
+    }
+}
+----
+<1> Spliting the list causes memory to be allocated which must be returned.
+Don't bleed memory on an error.
+
+One of the restrictions when opening using a list of open mode flags is that
+some access direction, read, write or both, must be specified.
+This is not a problem in the `fopen(3)` style mode string, since an access
+direction is implied by the mode string value.
+However,
+when specifying individual flags, we need to perform the check.
+The rules are that exactly one of read only, write only, or read / write
+must be specified.
+For this reason,
+we have accumulated a count of the number flags that specify access modes as we
+iterated across the list of flag names.
+The check for specifying an access mode becomes
+a simple test against one.
+
+(((chunk,processOpenModeOption: check access direction)))
+[source,c]
+----
+<<processOpenModeOption: check access direction>>=
+if (accessFlagCount != 1) {
+    Tcl_SetObjResult(interp, Tcl_NewStringObj(
+            "access mode must specify exactly one of RDONLY, WRONLY, or RDWR",
+            -1)) ;
+    resultCode = TCL_ERROR ;
+    goto release_list_items ;
+}
+----
+
+Note the mode names follow those used in Tcl and are restricted to
+modes that apply to IPC channels.
+Again,
+the initializers for the array must be ordered by ascending
+`modeName` element value.
+
+(((chunk,common data types)))
+[source,c]
+----
+<<common data types>>=
+struct openFlagDes {
+    char const *modeName ;          // <1>
+    int oFlags ;                    // <2>
+    int tclMask ;                   // <3>
+    bool isBinary ;                 // <4>
+    bool isAccessMode ;             // <5>
+} ;
+----
+<1> The string value to indicate the opening mode.
+<2> The flags implied by the mode string. These are the `O_*` flags
+    used for opening a file.
+<3> A corresponding set of flags as used by Tcl. We will need to check
+    whether things are readable or writable.
+<4> Indicates whether binary mode is requested on opening.
+    We need to know this so the translation configuration on the channel
+    can be properly set.
+<5> Indicates whether this flag controls the access mode when opening
+    the message queue.
+    The reason we need this member is because O_RDONLY is actually
+    defined to be zero.
+    So we can't test the value of the `oFlags` member for non-zero to
+    indicate that the RDONLY flag was specified.
+    Bother!
+
+(((chunk,processOpenModeOption: open style modes)))
+[source,c]
+----
+<<processOpenModeOption: open style modes>>=
+static struct openFlagDes const openFlags[] = { // order by ascending modeName!
+    {
+        .modeName = "BINARY",
+        .oFlags = 0,            // BINARY does not affect the open flags.
+        .tclMask = 0,
+        .isBinary = true,
+        .isAccessMode = false,
+    }, {
+        .modeName = "CREAT",
+        .oFlags = O_CREAT,
+        .tclMask = 0,
+        .isBinary = false,
+        .isAccessMode = false,
+    }, {
+        .modeName = "EXCL",
+        .oFlags = O_EXCL,
+        .tclMask = 0,
+        .isBinary = false,
+        .isAccessMode = false,
+    }, {
+        .modeName = "NONBLOCK",
+        .oFlags = O_NONBLOCK,
+        .tclMask = 0,
+        .isBinary = false,
+        .isAccessMode = false,
+    }, {
+        .modeName = "RDONLY",
+        .oFlags = O_RDONLY,
+        .tclMask = TCL_READABLE,
+        .isBinary = false,
+        .isAccessMode = true,
+    }, {
+        .modeName = "RDWR",
+        .oFlags = O_RDWR,
+        .tclMask = TCL_READABLE | TCL_WRITABLE,
+        .isBinary = false,
+        .isAccessMode = true,
+    }, {
+        .modeName = "WRONLY",
+        .oFlags = O_WRONLY,
+        .tclMask = TCL_WRITABLE,
+        .isBinary = false,
+        .isAccessMode = true,
+    },
+} ;
+----
+
+As required when using `bsearch(3)`,
+we must supply a comparison function.
+
+(((chunk,mq forward function declarations)))
+[source,c]
+----
+<<mq forward function declarations>>=
+static int openFlagCompare(void const *m1, void const *m2) ;
+----
+
+Again,
+since we are searching based on string values,
+`strcmp(3)` provides the correct interface.
+
+(((chunk,mq static function definitions)))
+[source,c]
+----
+<<mq static function definitions>>=
+static int
+openFlagCompare(
+    void const *m1,
+    void const *m2)
+{
+    struct openFlagDes const *f1 = m1 ;
+    struct openFlagDes const *f2 = m2 ;
+
+    return strcmp(f1->modeName, f2->modeName) ;
+}
+----
+
+==== Open style mode testing
+
+The following are tests to verify the parsing of the open style modes.
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test open-mode-1.0 {
+    Open the message queue for writing and create if necessary
+} -setup {
+    set queueName open-mode-1.0
+    set queueFile [file join $mqFSMount $queueName]
+} -cleanup {
+    chan close $mqchan
+    file delete $queueFile
+} -body {
+    set mqchan [mq open /$queueName {WRONLY CREAT}]
+    log::debug "mq channel = $mqchan"
+
+    set fattrs [file attributes $queueFile]
+    log::debug "mq file attributes = $fattrs"
+    set rightUser [expr {[dict get $fattrs -owner] eq $::tcl_platform(user)}]
+
+    set exists [file exists $queueFile]
+
+    return [expr {$rightUser && $exists}]
+} -result {1}
+----
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test open-mode-2.0 {
+    Attempt to open with a bad flag name.
+} -setup {
+    set queueName /open-mode-2.0
+} -cleanup {
+} -body {
+    mq open $queueName FOO
+} -result {invalid access mode "FOO": must be BINARY, CREAT, EXCL,\
+        NONBLOCK, RDONLY, RDWR, or WRONLY}\
+    -returnCodes error
+----
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test open-mode-3.0 {
+    Attempt to open with no access mode flag
+} -setup {
+    set queueName /open-mode-3.0
+} -cleanup {
+} -body {
+    mq open $queueName CREAT
+} -result {access mode must specify exactly one of RDONLY, WRONLY, or RDWR}\
+    -returnCodes error
+----
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test open-mode-3.1 {
+    Attempt to open with multiple access mode flags
+} -setup {
+    set queueName /open-mode-3.1
+} -cleanup {
+} -body {
+    mq open $queueName {RDONLY RDWR}
+} -result {access mode must specify exactly one of RDONLY, WRONLY, or RDWR}\
+    -returnCodes error
+----
+
+=== Opening a Message Queue Channel
+
+We provide an external function that may be called by a ``C'' based
+extension to open an message queue channel.
+We don't expect that to be a common use case,
+but it is convenient when necessary and we will use the same function
+to provide the Tcl script level command to open a message queue channel.
+This function is patterned off of the Tcl ``C'' library function,
+`Tcl_FSOpenFileChannel()`.
+So it accepts arguments that are the same as the `mq open` command,
+parses them and creates the message queue channel.
+
+
+(((chunk,mq external functions definitions)))
+[source,c]
+----
+<<mq external functions definitions>>=
+Tcl_Channel
+PosixIPC_OpenMQChannel(
+    Tcl_Interp *interp,
+    Tcl_Obj *name,
+    char const *mode,
+    mode_t permissions,
+    int maxmsg,
+    int msgsize,
+    unsigned priority)
+{
+    int flags = 0 ;
+    int tclMask = 0 ;
+    bool bintrans = false ;
+
+    if (islower(*mode)) {
+        if (processFopenModeOption(interp, mode, &flags, &tclMask, &bintrans) !=
+                TCL_OK) {
+            return NULL ;
+        }
+    } else {
+        if (processOpenModeOption(interp, mode, &flags, &tclMask, &bintrans) !=
+                TCL_OK) {
+            return NULL ;
+        }
+    }
+
+    <<OpenMQChannel: open message queue>>
+
+    Tcl_Channel mqChan ;
+
+    <<OpenMQChannel: create message queue channel>>
+
+    <<OpenMQChannel: set translation option>>
+
+    <<OpenMQChannel: set buffer size>>
+
+    return mqChan ;
+
+release_chan:
+    Tcl_Close(interp, mqChan) ;
+    return NULL ;
+}
+----
+
+Once all the options are parsed and the flag values indicated by the options
+are known,
+we can actually open the message queue.
+The only rule here is that if the flags indicate that the message queue
+is to be created,
+then `mq_open(3)` requires two additional arguments to specify the
+file permissions and the properties of the message queue.
+Note that message queue properties of maximum number of messages in the
+queue and message size can only be set when the message queue is created
+and cannot be changed afterwards.
+
+(((chunk,OpenMQChannel: open message queue)))
+[source,c]
+----
+<<OpenMQChannel: open message queue>>=
+char const *mqname = Tcl_GetString(name) ;
+struct mq_attr attrs = {
+    .mq_flags = 0,
+    .mq_maxmsg = maxmsg,
+    .mq_msgsize = msgsize,
+    .mq_curmsgs = 0
+} ;
+
+mqd_t mqdes = mq_open(mqname, flags, permissions, &attrs) ;
+if (mqdes == (mqd_t)(-1)) {
+    mqFailure(interp, mqname) ;
+    return NULL ;
+}
+----
+
+Now that the message queue is open,
+we can create the Tcl channel associated with the message queue.
+After creating the channel,
+we store the data needed to manage the channel in the instance
+data associated to it.
+
+(((chunk,OpenMQChannel: create message queue channel)))
+[source,c]
+----
+<<OpenMQChannel: create message queue channel>>=
+char chanName[TCL_INTEGER_SPACE + 16] ;
+snprintf(chanName, sizeof(chanName), "posixmq%d", mqdToFd(mqdes)) ;
+MqState *mqdata = ckalloc(sizeof(MqState)) ;
+mqChan = Tcl_CreateChannel(&MqChannelType, chanName, mqdata, tclMask) ;
+
+mqdata->channel = mqChan ;
+mqdata->mqdes = mqdes ;
+mqdata->tclMask = tclMask ;
+mqdata->lastpriority = 0 ;
+mqdata->defpriority = priority ;
+----
+
+If the channel was opened in binary mode,
+we need to instruct the Tcl channel system to set the translation properly.
+
+(((chunk,OpenMQChannel: set translation option)))
+[source,c]
+----
+<<OpenMQChannel: set translation option>>=
+if (bintrans) {
+    if (Tcl_SetChannelOption(interp, mqChan, "-translation", "binary") !=
+            TCL_OK) {
+        goto release_chan ;
+    }
+}
+----
+
+Finally,
+we want to make sure that the buffering in the Tcl channel matches the
+size of a message.
+This is a convenience for users having to remember to set the buffer size
+properly.
+Forgetting to do so often results in an error when using message queue.
+The default Tcl channel buffer size is 4 KiBytes.
+There is little reason to have the buffer size be any different than
+the message size.
+
+(((chunk,OpenMQChannel: set buffer size)))
+[source,c]
+----
+<<OpenMQChannel: set buffer size>>=
+
+int syserr = mq_getattr(mqdata->mqdes, &attrs) ;
+if (syserr < 0) {
+    mqFailure(interp, "mq_getattr failed during open") ;
+    goto release_chan ;
+}
+
+Tcl_SetChannelBufferSize(mqChan, attrs.mq_msgsize) ;
+----
+
+=== Message Queue Commands
+
+In this section,
+we show the functions that implement the script level commands for
+message queues.
+
+==== mq open command
+
+*******
+`posixipc mq open` ?options? mqname +
+`posixipc mq open` ?options? mqname ?access? +
+`posixipc mq open` ?options? mqname ?access? ?permissions?
+
+options::
+    The following options are write only and must be supplied to the `open`
+    command, but may be read as channel configuration options:
+
+    -maxmsg _count_;;
+        The maximum number of messages that may be queued.
+        If not specified, a system default value is used.
+    -msgsize _len_;;
+        The maximum length in bytes any message.
+        If not specified, a system default value is used.
++
+The following options are read / write and may be supplied to the `open`
+command or may be accessed as configuration options.
+    -priority _priority_number_;;
+        The default message priority as a non-negative number.
+        If not specified, the default priority is 0.
+        Messages are placed on the message queue in decreasing
+        order of priority.
+
++
+The following options are read only and can only be read
+as configuration options:
+
+    -curmsgs;;
+        The number of messages currently in the queue.
+    -lastpriority;;
+        The message priority of the last received message.
+
+mqname::
+    The name of message queue. Message queue names must start with
+    a slash (/) character and may *not* contain any other slash
+    characters.
+*******
+
+*******
+access::
+    The _access_ argument, if present, indicates the way in which the
+    message queue is to be accessed.
+    In the first form, _access_ may have any of the following forms:
+    r;;
+        Open the message queue for reading only.
+        The message queue must already exist.
+        This is the default if _access_ is not specified.
+    r+;;
+        Open the message queue for reading and writing.
+        The message queue must already exist.
+    w;;
+        Open the message queue for writing only.
+        Create the message queue if it does not already exist.
+    w+;;
+        Open the message queue for reading and writing.
+        Create the message queue if it does not already exist.
+
++
+All legal _access_ values above may have the character *b* added
+as the second or third character in the value to indicate that the
+opened channel should be configured as if with the
+*fconfigure -translation binary* option, making the channel suitable
+for reading or writing of binary data.
++
+In the second form,
+_access_ consists of a list of any of the following flags,
+all of which have the standard POSIX meanings.
+Exactly one flags must be either *RDONLY*, *WRONLY*, or *RDWR*.
+
+    RDONLY;;
+        Open the message queue for reading only.
+    WRONLY;;
+        Open the message queue for writing only.
+    RDWR;;
+        Open the message queue for both reading and writing.
+    BINARY;;
+        Configure the opened channel with the *-translation binary* option.
+    CREAT;;
+        Create the message queue if it does not already exist.
+    EXCL;;
+        If *CREAT* is also specified, an error is returned if the
+        message queue already exists.
+    NONBLOCK;;
+        Prevent the process from blocking in subsequent I/O operations.
+
+permissions::
+    If the message queue is created as part of opening it,
+    _permissions_ is used to set the permissions for the new message
+    queue in conjunction withthe process's file mode creation mask.
+    _Permissions_ defaults to 0666.
+*******
+
+(((chunk,mq forward function declarations)))
+[source,c]
+----
+<<mq forward function declarations>>=
+static int mqOpenCmd(ClientData clientData, Tcl_Interp *interp, int objc,
+        Tcl_Obj *const objv[]) ;
+----
+
+Like much of the ``C'' code for Tcl commands,
+we spend a good deal of effort just to parse and validate the input
+arguments.
+
+(((chunk,mq static function definitions)))
+[source,c]
+----
+<<mq static function definitions>>=
+static int
+mqOpenCmd(
+    ClientData clientData,
+    Tcl_Interp *interp,
+    int objc,
+    Tcl_Obj *const objv[])
+{
+    static char const usage[] = "?options? queuename ?access? ?permissions?" ;
+    if (objc < 2) {
+        Tcl_WrongNumArgs(interp, 1, objv, usage) ;
+        return TCL_ERROR ;
+    }
+
+    <<mqOpenCmd: establish default option values>>
+
+    <<mqOpenCmd: parse options arguments>>
+
+    <<mqOpenCmd: gather remaining arguments>>
+
+    <<mqOpenCmd: create channel>>
+
+    return TCL_OK ;
+}
+----
+
+We assign the argument defaults to variables.
+These variables are then overwritten as matching arguments are found.
+For the maximum number of messages (`maxmsg`) and message size (`msgsize`)
+arguments,
+the values are the default for many installations.
+
+(((chunk,mqOpenCmd: establish default option values)))
+[source,c]
+----
+<<mqOpenCmd: establish default option values>>=
+int maxmsg = 10 ;
+int msgsize = 8192 ;
+int priority = 0 ;
+char const *mode = "r" ;
+mode_t permissions = 0666 ;
+----
+
+Because some properties of a message queue can only be specified when
+the queue is created,
+it is necessary for the `mq open` command to accept these arguments.
+The arguments are just the ones we have seen before when dealing
+with the configuration procedures.
+
+We will deal with these open options in the same way as for the configurtion
+procedures, namely, look them up in our table and then convert the
+option value into an internal representation.
+
+There are two minor issues to be handled:
+
+. _Options_ must be specified as option name / option value pairs.
+. The _options_ are optional. They may not be specified and so we must
+to be able to skip them to find the required arguments.
+
+To handle these issues,
+this design uses an `objindex` as a cursor to track our current location in
+the command argument handling.
+The index is incremented as we iterate across the arguments to the command
+and can then be used to locate option values.
+
+(((chunk,mqOpenCmd: parse options arguments)))
+[source,c]
+----
+<<mqOpenCmd: parse options arguments>>=
+int objindex = 1 ;                                      // <1>
+for ( ; objindex < objc ; objindex++) {
+    <<mqOpenCmd: look up the option name>>
+
+    <<mqOpenCmd: index the option value>>
+
+    <<mqOpenCmd: convert the option value>>
+}
+----
+<1> Skip the command name and refer to the first real argument.
+Also, we need `objindex` later, so it must be declared outside
+of the `for` statement.
+
+To look up the option name,
+we use `lookUpMqOpt()` that was described previously.
+
+(((chunk,mqOpenCmd: look up the option name)))
+[source,c]
+----
+<<mqOpenCmd: look up the option name>>=
+char const *optionName = Tcl_GetString(objv[objindex]) ;
+if (strcmp(optionName, "--") == 0) {                        // <1>
+    objindex++ ;                                            // <2>
+    break ;
+}
+struct MqConfigOpt const *optProp = lookUpMqOpt(optionName) ;
+if (optProp == NULL) {                                      // <3>
+    if (*optionName == '-') {
+        return Tcl_BadChannelOption(interp, optionName, mqOptionsList) ;
+    } else {
+        break ;
+    }
+}
+if (!optProp->setOnOpen) {                                  // <4>
+    Tcl_SetObjResult(interp,
+            Tcl_ObjPrintf("option, %s, cannot be set on open: "
+            "should be one of: %s, %s, or %s",
+            optProp->optName, mqOptions[2].optName, mqOptions[3].optName,
+            mqOptions[4].optName)) ;
+    return TCL_ERROR ;
+}
+----
+<1> Using the usual convention, "--" stops option process so that
+the next argument could start with a dash character.
+<2> Skip the option termination argument and stop option processing.
+<3> The first command argument that doesn't look like a valid option
+halts option processing.
+<4> Options that can't be set on an open call are in error.
+
+Having found the option to be allowed,
+we increment `objindex` to index its value.
+
+(((chunk,mqOpenCmd: index the option value)))
+[source,c]
+----
+<<mqOpenCmd: index the option value>>=
+if (++objindex >= objc) {                                   // <1>
+    Tcl_WrongNumArgs(interp, 1, objv, usage) ;
+    return TCL_ERROR ;
+}
+----
+<1> We must not increment off the end of the argument array.
+
+There is specific code required to convert the option value into
+the proper internal form.
+Again we will fall back on our previous stategy by computing the
+array index of the option in the option table and using that
+as an integer encoding in a `switch` statement.
+
+(((chunk,mqOpenCmd: convert the option value)))
+[source,c]
+----
+<<mqOpenCmd: convert the option value>>=
+MqOptionType whichOpt = (MqOptionType)(optProp - mqOptions) ;
+switch (whichOpt) {
+    case Mq_maxmsg_opt:
+        if (Tcl_GetIntFromObj(interp, objv[objindex], &maxmsg) !=
+                TCL_OK) {
+            return TCL_ERROR ;
+        }
+        break ;
+    case Mq_msgsize_opt:
+        if (Tcl_GetIntFromObj(interp, objv[objindex], &msgsize) !=
+                TCL_OK) {
+            return TCL_ERROR ;
+        }
+        break ;
+    case Mq_priority_opt:
+        if (Tcl_GetIntFromObj(interp, objv[objindex], &priority) !=
+                TCL_OK) {
+            return TCL_ERROR ;
+        }
+        if (priority < 0) {                                 // <1>
+            Tcl_SetObjResult(interp,
+                    Tcl_ObjPrintf("negative values for option, \"%s\", "
+                    "are not allowed: got %d",
+                    optionName, priority)) ;
+            return TCL_ERROR ;
+        }
+        break ;
+    default:
+        Tcl_Panic("posixipc mq: open option failure: "
+                "found option named, "
+                "\"%s\", but no code to process the option",
+                optionName) ;
+        break ;
+}
+----
+<1> Negative priorities are not allowed.
+
+Having dealt with options that might affect the message creation,
+we need to gather up the message queue name and any access mode
+or creation permission arguments that were specified.
+We start by computing the number of remaining arguments.
+From there, we can decide if there were enough arguments and
+which of the optional arguments that come after the message queue
+name are present.
+
+(((chunk,mqOpenCmd: gather remaining arguments)))
+[source,c]
+----
+<<mqOpenCmd: gather remaining arguments>>=
+int remain = objc - objindex ;
+if (remain < 1 || remain > 3) {
+    Tcl_WrongNumArgs(interp, 1, objv, usage) ;
+    return TCL_ERROR ;
+}
+
+if (remain > 1) {
+    mode = Tcl_GetString(objv[objindex + 1]) ;
+}
+
+if (remain == 3) {
+    int permArgValue ;
+    if (Tcl_GetIntFromObj(interp, objv[objindex + 2], &permArgValue)
+            != TCL_OK) {
+        return TCL_ERROR ;
+    }
+    permissions = permArgValue ;
+}
+----
+
+Finally,
+we can invoke `PosixIPC_OpenMQChannel()` to create the message queue
+channel.
+
+(((chunk,mqOpenCmd: create channel)))
+[source,c]
+----
+<<mqOpenCmd: create channel>>=
+Tcl_Channel chan = PosixIPC_OpenMQChannel(interp, objv[objindex], mode,
+        permissions, maxmsg, msgsize, priority) ;
+if (chan == NULL) {
+    return TCL_ERROR ;
+}
+Tcl_RegisterChannel(interp, chan) ;                             // <1>
+Tcl_SetObjResult(interp, Tcl_NewStringObj(Tcl_GetChannelName(chan), -1)) ;
+----
+<1> Newly created channels must be registered to be used in the
+interpreter.
+
+.Tests
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-open-1.0 {
+    Open a message queue
+} -setup {
+    set queueName /mq-open-1.0
+} -cleanup {
+    chan close $mqchan
+    mq unlink $queueName
+} -body {
+    set mqchan [mq open $queueName w+]
+    log::debug "mq channel = $mqchan"
+    return $mqchan
+} -result {posixmq[0-9]*} -match glob
+----
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-open-2.0 {
+    Open a message queue with create time options
+} -setup {
+    set queueName /mq-open-2.0
+} -cleanup {
+    chan close $mqchan
+    mq unlink $queueName
+} -body {
+    set mqchan [mq open -msgsize 256 -priority 10 -- $queueName w+]
+    log::debug "mq channel = $mqchan"
+    chan configure $mqchan -msgsize
+} -result {256}
+----
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-open-2.1 {
+    Open a message queue with incorrect create time options
+} -setup {
+    set queueName /mq-open-2.1
+} -cleanup {
+} -body {
+    set mqchan [mq open -curmsgs 256 $queueName w+]
+} -result {option, -curmsgs, cannot be set on open: should be one of:\
+        -maxmsg, -msgsize, or -priority}\
+   -returnCodes error
+----
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-open-2.2 {
+    Open a message queue with message size too large
+} -setup {
+    set queueName /mq-open-2.2
+} -cleanup {
+} -constraints linuxOnly -body {
+    set mqchan [mq open -msgsize 16000 $queueName w+]
+} -result {posixipc mq: /mq-open-2.2: invalid argument}\
+   -returnCodes error
+----
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-open-2.3 {
+    Open a message queue lacking option argument
+} -setup {
+    set queueName /mq-open-2.3
+} -cleanup {
+} -body {
+    set mqchan [mq open -msgsize 200 -priority]
+} -result {wrong # args: should be "mq open ?options? queuename ?access?\
+        ?permissions?"} -returnCodes error
+----
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-open-2.4 {
+    Open a message queue with bad message size
+} -setup {
+    set queueName /mq-open-2.4
+} -cleanup {
+} -body {
+    set mqchan [mq open -msgsize foo $queueName w+]
+} -result {expected integer but got "foo"} -returnCodes error
+----
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-open-2.5 {
+    Open a message queue with bad max messages
+} -setup {
+    set queueName /mq-open-2.5
+} -cleanup {
+} -body {
+    set mqchan [mq open -maxmsg foo $queueName w+]
+} -result {expected integer but got "foo"} -returnCodes error
+----
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-open-2.6 {
+    Open a message queue with bad priority
+} -setup {
+    set queueName /mq-open-2.6
+} -cleanup {
+} -body {
+    set mqchan [mq open -priority foo $queueName w+]
+} -result {expected integer but got "foo"} -returnCodes error
+----
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-open-2.7 {
+    Open a message queue with wrong number of arguments
+} -setup {
+} -cleanup {
+} -body {
+    set mqchan [mq open]
+} -result {wrong # args: should be "mq open ?options? queuename ?access?\
+        ?permissions?"} -returnCodes error
+----
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-open-2.8 {
+    Open a message queue with option name
+} -setup {
+    set queueName /mq-open-2.8
+} -cleanup {
+} -body {
+    set mqchan [mq open -foobar 27 $queueName w+]
+} -result {bad option "-foobar": should be one of -blocking, -buffering,\
+        -buffersize, -encoding, -eofchar, -translation, -curmsgs,\
+        -lastpriority, -maxmsg, -msgsize, or -priority} -returnCodes error
+----
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-open-2.9 {
+    Open a message queue with negative priority
+} -setup {
+    set queueName /mq-open-2.9
+} -cleanup {
+} -body {
+    set mqchan [mq open -priority -30 $queueName w+]
+} -result {negative values for option, "-priority", are not allowed: got -30}\
+        -returnCodes error
+----
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-open-2.10 {
+    Open a message queue with wrong number of arguments after options
+} -setup {
+} -cleanup {
+} -body {
+    set mqchan [mq open -priority 20]
+} -result {wrong # args: should be "mq open ?options? queuename ?access?\
+        ?permissions?"} -returnCodes error
+----
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-open-2.11 {
+    Open a message queue with negative priority
+} -setup {
+    set queueName /mq-open-2.11
+} -cleanup {
+} -body {
+    set mqchan [mq open $queueName w+ foo]
+} -result {expected integer but got "foo"} -returnCodes error
+----
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-open-2.12 {
+    Open a message queue with non-default permissions
+} -setup {
+    set queueName /mq-open-2.12
+    set queueFile $mqFSMount$queueName
+} -cleanup {
+    chan close $mqchan
+    mq unlink $queueName
+} -body {
+    set mqchan [mq open $queueName w+ 0640]
+
+    set fattrs [file attributes $queueFile]
+    log::debug "mq file attributes = $fattrs"
+    dict get $fattrs -permissions
+} -result {00640}
+----
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-open-3.0 {
+    Write to a message queue
+} -setup {
+    set queueName /mq-open-3.0
+    set mqchan [mq open -maxmsg 1 -msgsize 128 $queueName w+]
+    chan configure $mqchan\
+        -buffering line
+} -cleanup {
+    chan close $mqchan
+    mq unlink $queueName
+} -body {
+    log::debug "mq channel = $mqchan"
+    log::debug "max messages = [chan configure $mqchan -maxmsg]"
+    log::debug "message size = [chan configure $mqchan -msgsize]"
+
+    chan puts $mqchan "Write a message"
+    chan gets $mqchan
+} -result {Write a message}
+----
+
+==== mq send command
+
+*******
+`posixipc mq send` chan msg ?priority?
+
+chan::
+    A message queue channel token as returned from `mq open`.
+    The channel must have been opened for writing.
+msg::
+    A message to be placed on the message queue.
+priority::
+    An optional unsigned number specifying the priority of the message.
+    If _priority_ is not specfied,
+    then the current value of the `-priority` configuration option
+    is used as the message priority.
+
+The `mq send` command operates outside of the buffering of the Tcl virtual
+channel system and directly sends _msg_ to the message queue associated with
+_chan_.
+If specified, the message is sent with _priority_ priority.
+This command is provided for applications where message priority
+changes frequently, such as on a message by message basis.
+*******
+
+(((chunk,mq forward function declarations)))
+[source,c]
+----
+<<mq forward function declarations>>=
+static int mqSendCmd(ClientData clientData, Tcl_Interp *interp, int objc,
+        Tcl_Obj *const objv[]) ;
+----
+
+(((chunk,mq static function definitions)))
+[source,c]
+----
+<<mq static function definitions>>=
+static int
+mqSendCmd(
+    ClientData clientData,
+    Tcl_Interp *interp,
+    int objc,
+    Tcl_Obj *const objv[])
+{
+    static char const usage[] = "mqchan msg ?priority?" ;
+    if (objc < 3 || objc > 4) {
+        Tcl_WrongNumArgs(interp, 1, objv, usage) ;
+        return TCL_ERROR ;
+    }
+
+    char const *chanName = Tcl_GetString(objv[1]) ;
+    int mode ;
+    Tcl_Channel channel = Tcl_GetChannel(interp, chanName, &mode) ;
+    if (channel == NULL) {
+        return TCL_ERROR ;
+    }
+    MqState *mqdata = Tcl_GetChannelInstanceData(channel) ;
+
+    int msglen ;
+    unsigned char *msg = Tcl_GetByteArrayFromObj(objv[2], &msglen) ;
+
+    int priority = mqdata->defpriority ;
+    if (objc == 4) {
+        if (Tcl_GetIntFromObj(interp, objv[3], &priority) != TCL_OK) {
+            return TCL_ERROR ;
+        }
+        if (priority < 0) {
+            Tcl_SetObjResult(interp,
+                    Tcl_ObjPrintf("negative values for priority "
+                    "are not allowed: got %d", priority)) ;
+            return TCL_ERROR ;
+        }
+    }
+
+    int err = mq_send(mqdata->mqdes, (char const *)msg, msglen, priority) ;
+    if (err < 0) {
+        return mqFailure(interp, "mq_send failed") ;
+    }
+
+    Tcl_SetObjResult(interp, Tcl_NewIntObj(msglen)) ;
+    return TCL_OK ;
+}
+----
+
+.Tests
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-send-1.0 {
+    Write to a message queue using send command
+} -setup {
+    set queueName /mq-send-1.0
+    set mqchan [mq open $queueName w+]
+    chan configure $mqchan -buffering line
+} -cleanup {
+    chan close $mqchan
+    mq unlink $queueName
+} -body {
+    log::debug "mq channel = $mqchan"
+
+    mq send $mqchan "Write a message\n"
+    chan gets $mqchan
+} -result {Write a message}
+----
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-send-2.0 {
+    send message -- wrong args
+} -setup {
+} -cleanup {
+} -body {
+    mq send
+} -result {wrong # args: should be "mq send mqchan msg ?priority?"}\
+    -returnCodes error
+----
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-send-2.1 {
+    send message -- bad priority
+} -setup {
+    set queueName /mq-send-2.1
+    set mqchan [mq open $queueName w+]
+} -cleanup {
+    chan close $mqchan
+    mq unlink $queueName
+} -body {
+    mq send $mqchan "Hello World" foobar
+} -result {expected integer but got "foobar"} -returnCodes error
+----
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-send-2.2 {
+    send message -- negative priority
+} -setup {
+    set queueName /mq-send-2.2
+    set mqchan [mq open $queueName w+]
+} -cleanup {
+    chan close $mqchan
+    mq unlink $queueName
+} -body {
+    mq send $mqchan "Hello World" -6
+} -result {negative values for priority are not allowed: got -6}\
+    -returnCodes error
+----
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-send-2.3 {
+    send message -- bad channel
+} -setup {
+} -cleanup {
+} -body {
+    mq send posixmq27 "Hello World"
+} -result {can not find channel named "posixmq27"} -returnCodes error
+----
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-send-3.0 {
+    Send a message -- non-blocking mode and queue full
+} -setup {
+    set queueName /mq-send-3.0
+} -cleanup {
+    chan close $mqchan
+    mq unlink $queueName
+} -body {
+    set mqchan [mq open -maxmsg 1 $queueName {CREAT EXCL RDWR NONBLOCK}]
+    mq send $mqchan "Hello World"
+    mq send $mqchan "Hello World"
+} -result {posixipc mq: mq_send failed: resource temporarily unavailable}\
+    -returnCodes error
+----
+
+==== mq receive command
+
+*******
+`posixipc mq receive` chan ?varname?
+
+chan::
+    A message queue channel token as returned from `mq open`.
+    The channel must have been opened for reading.
+varname::
+    An optional variable name where the value of the priority
+    of the received message is set.
+    The priority of the last received message is also available
+    as the `-lastpriority` configuration option.
+
+The `mq receive` command operates outside of the buffering of the Tcl virtual
+channel system and returns the value of the next message on the message queue
+referenced by _chan_.
+If the variable, _varname_, is specified,
+the priority of the message is set as the variable's value.
+This command is provided for those applications where
+message priority changes frequently, such as on a message by message basis.
+The message priority of the last received message is also available
+as the `-lastpriority` configuration option.
+*******
+
+(((chunk,mq forward function declarations)))
+[source,c]
+----
+<<mq forward function declarations>>=
+static int mqReceiveCmd(ClientData clientData, Tcl_Interp *interp, int objc,
+        Tcl_Obj *const objv[]) ;
+----
+
+(((chunk,mq static function definitions)))
+[source,c]
+----
+<<mq static function definitions>>=
+static int
+mqReceiveCmd(
+    ClientData clientData,
+    Tcl_Interp *interp,
+    int objc,
+    Tcl_Obj *const objv[])
+{
+    static char const usage[] = "mqchan ?priorvar?" ;
+    if (objc < 2 || objc > 3) {
+        Tcl_WrongNumArgs(interp, 1, objv, usage) ;
+        return TCL_ERROR ;
+    }
+
+    char const *chanName = Tcl_GetString(objv[1]) ;
+    int mode ;
+    Tcl_Channel channel = Tcl_GetChannel(interp, chanName, &mode) ;
+    if (channel == NULL) {
+        return TCL_ERROR ;
+    }
+
+    MqState *mqdata = Tcl_GetChannelInstanceData(channel) ;
+    struct mq_attr attrs ;
+    int syserr = mq_getattr(mqdata->mqdes, &attrs) ;
+    if (syserr < 0) {
+        return mqFailure(interp, "mq_getattr failed during receive") ;
+    }
+
+    Tcl_Obj *resultObj = Tcl_NewByteArrayObj(NULL, attrs.mq_msgsize) ;
+    unsigned char *value = Tcl_GetByteArrayFromObj(resultObj, NULL) ;
+
+    syserr = mq_receive(mqdata->mqdes, (char *)value, attrs.mq_msgsize,
+            &mqdata->lastpriority) ;
+    if (syserr < 0) {
+        mqFailure(interp, "mq_receive failed") ;
+        goto release_result ;
+    }
+
+    if (objc == 3) {
+        Tcl_Obj *priorObj = Tcl_NewIntObj(mqdata->lastpriority) ;
+        Tcl_IncrRefCount(priorObj) ;
+        Tcl_Obj *newValue = Tcl_ObjSetVar2(interp, objv[2], NULL, priorObj,
+                TCL_LEAVE_ERR_MSG) ;
+        Tcl_DecrRefCount(priorObj) ;
+
+        if (newValue == NULL) {
+            goto release_result ;
+        }
+    }
+
+    Tcl_SetObjResult(interp, resultObj) ;
+    return TCL_OK ;
+
+release_result:
+    Tcl_DecrRefCount(resultObj) ;
+
+    return TCL_ERROR ;
+}
+----
+
+.Tests
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-receive-1.0 {
+    Receive a message using the receive command
+} -setup {
+    set queueName /mq-receive-1.0
+    set mqchan [mq open $queueName w+]
+} -cleanup {
+    chan close $mqchan
+    mq unlink $queueName
+} -body {
+    log::debug "mq channel = $mqchan"
+
+    set msgvalue "Receive a message"
+    append msgvalue "\0"
+    mq send $mqchan $msgvalue 20
+    set msg [mq receive $mqchan msgpriority]
+    set endmsg [expr {[string first \0 $msg] + 1}]
+    binary scan $msg a$endmsg msgstr
+
+    log::debug "message = \"$msgstr\""
+    log::debug "priority = $msgpriority"
+    log::debug "last priority = [chan configure $mqchan -lastpriority]"
+
+    expr {$msgstr eq $msgvalue && $msgpriority == 20 &&\
+            [chan configure $mqchan -lastpriority] == 20}
+} -result {1}
+----
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-receive-2.0 {
+    Receive a message -- wrong arguments
+} -setup {
+} -cleanup {
+} -body {
+    mq receive
+} -result {wrong # args: should be "mq receive mqchan ?priorvar?"}\
+    -returnCodes error
+----
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-receive-2.1 {
+    Receive a message -- non-blocking mode and no messages
+} -setup {
+    set queueName /mq-receive-2.1
+} -cleanup {
+    chan close $mqchan
+    mq unlink $queueName
+} -body {
+    set mqchan [mq open $queueName {CREAT EXCL RDWR NONBLOCK}]
+    mq receive $mqchan
+} -result {posixipc mq: mq_receive failed: resource temporarily unavailable}\
+    -returnCodes error
+----
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-receive-2.2 {
+    Receive a message -- bad channel
+} -setup {
+} -cleanup {
+} -body {
+    mq receive posixmq88
+} -result {can not find channel named "posixmq88"} -returnCodes error
+----
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-receive-2.3 {
+    Receive a message -- bad priority variable
+} -setup {
+    set queueName /mq-receive-2.3
+} -cleanup {
+    chan close $mqchan
+    mq unlink $queueName
+} -body {
+    set mqchan [mq open $queueName {CREAT EXCL RDWR NONBLOCK}]
+    mq send $mqchan "Hello World" 20
+    mq receive $mqchan ::foobar::priority
+} -result {can't set "::foobar::priority": parent namespace doesn't exist}\
+    -returnCodes error
+----
+
+==== mq unlink command
+
+(((chunk,mq forward function declarations)))
+[source,c]
+----
+<<mq forward function declarations>>=
+static int mqUnlinkCmd(ClientData clientData, Tcl_Interp *interp, int objc,
+        Tcl_Obj *const objv[]) ;
+----
+
+*******
+`posixipc mq unlink mqname`
+
+mqname::
+    The name of message queue. Message queue names must start with
+    a slash (/) character and may *not* contain any other slash
+    characters.
+
+The `unlink` command removes the message queue named, `mqname`,
+from the system.
+The queue is actually destroyed when all processes that have open
+descriptors for the queue close those descriptors referring to the queue.
+*******
+
+(((chunk,mq static function definitions)))
+[source,c]
+----
+<<mq static function definitions>>=
+static int
+mqUnlinkCmd(
+    ClientData clientData,
+    Tcl_Interp *interp,
+    int objc,
+    Tcl_Obj *const objv[])
+{
+    static char const usage[] = "queuename" ;
+    if (objc != 2) {
+        Tcl_WrongNumArgs(interp, 1, objv, usage) ;
+        return TCL_ERROR ;
+    }
+
+    char const *mqname = Tcl_GetString(objv[1]) ;
+    int syserr = mq_unlink(mqname) ;
+    if (syserr == -1) {
+        return mqFailure(interp, mqname) ;
+    }
+
+    return TCL_OK ;
+}
+----
+
+.Tests
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-unlink-1.0 {
+    Unlink a message queue
+} -setup {
+    set queueName /mq-unlink-1.0
+} -cleanup {
+    chan close $mqchan
+} -body {
+    set mqchan [mq open $queueName w+]
+    log::debug "mq channel = $mqchan"
+    mq unlink $queueName
+    file exists [file join $mqFSMount $queueName]
+} -result {0}
+----
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-unlink-2.0 {
+    Unlink a message queue -- bad argument
+} -setup {
+} -cleanup {
+} -body {
+    set mqchan [mq unlink]
+} -result {wrong # args: should be "mq unlink queuename"} -returnCodes error
+----
+
+(((chunk,mq tests)))
+[source,tcl]
+----
+<<mq tests>>=
+test mq-unlink-2.0 {
+    Unlink a message queue -- unknown queue
+} -setup {
+} -cleanup {
+} -body {
+    set mqchan [mq unlink /foobar]
+} -result {posixipc mq: /foobar: no such file or directory} -returnCodes error
+----
+
+// vim:set syntax=asciidoc:

@@ -1,0 +1,1267 @@
+== Translating processing
+
+The processing facet of a model is the third and most difficult to translate.
+Translating domain actions requires the Translator to reformulate the
+intent of an action language or data flow diagram into ``C'' language
+statements.
+The semantic gap between these representations is larger than that of
+either the dynamics facet (where it is virtually zero) or the data facet
+(where there are a relatively small set of rules and guidelines).
+
+=== Action language -- what action language?
+
+The first quandry we encounter is to determine how domain activities
+are described to the Translator.
+Since we don't transfer any machine readable content from the analysis effort,
+there is no requirement for a formal, parsable description of how activities
+are expressed.
+Many action languages have been defined.
+It is possible the analyst decided to express the processing facet as a
+data flow diagram with associated descriptions of the processes.
+It could be that the domain actions are written in a more informal pseudo-code.
+Regardless of how the actions are expressed,
+projects are strongly encouraged to adopt one particular way to express domain
+actions for all the domains in the project.
+Multiple types of action specifications only confuses the matter.
+
+Practice shows,
+counter to what you might think,
+the exact manner of expressing the model processing actions is not
+as important is might seem.
+In well designed models,
+most activities are small and highly focused in what they must accomplish.
+Complex mathematical calculations are usually delegated to specialized
+libraries.
+For example,
+there is little reason to model and write action language for
+a Fourier transform.
+Fourier transforms are a well researched and implemented world
+unto themselves and would yield little insight into the larger problem.
+Model code is usually more concerned with when and on what data
+would a transform be applied.
+What is important is that the actions be expressed in a form that is
+clear and unambiguous.
+
+In our discussion and examples here,
+we will used a variety of ways to show model actions and how they are
+translated using `micca`.
+Sometimes a pseudo-code narrative is sufficient.
+However,
+we will tend to use an action language called, _Scrall_, the most.
+Scrall is an open source action language designed to leverage the
+distinct semantics of XUML.footnote::[Need a reference here!]
+
+=== Categories of processing
+
+Broadly speaking,
+domain actions fall into two categories:
+
+Expression evaluation and flow of control::
+    Actions need to be able to compute things, such as adding or
+    multiplying values. Actions need to be able to test values
+    and change the flow of execution. 
+    These are basic operations required to perform any reasonable computation.
+Model level actions::
+    Action languages have primitives that affect model level components.
+    For example, signaling an event to an instance is a model level
+    action that is usually expressed as a basic construct in the action
+    language.
+
+Examined from a different perspective,
+these two categories of actions can also be seen as:
+
+* Constructs that are directly supported by the implementation language
+    (``C'' in our case) and for which there is a direct mapping
+    from the action onto the implementation language.
+* Constructs that are built using using data and code constructs of the target
+  language to implement operations on model level elements.
+
+Consider the following action snippet:
+
+----
+(Altitude < Minimum) ? Pull up -> me
+----
+
+The intent of the action is to test whether the altitude value
+is less than some minimum and if so,
+then to signal the *Pull up* event to the instance running the action,
+_i.e._ *me*.
+A translation of these ideas to ``C'' might look like:
+
+[source,c]
+----
+unsigned Altitude ;
+unsigned Minimum ;
+
+// Some code to assign values to both Altitude and Miniumum.
+// Perhaps something like:
+// Altitude = self->Altitude ;
+// Minimum = self->Minimum ;
+
+if (Altitude < Minumum) {
+    // OK, now what? How do I signal an event?
+}
+----
+
+Signaling an event to an instance is not a base concept in ``C''
+and there is no direct, handy statement in the language that will do it.
+Consequently,
+`micca` has devised data structures and supplies code as part of the run-time
+library to perform that operation.
+There is nothing mysterious about that code.
+It is ordinary ``C'' code and can be viewed like any other ``C''
+implementation.
+The function to signal events is called `mrt_SignalEvent()` and it accepts
+arguments required to accomplish the model level action of sending an event
+signal to a class instance.
+It is possible to translate the activity by writing the ``C'' code that invokes
+`mrt_SignalEvent()` directly, and that would cause the signal to be generated.
+
+The difficulty of coding directly against the run-time library interfaces is:
+
+* There is a large cognitive burden to understand the details of the
+    run-time API and to supply the correct argument values.
+* Direct coding against the run-time API strongly couples the model
+    translation to the run-time interface.
+    Future changes to the run-time that might be required to correct errors or
+    extend its functionality could break a translation.
+
+The `micca` solution to this is to provide an _embeddable_ command language
+that generates the code needed for model level actions.
+You can think of the embedded commands as automatic bridge generation,
+bridging model level actions to ``C'' code to implement the action.
+One significant advantage of the embedded commands is that `micca` has
+access to the platform specific model when the code generation happens.
+Consequently,
+error diagnosis is much improved.
+If you attempt to signal an event to a class instance and that class
+does not accept such an event,
+`micca` is able to diagnose that condition and issue an appropriate error
+message.
+This helps detect errors earlier in the process rather than
+relying on the ``C'' compiler which cannot give as precise an error
+message as the embedded command.
+
+=== `Micca` embedded command language
+
+An activity in a `micca` translation, _e.g._ a state activity,
+appears as ordinary ``C'' code with other commands embedded into the code.
+The commands are embedded by surrounding them with the `<%` and `%>`
+characters.
+Our previous example would appear as:
+
+[source,c]
+----
+unsigned Altitude ;
+unsigned Minimum ;
+
+// some code to assign values to both Altitude and Miniumum
+
+if (Altitude < Minumum) {
+<%  my signal Pull_up       %>
+}
+----
+
+There are a few rules about the embedded commands:
+
+* The command syntax is the same as for `micca` itself, _i.e._ it is Tcl
+    syntax.
+* Leading or trailing whitespace around the embedded
+    command does not matter.  So you may format
+    the embedded commands in whatever way you find clearest.
+    The above formatting tries to keep the `<%` and `%>` markers
+    out of the way to make indentation more apparent.
+* Embedded commands *do not nest*.
+* Some embedded commands generate multiple ``C'' code statements and include
+    all the necessary semicolon punctuation.
+    Other embedded commands are intended to be used in expressions and
+    so do not place semicolons in the output.
+    The reference documentation for the embedded command language states
+    which behavior each command has, but you will quickly know
+    the difference by the intent of each embedded command.
+* During the code generation, the embedded command is removed from the input
+    and the semantically equivalent ``C'' code is placed in the output at the
+    same location.
+* Since it is unknown how many ``C'' statements an embedded
+    command may generate, all statements should be treated as _compound_
+    statements and surrounded by curly braces (as we did in the `if` test of
+    the previous example).
+
+==== Generated code
+
+Most people who perform a model translation using `micca` are
+curious, initially, about the contents of the generated ``C'' code.
+It usually takes some experience to trust the tooling and examining the
+code can build that trust.
+In the end,
+everything must end up as ``C'' code and we should be able to read
+that code.
+What follows is a sample showing a state activity and its generated code.
+
+First, we show the `micca` source.
+This is a state activity, so it would be part of a state model.
+
+----
+statemodel {
+    # Code for states, events, et.al.
+
+    state Autocycle_Session_Deactivate {} {
+    <%  my update Deactivate true               %>
+    <%  my signal Deactivate                    %>
+    }
+}
+----
+
+And the following is the generated code snippet.
+
+[source,c]
+----
+static void
+Autocycle_Session_Deactivate(
+    struct Autocycle_Session *const self)
+// <%  my update Deactivate true               %>
+// <%  my signal Deactivate                    %>
+{
+    MRT_INSTRUMENT_ENTRY
+    // instance self update Deactivate true
+    self->Deactivate = true ;
+    // instance self signal Deactivate {}
+    mrt_SignalEvent(6, self, self, NULL, 0) ; // Deactivate
+}
+----
+
+There are several points of interest:
+
+* State activities are turned into ordinary ``C'' functions.
+    Most names are made file static to avoid cluttering
+    the global space of names and to lessen the chance of a name
+    conflict.
+    State activities to not return values.
+    All of their side effects are recorded in the class data.
+* Each state activity function has an argument called, `self`, which
+    is a reference to the class instance for which the action is
+    being run.
+* The contents of the state action is placed as a comment at the
+    beginning of the function body.
+* `MRT_INSTRUMENT_ENTRY` is a macro that can be used for logging
+    and instrumentation output or it can be defined to be empty and
+    no additional code is generated.
+* As each embedded command is expanded, a comment containing the
+    command is placed in the ``C'' code.
+    In this example, `my signal` is the same as `instance self`.
+    The `my` prefix is just a shorthand.
+* Updating an attribute is done via pointer indirection on the instance
+    using structure members defined as part of the class's attributes.
+* Signaling an event happens by invoking a function in the run-time
+    with the proper argument values.
+    In this case the *Deactivate* event has been numbered `6`,
+    and the event is self-directed with no parameters.
+    `Micca` generates all the numbers used to encode things such
+    as states and events.
+* The output code is neatly formatted.
+    Although the code is not examined often,
+    during debugging you may be setting breakpoints in the generated code and
+    it is helpful if it is readable and there are clues about how the generated
+    code relates back to the model.
+
+We do not show any other generated code in this document.
+How the code is generated is discussed in the
+<<micca-litprog,literate source document>>
+for `micca`.
+Code generation test cases are
+http://repos.modelrealization.com/cgi-bin/fossil/mrtools[available]
+for those interested in
+the precise details of how the generated output appears.
+
+As we stated previously,
+model actions are a mix of ordinary ``C'' code,
+used for expression evaluation and flow of control,
+plus embedded commands to perform model level operations.
+In the end,
+the result looks like ``C'' but with what can be imagined as
+unusual looking function invocations to perform the model level
+semantics.
+
+=== Categories of domain activities
+
+The processing accomplished by a model occurs in very specific places.
+In general,
+model activities do not sequence the overall flow of execution.
+That responsibility is given to the Model Execution domain,
+which in this case is the run-time code supplied by `micca`.
+The following sections describe where the processing in a domain is
+found.
+
+Regardless of category of an activity,
+the translation process is the same.
+The same embedded commands are available.
+
+==== State activities
+
+The primary processing of a domain occurs in activities associated with
+states.
+State activities cannot be directly invoked.
+Rather,
+they are executed when an event is received which causes a transition
+into a state.
+`Micca` converts the ``C'' code specified for a state activity into
+an ordinary ``C'' function of file static scope.
+State activities have an automatically declared `self` variable
+that references the class instance receiving the event.
+
+==== Domain operations
+
+Domain operations are actvities which provide an exterally callable
+interface to the domain.
+`Micca` converts domain operations into ``C'' function of external scope.
+
+==== Instance operations
+
+Instance operations are defined within a class and represent
+common code factored into a ``C'' function.
+Instance operations have an automatically declared `self` variable
+that references the class instance upon which the operation is invoked.
+
+==== Class operations
+
+`Micca` allows the definition of an operation associated with a particular
+class.
+Class operations do not arise from the XUML model.
+They represent code that the Translator has added to the implementation
+for some particular purpose.
+For example,
+identity constraints are usually enforced by a class operation
+and this topic is covered in a subsequent section.
+
+=== Referring to instances
+
+Since many operations are directed at instances, _e.g._ access an attribute,
+we must have some way to refer to an instance.
+In this section,
+we describe the ways provided by `micca` to refer to instances of platform
+classes.
+
+==== Instance references
+
+Operations on class instances are accomplished by
+being given or by finding an _instance reference_.
+To access the attributes, navigate a relationship or signal event,
+you must have some way to identify the class instance which is affected.
+This is accomplished with an _instance reference variable_.
+An instance reference variable is simply a variable whose value refers
+to a particular class instance.
+There is no notion of an instance reference variable that refers to an
+instance of an arbitrary class.
+Instance references are typed according to the class to which the instance
+belongs.
+
+`Micca` provides an embedded command to declare an instance reference
+variable.
+Each platform class defined in the domain has a command defined for it.
+For example,
+if there is a `Part` class in the domain, then the following
+declares an instance reference variable for a `Part`.
+
+----
+<%  Part refvar screw  %>
+----
+
+This command will declare a ``C'' variable named, `screw`,
+which can hold a value that refers to an instance of the platform class,
+`Part`.
+This construct is not frequently used since most embedded commands
+will automatically declare any necessary ``C'' variables that hold
+the command result.
+However,
+sometimes you will want to control the scope of the variable by using this
+command.
+
+In practice,
+an instance reference variable is actually a ``C'' pointer and so
+carries with it all the usual admonitions about pointers.
+In particular,
+`micca` does use an instance reference variable value of `NULL` to indicate
+that the variable does not refer to any instance.
+For example,
+searching for a particular instance or navigating a conditional relationship
+can yield an instance reference variable whose value is `NULL`.
+
+==== The `self` instance reference variable
+
+For state activities and instance operations,
+`micca` automatically declares and initializes an instance reference
+variable called, `self`.
+The `self` instance reference variable refers to the instance receiving
+the event or to which the instance operation applies.
+
+The `micca` embedded command language uses the `instance` command
+for all operations that use an instance reference variable to
+perform a model level action on an instance.
+
+For example:
+
+----
+<%  instance red_part attr Weight   %>
+----
+
+accesses the *Weight* attribute of the instance referenced by the `red_part`
+variable.
+
+As a shorthand,
+embedded commands that refer to the instance `self` can simply use
+the `my` command.
+For example,
+rather than write:
+
+----
+<%  instance self update Color red  %>
+----
+
+one can write:
+
+----
+<%  my update Color red  %>
+----
+
+==== Instance reference sets
+
+`Micca` also supports the concept of an _instance reference set_.
+As its name implies,
+an instance reference set can refer to multiple instances (and possibly zero).
+Like instance reference variables,
+instance reference sets are typed to the class to which the instances
+belong.
+An example of declaring an instance reference set is:
+
+----
+<%  Part instset red_parts   %>
+----
+
+Like instance reference variables,
+instance reference sets are declared using the embedded command
+which is named the same as a platform class.
+Instance reference sets are implemented using bit fields.
+This is a compact representation, but the maximum number of elements
+in an instance reference set must be known at compile time.
+The default value is 128, _i.e._ an instance reference set can only
+describe the set of instances for a class that has at most 128 instances.
+This value can be changed by defining the `MRT_INSTANCE_SET_SIZE`
+pre-processor macro to a different number.
+We cover all the operations on instance reference sets in a subsequent section.
+
+Notice that we have defined two different data types to hold
+instance references:
+
+. An instance reference variable can hold a reference to only a single
+    class instance.
+. An instance reference set can hold references to multiple class instances.
+
+In theory,
+an instance reference variable is redundant since an instance reference set is 
+capable of holding a single instance reference.
+In practice,
+operations and storage for an instance reference variable are significantly
+less costly, computationally.
+Since dealing with a single instance is also a frequent situation,
+it is a benefit to the implementation to provide both a single reference and a
+set of references and allow the translator to choose which works best for a
+given situation.
+
+=== Accessing instance attributes
+
+Because accessing attributes is so common,
+the `micca` run-time provides several ways to access them.
+The choice of which access technique to use can be made based on the
+intent of the action language.
+
+==== The `attr` command  (((command,embedded,attr)))
+
+The most basic form of attribute access is to use the `attr` command.
+This embedded command generates code to access one named attribute
+of the instance.
+For example,
+to change the `Speed` attibute of an instance referenced by a
+variable called `motor`, we could write:
+
+----
+<% instance motor attr Speed %> = 25 ;
+----
+
+The expansion of the `attr` embedded command yields a ``C'' expression
+that is suitable for using as either an `lvalue` (as above) or an `rvalue`.
+As an `rvalue` it might appear as:
+
+----
+unsigned new_speed = <% instance motor attr Speed %> + 10 ;
+----
+
+==== Assigning attributes to variables  (((command,embedded,assign)))
+
+Sometimes an activity need access to several attributes or the computation
+on an attribute is most clearly shown when it assigned to a local variable.
+The `assign` embedded command will place attribute values into
+ordinary ``C'' variables of the appropriate type.
+
+Let's say we interested in computing an area from the width and height
+of a rectangle:
+
+----
+<%  my assign Width Height  %>
+unsigned area = Width * Height ;
+----
+
+In this example,
+the *Width* and *Height* attribute values have been placed into ordinary
+``C'' variable also named `Width` and `Height`.
+The types of the variable are the same types as the attributes.
+
+Sometimes it is inconvenient to name the variable holding attribute values
+the same as the attribute itself.
+This might lead to a naming conflict.
+In those cases,
+the attribute arguments to the `assign` command can be two elements lists:
+the first item is the attribute name and the second is the name of the
+``C'' variable into which the attribute value is assigned.
+The previous example could be written as:
+
+----
+<%  my assign {Width myWidth} {Height myHeight}  %>
+unsigned area = myWidth * myHeight ;
+----
+
+In both cases,
+the generated code handles the details of declaring the ``C'' variables
+and assigning the attributes to them.
+
+Another important use for the `assign` command is to handle
+<<dependent-attributes,_dependent attributes_>>.  (((attribute,dependent)))
+Recall that a dependent attribute is a read-only attribute whose value
+is determined by a formula.
+The `assign` command is the *only* way to obtain the value of a dependent
+attribute (using other embedded commands on a dependent attribute will result
+in an error).
+The `assign` command is invoked on a dependent attribute in the same was as for
+any other attribute.
+The `micca` code generator will recognize that the attribute is of the
+dependent variety and arrange to evaluate the formula,
+placing the result into a ``C'' variable.
+
+==== Updating attributes
+
+The counterpart to the `assign` command is the `update` command.
+The `update` command generates code to update the value of one or more
+attributes.
+For example:
+
+----
+<%  my assign Width Height  %>
+unsigned area = Width * Height ;
+Width += 10 ;
+Height /= 10 ;
+<%  my update Width Width Height Height  %>
+----
+
+The `update` command takes attribute name / value pairs and generates
+code to assign the attribute value into the referenced instance.
+In the above case, the name of the attribute and the name of a
+``C'' variable are the same.
+The attribute value need not be a variable.
+Any ``C'' _rvalue_ is good.
+For example:
+
+----
+<%  instance pump update Can_run_status false  %>
+----
+
+In this case,
+*Can_run_status* is a boolean attribute whose value was set to `false`.
+
+You can even use more complex _rvalue_ expressions as long as you
+enclose them in braces.
+
+----
+<%  instance color update Red {20 * 3}  %>
+----
+
+==== Direct reference
+
+Finally,
+it is no secret that class instances are structures which have
+members named the same as the attribute names of the class.
+Given an instance reference variable,
+you may read or write an attribute by directly accessing the
+structure member.
+For example:
+
+----
+if (pump->Max_pressure > 3000) {
+<%  instance pump signal Overpressure  %>
+}
+----
+
+This approach has the disadvantage that if the instance to which `pump`
+refers does not have an attribute named `Max_pressure`,
+then the error is not found until compile time.
+For simple cases such as this example,
+using the `attr` embedded command is preferable.
+
+However, since embedded commands do not nest,
+there will be times when direct attribute access is the only alternative.
+We will see these cases below when discussing relationship navigation.
+
+
+=== Signaling events
+
+Signaling events is a common domain activity.
+It appears in action languages in a variety of syntactic forms such as:
+
+----
+Run -> motor
+----
+
+or
+
+----
+signal Run to motor
+----
+
+where *Run* is the name of an event and `motor` is an instance
+reference variable or an instance reference set.
+
+Simple event signaling is translated into `micca` as:
+
+----
+<%  instance motor signal Run       %>
+----
+
+There is no embedded `micca` command to signal a set of instances.
+You must construct a loop to accomplish that.
+In the following example,
+we construct an instance reference set by navigating a relationship
+looking for a particular status and then signal all the set members.
+
+----
+<%  Motor instset idle_motors                                               %>
+<%  my selectRelatedWhere idle_motors mtr {mtr->Status == Idle_Status} R1   %>
+<%  instset idle_motors foreachInstance motor                               %>
+<%      instance motor signal Run                                           %>
+<%  end                                                                     %>
+----
+
+It is often the case that action language statements define the
+set of instances by some set of conditions and then operate on the
+accumulated set as a separate statement.
+This is what we saw in the previous example.
+The `selectRelatedWhere` command was used to accumulate a set of instances
+and then each accumulated instance is visited in a loop and signaled.
+
+If there is no other use for the instance reference set, (_i.e._ `idle_motors`
+in this example),
+then it is not necessary to go the to trouble of accumulating it.
+The above example could be written to iterate across the instances
+selecting the ones that match some criteria and then operating on
+each selected instance as it is found.
+For example, it could have been rewritten as:
+
+----
+<%  my foreachRelatedWhere motor {motor->Status == Idle_Status} R1          %>
+<%      instance motor signal Run                                           %>
+<%  end                                                                     %>
+----
+
+=== Signaling events with parameters
+
+Sometimes events have parameters and to signal them implies that you
+must supply arguments at run time.
+Suppose from the previous example that the *Run* command requires
+a `speed` parameter.
+In that case,
+you can signal the event as:
+
+----
+<%  instance motor signal Run speed 3.7             %>
+----
+
+Event parameters are given as parameter name / value pairs.
+Parameter names must match the names of the event signature.
+All parameters must be supplied with a value,
+but the order of the name / value pairs is not significant.
+`Micca` will arrange to deliver the argument values correctly.
+
+==== Delayed signals
+
+A delayed signal is a request from some domain activity to the model execution
+environment to signal an event on its behalf at some time in the future.
+The embedded `micca` command to accomplish a delayed signal is similar
+to that for an immediately dispatched signal.
+Suppose we wanted to signal a motor to run at one second in the future:
+
+----
+<%  instance motor delaysignal 1000 Run speed 3.7   %.
+----
+
+There is a different command word, `delaysignal`, which is followed by
+the delay time in milliseconds (`1000` in this example).
+Otherwise, the remaining command arguments are the same as for an
+ordinary signal.
+
+==== How delayed signals work
+
+The `micca` run-time handles the delayed dispatch, so there are some
+details of delaying a signal that you need to understand to insure
+a faithful translation.
+
+* There may be only one outstanding delayed signal for any given event
+  between any sending / receiving pair of instances (which might be the same
+  instance).
+  This is the same as saying that delayed events are identified by
+  the name of the event, the sending instance and the receiving instance.
+  This is a rule of the XUML execution semantics.
+* The unit of time is milliseconds, so there is no way to have really
+  short signal delays.
+* The delay time is the *minimum* time before the signal will be delivered.
+  Software execution can introduce small additional delays or jitter.
+* Delivery of any delayed signal starts a new
+  <<thread-of-control,_thread of control_>>.
+* It is acceptable to have a delay time of zero.  This means the event is
+  queued immediately and,
+  when it is dispatched,
+  will start a new thread of control.
+* The run-time interprets any attempt to have a duplicate delayed signal,
+  _i.e._ an attempt to create a new delayed signal for the same event between
+  the same sending / receiving pair as a request to cancel the current
+  delayed signal and post a new one at the new delay interval.
+  This is usually the most convenient outcome.
+
+The `micca` run-time consumes a single timing resource on the target platform
+to maintain a delayed event queue to manage the outstanding delayed signals.
+For the POSIX version of the run-time,
+`SIGALRM` is used to time the delayed event queue.
+For other platforms,
+a physical timer peripheral is used.
+As you can see from the previous rules of how delayed signals work,
+their use is best suited for timeouts and relatively course grained
+timing.
+Applications which require precise, repeatable, periodic or high frequency time
+notifications should use actual hardware timers or other system resources to
+generate such events.
+
+==== Canceling delayed signals
+
+Delayed signals may be cancelled.
+In action language you might find:
+
+----
+Run !-> motor
+----
+
+or something like
+
+----
+cancel Run to motor
+----
+
+These types of action language constructs are translated as:
+
+----
+<%  instance motor canceldelay Run              %>
+----
+
+Here, `motor` is an instance reference variable name holding a reference
+to the receiver of the event.
+By default,
+the sender of the event is assumed to be the activity invoking the
+`canceldelay` command, _i.e._ `self`.
+If that is not the case,
+and an activity is canceling a delayed signal sent by different
+instance,
+the an instance variable name holding an instance reference to the
+sender of the delayed signal can be supplied.
+In this example, 
+if the original `Run` event was signaled by an instance other than `self`,
+then the cancelation might be written as:
+
+----
+<%  instance motor canceldelay Run controller   %>
+----
+
+where `controller` is an instance reference variable refering to the
+instance orignally sending the signal.
+
+Self-directed delayed signals may be canceled using the `my` command,
+as in:
+
+----
+<%  my canceldelay Stop              %>
+----
+
+There are a few other rules about canceling delayed events:
+
+* Only events that were signaled as delayed signals may be canceled.
+* It is guaranteed that a canceled signal is not delivered.
+* It is not an error to cancel a signal that has already been delivered
+  or was never sent.
+
+==== Remaining time for delayed signals
+
+The other allowed operation on delayed signals is to request the
+amount of time remaining before the signal is delivered.
+It is sometimes necessary to adjust the timing of a delayed signal.
+Continuing with the above examples,
+we can determine the amount of time before a delayed signal is
+dispatched by:
+
+----
+MRT_DelayTime t = <% instance motor delayremaining Run %> ;
+----
+
+Note that the `delayremaining` embedded command creates an _rvalue_
+of type `MRT_DelayTime`.
+The following code sequence adds 100 ms to the delay for the *Run* event:
+
+----
+MRT_DelayTime runTime = <% instance motor delayremaining Run %> ;
+if (runTime != 0) {
+    runTime += 100 ;
+<%  instance motor delaysignal runTime Run        %>
+}
+----
+
+Note the test of `runTime` for zero.
+A zero time returned from `delayremaining` indicates that the delayed
+event has already been dispatched or never existed.
+In this case,
+notice that we are taking advantage of the semantics of `delaysignal`
+by simply requesting a new one at a new delay time,
+knowing that the current one is canceled automatically.
+
+=== Navigating relationships
+
+Previously we discussed the
+<<relationship-direction,concept>>
+of a direction for a relationship and how micca uses some syntax
+conventions to indicate the direction when navigating a relationship.
+The notion of relationships directionality help resolve some
+ambiguities in navigation as well as reduces the amount of information
+that must be provided.
+
+The embedded commands that provide relationship navigation use
+the direction syntax.
+They also allow for a _chain_ of relationships to be specified as a
+simple list of navigation components.
+
+==== Navigating simple associations
+
+Consider the example of an association defined as:
+
+----
+association R13 Injector 1..*--1 Injector_Design
+----
+
+uses the syntax `R13` to navigate from a set of instances of *Injector*
+to the related instance of *Injector_Design*.
+Analogously,
+the `~R13` syntax indicates a navigation from *Injector_Design* to
+a set of *Injector* instances (at least conceptually).
+
+==== Navigating associative relationships
+
+Associative relationships have more options to consider since it is
+possible to navigate to or from the associator class.
+Consider a relationship defined as:
+
+----
+association R44 -associator Ownership Owner 1..*--1..* Property
+----
+
+The following diagram shows the fragment of a class diagram and
+shows schematically the six different ways the relationship might
+be navigated.
+
+image::assoc-relationship-nav.pdf[title="Ways to Navigate an Associative Relationship"]
+
+The simple forward direction of *R44* navigates from *Owner* to *Property*.
+This is the forward direction because of the order in which the classes
+were specified in the `association` command defining the relationship
+(_i.e._ Owner was mentioned first so it is the source of a forward
+navigation).
+
+Navigating to the associative class (in this case *Ownership*) is accomplished
+by traversing in the proper direction.
+For example,
+navigating from *Property* to *Ownership* is specified as `{~R44 Ownership}`.
+
+==== Navigating generalizations
+
+Navigating a generalization from the subtype class to the superclass
+type is the easiest situation to understand.
+There is always an unconditional reference from a subtype class instance to
+its related supertype class instances.
+For example if *R22* is a generalization defined as:
+
+----
+generalization R22 Product Book_Product Recording_Product
+----
+
+Then we can navigate from a *Book_Product* instance (call it `book`)
+to a *Product* instance using something like:
+
+----
+<%  instance book findOneRelated product R22    %>
+----
+
+When the generated code executes,
+an instance reference value is placed into a ``C'' variable named, `product`,
+that is the currently related superclass instance of the
+subclass instance contained in the `book` instance reference variable.
+References from subtype instances to superclass instances are always
+singular and unconditional.
+This means that `product` is always non-NULL and there is always only
+one related superclass instance.
+
+Navigating from a superclass instance to a subclass instance is more
+complicated.
+Recall, that in XUML, we interpret a generalization as always being
+_disjoint and complete_.
+In practical terms,
+this means that the superclass instance is always related to exactly one
+subclass instance, but
+we do not know to which subclass the related instance belongs.
+This is a property of the set partitioning that the generalization
+represents in modeling terms.
+
+Conceptually,
+we can always find the related subclass instance by exhaustively
+trying each subtype.
+Navigating from the superclass to a subclass is navigating in the _reverse_
+direction and the desired subclass name must be specified.
+This might appear as something like:
+
+----
+<%instance product findOneRelate book {~R22 Book_Product} %>
+if (book != NULL) {
+    // We are related to a Book_Product
+    // do something with the book instance
+} else {
+<%  instance product findOneRelated record {~R22 Recording_Product} %>
+    if (record != NULL) {
+        // We are related to a Recording_Product
+        // do something with the record instance
+    }
+}
+----
+
+This approach can be tedious if there are even a modest number
+of subtype classes and we insist upon covering all the possible subclasses.
+To help this situation,
+`micca` provides an embedded command called, `classify`,
+that outwardly appears similar to a `switch` statement on the subclass type.
+
+----
+<%R22 classify product prodtype     %>
+<%  subclass Book_Product           %>
+    // Here, prodtype is a reference to a Book_Product instance
+    // Do something with protype appropriate for a Book_Product
+<%  end                             %>
+<%  subclass Recording_Product      %>
+    // Here, prodtype is a reference to a Recording_Product instance
+    // Do something with protype appropriate for a Recording_Product
+<%  end                             %>
+<%end                               %>
+----
+
+There are several things to note here.
+
+* Each generalization relationships has an embedded command defined
+  to be the same as its name, _i.e._ *R22* in this case,
+  and the `classify` command applies to that generalization.
+* A `subclass` command is used to define the actions for a particular
+  subclass of the generalization.
+  The corresponding `end` command defines the boundary of the
+  activity for that subtype.
+* The superclass instance, here `product`, is checked to determine if
+  it is related to an instance of the subclasses listed in the
+  `subclass` commands.
+* The related instance reference is placed in the `prodtype` variable.
+  *N.B.* `prodtype` is a differently typed variable in each of the `subclass`
+  bodies that matches the type of the recognized subtype.
+  So, in the `subclass Book_Product` branch, `prodtype` is an instance
+  reference to a `Book_Product` instance.
+* The scope of the variable holding the subclass instance reference is
+  local to each `subclass` branch.
+  In this example, the scope of `prodtype` is limited to the `subclass`
+  branches and is not defined outside of them.
+
+In the previous example,
+all possible subclasses are listed in the `subclass` commands.
+This will not always be the case and so it is possible to use a `default`
+command as part of a `classify` sequence.
+Consider a generalization defined as:
+
+----
+generalization R33 Lamp Table_Lamp Floor_Lamp Ceiling_Lamp
+----
+
+If we have an activity which does something specific for a Table_Lamp,
+but otherwise does some common processing for the other subtypes,
+we can translate that situation as:
+
+----
+<%R33 classify lamp sublamp             %>
+<%  subclass Table_Lamp                 %>
+        // Here, sublamp is a Table_Lamp reference
+<%  end                                 %>
+<%  default                             %>
+        // Here, sublamp is not defined
+<%  end                                 %>
+<%end                                   %>
+----
+
+The `default` situation has some additional rules:
+
+* No subtype instance reference variable is in scope in the `default` case
+  (_i.e._ `sublamp` is not defined in the previous example for the
+  body of the `default` case).
+  Since an instance reference variable is typed according to the
+  class of the instance to which it refers,
+  no instance reference variable can be properly typed for the `default` case.
+* If the `classify` command has a `subclass` section for each possible
+  subclass of the generalization,
+  then the `default` section is neither needed nor desirable.
+  `Micca` detects the situation where _not all_ subclasses are given
+  and there is _no_ `default` section.
+  In that case it issues a warning.
+  This helps detect the situation where a previously written `classify` command
+  exhaustively covered all the subclass cases and then a new one was added to
+  the data translation without updating the processing translation.
+  So, `default` sections should only be used where you are deliberately
+  handling only a subset of the possible subclass cases.
+
+==== Embedded commands for navigation
+
+Domain activities frequently _navigate_ relationships to obtain
+references to related instances.
+This situation is common enough that `micca` supplies a variety
+of specialized embedded commands to handle specific circumstances.
+
+`findOneRelated`::
+    Finds a single instance along a relationship navigation chain.
+`findRelatedWhere`::
+    Finds a single instance along a relationship navigation chain
+    where a boolean expression evaluates to `true`.
+`foreachRelated`::
+    Visits each instance along a relationship navigation chain.
+`foreachRelatedWhere`::
+    Visits each instance along a relationship navigation chain
+    where a boolean expression evaluates to `true`.
+`selectRelated`::
+    Creates an instance reference set of instances along a relationship
+    navigation chain.
+`selectRelatedWhere`::
+    Creates an instance reference set of instances along a relationship
+    navigation chain where a boolean expression evaluates to `true`.
+
+=== Searching for class instances
+
+`Micca` provides two embedded commands to locate class instances,
+`findByName` and `findWhere`.
+
+The first command, `findByName` is rather specialized.
+When the initial instance population is defined,
+each initial instance is given a _name_.
+That name is used to handle relationship associations in the
+inital instances and stands for an instance reference.
+It can do the same at run time.
+For example,
+if there is a single instance of some class named, `singleton`,
+the you can directly reference using `findByName`.
+
+.Micca translation
+----
+<%  Schedule findByName singleton theSchedule       %>
+----
+
+This will result in an instance reference to the `singleton` instance
+of the `Schedule` class being place in the ``C'' variable called,
+`theSchedule`.
+So if you know by context that you want a particular instance that
+was defined in the initial instance population,
+the `findByName` command will obtain is by direct means without any
+searching.
+
+A more general search is obtained using the `findWhere` command.
+
+.Scrall action
+----
+airports in my country .= Airport(1, Country : my country)
+----
+
+.Micca translation
+----
+<%  Airport findWhere airports_in_my_country\
+        {strcmp(airports_in_my_country->Country, my_country) == 0}       %>
+----
+
+This translation assumes that the `Country` attribute is a string
+and the `my_country` variable points to a string.
+So `strcmp()` is used to make the comparison.
+The `findWhere` command sequentially searches the instances of the
+class assigning a reference to the instance variable and evaluating
+the condition.
+It stops when it finds the first match and the instance reference will
+be `NULL` if no match is found.
+
+=== Interating over class instances
+Interating over class instances
+
+=== Handling sets of instances
+Handling sets of instances
+
+=== Creating class instances
+Creating class instances
+
+==== Synchronous creation of class instances
+
+To create an instance,
+the values of *all* attributes must be supplied.
+Attribute values may be supplied explicitly at the point of creation
+or by default values or by declaring the attribute to be zero initialized.
+(Note that dependent attributes are not initalized since they are
+computed by a formula at each access).
+All attributes also means that all relationship associations must
+be defined at the point of creation.
+This insistence insures that there is never any _partially_ initialized
+instances floating round in the program.
+
+In Scrall, a synchronous instance creation would appear as:
+
+.Scrall action
+----
+ac .= *Aircraft(Tail: t, Altitude: a, Heading: h, Location: l, Airspeed:s)
+----
+
+This assumes `t`, `a`, `h`, `l`, and `s` are variables with appropriate
+values.
+
+The corresponding embedded command is:
+
+.Micca translation
+----
+<%  Aircraft create ac Tail t Altitude a Heading h Location l Airspeed s %>
+----
+
+Note it is not necessary to declare a variable named, `ac`, to hold
+the instance reference value.
+The `micca` code generator will automatically declare the variable if
+needed.
+
+When relationship references must be specified,
+this is done using the relationship number and an instance reference
+variable.
+Note the specification of relationships is _not_ done using the values
+of referential attributes.
+Rather, the notion is abstracted away from the individual attributes
+and the association is expressed in terms of the number of the relationship
+and a reference to the related instance.
+In this case the action language might appear as:
+
+.Scrall action
+----
+v .= *Owned Vehicle( License number:l ) &R1 me
+----
+
+.Micca translation
+----
+<%  Owned_Vehicle create License_number l R1 self   %>
+----
+
+Note that the requirement to supply instance references at creation
+time to satisfy the referential attribute values will impose an order
+to instance creation in certain cases.
+For example,
+classes related across a generalization relationship must be created
+in supertype to subtype order since the subtype instance must have
+an instance reference to its related supertype instance to satisfy
+the referential integrity.
+So, if there were class definitions such as:
+
+.Micca class definition
+----
+class Lamp {
+    attribute Manufacturer {char[32]}
+    attribute Model ModelType_t
+}
+class Table_Lamp {
+    attribute Height unsigned
+}
+class Desk_Lamp {
+    attribute Wattage unsigned
+}
+
+generalization R22 Lamp Table_Lamp Desk_Lamp
+----
+
+Then creating an instance of a *Desk_Lamp* requires creating an
+instance of *Lamp* and that must be done first.
+
+.Micca translation
+----
+<%  Lamp create lamp Manufacturer {"Edison"} Model L100     %>
+<%  Desk_Lamp create dlamp Wattage 100 R22 lamp             %>
+----
+
+Also note in the `micca create` command,
+the order of attributes and relationship names does not matter.
+
+==== Asynchronous creation of class instances
+
+.Scrall action
+----
+New folder(Parent: parent id) -> *Folder
+----
+
+.Micca translation
+----
+<%  Folder createasync New_folder {Parent parent_id}        %>
+----
+
+=== Deleting class instances
+Deleting class instances
+
+=== External entities
+External entities
+
+==== External identification of instances
+External identification of instances
+
+////
+The following sections group the embedded commands based on
+model level components such as classes or relationships.
+Embedded commands are presented, along with some example action language,
+to show how the intent of the action language is rendered into
+the embedded commands.
+
+In this section we examine the support for operating on classes.
+This includes:
+
+* Creating class instances
+* Deleting class instances
+* Searching for class instances
+* Iterating across class instances
+
+* types of model level actions
+  ** actions associated with instances
+  ** actions associated with relationships
+  *** navigating
+  *** subtype migration
+  ** actions associated with state machines
+  ** instance sets
+  ** operations
+  *** domain operations
+  *** instance operations
+  *** class operations
+  ** external entities
+////
+
+
+// vim:syntax=asciidoc:

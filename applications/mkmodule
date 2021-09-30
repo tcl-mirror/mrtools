@@ -1,0 +1,370 @@
+#!/usr/bin/env tclsh
+
+# This software is copyrighted 2018 - 2021 by G. Andrew Mangogna.
+# The following terms apply to all files associated with the software unless
+# explicitly disclaimed in individual files.
+# 
+# The authors hereby grant permission to use, copy, modify, distribute,
+# and license this software and its documentation for any purpose, provided
+# that existing copyright notices are retained in all copies and that this
+# notice is included verbatim in any distributions. No written agreement,
+# license, or royalty fee is required for any of the authorized uses.
+# Modifications to this software may be copyrighted by their authors and
+# need not follow the licensing terms described here, provided that the
+# new terms are clearly indicated on the first page of each file where
+# they apply.
+# 
+# IN NO EVENT SHALL THE AUTHORS OR DISTRIBUTORS BE LIABLE TO ANY PARTY FOR
+# DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES ARISING
+# OUT OF THE USE OF THIS SOFTWARE, ITS DOCUMENTATION, OR ANY DERIVATIVES
+# THEREOF, EVEN IF THE AUTHORS HAVE BEEN ADVISED OF THE POSSIBILITY OF
+# SUCH DAMAGE.
+# 
+# THE AUTHORS AND DISTRIBUTORS SPECIFICALLY DISCLAIM ANY WARRANTIES,
+# INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.  THIS SOFTWARE
+# IS PROVIDED ON AN "AS IS" BASIS, AND THE AUTHORS AND DISTRIBUTORS HAVE
+# NO OBLIGATION TO PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS,
+# OR MODIFICATIONS.
+# 
+# GOVERNMENT USE: If you are acquiring this software on behalf of the
+# U.S. government, the Government shall have only "Restricted Rights"
+# in the software and related documentation as defined in the Federal
+# Acquisition Regulations (FARs) in Clause 52.227.19 (c) (2).  If you
+# are acquiring the software on behalf of the Department of Defense,
+# the software shall be classified as "Commercial Computer Software"
+# and the Government shall have only "Restricted Rights" as defined in
+# Clause 252.227-7013 (c) (1) of DFARs.  Notwithstanding the foregoing,
+# the authors grant the U.S. Government and others acting in its behalf
+# permission to use and distribute the software in accordance with the
+# terms specified in this license.
+
+# Make a Tcl module from script or binary extension files.
+# usage: mkmodule package version ?-script scriptfile ...?
+#        ?-<os>?-<machine>??-<load>? libraryfile?
+#        ?-outdir dirname?"
+#
+# where:
+#   package
+#       is the name of the package.
+#   version
+#       is the version number of the package.
+#   -script scriptfile
+#       gives the name of a text file containing a Tcl script. Multiple script
+#       files may be placed in the module.
+#   -<os>?-<machine>??-<load>? libraryfile
+#       Arguments of this type load binary extensions for the given <os> and
+#       <machine>. If values of <os> and <machine> match the value of the
+#       tcl_platform(os) and tcl_platform(machine) variables on the machine
+#       where the module is sourced, then the binary "libraryfile" is loaded as
+#       an extension.  The "libraryfile" must be the name of a shared object
+#       file appropriate for the OS and machine.  Multiple platform binaries
+#       may be placed in the module The <machine> part is the designation is
+#       optional and by default is taken as "x86_64" (to maintain backward
+#       compatibility).  By special dispensation, "Windows NT" may be specified
+#       as simply, "Windows".  The optional <load> portion of the argument is
+#       the name to give to the "load" command when loading a binary extension.
+#       By default this is the same name as the "package" argument. However,
+#       some packages use different names for the package and the shared object
+#       that is loaded. If the <load> portion of the argument is to be given,
+#       then the <machine> portion must also be supplied.
+#
+#       Note: when generating multi-platform binary extension modules, best
+#       practice is to place the arguments for each platform together,
+#       sequentially.
+#   -outdir directory
+#       The name of directory where the output module file is placed.  By
+#       default, the newly created module file is placed the current directory.
+#
+#   A Tcl module file is constructed from the binary and script files specified
+#   as arguments.  The file name follows the pattern required by Tcl module
+#   files, i.e. package-version.tm.  The order of -script and -<os> arguments
+#   is significant as script evaluation or shared library loading is done in
+#   the order the arguments are specified on the command line. Note that some
+#   packages which contain both binary and Tcl script portions require a
+#   specific order to load properly. Typically this would be the same order
+#   specified in a "pkgIndex.tcl" file for a conventionally packaged extension.
+
+namespace eval ::mkmodule {
+    namespace export module
+    namespace ensemble create
+
+    variable mkmodule_version "1.5"
+
+    # This is the code used to load script files. Script files
+    # are read from their location in the module file and passed
+    # as a text string to be executed. N.B. the use of "uplevel"
+    # to remove the stack frame which is added when this is used
+    # as a lambda function with the "apply" command.
+    variable loadScript {{offset size} {
+    set schan [open [info script] r]
+    try {
+        chan seek $schan $offset start
+        uplevel 1 [chan read $schan $size]
+    } finally {
+        chan close $schan
+    }
+}}
+
+    # This is the code placed in the module file that does the
+    # heavy lifting to copy the binary extension to the native file
+    # system and execute the "load" command on the result.
+    variable loadBinary {{offset size package} {
+    set mchan [open [info script] rb]
+    set lchan [file tempfile tempname]
+    chan configure $lchan -translation binary
+    try {
+        chan seek $mchan $offset start
+        chan copy $mchan $lchan -size $size
+    } finally {
+        chan close $mchan
+        chan close $lchan
+    }
+    try {
+        load $tempname $package
+    } finally {
+        catch {file delete $tempname}
+    }
+}}
+
+    # This is the Tcl sequence to load a script extension.
+    variable scriptTemplate {::apply $__loadScript__ %ld %ld}
+
+    # This is the Tcl sequence to load a binary extension.
+    variable binaryTemplate {::apply $__loadBinary__ %ld %ld %s}
+
+    # This value must be larger than the maximum number of characters in either
+    # "scriptTemplate" or "binaryTemplate" when substituted with its
+    # parameters. Here we are being generous, but if the value of
+    # "binaryTemplate" or "scriptTemplate" expands, make sure it either is
+    # smaller than this quantity or increase the "templateSize" value.
+    variable templateSize 256
+}
+
+proc ::mkmodule::module {package version args} {
+    set loadables [list]
+    set script_count 0
+    set binary_count 0
+    set outdir .
+
+    # Parse arguments and accumlate the argument information into
+    # data variables for later use.
+    set nargs [llength $args]
+    for {set aindex 0} {$aindex < $nargs} {incr aindex} {
+        set arg [lindex $args $aindex]
+        switch -glob -- $arg {
+            -script {
+                set filename [lindex $args [incr aindex]]
+                validateFile $filename
+                lappend loadables [dict create\
+                    type script\
+                    file $filename\
+                    size [file size $filename]\
+                ]
+                incr script_count
+            }
+            -outdir {
+                set outdir [lindex $args [incr aindex]]
+                if {![file isdirectory $outdir]} {
+                    error "output location, \"$outdir\", is not a directory"
+                }
+            }
+            -* {
+                set filename [lindex $args [incr aindex]]
+                validateFile $filename
+                set binarg [split [string trimleft $arg -] -]
+                set remain [lassign $binarg os machine loadas]
+                if {$remain ne {}} {
+                    error "unexpected binary extension argument, \"$arg\""
+                }
+                # So that we don't have to type "Windows NT" on the command
+                # line and have to worry about escaping it from the shell,
+                # we'll tack on the other part here.
+                if {$os eq "Windows"} {
+                    append os " NT"
+                }
+                if {$machine eq {}} {
+                    set machine x86_64
+                }
+                if {$loadas eq {}} {
+                    set loadas $package
+                }
+                lappend loadables [dict create\
+                    type binary\
+                    os $os\
+                    machine $machine\
+                    load $loadas\
+                    file $filename\
+                    size [file size $filename]\
+                ]
+                incr binary_count
+            }
+            default {
+                usage "unrecognized argument, \"$arg\""
+            }
+        }
+    }
+
+    if {[llength $loadables] == 0} {
+        error "no loadable files were specified"
+    }
+
+    set tmchan [open [file join $outdir ${package}-${version}.tm] w]
+    variable mkmodule_version
+    chan puts $tmchan "# created by mkmodule: version $mkmodule_version"
+    chan puts $tmchan "# on [clock format [clock seconds]]"
+
+    variable templateSize
+    variable loadBinary
+    variable loadScript
+    # This slack space computation is approximate. It accounts for the big
+    # pieces, but "templateSize" should be generous to account for the small
+    # pieces that aren't included.
+    set slackSpace [expr {([llength $loadables] * $templateSize) +\
+            max([string length $loadBinary], [string length $loadScript])}]
+
+    try {
+        set loadOffset 0
+        # First we output the text needed to load script or binary extensions.
+        if {$script_count != 0} {
+            puts $tmchan "set __loadScript__ [list $loadScript]"
+        }
+        if {$binary_count != 0} {
+            puts $tmchan "set __loadBinary__ [list $loadBinary]"
+            puts $tmchan "set __loadedBinary__ false"
+        }
+        # Write a block of blanks allocate space for the code that invokes the
+        # module loading.  Later we come back and fill in the actual
+        # invocations.  We do it this way because at this point in building the
+        # output module file, we don't know the file offsets.
+        set loadOffset [chan tell $tmchan]
+        puts $tmchan [string repeat { } $slackSpace]
+
+        # ^Z to stop the source command from scanning any further
+        puts -nonewline $tmchan "\x1a"
+
+        # Output the script / binary data for the module.
+        # We must keep track of where each piece is located in the
+        # file. We do this by indexing into the "loadables" list
+        # since we need to annotate the various dictionaries with the
+        # location of the data.
+        for {set ld_index 0} {$ld_index < [llength $loadables]} {incr ld_index} {
+            set loadable [lindex $loadables $ld_index]
+            dict set loadable offset [chan tell $tmchan]
+            lset loadables $ld_index $loadable
+
+            switch -exact -- [dict get $loadable type] {
+                script {
+                    set schan [open [dict get $loadable file] r]
+                    try {
+                        chan configure $tmchan -translation auto
+                        chan copy $schan $tmchan
+                        chan puts $tmchan {} ; # in case there is no terminal newline
+                    } finally {
+                        chan close $schan
+                    }
+                }
+                binary {
+                    set bchan [open [dict get $loadable file] rb]
+                    try {
+                        chan configure $tmchan -translation binary
+                        chan copy $bchan $tmchan
+                    } finally {
+                        chan close $bchan
+                    }
+                }
+                default {
+                    error "panic: unexpected load type, \"[dict get $loadable type]\""
+                }
+            }
+        }
+
+        # Now, seek back to the blank section and overwrite the blanks
+        # with command invocations to load the scripts and binaries
+        chan seek $tmchan $loadOffset start
+        chan configure $tmchan -translation auto
+        variable scriptTemplate
+        variable binaryTemplate
+
+        set loading_binary false
+
+        foreach loadable $loadables {
+            switch -exact -- [dict get $loadable type] {
+                script {
+                    if {$loading_binary} {
+                        unfound $tmchan
+                    }
+                    set loading_binary false
+                    chan puts $tmchan [format $scriptTemplate\
+                        [dict get $loadable offset] [dict get $loadable size]
+                    ]
+                }
+                binary {
+                    set loading_binary true
+                    set platform_test {if {$::tcl_platform(os) eq "%s" &&\
+                            $::tcl_platform(machine) eq "%s"}}
+                    chan puts $tmchan "[format $platform_test\
+                        [dict get $loadable os] [dict get $loadable machine]] \{"
+                    chan puts $tmchan\
+                        "    [format $binaryTemplate\
+                            [dict get $loadable offset] [dict get $loadable size]\
+                            [dict get $loadable load]]"
+                    chan puts $tmchan {    set __loadedBinary__ true}
+                    chan puts $tmchan "\}"
+                }
+                default {
+                    error "panic: unexpected load type, \"[dict get $loadable type]\""
+                }
+            }
+        }
+        if {$loading_binary} {
+            unfound $tmchan
+        }
+        chan puts $tmchan "catch {unset __loadScript__}"
+        chan puts $tmchan "catch {unset __loadBinary__}"
+        chan puts $tmchan "catch {unset __loadedBinary__}"
+        chan puts $tmchan "return"
+        # Check that the overwriting didn't destroy anything.
+        if {[chan tell $tmchan] - $loadOffset > $slackSpace} {
+            error "panic, overwrote space allocated for loading script"
+        }
+    } finally {
+        chan close $tmchan
+    }
+}
+
+proc unfound {tmchan} {
+    chan puts $tmchan "if {!\$__loadedBinary__} \{"
+    chan puts $tmchan {    error "no binary found for\
+            $::tcl_platform(os)-$::tcl_platform(machine)"}
+    chan puts $tmchan "\}"
+}
+
+proc usage {errstring} {
+    puts stderr $errstring
+    set progname [lindex [file split $::argv0] end]
+    puts stderr "usage: $progname package version ?-script scriptfile ...?\
+        ?-<os>?-<machine>??-<name>? libraryfile ...?
+        ?-outdir dirname?"
+    exit 1
+}
+
+proc ::mkmodule::validateFile {filename} {
+    if {![file readable $filename]} {
+        error "file, \"$filename\", is not a valid, readable file"
+    }
+}
+
+#
+# Start of main program.
+#
+
+set argv [lassign $argv package version]
+if {$package eq {}} {
+    usage "no package name given"
+}
+if {![string is integer -strict [string index $version 0]]} {
+    usage "version number does not begin with a number,\
+        found \"[string index $version 0]\""
+}
+::mkmodule module $package $version {*}$argv

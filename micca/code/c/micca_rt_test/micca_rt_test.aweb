@@ -1,0 +1,4250 @@
+// vim:set syntax=asciidoc:
+
+= Micca Run Time Testing
+
+This document describes a set of unit tests for the `micca` run-time.
+The `micca` run-time code is part of the `micca` translation
+scheme for xUML models.
+The run-time code is responsible for managing all the data and execution
+sequencing for `micca` generated systems.
+
+The strategy for these tests is to create a test domain and use
+the
+http://cunit.sourceforge.net[CUnit]
+testing framework to trigger the tests and record the
+pass / fail status.
+
+This document is also a literate program and so contains all the
+code and documentation for the tests.
+
+== CUnit Setup
+
+
+[source,c]
+----
+<<micca_rt_test.c>>=
+#include "micca_rt.h"
+#include <stdlib.h>
+#include <setjmp.h>
+#include <CUnit/CUnit.h>
+#include <CUnit/Basic.h>
+
+#include "testdomain.h"
+
+#ifdef EFM32GG990F1024
+#include "em_device.h"
+#endif /* EFM32GG990F1024 */
+
+<<test functions>>
+
+<<suite tests>>
+
+static CU_SuiteInfo suites[] = {
+    <<test suites>>
+    CU_SUITE_INFO_NULL,
+} ;
+----
+
+[source,c]
+----
+<<micca_rt_test.c>>=
+int
+main(
+    int argc,
+    char **argv)
+{
+    testdomain_initialize() ;
+
+    CU_initialize_registry() ;
+
+    CU_register_suites(suites) ;
+
+    CU_basic_set_mode(CU_BRM_VERBOSE) ;
+    CU_basic_run_tests() ;
+
+    const CU_pFailureRecord failures = CU_get_failure_list() ;
+    if (failures != NULL) {
+        puts("\nFailures:") ;
+        CU_basic_show_failures(failures) ;
+        putchar('\n') ;
+    }
+
+    CU_cleanup_registry() ;
+
+#       ifdef MRT_ARM_ARCH_7M
+    __BKPT(0) ;
+#       endif /* MRT_ARM_ARCH_7M */
+}
+----
+
+== Test Helper Functions
+
+[source,c]
+----
+<<test functions>>=
+static jmp_buf fatalbuf ;
+static MRT_FatalErrorHandler oldHandler ;
+
+static void
+catchFatalErrorHandler(
+    MRT_ErrorCode errNum,
+    char const *fmt,
+    va_list alist)
+{
+    oldHandler(errNum, fmt, alist) ;
+    longjmp(fatalbuf, errNum) ;
+}
+
+static void catchFatal() {
+    oldHandler = mrt_SetFatalErrorHandler(catchFatalErrorHandler) ;
+}
+
+static void restoreFatal() {
+    mrt_SetFatalErrorHandler(oldHandler) ;
+}
+
+static int catchFatalTransaction() {
+    catchFatal() ;
+    int code = setjmp(fatalbuf) ;
+    if (code == 0) {
+        mrt_DispatchSingleEvent() ;
+    } else {
+        CU_PASS("Caught fatal event dispatch") ;
+    }
+    restoreFatal() ;
+
+    return code ;
+}
+
+static int catchFatalSyncService() {
+    catchFatal() ;
+    int code = setjmp(fatalbuf) ;
+    if (code == 0) {
+        mrt_EndSyncService() ;
+    } else {
+        CU_PASS("Caught fatal event dispatch") ;
+    }
+    restoreFatal() ;
+
+    return code ;
+}
+
+static int catchFatalDomainOp(void (*dop)(void)) {
+    catchFatal() ;
+    int code = setjmp(fatalbuf) ;
+    if (code == 0) {
+        dop() ;
+    } else {
+        CU_PASS("Caught fatal domain operation") ;
+    }
+    restoreFatal() ;
+
+    return code ;
+}
+----
+
+== Test Domain
+
+[source,tcl]
+----
+<<testdomain.micca>>=
+domain testdomain {
+    prologue {
+        #include <CUnit/CUnit.h>
+    }
+
+    <<test domain configuration>>
+
+    domainop void initialize {} {
+        testdomain__INIT() ;
+    }
+}
+population testdomain {
+    <<test domain population>>
+}
+----
+
+== Initialization
+
+[source,c]
+----
+<<test suites>>=
+{"initialization", NULL, NULL, NULL, NULL, initializationSuiteTests},
+----
+
+[source,c]
+----
+<<suite tests>>=
+<<initialization suite tests>>
+
+<<initialization suite tests>>=
+static CU_TestInfo initializationSuiteTests[] = {
+    <<initialization test cases>>
+    CU_TEST_INFO_NULL,
+} ;
+----
+
+[source,c]
+----
+<<initialization test cases>>=
+{"initialize run time", mrtTest_InitRunTime},
+
+<<test functions>>=
+static void
+mrtTest_InitRunTime(void)
+{
+    mrt_Initialize() ;
+    CU_ASSERT_TRUE(mrt_CanSignalEvent()) ;
+    CU_ASSERT_FALSE(mrt_DispatchSingleEvent()) ;
+}
+----
+
+== Event Dispatch
+
+[source,c]
+----
+<<test suites>>=
+{"event dispatch", NULL, NULL, NULL, NULL, eventDispatchSuiteTests},
+----
+
+[source,c]
+----
+<<suite tests>>=
+<<event dispatch suite tests>>
+
+<<event dispatch suite tests>>=
+static CU_TestInfo eventDispatchSuiteTests[] = {
+    <<event dispatch test cases>>
+    CU_TEST_INFO_NULL,
+} ;
+----
+
+=== Dispatch An Event with Parameters
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class A {
+    attribute count int -default 0
+    attribute ranctor bool -default false
+    attribute randtor bool -default false
+
+    constructor {
+        <%my update ranctor true%>
+    }
+    destructor {
+        <%my update randtor true%>
+    }
+
+    statemodel {
+        state s1 {b int} {
+            printf("In %s.%s, b = %d\n", MRT_CLASS_NAME, MRT_STATE_NAME, b) ;
+            <%my attr count%> += b ;
+        }
+        transition s1 - e1 -> s1
+    }
+}
+<<test domain population>>=
+class A {
+    instance a1
+    allocate 1
+}
+----
+
+[source,c]
+----
+<<event dispatch test cases>>=
+{"signal event", mrtTest_SignalEvent},
+
+<<test functions>>=
+static void
+mrtTest_SignalEvent(void)
+{
+    bool didevent = mrt_DispatchSingleEvent() ;
+    CU_ASSERT_FALSE(didevent) ;
+
+    CU_ASSERT_TRUE(mrt_CanSignalEvent()) ;
+
+    struct testdomain_A_e1__EPARAMS aparams = {
+        .b = 20
+    } ;
+    int pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_A_CLASSID,
+        TESTDOMAIN_A_A1_INSTID,
+        TESTDOMAIN_A_E1_EVENT,
+        &aparams, sizeof(aparams)) ;
+    CU_ASSERT(pcode == 0) ;
+
+    CU_ASSERT_TRUE(mrt_DispatchSingleEvent()) ;
+
+    int count ;
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_A_CLASSID,
+        TESTDOMAIN_A_A1_INSTID,
+        TESTDOMAIN_A_COUNT_ATTRID,
+        &count, sizeof(count)) ;
+    CU_ASSERT(pcode == sizeof(count)) ;
+    CU_ASSERT(count == 20) ;
+}
+----
+
+=== Dispatch An Ignored Event
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class AA {
+    attribute count int -default 0
+    statemodel {
+        state s1 {} {
+            printf("In %s.%s\n", MRT_CLASS_NAME, MRT_STATE_NAME) ;
+            <%my attr count%> += 1 ;
+        }
+        transition s1 - e1 -> s1
+        transition s1 - e2 -> IG
+        transition s1 - e3 -> CH
+    }
+}
+<<test domain population>>=
+class AA {
+    instance a1
+}
+----
+
+[source,c]
+----
+<<event dispatch test cases>>=
+{"signal ignored event", mrtTest_SignalIgnoredEvent},
+
+<<test functions>>=
+static void
+mrtTest_SignalIgnoredEvent(void)
+{
+    bool didevent = mrt_DispatchSingleEvent() ;
+    CU_ASSERT_FALSE(didevent) ;
+
+    int pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_AA_CLASSID,
+        TESTDOMAIN_AA_A1_INSTID,
+        TESTDOMAIN_AA_E2_EVENT,
+        NULL, 0) ;
+    CU_ASSERT(pcode == 0) ;
+
+    didevent = mrt_DispatchSingleEvent() ;
+    CU_ASSERT_TRUE(didevent) ;
+
+    int count ;
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_AA_CLASSID,
+        TESTDOMAIN_AA_A1_INSTID,
+        TESTDOMAIN_AA_COUNT_ATTRID,
+        &count, sizeof(count)) ;
+    CU_ASSERT(pcode == sizeof(count)) ;
+    CU_ASSERT(count == 0) ;
+}
+----
+
+=== Dispatch Can't Happen Event
+
+[source,c]
+----
+<<event dispatch test cases>>=
+{"signal can't happen event", mrtTest_SignalCantHappenEvent},
+
+<<test functions>>=
+static void
+mrtTest_SignalCantHappenEvent(void)
+{
+    bool didevent = mrt_DispatchSingleEvent() ;
+    CU_ASSERT_FALSE(didevent) ;
+
+    int pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_AA_CLASSID,
+        TESTDOMAIN_AA_A1_INSTID,
+        TESTDOMAIN_AA_E3_EVENT,
+        NULL, 0) ;
+    CU_ASSERT(pcode == 0) ;
+
+    int code = catchFatalTransaction() ;
+    CU_ASSERT(code == mrtCantHappen) ;
+
+    int count ;
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_AA_CLASSID,
+        TESTDOMAIN_AA_A1_INSTID,
+        TESTDOMAIN_AA_COUNT_ATTRID,
+        &count, sizeof(count)) ;
+    CU_ASSERT(pcode == sizeof(count)) ;
+    CU_ASSERT(count == 0) ;
+}
+----
+
+=== Event In Flight Error
+
+[source,c]
+----
+<<event dispatch test cases>>=
+{"event in flight error", mrtTest_EventInFlight},
+
+<<test functions>>=
+static void
+mrtTest_EventInFlight(void)
+{
+    bool didevent = mrt_DispatchSingleEvent() ;
+    CU_ASSERT_FALSE(didevent) ;
+
+    int pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_AA_CLASSID,
+        TESTDOMAIN_AA_A1_INSTID,
+        TESTDOMAIN_AA_E1_EVENT,
+        NULL, 0) ;
+    CU_ASSERT(pcode == 0) ;
+
+    // Delete the instance so the event dispatch will fail.
+    pcode = mrt_PortalDeleteInstance(&testdomain__PORTAL,
+        TESTDOMAIN_AA_CLASSID,
+        TESTDOMAIN_AA_A1_INSTID) ;
+    CU_ASSERT(pcode == 0) ;
+
+    int code = catchFatalTransaction() ;
+    CU_ASSERT(code == mrtEventInFlight) ;
+
+    int count ;
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_AA_CLASSID,
+        TESTDOMAIN_AA_A1_INSTID,
+        TESTDOMAIN_AA_COUNT_ATTRID,
+        &count, sizeof(count)) ;
+    CU_ASSERT(pcode == MICCA_PORTAL_UNALLOC) ;
+}
+----
+
+=== Event Dispatch Causes Further Generation
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class B {
+    attribute count int -default 0
+    attribute width unsigned -default 10
+    attribute length unsigned -default 15
+    attribute area unsigned -dependent {
+        *area = <%my attr width%> * <%my attr length%> ;
+    }
+
+    statemodel {
+        state s1 {} {
+            printf("In %s\n", MRT_STATE_NAME) ;
+            <%my signal e2%>
+        }
+        transition s1 - e1 -> s1
+        transition s1 - e2 -> s2
+
+        state s2 {} {
+            (void)self ; // shut up compiler warning about unused self
+            printf("In %s\n", MRT_STATE_NAME) ;
+        }
+        transition s2 - e1 -> s1
+    }
+}
+
+<<test domain population>>=
+class B {
+    instance b1
+}
+----
+
+[source,c]
+----
+<<event dispatch test cases>>=
+{"cascade events", mrtTest_CascadeEvents},
+
+<<test functions>>=
+static void
+mrtTest_CascadeEvents(void)
+{
+    int current = mrt_PortalInstanceCurrentState(&testdomain__PORTAL,
+        TESTDOMAIN_B_CLASSID,
+        TESTDOMAIN_B_B1_INSTID) ;
+    CU_ASSERT(current == TESTDOMAIN_B_S1_STATE) ;
+
+    int pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_B_CLASSID,
+        TESTDOMAIN_B_B1_INSTID,
+        TESTDOMAIN_B_E1_EVENT,
+        NULL, 0) ;
+    CU_ASSERT(pcode == 0) ;
+
+    bool didevent = mrt_DispatchSingleEvent() ;
+    CU_ASSERT_TRUE(didevent) ;
+
+    didevent = mrt_DispatchSingleEvent() ;
+    CU_ASSERT_TRUE(didevent) ;
+
+    current = mrt_PortalInstanceCurrentState(&testdomain__PORTAL,
+        TESTDOMAIN_B_CLASSID,
+        TESTDOMAIN_B_B1_INSTID) ;
+    CU_ASSERT(current == TESTDOMAIN_B_S2_STATE) ;
+}
+----
+
+=== Dispatch Self Directed Event
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class WWW {
+    attribute w1 int -default 0
+    attribute first bool -default false
+
+    statemodel {
+        transition s1 - e1 -> s2
+        transition s2 - e2 -> s1
+
+        state s1 {} {
+            <% my attr first %> = false ;
+        }
+
+        state s2 {} {
+            <% my findOneRelated xref R54 %>
+            <% instance xref signal e1 %>
+            <% my signal e2 %>
+        }
+    }
+}
+
+class XXX {
+    statemodel {
+        transition s1 - e1 -> s1
+        state s1 {} {
+            <% my findOneRelated wref ~R54 %>
+            <% instance wref attr first %> = true ;
+        }
+    }
+}
+
+association R54 WWW 1--1 XXX
+
+<<test domain population>>=
+class WWW {
+    instance w1 R54 x1
+}
+
+class XXX {
+    instance x1
+}
+----
+
+[source,c]
+----
+<<event dispatch test cases>>=
+{"self directed events", mrtTest_SelfDirectedEvents},
+
+<<test functions>>=
+static void
+mrtTest_SelfDirectedEvents(void)
+{
+    int pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_WWW_CLASSID,
+        TESTDOMAIN_WWW_W1_INSTID,
+        TESTDOMAIN_WWW_E1_EVENT,
+        NULL, 0) ;
+    CU_ASSERT(pcode == 0) ;
+
+    bool didtoc = mrt_DispatchThreadOfControl(false) ;
+    CU_ASSERT_TRUE(didtoc) ;
+
+    bool first ;
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_WWW_CLASSID,
+        TESTDOMAIN_WWW_W1_INSTID,
+        TESTDOMAIN_WWW_FIRST_ATTRID,
+        &first, sizeof(first)) ;
+    CU_ASSERT(pcode == sizeof(first)) ;
+    CU_ASSERT(first == true) ;
+}
+----
+
+=== Dispatch Polymorphic Event for Reference Generalization
+
+Simple dispatch across a single level hierarchy of a reference generalization.
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class C {
+    polymorphic e1
+}
+
+generalization R1 C D E
+
+class D {
+    attribute count int -default 0
+
+    statemodel {
+        state s1 {} {
+            printf("In %s.%s\n", MRT_CLASS_NAME, MRT_STATE_NAME) ;
+            <%my attr count%>++ ;
+        }
+        transition s1 - e1 -> s1
+    }
+}
+class E {
+    attribute count int -default 0
+
+    statemodel {
+        state s1 {} {
+            printf("In %s.%s\n", MRT_CLASS_NAME, MRT_STATE_NAME) ;
+            <%my attr count%>++ ;
+        }
+        transition s1 - e1 -> s1
+    }
+}
+
+<<test domain population>>=
+class C {
+    instance c1
+    instance c2
+}
+class D {
+    instance d1 R1 c1
+}
+class E {
+    instance e1 R1 c2
+}
+----
+
+[source,c]
+----
+<<event dispatch test cases>>=
+{"signal polymorphic event", mrtTest_SignalPoly},
+
+<<test functions>>=
+static void
+mrtTest_SignalPoly(void)
+{
+    int pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_C_CLASSID,
+        TESTDOMAIN_C_C1_INSTID,
+        TESTDOMAIN_C_E1_EVENT,
+        NULL, 0) ;
+    CU_ASSERT(pcode == 0) ;
+
+    bool didevent = mrt_DispatchSingleEvent() ;
+    CU_ASSERT_TRUE(didevent) ;
+
+    int count ;
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_D_CLASSID,
+        TESTDOMAIN_D_D1_INSTID,
+        TESTDOMAIN_D_COUNT_ATTRID,
+        &count, sizeof(count)) ;
+    CU_ASSERT(pcode == sizeof(count)) ;
+    CU_ASSERT(count == 1) ;
+}
+----
+
+=== Event In Flight Error on Polymorphic Dispatch
+
+[source,c]
+----
+<<event dispatch test cases>>=
+{"event in flight error on polymorphic event", mrtTest_EIFOnSignalPoly},
+
+<<test functions>>=
+static void
+mrtTest_EIFOnSignalPoly(void)
+{
+    mrt_BeginSyncService() ;
+
+    int pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_C_CLASSID,
+        TESTDOMAIN_C_C2_INSTID,
+        TESTDOMAIN_C_E1_EVENT,
+        NULL, 0) ;
+    CU_ASSERT(pcode == 0) ;
+
+    pcode = mrt_PortalDeleteInstance(&testdomain__PORTAL,
+        TESTDOMAIN_C_CLASSID,
+        TESTDOMAIN_C_C2_INSTID) ;
+    CU_ASSERT(pcode == 0) ;
+
+    pcode = mrt_PortalDeleteInstance(&testdomain__PORTAL,
+        TESTDOMAIN_E_CLASSID,
+        TESTDOMAIN_E_E1_INSTID) ;
+    CU_ASSERT(pcode == 0) ;
+
+    mrt_EndSyncService() ;
+
+    int err = catchFatalTransaction() ;
+    CU_ASSERT(err == mrtEventInFlight) ;
+}
+----
+
+=== Polymorphic Dispatch across Repeated Generalization
+
+.Repeated generalization
+["plantuml"]
+----
+@startuml
+hide empty members
+hide circle
+skinparam shadowing false
+skinparam class {
+    BackgroundColor Yellow
+    BorderColor Black
+    ArrowColor Black
+}
+
+class F {}
+class G {}
+class H {}
+
+F <|-- G : R2
+F <|-- H : R2
+
+class I {}
+class J {}
+
+H <|-- I : R3
+H <|-- J : R3
+
+class K {}
+class L {}
+
+J <|-- K : R4
+J <|-- L : R4
+@enduml
+----
+
+[source,tcl]
+----
+<<test domain configuration>>=
+generalization R2 F G H
+
+class F {
+    polymorphic e1
+}
+class G {
+    statemodel {
+        state s1 {} {
+            (void)self ; // shut up compiler warning about unused self
+            printf("In %s.%s\n", MRT_CLASS_NAME, MRT_STATE_NAME) ;
+        }
+        transition s1 - e1 -> s1
+    }
+}
+
+generalization R3 H I J
+
+class H {}
+class I {
+    statemodel {
+        state s1 {} {
+            (void)self ; // shut up compiler warning about unused self
+            printf("In %s.%s\n", MRT_CLASS_NAME, MRT_STATE_NAME) ;
+        }
+        transition s1 - e1 -> s1
+    }
+}
+class J {}
+
+generalization R4 J K L
+
+class K {
+    attribute count int -default 0
+
+    statemodel {
+        state s1 {} {
+            printf("In %s.%s\n", MRT_CLASS_NAME, MRT_STATE_NAME) ;
+            <%my attr count%>++ ;
+        }
+        transition s1 - e1 -> s1
+    }
+}
+class L {
+    statemodel {
+        state s1 {} {
+        }
+        transition s1 - e1 -> s1
+    }
+}
+----
+
+[source,tcl]
+----
+<<test domain population>>=
+class F {
+    instance f1
+}
+class H {
+    instance h1 R2 f1
+}
+class J {
+    instance j1 R3 h1
+}
+class K {
+    instance k1 R4 j1
+}
+class G {
+    allocate 1
+}
+class I {
+    allocate 1
+}
+class L {
+    allocate 1
+}
+----
+
+[source,c]
+----
+<<event dispatch test cases>>=
+{"signal repeated polymorphic event", mrtTest_SignalRepeatedPoly},
+
+<<test functions>>=
+static void
+mrtTest_SignalRepeatedPoly(void)
+{
+    int pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_F_CLASSID,
+        TESTDOMAIN_F_F1_INSTID,
+        TESTDOMAIN_F_E1_EVENT,
+        NULL, 0) ;
+    CU_ASSERT(pcode == 0) ;
+
+    bool didevent = mrt_DispatchSingleEvent() ;
+    CU_ASSERT_TRUE(didevent) ;
+
+    int count ;
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_K_CLASSID,
+        TESTDOMAIN_K_K1_INSTID,
+        TESTDOMAIN_K_COUNT_ATTRID,
+        &count, sizeof(count)) ;
+    CU_ASSERT(pcode == sizeof(count)) ;
+    CU_ASSERT(count == 1) ;
+}
+----
+
+=== Polymorphic Dispatch across Compound Generalization
+
+.Compound generalization
+["plantuml"]
+----
+@startuml
+hide empty members
+hide circle
+skinparam shadowing false
+skinparam class {
+    BackgroundColor Yellow
+    BorderColor Black
+    ArrowColor Black
+}
+
+class S {}
+class T {}
+class P {}
+
+P <|-down- S : R7
+P <|-down- T : R7
+
+class Q {}
+class R {}
+
+P <|-up- Q : R6
+P <|-up- R : R6
+@enduml
+----
+
+[source,tcl]
+----
+<<test domain configuration>>=
+generalization R6 P Q R
+
+class P {
+    polymorphic e1
+}
+class Q {
+    attribute count int -default 0
+
+    statemodel {
+        state s1 {} {
+            printf("In %s.%s\n", MRT_CLASS_NAME, MRT_STATE_NAME) ;
+            <%my attr count%>++ ;
+        }
+        transition s1 - e1 -> s1
+    }
+}
+class R {
+    attribute count int -default 0
+
+    statemodel {
+        state s1 {} {
+            printf("In %s.%s\n", MRT_CLASS_NAME, MRT_STATE_NAME) ;
+            <%my attr count%>++ ;
+        }
+        transition s1 - e1 -> s1
+    }
+}
+generalization R7 -union P S T
+class S {
+    attribute count int -default 0
+
+    statemodel {
+        state s1 {} {
+            printf("In %s.%s\n", MRT_CLASS_NAME, MRT_STATE_NAME) ;
+            <%my attr count%>++ ;
+        }
+        transition s1 - e1 -> s1
+    }
+}
+class T {
+    attribute count int -default 0
+
+    statemodel {
+        state s1 {} {
+            printf("In %s.%s\n", MRT_CLASS_NAME, MRT_STATE_NAME) ;
+            <%my attr count%>++ ;
+        }
+        transition s1 - e1 -> s1
+    }
+}
+<<test domain population>>=
+class P {
+    instance p1
+}
+class Q {
+    instance q1 R6 p1
+}
+class R {
+    allocate 1
+}
+class S {
+    instance s1 R7 p1
+}
+----
+
+[source,c]
+----
+<<event dispatch test cases>>=
+{"signal compound polymorphic event", mrtTest_SignalCompoundPoly},
+
+<<test functions>>=
+static void
+mrtTest_SignalCompoundPoly(void)
+{
+    int qcount = 0 ;
+    int pcode = mrt_PortalUpdateAttr(&testdomain__PORTAL,
+        TESTDOMAIN_Q_CLASSID,
+        TESTDOMAIN_Q_Q1_INSTID,
+        TESTDOMAIN_Q_COUNT_ATTRID,
+        &qcount, sizeof(qcount)) ;
+    CU_ASSERT(pcode == sizeof(qcount)) ;
+
+    int current = mrt_PortalInstanceCurrentState(&testdomain__PORTAL,
+        TESTDOMAIN_Q_CLASSID,
+        TESTDOMAIN_Q_Q1_INSTID) ;
+    CU_ASSERT(current == TESTDOMAIN_Q_S1_STATE) ;
+
+    int scount = 0 ;
+    pcode = mrt_PortalUpdateAttr(&testdomain__PORTAL,
+        TESTDOMAIN_S_CLASSID,
+        TESTDOMAIN_S_S1_INSTID,
+        TESTDOMAIN_S_COUNT_ATTRID,
+        &scount, sizeof(scount)) ;
+    CU_ASSERT(pcode == sizeof(scount)) ;
+
+    current = mrt_PortalInstanceCurrentState(&testdomain__PORTAL,
+        TESTDOMAIN_S_CLASSID,
+        TESTDOMAIN_S_S1_INSTID) ;
+    CU_ASSERT(current == TESTDOMAIN_S_S1_STATE) ;
+
+    pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_P_CLASSID,
+        TESTDOMAIN_P_P1_INSTID,
+        TESTDOMAIN_P_E1_EVENT,
+        NULL, 0) ;
+    CU_ASSERT(pcode == 0) ;
+
+    bool didevent = mrt_DispatchSingleEvent() ;
+    CU_ASSERT_TRUE(didevent) ;
+
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_Q_CLASSID,
+        TESTDOMAIN_Q_Q1_INSTID,
+        TESTDOMAIN_Q_COUNT_ATTRID,
+        &qcount, sizeof(qcount)) ;
+    CU_ASSERT(pcode == sizeof(qcount)) ;
+    CU_ASSERT(qcount == 1) ;
+
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_S_CLASSID,
+        TESTDOMAIN_S_S1_INSTID,
+        TESTDOMAIN_S_COUNT_ATTRID,
+        &scount, sizeof(scount)) ;
+    CU_ASSERT(pcode == sizeof(scount)) ;
+    CU_ASSERT(scount == 1) ;
+}
+----
+
+=== Dispatch Polymorphic Event over Complex Generalization Hierarchy
+
+.Complex generalization hierarchy
+["plantuml"]
+----
+@startuml
+hide empty members
+hide circle
+skinparam shadowing false
+skinparam class {
+    BackgroundColor Yellow
+    BorderColor Black
+    ArrowColor Black
+}
+
+class SP {}
+class SA2 {}
+class SA1 {}
+class SA3 {}
+
+SP <|-- SA2 : R20
+SP <|-- SA1 : R20
+SP <|-- SA3 : R20
+
+class SB1 {}
+class SB2 {}
+class SC1 {}
+class SC2 {}
+
+SA1 <|-- SB1 : R21
+SA1 <|-- SB2 : R21
+SA1 <|-- SC1 : R22
+SA1 <|-- SC2 : R22
+@enduml
+----
+
+[source,tcl]
+----
+<<test domain configuration>>=
+generalization R20 SP SA1 SA2 SA3
+
+class SP {
+    attribute LastState {char const *} -default NULL
+
+    polymorphic e1
+    polymorphic e2
+    polymorphic a1
+
+    # transitioning state model
+    statemodel {
+        state s1 {} {
+            <%my update LastState {"s1"}%>
+        }
+        transition s1 - sp1 -> s1
+    }
+}
+class SA1 {
+    attribute LastState {char const *} -default NULL
+
+    # new polymorphic event a3
+    # inherited e1, e2, a1
+    # consume a1
+    polymorphic a3
+
+    # transitioning state model
+    statemodel {
+        state s1 {} {
+            <%my update LastState {"s1"}%>
+        }
+        transition s1 - a1 ->  s1
+    }
+}
+class SA2 {
+    attribute LastState {char const *} -default NULL
+
+    # inherited e1, e2, a1
+    # consume e1, e2, a1
+    statemodel {
+        state s1 {} {
+            <%my update LastState {"s1"}%>
+        }
+        state s2 {} {
+            <%my update LastState {"s2"}%>
+        }
+        transition s1 - e1 -> s1
+        transition s1 - e2 -> s2
+        transition s2 - a1 -> s1
+    }
+}
+class SA3 {
+    attribute LastState {char const *} -default NULL
+
+    # inherited e1, e2, a1
+    # consume e1, e2, a1
+    statemodel {
+        state s1 {} {
+            <%my update LastState {"s1"}%>
+        }
+        state s2 {} {
+            <%my update LastState {"s2"}%>
+        }
+        transition s1 - e1 -> s1
+        transition s1 - e2 -> s2
+        transition s2 - a1 -> s1
+    }
+}
+
+# Repeated generalization
+generalization R21 SA1 SB1 SB2
+
+class SB1 {
+    attribute LastState {char const *} -default NULL
+
+    # inherited e1, e2, a3
+    # consume e1, e2, a3
+    # local event sb1
+    statemodel {
+        state s1 {} {
+            <%my update LastState {"s1"}%>
+        }
+        state s2 {} {
+            <%my update LastState {"s2"}%>
+        }
+        state s3 {} {
+            <%my update LastState {"s3"}%>
+        }
+        transition s1 - e1 -> s1
+        transition s1 - e2 -> s2
+        transition s2 - sb1 -> s1 ; # local event sb1
+        transition s1 - a3 -> s3
+        transition s2 - a3 -> s3
+    }
+}
+class SB2 {
+    attribute LastState {char const *} -default NULL
+
+    # inherited e1, e2, a3
+    # consume e1, e2, a3
+    # local event sb2
+    statemodel {
+        state s1 {} {
+            <%my update LastState {"s1"}%>
+        }
+        state s2 {} {
+            <%my update LastState {"s2"}%>
+        }
+        state s3 {} {
+            <%my update LastState {"s3"}%>
+        }
+        transition s1 - e1 -> s1
+        transition s1 - e2 -> s2
+        transition s1 - a3 -> s3
+        transition s2 - sb2 -> s1 ; # local event sb2
+    }
+}
+
+# Compound generalization
+generalization R22 SA1 SC1 SC2
+
+class SC1 {
+    attribute LastState {char const *} -default NULL
+
+    # inherited e1, e2, a3
+    # consume e1, e2, a3
+    # local event sc1
+    statemodel {
+        state s1 {} {
+            <%my update LastState {"s1"}%>
+        }
+        state s2 {} {
+            <%my update LastState {"s2"}%>
+        }
+        transition s1 - e1 -> s1
+        transition s1 - e2 -> s1
+        transition s1 - a3 -> s2
+        transition s1 - sc1 -> s2
+    }
+}
+class SC2 {
+    attribute LastState {char const *} -default NULL
+
+    # inherited e1, e2, a3
+    # consume e1, e2, a3
+    statemodel {
+        state s1 {} {
+            <%my update LastState {"s1"}%>
+        }
+        state s2 {} {
+            <%my update LastState {"s2"}%>
+        }
+        transition s1 - e1 -> s2
+        transition s1 - a3 -> s2
+        transition s2 - e2 -> s1
+        transition s2 - a3 -> s1
+    }
+}
+
+<<test domain population>>=
+class SP {
+    instance sp_1
+    instance sp_2
+    instance sp_3
+    instance sp_4
+}
+class SA1 {
+    instance sa1_1 R20 sp_1
+    instance sa1_2 R20 sp_3
+}
+class SA2 {
+    instance sa2_1 R20 sp_2
+}
+class SA3 {
+    instance sa3_1 R20 sp_4
+}
+class SB1 {
+    instance sb1_1 R21 sa1_1
+}
+class SB2 {
+    instance sb2_1 R21 sa1_2
+}
+class SC1 {
+    instance sc1_1 R22 sa1_1
+}
+class SC2 {
+    instance sc2_1 R22 sa1_2
+}
+----
+
+[source,c]
+----
+<<event dispatch test cases>>=
+{"signal polymorphic event in complex hierarchy", mrtTest_SignalPolyComplex},
+
+<<test functions>>=
+static void
+mrtTest_SignalPolyComplex(void)
+{
+    int pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_SP_CLASSID,
+        TESTDOMAIN_SP_SP_1_INSTID,
+        TESTDOMAIN_SP_SP1_EVENT,
+        NULL, 0) ;
+    CU_ASSERT(pcode == 0) ;
+
+    bool didevent = mrt_DispatchSingleEvent() ;
+    CU_ASSERT_TRUE(didevent) ;
+
+    char const *ls = NULL ;
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_SP_CLASSID,
+        TESTDOMAIN_SP_SP_1_INSTID,
+        TESTDOMAIN_SP_LASTSTATE_ATTRID,
+        &ls, sizeof(ls)) ;
+    CU_ASSERT(pcode == sizeof(ls)) ;
+    CU_ASSERT_PTR_NOT_NULL_FATAL(ls) ;
+    CU_ASSERT_STRING_EQUAL(ls, "s1") ;
+
+    pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_SP_CLASSID,
+        TESTDOMAIN_SP_SP_2_INSTID,
+        TESTDOMAIN_SP_E2_EVENT,
+        NULL, 0) ;
+    CU_ASSERT(pcode == 0) ;
+
+    didevent = mrt_DispatchSingleEvent() ;
+    CU_ASSERT_TRUE(didevent) ;
+
+    ls = NULL ;
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_SA2_CLASSID,
+        TESTDOMAIN_SA2_SA2_1_INSTID,
+        TESTDOMAIN_SA2_LASTSTATE_ATTRID,
+        &ls, sizeof(ls)) ;
+    CU_ASSERT(pcode == sizeof(ls)) ;
+    CU_ASSERT_PTR_NOT_NULL_FATAL(ls) ;
+    CU_ASSERT_STRING_EQUAL(ls, "s2") ;
+
+    pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_SP_CLASSID,
+        TESTDOMAIN_SP_SP_1_INSTID,
+        TESTDOMAIN_SP_A1_EVENT,
+        NULL, 0) ;
+    CU_ASSERT(pcode == 0) ;
+
+    didevent = mrt_DispatchSingleEvent() ;
+    CU_ASSERT_TRUE(didevent) ;
+
+    ls = NULL ;
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_SA1_CLASSID,
+        TESTDOMAIN_SA1_SA1_1_INSTID,
+        TESTDOMAIN_SA1_LASTSTATE_ATTRID,
+        &ls, sizeof(ls)) ;
+    CU_ASSERT(pcode == sizeof(ls)) ;
+    CU_ASSERT_PTR_NOT_NULL_FATAL(ls) ;
+    CU_ASSERT_STRING_EQUAL(ls, "s1") ;
+
+    pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_SP_CLASSID,
+        TESTDOMAIN_SP_SP_1_INSTID,
+        TESTDOMAIN_SP_E2_EVENT,
+        NULL, 0) ;
+    CU_ASSERT(pcode == 0) ;
+
+    didevent = mrt_DispatchSingleEvent() ;
+    CU_ASSERT_TRUE(didevent) ;
+
+    ls = NULL ;
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_SB1_CLASSID,
+        TESTDOMAIN_SB1_SB1_1_INSTID,
+        TESTDOMAIN_SB1_LASTSTATE_ATTRID,
+        &ls, sizeof(ls)) ;
+    CU_ASSERT(pcode == sizeof(ls)) ;
+    CU_ASSERT_PTR_NOT_NULL_FATAL(ls) ;
+    CU_ASSERT_STRING_EQUAL(ls, "s2") ;
+
+    ls = NULL ;
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_SC1_CLASSID,
+        TESTDOMAIN_SC1_SC1_1_INSTID,
+        TESTDOMAIN_SC1_LASTSTATE_ATTRID,
+        &ls, sizeof(ls)) ;
+    CU_ASSERT(pcode == sizeof(ls)) ;
+    CU_ASSERT_PTR_NOT_NULL_FATAL(ls) ;
+    CU_ASSERT_STRING_EQUAL(ls, "s1") ;
+
+    pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_SA1_CLASSID,
+        TESTDOMAIN_SA1_SA1_2_INSTID,
+        TESTDOMAIN_SA1_A3_EVENT,
+        NULL, 0) ;
+    CU_ASSERT(pcode == 0) ;
+
+    didevent = mrt_DispatchSingleEvent() ;
+    CU_ASSERT_TRUE(didevent) ;
+
+    ls = NULL ;
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_SB2_CLASSID,
+        TESTDOMAIN_SB2_SB2_1_INSTID,
+        TESTDOMAIN_SB2_LASTSTATE_ATTRID,
+        &ls, sizeof(ls)) ;
+    CU_ASSERT(pcode == sizeof(ls)) ;
+    CU_ASSERT_PTR_NOT_NULL_FATAL(ls) ;
+    CU_ASSERT_STRING_EQUAL(ls, "s3") ;
+
+    ls = NULL ;
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_SC2_CLASSID,
+        TESTDOMAIN_SC2_SC2_1_INSTID,
+        TESTDOMAIN_SC2_LASTSTATE_ATTRID,
+        &ls, sizeof(ls)) ;
+    CU_ASSERT(pcode == sizeof(ls)) ;
+    CU_ASSERT_PTR_NOT_NULL_FATAL(ls) ;
+    CU_ASSERT_STRING_EQUAL(ls, "s2") ;
+}
+----
+
+=== Dispatch Polymorphic Event for Mixed Union/Reference Generalizations
+
+.Mixed union/reference generalization hierarchy
+["plantuml"]
+----
+@startuml
+hide empty members
+hide circle
+skinparam shadowing false
+skinparam class {
+    BackgroundColor Yellow
+    BorderColor Black
+    ArrowColor Black
+}
+
+class A {}
+class B {}
+class C {}
+
+A <|-down- B : R1
+A <|-down- C : R1
+
+class D {}
+class E {}
+B <|-down- D : R2
+B <|-down- E : R2
+
+class F {}
+class G {}
+D <|-down- F : R3
+D <|-down- G : R3
+
+class X {}
+X <|-up- G : R4
+X <|-up- E : R4
+
+class Y {}
+Y <|-up- F : R5
+Y <|-up- C : R5
+
+@enduml
+----
+
+[source,tcl]
+----
+<<test domain configuration>>=
+generalization R1m -union Am Bm Cm
+
+class Am {
+    attribute a int -default 0
+
+    polymorphic evA1
+}
+class Bm {
+    attribute b int -default 0
+}
+class Cm {
+    attribute c int -default 0
+
+    statemodel {
+        state CmS1 {} {
+            <%my attr c%>++ ;
+        }
+        transition CmS1 - evA1 -> CmS1
+        transition CmS1 - evY1 -> CmS1
+    }
+}
+
+generalization R2m -union Bm Dm Em
+
+class Dm {
+    attribute d int -default 0
+}
+class Em {
+    attribute e int -default 0
+
+    statemodel {
+        state EmS1 {} {
+            <%my attr e%>++ ;
+        }
+        transition EmS1 - evA1 -> EmS1
+        transition EmS1 - evX1 -> EmS1
+    }
+}
+
+generalization R3m -union Dm Fm Gm
+
+class Fm {
+    attribute f int -default 0
+
+    statemodel {
+        state FmS1 {} {
+            <%my attr f%>++ ;
+        }
+        transition FmS1 - evA1 -> FmS1
+        transition FmS1 - evY1 -> FmS1
+    }
+}
+class Gm {
+    attribute g int -default 0
+
+    statemodel {
+        state GmS1 {} {
+            <%my attr g%>++ ;
+        }
+        transition GmS1 - evA1 -> GmS1
+        transition GmS1 - evX1 -> GmS1
+    }
+}
+
+generalization R4m -reference Xm Gm Em
+
+class Xm {
+    attribute x int -default 0
+
+    polymorphic evX1
+}
+
+generalization R5m -reference Ym Fm Cm
+
+class Ym {
+    attribute y int -default 0
+
+    polymorphic evY1
+}
+----
+
+[source,tcl]
+----
+<<test domain population>>=
+class Am {
+    instance Am1
+    instance Am2
+    instance Am3
+    instance Am4
+}
+class Bm {
+    instance Bm1 R1m Am1
+    instance Bm2 R1m Am2
+    instance Bm3 R1m Am3
+}
+class Cm {
+    instance Cm1 R1m Am4 R5m Ym1
+}
+class Dm {
+    instance Dm1 R2m Bm1
+    instance Dm2 R2m Bm2
+}
+class Em {
+    instance Em1 R2m Bm3 R4m Xm1
+}
+class Fm {
+    instance Fm1 R3m Dm1 R5m Ym2
+}
+class Gm {
+    instance Gm1 R3m Dm2 R4m Xm2
+}
+class Xm {
+    instance Xm1
+    instance Xm2
+}
+class Ym {
+    instance Ym1
+    instance Ym2
+}
+----
+
+[source,c]
+----
+<<event dispatch test cases>>=
+{"dispatch poly event in mixed generalization", mrtTest_SignalPolyMixed},
+
+<<test functions>>=
+static void
+mrtTest_SignalPolyMixed(void)
+{
+    int pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_AM_CLASSID,
+        TESTDOMAIN_AM_AM1_INSTID,
+        TESTDOMAIN_AM_EVA1_EVENT,
+        NULL, 0) ;
+    CU_ASSERT(pcode == 0) ;
+
+    bool didevent = mrt_DispatchSingleEvent() ;
+    CU_ASSERT_TRUE(didevent) ;
+
+    int f = -1 ;
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_FM_CLASSID,
+        TESTDOMAIN_FM_FM1_INSTID,
+        TESTDOMAIN_FM_F_ATTRID,
+        &f, sizeof(f)) ;
+    CU_ASSERT(pcode == sizeof(f)) ;
+    CU_ASSERT(f == 1) ;
+
+    pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_YM_CLASSID,
+        TESTDOMAIN_YM_YM2_INSTID,
+        TESTDOMAIN_YM_EVY1_EVENT,
+        NULL, 0) ;
+    CU_ASSERT(pcode == 0) ;
+
+    didevent = mrt_DispatchSingleEvent() ;
+    CU_ASSERT_TRUE(didevent) ;
+
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_FM_CLASSID,
+        TESTDOMAIN_FM_FM1_INSTID,
+        TESTDOMAIN_FM_F_ATTRID,
+        &f, sizeof(f)) ;
+    CU_ASSERT(pcode == sizeof(f)) ;
+    CU_ASSERT(f == 2) ;
+}
+----
+
+=== Dispatch Polymorphic Event for Union Generalization
+
+Simple dispatch across a single level hierarchy of a union generalization.
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class CC {
+    polymorphic e1
+    polymorphic e2
+
+    statemodel {
+        state s1 {} {
+            printf("In %s.%s\n", MRT_CLASS_NAME, MRT_STATE_NAME) ;
+            (void)self ;
+        }
+        transition s1 - m1 -> s1
+    }
+}
+
+generalization R5 -union CC DD EE
+
+class DD {
+    attribute count int -default 0
+
+    statemodel {
+        state s1 {} {
+            printf("In %s.%s\n", MRT_CLASS_NAME, MRT_STATE_NAME) ;
+            <%my attr count%>++ ;
+        }
+        transition s1 - e1 -> s1
+        transition s1 - e2 -> IG
+    }
+}
+class EE {
+    statemodel {
+        state s1 {} {
+            (void)self ; // shut up compiler warning about unused self
+            printf("In %s.%s\n", MRT_CLASS_NAME, MRT_STATE_NAME) ;
+        }
+        transition s1 - e1 -> s1
+        transition s1 - e2 -> IG
+    }
+}
+
+<<test domain population>>=
+class CC {
+    instance c1
+}
+class DD {
+    instance d1 R5 c1
+}
+----
+
+[source,c]
+----
+<<event dispatch test cases>>=
+{"signal polymorphic event for union gen", mrtTest_SignalPolyUnion},
+
+<<test functions>>=
+static void
+mrtTest_SignalPolyUnion(void)
+{
+    int pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_CC_CLASSID,
+        TESTDOMAIN_CC_C1_INSTID,
+        TESTDOMAIN_CC_E1_EVENT,
+        NULL, 0) ;
+    CU_ASSERT(pcode == 0) ;
+
+    bool didevent = mrt_DispatchSingleEvent() ;
+    CU_ASSERT_TRUE(didevent) ;
+
+    int count ;
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_DD_CLASSID,
+        TESTDOMAIN_DD_D1_INSTID,
+        TESTDOMAIN_DD_COUNT_ATTRID,
+        &count, sizeof(count)) ;
+    CU_ASSERT(pcode == sizeof(count)) ;
+    CU_ASSERT(count == 1) ;
+}
+----
+
+=== Signal Delayed Event Through Portal
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class M {
+    attribute count int -default 0
+    statemodel {
+        state s1 {} {
+            printf("In %s.%s\n", MRT_CLASS_NAME, MRT_STATE_NAME) ;
+            <%my attr count%> += 1 ;
+        }
+        transition s1 - e1 -> s1
+    }
+}
+<<test domain population>>=
+class M {
+    instance m1
+}
+----
+
+[source,c]
+----
+<<event dispatch test cases>>=
+{"signal delayed event through portal", mrtTest_SignalPortalDelayedEvent},
+
+<<test functions>>=
+static void
+mrtTest_SignalPortalDelayedEvent(void)
+{
+    int count = 0 ;
+    int pcode = mrt_PortalUpdateAttr(&testdomain__PORTAL,
+        TESTDOMAIN_M_CLASSID,
+        TESTDOMAIN_M_M1_INSTID,
+        TESTDOMAIN_M_COUNT_ATTRID,
+        &count, sizeof(count)) ;
+    CU_ASSERT(pcode == sizeof(count)) ;
+
+    bool didevent = mrt_DispatchSingleEvent() ;
+    CU_ASSERT_FALSE(didevent) ;
+
+    pcode = mrt_PortalSignalDelayedEvent(&testdomain__PORTAL,
+        TESTDOMAIN_M_CLASSID,
+        TESTDOMAIN_M_M1_INSTID,
+        TESTDOMAIN_M_E1_EVENT, NULL, 0,
+        100) ;
+    CU_ASSERT(pcode == 0) ;
+
+    bool didtoc = mrt_DispatchThreadOfControl(true) ;
+    CU_ASSERT_TRUE(didtoc) ;
+
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_M_CLASSID,
+        TESTDOMAIN_M_M1_INSTID,
+        TESTDOMAIN_M_COUNT_ATTRID,
+        &count, sizeof(count)) ;
+    CU_ASSERT(pcode == sizeof(count)) ;
+    CU_ASSERT(count == 1) ;
+}
+----
+
+=== Cancel Delayed Event Through Portal
+
+[source,c]
+----
+<<event dispatch test cases>>=
+{"cancel delayed event through portal", mrtTest_CancelPortalDelayedEvent},
+
+<<test functions>>=
+static void
+mrtTest_CancelPortalDelayedEvent(void)
+{
+    int count = 0 ;
+    int pcode = mrt_PortalUpdateAttr(&testdomain__PORTAL,
+        TESTDOMAIN_M_CLASSID,
+        TESTDOMAIN_M_M1_INSTID,
+        TESTDOMAIN_M_COUNT_ATTRID,
+        &count, sizeof(count)) ;
+    CU_ASSERT(pcode == sizeof(count)) ;
+
+    bool didevent = mrt_DispatchSingleEvent() ;
+    CU_ASSERT_FALSE(didevent) ;
+
+    pcode = mrt_PortalSignalDelayedEvent(&testdomain__PORTAL,
+        TESTDOMAIN_M_CLASSID,
+        TESTDOMAIN_M_M1_INSTID,
+        TESTDOMAIN_M_E1_EVENT, NULL, 0,
+        100) ;
+    CU_ASSERT(pcode == 0) ;
+
+    MRT_DelayTime remain ;
+    pcode = mrt_PortalRemainingDelayTime(&testdomain__PORTAL,
+        TESTDOMAIN_M_CLASSID,
+        TESTDOMAIN_M_M1_INSTID,
+        TESTDOMAIN_M_E1_EVENT,
+        &remain) ;
+    CU_ASSERT(pcode == 0) ;
+    printf("remaining time = %" PRIu32 "\n", remain) ;
+
+    pcode = mrt_PortalCancelDelayedEvent(&testdomain__PORTAL,
+        TESTDOMAIN_M_CLASSID,
+        TESTDOMAIN_M_M1_INSTID,
+        TESTDOMAIN_M_E1_EVENT) ;
+    CU_ASSERT(pcode == 0) ;
+
+    didevent = mrt_DispatchSingleEvent() ;
+    CU_ASSERT_FALSE(didevent) ;
+
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_M_CLASSID,
+        TESTDOMAIN_M_M1_INSTID,
+        TESTDOMAIN_M_COUNT_ATTRID,
+        &count, sizeof(count)) ;
+    CU_ASSERT(pcode == sizeof(count)) ;
+    CU_ASSERT(count == 0) ;
+}
+----
+
+=== Signal Multiple Delayed Events
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class N {
+    attribute count int -default 0
+    statemodel {
+        state s1 {} {
+            printf("In %s.%s\n", MRT_CLASS_NAME, MRT_STATE_NAME) ;
+            <%my attr count%> += 1 ;
+        }
+        transition s1 - e1 -> s2
+
+        state s2 {} {
+            printf("In %s.%s\n", MRT_CLASS_NAME, MRT_STATE_NAME) ;
+            <%my attr count%> += 2 ;
+        }
+        transition s2 - e2 -> s3
+
+        state s3 {} {
+            printf("In %s.%s\n", MRT_CLASS_NAME, MRT_STATE_NAME) ;
+            <%my attr count%> += 3 ;
+        }
+        transition s3 - e3 -> s1
+    }
+}
+<<test domain population>>=
+class N {
+    instance n1
+}
+----
+
+[source,c]
+----
+<<event dispatch test cases>>=
+{"signal multiple delayed events", mrtTest_SignalMultDelayedEvent},
+
+<<test functions>>=
+static void
+mrtTest_SignalMultDelayedEvent(void)
+{
+    int count = 0 ;
+    int pcode = mrt_PortalUpdateAttr(&testdomain__PORTAL,
+        TESTDOMAIN_N_CLASSID,
+        TESTDOMAIN_N_N1_INSTID,
+        TESTDOMAIN_N_COUNT_ATTRID,
+        &count, sizeof(count)) ;
+    CU_ASSERT(pcode == sizeof(count)) ;
+
+    bool didevent = mrt_DispatchSingleEvent() ;
+    CU_ASSERT_FALSE(didevent) ;
+
+    pcode = mrt_PortalSignalDelayedEvent(&testdomain__PORTAL,
+        TESTDOMAIN_N_CLASSID,
+        TESTDOMAIN_N_N1_INSTID,
+        TESTDOMAIN_N_E3_EVENT, NULL, 0,
+        150) ;
+    CU_ASSERT(pcode == 0) ;
+    pcode = mrt_PortalSignalDelayedEvent(&testdomain__PORTAL,
+        TESTDOMAIN_N_CLASSID,
+        TESTDOMAIN_N_N1_INSTID,
+        TESTDOMAIN_N_E1_EVENT, NULL, 0,
+        50) ;
+    CU_ASSERT(pcode == 0) ;
+    pcode = mrt_PortalSignalDelayedEvent(&testdomain__PORTAL,
+        TESTDOMAIN_N_CLASSID,
+        TESTDOMAIN_N_N1_INSTID,
+        TESTDOMAIN_N_E2_EVENT, NULL, 0,
+        75) ;
+    CU_ASSERT(pcode == 0) ;
+    // repost duplicate to remove the previous one
+    // want to remove one in the middle
+    pcode = mrt_PortalSignalDelayedEvent(&testdomain__PORTAL,
+        TESTDOMAIN_N_CLASSID,
+        TESTDOMAIN_N_N1_INSTID,
+        TESTDOMAIN_N_E2_EVENT, NULL, 0,
+        100) ;
+    CU_ASSERT(pcode == 0) ;
+
+    bool didtoc = mrt_DispatchThreadOfControl(true) ;
+    CU_ASSERT_TRUE(didtoc) ;
+    didtoc = mrt_DispatchThreadOfControl(true) ;
+    CU_ASSERT_TRUE(didtoc) ;
+    didtoc = mrt_DispatchThreadOfControl(true) ;
+    CU_ASSERT_TRUE(didtoc) ;
+
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_N_CLASSID,
+        TESTDOMAIN_N_N1_INSTID,
+        TESTDOMAIN_N_COUNT_ATTRID,
+        &count, sizeof(count)) ;
+    CU_ASSERT(pcode == sizeof(count)) ;
+    CU_ASSERT(count == 6) ;
+}
+----
+
+=== Cancel Delayed Event
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class O {
+    attribute canceled bool -default false
+    attribute remain MRT_DelayTime -default 0
+    statemodel {
+        state s1 {} {
+            printf("In %s.%s\n", MRT_CLASS_NAME, MRT_STATE_NAME) ;
+            <%my update canceled false%>
+        }
+        transition s1 - e1 -> s2
+
+        state s2 {} {
+            printf("In %s.%s\n", MRT_CLASS_NAME, MRT_STATE_NAME) ;
+            <%my signal e2%>
+            <%my delaysignal 100 e3%>
+        }
+        transition s2 - e2 -> s3
+
+        state s3 {} {
+            printf("In %s.%s\n", MRT_CLASS_NAME, MRT_STATE_NAME) ;
+            MRT_DelayTime rem = <%my delayremaining e3 self%> ;
+            <%my update remain rem%>
+            printf("remain = %" PRIu32 "\n", <%my attr remain%>) ;
+            <%my canceldelayed e3 self%>
+            <%my delaysignal 150 e4%>
+        }
+        transition s3 - e3 -> s1
+        transition s3 - e4 -> s4
+
+        state s4 {} {
+            printf("In %s.%s\n", MRT_CLASS_NAME, MRT_STATE_NAME) ;
+            <%my update canceled true%>
+        }
+    }
+}
+<<test domain population>>=
+class O {
+    instance o1
+}
+----
+
+[source,c]
+----
+<<event dispatch test cases>>=
+{"cancel delayed event", mrtTest_CancelDelayedEvent},
+
+<<test functions>>=
+static void
+mrtTest_CancelDelayedEvent(void)
+{
+    bool canceled = false ;
+    int pcode = mrt_PortalUpdateAttr(&testdomain__PORTAL,
+        TESTDOMAIN_O_CLASSID,
+        TESTDOMAIN_O_O1_INSTID,
+        TESTDOMAIN_O_CANCELED_ATTRID,
+        &canceled, sizeof(canceled)) ;
+    CU_ASSERT(pcode == sizeof(canceled)) ;
+
+    bool didevent = mrt_DispatchSingleEvent() ;
+    CU_ASSERT_FALSE(didevent) ;
+
+    pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_O_CLASSID,
+        TESTDOMAIN_O_O1_INSTID,
+        TESTDOMAIN_O_E1_EVENT,
+        NULL, 0) ;
+    CU_ASSERT(pcode == 0) ;
+
+    bool didtoc = mrt_DispatchThreadOfControl(true) ;
+    CU_ASSERT_TRUE(didtoc) ;
+    didtoc = mrt_DispatchThreadOfControl(true) ;
+    CU_ASSERT_TRUE(didtoc) ;
+
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_O_CLASSID,
+        TESTDOMAIN_O_O1_INSTID,
+        TESTDOMAIN_O_CANCELED_ATTRID,
+        &canceled, sizeof(canceled)) ;
+    CU_ASSERT(pcode == sizeof(canceled)) ;
+    CU_ASSERT_TRUE(canceled) ;
+
+    MRT_DelayTime remain ;
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_O_CLASSID,
+        TESTDOMAIN_O_O1_INSTID,
+        TESTDOMAIN_O_REMAIN_ATTRID,
+        &remain, sizeof(remain)) ;
+    CU_ASSERT(pcode == sizeof(remain)) ;
+    CU_ASSERT(remain >= 95 && remain <= 100) ;
+
+    pcode = mrt_PortalInstanceCurrentState(&testdomain__PORTAL,
+        TESTDOMAIN_O_CLASSID,
+        TESTDOMAIN_O_O1_INSTID) ;
+    CU_ASSERT(pcode >= 0) ;
+}
+----
+
+== Instance Management
+
+[source,c]
+----
+<<test suites>>=
+{"instance management", NULL, NULL, NULL, NULL, instanceManagementSuiteTests},
+----
+
+[source,c]
+----
+<<suite tests>>=
+<<instance management suite tests>>
+
+<<instance management suite tests>>=
+static CU_TestInfo instanceManagementSuiteTests[] = {
+    <<instance management test cases>>
+    CU_TEST_INFO_NULL,
+} ;
+----
+
+=== Synchronous Instance Creation and Deletion
+
+[source,c]
+----
+<<instance management test cases>>=
+{"create instance", mrtTest_CreateInstance},
+
+<<test functions>>=
+static void
+mrtTest_CreateInstance(void)
+{
+    int instid = mrt_PortalCreateInstance(&testdomain__PORTAL,
+        TESTDOMAIN_A_CLASSID, MRT_StateCode_IG) ;
+    CU_ASSERT(instid >= 0 && instid < TESTDOMAIN_A_INSTCOUNT) ;
+
+    bool ranctor ;
+    int pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_A_CLASSID,
+        instid,
+        TESTDOMAIN_A_RANCTOR_ATTRID,
+        &ranctor, sizeof(ranctor)) ;
+    CU_ASSERT(pcode == sizeof(ranctor)) ;
+    CU_ASSERT_TRUE(ranctor) ;
+
+    pcode = mrt_PortalDeleteInstance(&testdomain__PORTAL,
+        TESTDOMAIN_A_CLASSID, instid) ;
+    CU_ASSERT(pcode == 0) ;
+}
+----
+
+=== Insufficient Space to Create Instance
+
+[source,c]
+----
+<<instance management test cases>>=
+{"no instance space", mrtTest_CreateInstanceFailure},
+
+<<test functions>>=
+static void
+mrtTest_CreateInstanceFailure(void)
+{
+    int pcode = mrt_PortalCreateInstance(&testdomain__PORTAL,
+        TESTDOMAIN_AA_CLASSID, MRT_StateCode_IG) ;
+    CU_ASSERT(pcode == 0) ;
+
+    catchFatal() ;
+
+    int code = setjmp(fatalbuf) ;
+    if (code == 0) {
+        (void)mrt_PortalCreateInstance(&testdomain__PORTAL,
+            TESTDOMAIN_AA_CLASSID, MRT_StateCode_IG) ;
+    }
+
+    restoreFatal() ;
+    CU_ASSERT(code == mrtNoInstSlot) ;
+}
+----
+
+=== Asynchronous Instance Creation and Deletion
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class U {
+    attribute count int -default 0
+    statemodel {
+        state s1 {} {
+            printf("In %s.%s\n", MRT_CLASS_NAME, MRT_STATE_NAME) ;
+            <%my attr count%> += 1 ;
+        }
+        transition @ - e1 -> s1
+
+        final s2
+        state s2 {} {
+            printf("In %s.%s\n", MRT_CLASS_NAME, MRT_STATE_NAME) ;
+            <%my attr count%> += 1 ;
+        }
+        transition s1 - e2 -> s2
+    }
+}
+<<test domain population>>=
+class U {
+    allocate 1
+}
+----
+
+[source,c]
+----
+<<instance management test cases>>=
+{"async create instance", mrtTest_AsyncCreateInstance},
+
+<<test functions>>=
+static void
+mrtTest_AsyncCreateInstance(void)
+{
+    bool didevent = mrt_DispatchSingleEvent() ;
+    CU_ASSERT_FALSE(didevent) ;
+
+    int instid = mrt_PortalCreateInstanceAsync(&testdomain__PORTAL,
+        TESTDOMAIN_U_CLASSID, TESTDOMAIN_U_E1_EVENT, NULL, 0) ;
+    CU_ASSERT(instid >= 0 && instid < TESTDOMAIN_U_INSTCOUNT) ;
+
+    didevent = mrt_DispatchSingleEvent() ;
+    CU_ASSERT_TRUE(didevent) ;
+
+    int pcode = mrt_PortalSignalEvent(&testdomain__PORTAL,
+        TESTDOMAIN_U_CLASSID, instid, TESTDOMAIN_U_E2_EVENT, NULL, 0) ;
+    CU_ASSERT(pcode == 0) ;
+
+    didevent = mrt_DispatchSingleEvent() ;
+    CU_ASSERT_TRUE(didevent) ;
+}
+----
+
+== Relationship Management
+
+[source,c]
+----
+<<test suites>>=
+{"relationship management", NULL, NULL, NULL, NULL, relationshipManagementSuiteTests},
+----
+
+[source,c]
+----
+<<suite tests>>=
+<<relationship management suite tests>>
+
+<<relationship management suite tests>>=
+static CU_TestInfo relationshipManagementSuiteTests[] = {
+    <<relationship management test cases>>
+    CU_TEST_INFO_NULL,
+} ;
+----
+
+=== Relate One To One Simple Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class V {}
+class X {}
+association R8 V 1--1 X
+
+<<test domain population>>=
+class V {
+    allocate 1
+}
+class X {
+    allocate 2
+}
+----
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void relateVtoX {} {
+    CU_ASSERT_TRUE(
+        mrt_CanCreateInstance(&testdomain__CLASSES[TESTDOMAIN_X_CLASSID])) ;
+
+    <%X create xref%>
+    <%V create vref R8 xref%>
+    <%instance vref findOneRelated linkedx R8%>
+    CU_ASSERT_PTR_EQUAL(xref, linkedx) ;
+    <%instance xref findOneRelated linkedv ~R8%>
+    CU_ASSERT_PTR_EQUAL(vref, linkedv) ;
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"relate simple 1--1", mrtTest_RelateSimpleOneToOne},
+
+<<test functions>>=
+static void
+mrtTest_RelateSimpleOneToOne(void)
+{
+    testdomain_relateVtoX() ;
+    mrt_DispatchSingleEvent() ;
+}
+----
+
+=== Swap One To One Simple Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void referenceVfromX {} {
+    <%V idtoref 0 vref%>
+    <%instance vref findOneRelated oldx R8%>
+    <%X create xref%>
+    <%R8 reference vref xref%>
+    <%instance oldx delete%>
+
+    <%instance vref findOneRelated linkedx R8%>
+    CU_ASSERT_PTR_EQUAL(xref, linkedx) ;
+    <%instance xref findOneRelated linkedv ~R8%>
+    CU_ASSERT_PTR_EQUAL(vref, linkedv) ;
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"reference simple 1--1", mrtTest_SwapSimpleOneToOne},
+
+<<test functions>>=
+static void
+mrtTest_SwapSimpleOneToOne(void)
+{
+    testdomain_referenceVfromX() ;
+    mrt_DispatchSingleEvent() ;
+}
+----
+
+=== Unrelate One To One Simple Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void unrelateVfromX {} {
+    <%V foreachInstance vref%>
+        <%instance vref findOneRelated xref R8%>
+        <%instance xref delete%>
+        <%instance vref delete%>
+    <%end%>
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"unrelate simple 1--1", mrtTest_UnrelateSimpleOneToOne},
+
+<<test functions>>=
+static void
+mrtTest_UnrelateSimpleOneToOne(void)
+{
+    testdomain_unrelateVfromX() ;
+    mrt_DispatchSingleEvent() ;
+}
+----
+
+=== One To One Reflexive Simple Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class Vr {
+    attribute count int
+}
+association R8r Vr 1--1 Vr
+
+<<test domain population>>=
+class Vr {
+    # forms a loop from 0 -> 1 -> 2 -> 3 back to 0
+    instance Vr0 count 0 R8r Vr1
+    instance Vr1 count 1 R8r Vr2
+    instance Vr2 count 2 R8r Vr3
+    instance Vr3 count 3 R8r Vr0
+}
+----
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void relateVrtoVr {} {
+    <%Vr findByName Vr0 vref0%>
+    CU_ASSERT(vref0->count == 0) ;
+    <%instance vref0 findOneRelated vref1 R8r%>
+    CU_ASSERT(vref1->count == 1) ;
+    <%instance vref0 findOneRelated vref3 ~R8r%>
+    CU_ASSERT(vref3->count == 3) ;
+
+    // divide into two loops 0 -> 3 -> 0
+    <%R8r reference vref0 vref3%>
+
+    <%instance vref1 findOneRelated vref2 R8r%>
+    CU_ASSERT(vref2->count == 2) ;
+
+    // close second loop 1 -> 2 -> 1
+    <%R8r reference vref2 vref1%>
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"reflexive simple 1--1", mrtTest_ReflexiveSimpleOneToOne},
+
+<<test functions>>=
+static void
+mrtTest_ReflexiveSimpleOneToOne(void)
+{
+    testdomain_relateVrtoVr() ;
+    mrt_DispatchSingleEvent() ;
+}
+----
+
+=== Relate Many To One Simple Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class MM {}
+class OO {}
+association R9 MM 1..*--1 OO
+
+<<test domain population>>=
+class MM {
+    allocate 4
+}
+class OO {
+    allocate 2
+}
+----
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void relateMMtoOO {} {
+    <%OO create ooref%>
+    <%MM create mmref1 R9 ooref%>
+    <%MM create mmref2 R9 ooref%>
+
+    <%instance mmref1 findOneRelated linkedoo R9%>
+    CU_ASSERT_PTR_EQUAL(ooref, linkedoo) ;
+    <%instance mmref2 findOneRelated linkedoo R9%>
+    CU_ASSERT_PTR_EQUAL(ooref, linkedoo) ;
+
+    <%instance ooref foreachRelated linkedmm ~R9%>
+        <%instance linkedmm findOneRelated linkedoo R9%>
+        CU_ASSERT_PTR_EQUAL(ooref, linkedoo) ;
+    <%end%>
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"relate simple M--1", mrtTest_RelateSimpleManyToOne},
+
+<<test functions>>=
+static void
+mrtTest_RelateSimpleManyToOne(void)
+{
+    testdomain_relateMMtoOO() ;
+    mrt_DispatchSingleEvent() ;
+}
+----
+
+=== Unrelate Many To One Simple Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void unrelateMMfromOO {} {
+    <%MM foreachInstance mref%>
+        <%instance mref delete%>
+    <%end%>
+    <%OO foreachInstance oref%>
+        <%instance oref delete%>
+    <%end%>
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"unrelate class M--1", mrtTest_UnrelateSimpleManyToOne},
+
+<<test functions>>=
+static void
+mrtTest_UnrelateSimpleManyToOne(void)
+{
+    testdomain_unrelateMMfromOO() ;
+    mrt_DispatchSingleEvent() ;
+}
+----
+
+=== Many To One Static Simple Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class MMs {}
+class OOs {}
+association R9s -static MMs 0..*--1 OOs
+
+<<test domain population>>=
+class MMs {
+    instance mm0 R9s oo0
+    instance mm1 R9s oo0
+    instance mm2 R9s oo0
+}
+class OOs {
+    instance oo0
+    allocate 2
+}
+----
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void relateMMstoOOs {} {
+    <%OOs create ooref%>
+    <%instance ooref selectRelated mrefset ~R9s%>
+    CU_ASSERT_TRUE(<%instset mrefset empty%>) ;
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"static simple M--1", mrtTest_StaticSimpleManyToOne},
+
+<<test functions>>=
+static void
+mrtTest_StaticSimpleManyToOne(void)
+{
+    testdomain_relateMMstoOOs() ;
+    mrt_DispatchSingleEvent() ;
+}
+----
+
+=== Relate Many To One Simple Reflexive Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class MMr {
+    attribute count int
+}
+association R9r MMr 0..*--1 MMr
+
+<<test domain population>>=
+class MMr {
+    instance mmr0 R9r mmr0 count 0
+    instance mmr1 R9r mmr0 count 1
+    instance mmr2 R9r mmr0 count 2
+    instance mmr3 R9r mmr1 count 3
+}
+----
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void referenceMMr {} {
+    <%MMr findByName mmr0 mr0%>
+    CU_ASSERT(mr0->count == 0) ;
+    <%instance mr0 foreachRelated ref ~R9r%>
+        CU_ASSERT(ref->count >= 0 && ref->count <= 2) ;
+    <%end%>
+
+    <%MMr findByName mmr1 mr1%>
+    <%MMr findByName mmr2 mr2%>
+    <%R9r reference mr2 mr1%>
+    <%MMr findByName mmr3 mr3%>
+    <%R9r reference mr3 mr0%>
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"reference simple 0..*--1", mrtTest_SwapSimpleManyToOne},
+
+<<test functions>>=
+static void
+mrtTest_SwapSimpleManyToOne(void)
+{
+    testdomain_referenceMMr() ;
+    mrt_DispatchSingleEvent() ;
+}
+----
+
+=== Relate One To One Class Based Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class YY {}
+class VV {}
+class XX {}
+association R10 -associator YY VV 1--1 XX
+
+<<test domain population>>=
+class YY {
+    allocate 2
+}
+class VV {
+    allocate 1
+}
+class XX {
+    allocate 1
+}
+----
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void relateVVtoXX {} {
+    <%VV create vref%>
+    <%XX create xref%>
+    <%YY create yref R10 {VV vref XX xref}%>
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"relate class based 1--1", mrtTest_RelateClassOneToOne},
+
+<<test functions>>=
+static void
+mrtTest_RelateClassOneToOne(void)
+{
+    testdomain_relateVVtoXX() ;
+    mrt_DispatchSingleEvent() ;
+}
+----
+
+=== Unrelate One To One Class Based Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void unrelateVVtoXX {} {
+    <%YY foreachInstance yref%>
+        <%instance yref findOneRelated xref {R10 XX}%>
+        <%instance yref findOneRelated vref {~R10 VV}%>
+        <%instance yref delete%>
+        <%instance vref delete%>
+        <%instance xref delete%>
+    <%end%>
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"unrelate class based 1--1", mrtTest_UnrelateClassOneToOne},
+
+<<test functions>>=
+static void
+mrtTest_UnrelateClassOneToOne(void)
+{
+    testdomain_unrelateVVtoXX() ;
+    mrt_DispatchSingleEvent() ;
+}
+----
+
+=== Duplicated Relate 1 To 1 Class Based Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void dupRelateVVtoXX {} {
+    <%VV create vref%>
+    <%XX create xref%>
+    <%YY create yref R10 {VV vref XX xref}%>
+    <%YY create yref R10 {VV vref XX xref}%>
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"duplicate relate class based 1--1", mrtTest_DuplicateRelateClassOneToOne},
+
+<<test functions>>=
+static void
+mrtTest_DuplicateRelateClassOneToOne(void)
+{
+    int code = catchFatalDomainOp(testdomain_dupRelateVVtoXX) ;
+    CU_ASSERT(code == mrtDupAssociator) ;
+
+    // Clean up the referential integrity problems by simply
+    // deleting all the instances.
+    int pcode = mrt_PortalDeleteInstance(&testdomain__PORTAL,
+        TESTDOMAIN_VV_CLASSID, 0) ;
+    CU_ASSERT(pcode == 0) ;
+    pcode = mrt_PortalDeleteInstance(&testdomain__PORTAL,
+        TESTDOMAIN_XX_CLASSID, 0) ;
+    CU_ASSERT(pcode == 0) ;
+    pcode = mrt_PortalDeleteInstance(&testdomain__PORTAL,
+        TESTDOMAIN_YY_CLASSID, 0) ;
+    CU_ASSERT(pcode == 0) ;
+    pcode = mrt_PortalDeleteInstance(&testdomain__PORTAL,
+        TESTDOMAIN_YY_CLASSID, 1) ;
+    mrt_DispatchSingleEvent() ;
+}
+----
+
+=== Relate One To One Reflexive Class Based Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class YYr {}
+class VVr {
+    attribute number int
+}
+
+association R10r -associator YYr VVr 1--1 VVr
+
+<<test domain population>>=
+class YYr {
+    allocate 2
+}
+class VVr {
+    allocate 2
+}
+----
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void relateVVr {} {
+    <%VVr create vref0 number 0%>
+    <%VVr create vref1 number 1%>
+    // because R10r is unconditional, we have to form a
+    // complete "circle"
+    <%YYr create yref0 R10r {backward vref0 forward vref1}%>
+    <%YYr create yref1 R10r {backward vref1 forward vref0}%>
+
+    <%instance vref0 findOneRelated vr R10r%>
+    CU_ASSERT(vr->number == 1) ;
+    <%instance vref1 findOneRelated vr ~R10r%>
+    CU_ASSERT(vr->number == 0) ;
+}
+
+domainop void referenceVVr {} {
+    <%VVr findWhere vref0 {vref0->number == 0}%>
+    CU_ASSERT_PTR_NOT_NULL_FATAL(vref0) ;
+    <%VVr findWhere vref1 {vref1->number == 1}%>
+    CU_ASSERT_PTR_NOT_NULL_FATAL(vref1) ;
+
+    // yref0 is the 0 -> 1 path
+    <%instance vref0 findOneRelated yref0 {R10r YYr}%>
+    CU_ASSERT_PTR_NOT_NULL_FATAL(yref0) ;
+    // yref1 this is the 1 -> 0 path
+    <%instance vref1 findOneRelated yref1 {R10r YYr}%>
+    CU_ASSERT_PTR_NOT_NULL_FATAL(yref1) ;
+
+    // now invert the "circle"
+    // yref0 is now the 1 -> 0 path
+    <%R10r reference yref0 vref1 backward%>
+    <%R10r reference yref0 vref0 forward%>
+
+    // yref1 is now the 0 -> 1 path
+    <%R10r reference yref1 vref0 backward%>
+    <%R10r reference yref1 vref1 forward%>
+
+    // check that we get the right numbers
+    <%instance yref0 findOneRelated vr R10r%>
+    CU_ASSERT(vr->number == 0) ;
+    <%instance yref1 findOneRelated vr R10r%>
+    CU_ASSERT(vr->number == 1) ;
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"relate reflexive class based 1--1", mrtTest_RelateReflexiveClassOneToOne},
+
+<<test functions>>=
+static void
+mrtTest_RelateReflexiveClassOneToOne(void)
+{
+    testdomain_relateVVr() ;
+    mrt_DispatchSingleEvent() ;
+
+    testdomain_referenceVVr() ;
+    mrt_DispatchSingleEvent() ;
+}
+----
+
+=== Relate Conditional One To One Reflexive Class Based Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class YYcr {}
+class VVcr {
+    attribute number int
+}
+
+association R10cr -associator YYcr VVcr 0..1--0..1 VVcr
+
+<<test domain population>>=
+class YYcr {
+    allocate 2
+}
+class VVcr {
+    allocate 2
+}
+----
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void relateVVcr {} {
+    <%VVcr create vref0 number 0%>
+    <%VVcr create vref1 number 1%>
+    <%YYcr create yref0 R10cr {backward vref0 forward vref1}%>
+
+    <%instance vref0 findOneRelated vr R10cr%>
+    CU_ASSERT(vr->number == 1) ;
+    <%instance vref1 findOneRelated vr ~R10cr%>
+    CU_ASSERT(vr->number == 0) ;
+}
+
+domainop void referenceVVcr {} {
+    <%VVcr findWhere vref0 {vref0->number == 0}%>
+    CU_ASSERT_PTR_NOT_NULL_FATAL(vref0) ;
+    <%VVcr findWhere vref1 {vref1->number == 1}%>
+    CU_ASSERT_PTR_NOT_NULL_FATAL(vref1) ;
+
+    // yref0 is the 0 -> 1 path
+    <%instance vref0 findOneRelated yref0 {R10cr YYcr}%>
+    CU_ASSERT_PTR_NOT_NULL_FATAL(yref0) ;
+
+    // now invert the path
+    // yref0 is now the 1 -> 0 path
+    <%R10cr reference yref0 vref1 backward%>
+    <%R10cr reference yref0 vref0 forward%>
+
+    // check that we get the right numbers
+    <%instance yref0 findOneRelated vr R10cr%>
+    CU_ASSERT(vr->number == 0) ;
+    <%instance yref0 findOneRelated vr ~R10cr%>
+    CU_ASSERT(vr->number == 1) ;
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"relate reflexive class based 1c--1c", mrtTest_RelateCondReflexiveClassOneToOne},
+
+<<test functions>>=
+static void
+mrtTest_RelateCondReflexiveClassOneToOne(void)
+{
+    testdomain_relateVVcr() ;
+    mrt_DispatchSingleEvent() ;
+
+    testdomain_referenceVVcr() ;
+    mrt_DispatchSingleEvent() ;
+}
+----
+
+=== Relate Many To One Class Based Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class FF {}
+class GG {}
+class HH {}
+association R11 -associator FF GG 1..*--1 HH
+
+<<test domain population>>=
+class FF {
+    allocate 2
+}
+class GG {
+    allocate 2
+}
+class HH {
+    allocate 2
+}
+----
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void relateGGtoHH {} {
+    <%HH create href%>
+    <%GG create gref%>
+    <%FF create fref R11 {GG gref HH href}%>
+    <%GG create gref%>
+    <%FF create fref R11 {GG gref HH href}%>
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"relate class based M--1", mrtTest_RelateClassManyToOne},
+
+<<test functions>>=
+static void
+mrtTest_RelateClassManyToOne(void)
+{
+    testdomain_relateGGtoHH() ;
+    mrt_DispatchSingleEvent() ;
+}
+----
+
+=== Unrelate Many To One Class Based Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void unrelateGGtoHH {} {
+    <%GG foreachInstance gref%>
+        <%instance gref findOneRelated fref {R11 FF}%>
+        <%instance fref findOneRelated href {R11 HH}%>
+        <%instance fref delete%>
+        <%instance gref delete%>
+        <%instance href delete%>
+    <%end%>
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"unrelate class based M--1", mrtTest_UnrelateClassManyToOne},
+
+<<test functions>>=
+static void
+mrtTest_UnrelateClassManyToOne(void)
+{
+    testdomain_unrelateGGtoHH() ;
+    mrt_DispatchSingleEvent() ;
+}
+----
+
+=== Relate Many To Many Class Based Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class II {}
+class JJ {
+    attribute j int
+}
+class KK {
+    attribute k int
+}
+association R12 -associator II JJ 1..*--1..* KK
+
+<<test domain population>>=
+class II {
+    allocate 4
+}
+class JJ {
+    allocate 4
+}
+class KK {
+    allocate 2
+}
+----
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void relateJJtoKK {} {
+    <%KK create kref0 k 0%>
+    <%JJ create jref0 j 0%>
+    <%II create iref0 R12 {JJ jref0 KK kref0}%>
+    <%JJ create jref1 j 1%>
+    <%II create iref1 R12 {JJ jref1 KK kref0}%>
+}
+
+domainop void referenceJJtoKK {} {
+    <%JJ findWhere jref0 {jref0->j == 0}%>
+    CU_ASSERT_PTR_NOT_NULL(jref0) ;
+
+    <%instance jref0 findRelatedWhere iref0 {"true"} {R12 II}%>
+    CU_ASSERT_PTR_NOT_NULL(iref0) ;
+
+    <%JJ create jref2 j 2%>
+    <%R12 reference iref0 jref2%>
+    <%instance jref0 delete%>
+
+    <%instance iref0 findOneRelated newjref ~R12%>
+    CU_ASSERT(<%instance newjref attr j%> == 2) ;
+
+    <%instance iref0 findOneRelated kref0 R12%>
+    CU_ASSERT(<%instance kref0 attr k%> == 0) ;
+    <%KK create kref1 k 1%>
+    <%R12 reference iref0 kref1%>
+
+    <%instance iref0 findOneRelated newkref R12%>
+    CU_ASSERT(<%instance newkref attr k%> == 1) ;
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"relate class based M--M", mrtTest_RelateClassManyToMany},
+
+<<test functions>>=
+static void
+mrtTest_RelateClassManyToMany(void)
+{
+    testdomain_relateJJtoKK() ;
+    mrt_DispatchSingleEvent() ;
+
+    testdomain_referenceJJtoKK() ;
+    mrt_DispatchSingleEvent() ;
+}
+----
+
+=== Unrelate Many To Many Class Based Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void unrelateJJtoKK {} {
+    <%JJ foreachInstance jref%>
+        <%instance jref foreachRelated iref {R12 II}%>
+            <%instance iref findOneRelated kref {R12 KK}%>
+            <%instance jref delete%>
+            <%instance kref delete%>
+            <%instance iref delete%>
+        <%end%>
+    <%end%>
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"unrelate class based M--M", mrtTest_UnrelateClassManyToMany},
+
+<<test functions>>=
+static void
+mrtTest_UnrelateClassManyToMany(void)
+{
+    testdomain_unrelateJJtoKK() ;
+    mrt_DispatchSingleEvent() ;
+}
+----
+
+=== Relate Many To Many Conditional Reflexive Class Based Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class MM_assoc {}
+class PP_part {
+    attribute count int -default 0
+}
+association R30 -associator MM_assoc PP_part 0..*--0..* PP_part
+
+<<test domain population>>=
+class MM_assoc {
+    allocate 4
+}
+class PP_part {
+    allocate 8
+}
+----
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void relateMMtoPP {} {
+    <%PP_part create pp0 count 0%>
+    <%PP_part create pp1 count 1%>
+    <%PP_part create pp2 count 2%>
+    <%PP_part create pp3 count 3%>
+
+    <%MM_assoc create mm0 R30 {backward pp0 forward pp1}%>
+    <%MM_assoc create mm1 R30 {backward pp0 forward pp2}%>
+
+    int count = 1 ;
+    <%instance pp0 foreachRelated pend R30%>
+        CU_ASSERT(pend->count == count) ;
+        count++ ;
+    <%end%>
+
+    <%R30 reference mm1 pp3 forward%>
+    <%instance pp0 selectRelated pp0set R30%>
+    CU_ASSERT(<%instset pp0set cardinality%> == 2) ;
+
+    <%instance pp2 selectRelated pp2set R30%>
+    CU_ASSERT_TRUE(<%instset pp2set empty%>) ;
+    <%instance pp2 selectRelated pp2set ~R30%>
+    CU_ASSERT_TRUE(<%instset pp2set empty%>) ;
+
+    <%PP_part create pp4 count 4%>
+    <%PP_part create pp5 count 5%>
+    <%MM_assoc create mm3 R30 {backward pp4 forward pp2}%>
+    <%MM_assoc create mm4 R30 {backward pp5 forward pp2}%>
+
+    <%instance pp2 selectRelated pp2set ~R30%>
+    CU_ASSERT(<%instset pp2set cardinality%> == 2) ;
+    <%instance pp2 selectRelated pp2set R30%>
+    CU_ASSERT_TRUE(<%instset pp2set empty%>) ;
+
+    <%PP_part create pp6 count 6%>
+
+    <%instance pp2 delete%>
+    <%instance mm3 delete%>
+    <%instance mm4 delete%>
+
+    <%instance pp3 selectRelated pp3set R30%>
+    CU_ASSERT_TRUE(<%instset pp3set empty%>) ;
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"relate reflexive class based Mc--Mc", mrtTest_RelateReflexClassManyCToManyC},
+
+<<test functions>>=
+static void
+mrtTest_RelateReflexClassManyCToManyC(void)
+{
+    testdomain_relateMMtoPP() ;
+    mrt_DispatchSingleEvent() ;
+}
+----
+
+=== Many To Many Conditional Class Based Static Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class JJJ {}
+class KKK {
+    attribute count int -default 0
+}
+class LLL {
+    attribute count int -default 0
+}
+association R31 -static -associator JJJ KKK 0..*--0..* LLL
+
+<<test domain population>>=
+class JJJ {
+    instance jjj0 R31 {KKK kkk0 LLL lll0}
+    instance jjj1 R31 {KKK kkk1 LLL lll1}
+    allocate 2
+}
+class KKK {
+    instance kkk0 count 0
+    instance kkk1 count 1
+    allocate 2
+}
+class LLL {
+    instance lll0 count 0
+    instance lll1 count 1
+}
+----
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void createKKKInstance {} {
+    <%KKK create kkkref2 count 2%>
+    (void)kkkref2 ;
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"static class based Mc--Mc", mrtTest_StaticClassManyCToManyC},
+
+<<test functions>>=
+static void
+mrtTest_StaticClassManyCToManyC(void)
+{
+    testdomain_createKKKInstance() ;
+    mrt_DispatchSingleEvent() ;
+}
+----
+
+=== Relate Reference Subclass
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class PP {}
+class QQ {}
+class RR {
+    attribute typechanged bool -default false
+}
+generalization R13 PP QQ RR
+
+<<test domain population>>=
+class PP {
+    allocate 1
+}
+class QQ {
+    allocate 1
+}
+class RR {
+    allocate 1
+}
+----
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void relatePPtoQQ {} {
+    <%PP create pref%>
+    <%QQ create qref R13 pref%>
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"relate reference generalization", mrtTest_RelateRefGen},
+
+<<test functions>>=
+static void
+mrtTest_RelateRefGen(void)
+{
+    testdomain_relatePPtoQQ() ;
+    mrt_DispatchSingleEvent() ;
+}
+----
+
+=== Reclassify Reference Subclass
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void reclassifyPPtoRR {} {
+    <%QQ foreachInstance qref%>
+        <%R13 reclassify qref RR rref typechanged true%>
+    <%end%>
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"reclassify reference generalization", mrtTest_ReclassifyRefGen},
+
+<<test functions>>=
+static void
+mrtTest_ReclassifyRefGen(void)
+{
+    testdomain_reclassifyPPtoRR() ;
+    mrt_DispatchSingleEvent() ;
+
+    bool typechanged ;
+    int pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_RR_CLASSID,
+        0,
+        TESTDOMAIN_RR_TYPECHANGED_ATTRID,
+        &typechanged, sizeof(typechanged)) ;
+    CU_ASSERT(pcode == sizeof(typechanged)) ;
+    CU_ASSERT_TRUE(typechanged) ;
+}
+----
+
+=== Unrelate Reference Subclass
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void unrelatePPtoQQ {} {
+    <%RR foreachInstance rref%>
+        <%instance rref findOneRelated pref R13%>
+        <%instance rref delete%>
+        <%instance pref delete%>
+    <%end%>
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"unrelate reference generalization", mrtTest_UnrelateRefGen},
+
+<<test functions>>=
+static void
+mrtTest_UnrelateRefGen(void)
+{
+    testdomain_unrelatePPtoQQ() ;
+    mrt_DispatchSingleEvent() ;
+}
+----
+
+=== Reclassify Union Subclass
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class SS {
+    attribute sum int -default 0
+}
+class TT {}
+class UU {
+    attribute count int -default 1
+}
+
+generalization R14 -union SS TT UU
+
+class ZZ {
+    attribute count int -default 2
+}
+
+association R16 ZZ 0..1--1 TT
+
+class WW {
+    attribute count int -default 3
+}
+
+association R23 TT 0..*--1 WW
+
+<<test domain population>>=
+class SS {
+    allocate 3
+}
+class ZZ {
+    allocate 1
+}
+class WW {
+    instance ww1
+}
+----
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void reclassifySStoTT {} {
+    <%WW findByName ww1 wref%>
+    <%SS create sref%>
+    <%TT create tref R14 sref R23 wref%>
+    <%ZZ create zref R16 tref%>
+    <%SS foreachInstance sref%>
+        <%instance sref findOneRelated xref {~R14 TT} ~R16%>
+        if (xref != NULL) {
+            <%instance sref attr sum%> += <%instance xref attr count%> ;
+        }
+    <%end%>
+}
+domainop void reclassifySStoUU {} {
+    <%SS foreachInstance sref%>
+        <%instance sref findOneRelated tref {~R14 TT}%>
+        if (tref != NULL) {
+            <%instance tref findOneRelated zref ~R16%>
+            <%R14 reclassify tref UU uref%>
+            <%instance uref update count 1%> 
+            if (zref != NULL) {
+                <%instance zref delete%>
+            }
+        }
+    <%end%>
+}
+----
+
+[source,c]
+----
+<<relationship management test cases>>=
+{"reclassify union generalization", mrtTest_ReclassifyUnionGen},
+
+<<test functions>>=
+static void
+mrtTest_ReclassifyUnionGen(void)
+{
+    testdomain_reclassifySStoTT() ;
+    mrt_DispatchSingleEvent() ;
+
+    testdomain_reclassifySStoUU() ;
+    mrt_DispatchSingleEvent() ;
+}
+----
+
+== Referential Integrity
+
+[source,c]
+----
+<<test suites>>=
+{"referential integrity", NULL, NULL, NULL, NULL, refIntegritySuiteTests},
+----
+
+[source,c]
+----
+<<suite tests>>=
+<<referential integrity suite tests>>
+
+<<referential integrity suite tests>>=
+static CU_TestInfo refIntegritySuiteTests[] = {
+    <<referential integrity test cases>>
+    CU_TEST_INFO_NULL,
+} ;
+----
+
+=== Referential Failure For One To One Simple Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void badrelateVtoX {} {
+    <%X create xref%>
+    <%V create vref R8 xref%>
+    <%instance xref delete%>
+    (void)vref ; // make the compiler quiet
+}
+----
+
+[source,c]
+----
+<<referential integrity test cases>>=
+{"failure for simple 1--1", mrtTest_RefFailSimpleOneToOne},
+
+<<test functions>>=
+static void
+mrtTest_RefFailSimpleOneToOne(void)
+{
+    int err = catchFatalDomainOp(testdomain_badrelateVtoX) ;
+    CU_ASSERT(err == mrtRefIntegrity) ;
+    int pcode = mrt_PortalDeleteInstance(&testdomain__PORTAL,
+        TESTDOMAIN_V_CLASSID, 0) ;
+    CU_ASSERT(pcode == 0) ;
+}
+----
+
+=== Referential Failure For Many To One Simple Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void badrelateMMtoOO {} {
+    <%OO create ooref%>
+    <%MM create mmref R9 ooref%>
+    <%instance ooref delete%>
+}
+
+domainop void badrelateOOtoMM {} {
+    <%OO create ooref%>
+    (void)ooref ; // make compiler quiet
+}
+----
+
+[source,c]
+----
+<<referential integrity test cases>>=
+{"failure for simple M--1", mrtTest_RefFailSimpleManyToOne},
+
+<<test functions>>=
+static void
+mrtTest_RefFailSimpleManyToOne(void)
+{
+    int err = catchFatalDomainOp(testdomain_badrelateMMtoOO) ;
+    CU_ASSERT(err == mrtRefIntegrity) ;
+
+    testdomain_unrelateMMfromOO() ;
+
+    err = catchFatalDomainOp(testdomain_badrelateOOtoMM) ;
+    CU_ASSERT(err == mrtRefIntegrity) ;
+
+    testdomain_unrelateMMfromOO() ;
+}
+----
+
+=== Referential Failure For Many To One Static Simple Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class FFF {
+}
+class GGG {
+}
+association R18 -static FFF 1..*--1 GGG
+
+<<test domain population>>=
+class FFF {
+    instance f1 R18 g1
+    instance f2 R18 g1
+    instance f3 R18 g2
+    allocate 1
+}
+class GGG {
+    instance g1
+    instance g2
+    allocate 1
+}
+----
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void badcreateFFF {} {
+    <%GGG create gref%>
+    <%FFF create fref R18 gref%>
+    (void)fref ; // keep compiler quiet
+}
+domainop void badFFFrelate {} {
+    <%FFF findByName f3 fref%>
+    <%GGG findByName g1 gref%>
+    mrt_CreateSimpleLinks(&testdomain__RSHIPS[32], fref, gref, true) ;
+}
+----
+
+[source,c]
+----
+<<referential integrity test cases>>=
+{"failure for static simple M--1", mrtTest_RefFailStaticSimpleManyToOne},
+
+<<test functions>>=
+static void
+mrtTest_RefFailStaticSimpleManyToOne(void)
+{
+    int code = catchFatalDomainOp(testdomain_badcreateFFF) ;
+    CU_ASSERT(code == mrtStaticRelationship) ;
+
+    int pcode = mrt_PortalDeleteInstance(&testdomain__PORTAL,
+        TESTDOMAIN_FFF_CLASSID, 3) ;
+    CU_ASSERT(pcode == 0) ;
+    pcode = mrt_PortalDeleteInstance(&testdomain__PORTAL,
+        TESTDOMAIN_GGG_CLASSID, 2) ;
+    CU_ASSERT(pcode == 0) ;
+
+    code = catchFatalDomainOp(testdomain_badFFFrelate) ;
+    CU_ASSERT(code == mrtStaticRelationship) ;
+    // mrt_DeleteInstance(&FFF__POOL[3]) ;
+}
+----
+
+=== Referential Failure For One To One Class Based Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void badrelateVVtoXX {} {
+    <%VV create vref%>
+    <%XX create xref%>
+    <%YY create yref R10 {VV vref XX xref}%>
+    <%instance xref delete%>
+    (void)vref ; // make compiler quiet
+    (void)yref ; // make compiler quiet
+}
+----
+
+[source,c]
+----
+<<referential integrity test cases>>=
+{"failure for class 1--1", mrtTest_RefFailClassOneToOne},
+
+<<test functions>>=
+static void
+mrtTest_RefFailClassOneToOne(void)
+{
+    int err = catchFatalDomainOp(testdomain_badrelateVVtoXX) ;
+    CU_ASSERT(err == mrtRefIntegrity) ;
+
+    int pcode = mrt_PortalDeleteInstance(&testdomain__PORTAL,
+        TESTDOMAIN_VV_CLASSID, 0) ;
+    CU_ASSERT(pcode == 0) ;
+
+    pcode = mrt_PortalDeleteInstance(&testdomain__PORTAL,
+        TESTDOMAIN_YY_CLASSID, 1) ;
+    CU_ASSERT(pcode == 0) ;
+}
+----
+
+=== Referential Failure For Many To One Class Based Association
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void badrelateGGtoHH {} {
+    <%GG create gref%>
+    <%HH create href%>
+    <%FF create fref R11 {GG gref HH href}%>
+    <%HH create href%>
+}
+----
+
+[source,c]
+----
+<<referential integrity test cases>>=
+{"failure for class M--1", mrtTest_RefFailClassManyToOne},
+
+<<test functions>>=
+static void
+mrtTest_RefFailClassManyToOne(void)
+{
+    int err = catchFatalDomainOp(testdomain_badrelateGGtoHH) ;
+    CU_ASSERT(err == mrtRefIntegrity) ;
+
+    int pcode = mrt_PortalDeleteInstance(&testdomain__PORTAL,
+        TESTDOMAIN_GG_CLASSID, 0) ;
+    CU_ASSERT(pcode == 0) ;
+
+    pcode = mrt_PortalDeleteInstance(&testdomain__PORTAL,
+        TESTDOMAIN_HH_CLASSID, 0) ;
+    CU_ASSERT(pcode == 0) ;
+    pcode = mrt_PortalDeleteInstance(&testdomain__PORTAL,
+        TESTDOMAIN_HH_CLASSID, 1) ;
+    CU_ASSERT(pcode == 0) ;
+
+    pcode = mrt_PortalDeleteInstance(&testdomain__PORTAL,
+        TESTDOMAIN_FF_CLASSID, 0) ;
+    CU_ASSERT(pcode == 0) ;
+}
+----
+
+=== Referential Failure For Reference Generalization
+
+[source,c]
+----
+<<referential integrity test cases>>=
+{"failure for reference generalization", mrtTest_RefFailRefGen},
+
+<<test functions>>=
+static void
+mrtTest_RefFailRefGen(void)
+{
+    mrt_BeginSyncService() ;
+    int pcode = mrt_PortalCreateInstance(&testdomain__PORTAL,
+        TESTDOMAIN_PP_CLASSID, MRT_StateCode_IG) ;
+    int err = catchFatalSyncService() ;
+    CU_ASSERT(err == mrtRefIntegrity) ;
+
+    mrt_BeginSyncService() ;
+    pcode = mrt_PortalDeleteInstance(&testdomain__PORTAL,
+        TESTDOMAIN_PP_CLASSID, 0) ; // fix reference issue
+    CU_ASSERT(pcode == 0) ;
+    mrt_EndSyncService() ;
+
+    mrt_BeginSyncService() ;
+    pcode = mrt_PortalCreateInstance(&testdomain__PORTAL,
+        TESTDOMAIN_QQ_CLASSID, MRT_StateCode_IG) ;
+    err = catchFatalSyncService() ;
+    CU_ASSERT(err == mrtRefIntegrity) ;
+
+    mrt_BeginSyncService() ;
+    pcode = mrt_PortalDeleteInstance(&testdomain__PORTAL,
+        TESTDOMAIN_QQ_CLASSID, 0) ; // fix reference issue
+    CU_ASSERT(pcode == 0) ;
+    mrt_EndSyncService() ;
+}
+----
+
+=== Referential Failure For Union Generalization
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop MRT_InstId relateSStoUU {} {
+    <%SS create sref%>
+    <%UU create uref R14 sref%>
+    return <%instance sref instid%> ;
+}
+----
+
+[source,c]
+----
+<<referential integrity test cases>>=
+{"failure for union generalization", mrtTest_RefFailUnionGen},
+
+<<test functions>>=
+static void
+mrtTest_RefFailUnionGen(void)
+{
+    mrt_BeginSyncService() ;
+    int pcode = mrt_PortalCreateInstance(&testdomain__PORTAL,
+        TESTDOMAIN_SS_CLASSID, MRT_StateCode_IG) ;
+    CU_ASSERT(pcode >= 0) ;
+    int err = catchFatalSyncService() ;
+    CU_ASSERT(err == mrtRefIntegrity) ;
+
+    pcode = mrt_PortalDeleteInstance(&testdomain__PORTAL,
+        TESTDOMAIN_SS_CLASSID, pcode) ;
+    CU_ASSERT(pcode == 0) ;
+
+    MRT_InstId ssInst = testdomain_relateSStoUU() ;
+
+    mrt_BeginSyncService() ;
+    pcode = mrt_PortalDeleteInstance(&testdomain__PORTAL,
+        TESTDOMAIN_SS_CLASSID, ssInst) ;
+    CU_ASSERT(pcode == 0) ;
+    err = catchFatalSyncService() ;
+    CU_ASSERT(err == mrtRefIntegrity) ;
+
+    pcode = mrt_PortalDeleteInstance(&testdomain__PORTAL,
+        TESTDOMAIN_UU_CLASSID, ssInst) ;
+    CU_ASSERT(pcode == 0) ;
+}
+----
+
+== Instance Sets
+
+[source,c]
+----
+<<test suites>>=
+{"instance sets", NULL, NULL, NULL, NULL, instanceSetsSuiteTests},
+----
+
+[source,c]
+----
+<<suite tests>>=
+<<instance sets suite tests>>
+
+<<instance sets suite tests>>=
+static CU_TestInfo instanceSetsSuiteTests[] = {
+    <<instance set test cases>>
+    CU_TEST_INFO_NULL,
+} ;
+----
+
+=== Generating and Iterating Instance Sets
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class AAA {
+    attribute Size int
+}
+class BBB {
+    attribute Sum int -default 0
+}
+class AB_Assoc {}
+
+association R15 -associator AB_Assoc AAA 0..*--0..1 BBB
+
+<<test domain population>>=
+class AB_Assoc {
+    instance ab1 R15 {AAA a1 BBB b1}
+    instance ab2 R15 {AAA a2 BBB b1}
+    instance ab3 R15 {AAA a3 BBB b2}
+    instance ab4 R15 {AAA a4 BBB b2}
+}
+class AAA {
+    instance a1 Size 1
+    instance a2 Size 2
+    instance a3 Size 3
+    instance a4 Size 4
+    instance a5 Size 5
+    instance a6 Size 6
+}
+class BBB {
+    instance b1
+    instance b2
+}
+----
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void sumB1s {} {
+    <%BBB findByName b1 bref%>
+    <%AAA instset aset%>
+    <%instance bref foreachRelated aref ~R15%>
+        <%instset aset add aref%>
+    <%end%>
+    CU_ASSERT_FALSE(<%instset aset empty%>) ;
+    CU_ASSERT_TRUE(<%instset aset notempty%>) ;
+    <%instset aset foreachInstance aref%>
+        <%instance bref attr Sum%> += <%instance aref attr Size%> ;
+    <%end%>
+}
+----
+
+[source,c]
+----
+<<instance set test cases>>=
+{"generate instance set", mrtTest_GenerateInstanceSet},
+
+<<test functions>>=
+static void
+mrtTest_GenerateInstanceSet(void)
+{
+    testdomain_sumB1s() ;
+}
+----
+
+=== Instance Set Operations
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class CCC {}
+class DDD {}
+class EEE {}
+
+generalization R17 CCC DDD EEE
+
+<<test domain population>>=
+class CCC {
+    instance c1
+    instance c2
+    instance c3
+    instance c4
+    instance c5
+}
+class DDD {
+    instance d1 R17 c1
+    instance d2 R17 c2
+}
+class EEE {
+    instance e1 R17 c3
+    instance e2 R17 c4
+    instance e3 R17 c5
+}
+----
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void instsetops {} {
+    <%CCC instset dset%>
+    <%DDD foreachInstance dref%>
+        <%instance dref findOneRelated cref R17%>
+        <%instset dset add cref%>
+    <%end%>
+    <%CCC instset eset%>
+    <%EEE foreachInstance eref%>
+        <%instance eref findOneRelated cref R17%>
+        <%instset eset add cref%>
+    <%end%>
+    <%CCC instset cset%>
+    <%CCC foreachInstance cref%>
+        <%instset cset add cref%>
+    <%end%>
+
+    CU_ASSERT_TRUE(<%instset dset notempty%>) ;
+    CU_ASSERT_TRUE(<%instset eset notempty%>) ;
+    <%instset iset intersect dset eset%>
+    CU_ASSERT_TRUE(<%instset iset empty%>) ;
+    <%instset uset union dset eset%>
+    CU_ASSERT_TRUE(<%instset uset equal cset%>) ;
+    <%instset mset minus cset uset%>
+    CU_ASSERT_TRUE(<%instset mset empty%>) ;
+    <%CCC findByName c1 c1ref%>
+    <%instset cset remove c1ref%>
+    unsigned csetCount = <%instset cset cardinality%> ;
+    CU_ASSERT(csetCount == 4) ;
+
+    <%DDD findByName d1 d1ref%>
+    <%instance d1ref selectRelated relcs R17%>
+    unsigned rcount = <%instset relcs cardinality%> ;
+    CU_ASSERT(rcount == 1) ;
+    CU_ASSERT_TRUE(<%instset relcs contains c1ref%>) ;
+}
+----
+
+[source,c]
+----
+<<instance set test cases>>=
+{"instance set operations", mrtTest_InstanceSetOps},
+
+<<test functions>>=
+static void
+mrtTest_InstanceSetOps(void)
+{
+   testdomain_instsetops() ;
+}
+----
+
+== Domain Portal Functions
+
+[source,c]
+----
+<<test suites>>=
+{"portal functions", NULL, NULL, NULL, NULL, portalFunctionsSuiteTests},
+----
+
+[source,c]
+----
+<<suite tests>>=
+<<portal functions suite tests>>
+
+<<portal functions suite tests>>=
+static CU_TestInfo portalFunctionsSuiteTests[] = {
+    <<portal functions test cases>>
+    CU_TEST_INFO_NULL,
+} ;
+----
+
+=== Domain Introspection Functions
+
+[source,c]
+----
+<<portal functions test cases>>=
+{"get domain name", mrtTest_GetDomainName},
+
+<<test functions>>=
+static void
+mrtTest_GetDomainName(void)
+{
+    char const *domainName = mrt_PortalDomainName(&testdomain__PORTAL) ;
+    CU_ASSERT_STRING_EQUAL(domainName, "testdomain") ;
+}
+----
+
+[source,c]
+----
+<<portal functions test cases>>=
+{"get class count", mrtTest_GetClassCount},
+
+<<test functions>>=
+static void
+mrtTest_GetClassCount(void)
+{
+    unsigned classCount = mrt_PortalDomainClassCount(&testdomain__PORTAL) ;
+    CU_ASSERT(classCount == TESTDOMAIN_CLASSCOUNT) ;
+}
+----
+
+[source,c]
+----
+<<portal functions test cases>>=
+{"get class name", mrtTest_GetClassName},
+
+<<test functions>>=
+static void
+mrtTest_GetClassName(void)
+{
+    char const *className ;
+    int result = mrt_PortalClassName(&testdomain__PORTAL,
+            TESTDOMAIN_F_CLASSID, &className) ;
+    CU_ASSERT_FALSE(result) ;
+    CU_ASSERT_STRING_EQUAL(className, "F") ;
+
+    result = mrt_PortalClassName(&testdomain__PORTAL, 1000, &className) ;
+    CU_ASSERT(result == MICCA_PORTAL_NO_CLASS) ;
+}
+----
+
+[source,c]
+----
+<<portal functions test cases>>=
+{"get attribute count", mrtTest_GetAttrCount},
+
+<<test functions>>=
+static void
+mrtTest_GetAttrCount(void)
+{
+    int result = mrt_PortalClassAttributeCount(&testdomain__PORTAL,
+            TESTDOMAIN_A_CLASSID) ;
+    CU_ASSERT(result == TESTDOMAIN_A_ATTRCOUNT) ;
+
+    result = mrt_PortalClassAttributeCount(&testdomain__PORTAL, 1000) ;
+    CU_ASSERT(result == MICCA_PORTAL_NO_CLASS) ;
+}
+----
+
+[source,c]
+----
+<<portal functions test cases>>=
+{"get instance count", mrtTest_GetInstCount},
+
+<<test functions>>=
+static void
+mrtTest_GetInstCount(void)
+{
+    int result = mrt_PortalClassInstanceCount(&testdomain__PORTAL,
+            TESTDOMAIN_AAA_CLASSID) ;
+    CU_ASSERT(result == TESTDOMAIN_AAA_INSTCOUNT) ;
+
+    result = mrt_PortalClassInstanceCount(&testdomain__PORTAL, 1000) ;
+    CU_ASSERT(result == MICCA_PORTAL_NO_CLASS) ;
+}
+----
+
+[source,c]
+----
+<<portal functions test cases>>=
+{"get event count", mrtTest_GetEventCount},
+
+<<test functions>>=
+static void
+mrtTest_GetEventCount(void)
+{
+    int result = mrt_PortalClassEventCount(&testdomain__PORTAL,
+            TESTDOMAIN_AA_CLASSID) ;
+    CU_ASSERT(result == TESTDOMAIN_AA_EVENTCOUNT) ;
+
+    result = mrt_PortalClassEventCount(&testdomain__PORTAL, 1000) ;
+    CU_ASSERT(result == MICCA_PORTAL_NO_CLASS) ;
+
+    result = mrt_PortalClassEventCount(&testdomain__PORTAL,
+        TESTDOMAIN_V_CLASSID) ;
+    CU_ASSERT(result == MICCA_PORTAL_NO_STATE_MODEL) ;
+
+    result = mrt_PortalClassEventCount(&testdomain__PORTAL,
+        TESTDOMAIN_A_CLASSID) ;
+    CU_ASSERT(result == 1) ;
+}
+----
+
+[source,c]
+----
+<<portal functions test cases>>=
+{"get state count", mrtTest_GetStateCount},
+
+<<test functions>>=
+static void
+mrtTest_GetStateCount(void)
+{
+    int result = mrt_PortalClassStateCount(&testdomain__PORTAL,
+            TESTDOMAIN_B_CLASSID) ;
+    CU_ASSERT(result == 2) ;
+
+    result = mrt_PortalClassStateCount(&testdomain__PORTAL, 1000) ;
+    CU_ASSERT(result == MICCA_PORTAL_NO_CLASS) ;
+
+    result = mrt_PortalClassStateCount(&testdomain__PORTAL,
+        TESTDOMAIN_V_CLASSID) ;
+    CU_ASSERT(result == MICCA_PORTAL_NO_STATE_MODEL) ;
+
+    result = mrt_PortalClassStateCount(&testdomain__PORTAL,
+        TESTDOMAIN_A_CLASSID) ;
+    CU_ASSERT(result == 1) ;
+}
+----
+
+[source,c]
+----
+<<portal functions test cases>>=
+{"get attribute name", mrtTest_GetAttrName},
+
+<<test functions>>=
+static void
+mrtTest_GetAttrName(void)
+{
+    char const *attrName ;
+    int result = mrt_PortalClassAttributeName(&testdomain__PORTAL,
+            TESTDOMAIN_A_CLASSID, TESTDOMAIN_A_RANCTOR_ATTRID, &attrName) ;
+    CU_ASSERT_FALSE(result) ;
+    CU_ASSERT_STRING_EQUAL(attrName, "ranctor") ;
+
+    result = mrt_PortalClassAttributeName(&testdomain__PORTAL, 1000,
+            TESTDOMAIN_A_RANCTOR_ATTRID, &attrName) ;
+    CU_ASSERT(result == MICCA_PORTAL_NO_CLASS) ;
+
+    result = mrt_PortalClassAttributeName(&testdomain__PORTAL,
+            TESTDOMAIN_A_CLASSID, 1000, &attrName) ;
+    CU_ASSERT(result == MICCA_PORTAL_NO_ATTR) ;
+}
+----
+
+[source,c]
+----
+<<portal functions test cases>>=
+{"get attribute Size", mrtTest_GetAttrSize},
+
+<<test functions>>=
+static void
+mrtTest_GetAttrSize(void)
+{
+    int result = mrt_PortalClassAttributeSize(&testdomain__PORTAL,
+            TESTDOMAIN_A_CLASSID, TESTDOMAIN_A_RANCTOR_ATTRID) ;
+    CU_ASSERT(result == sizeof(bool)) ;
+
+    result = mrt_PortalClassAttributeSize(&testdomain__PORTAL, 1000,
+            TESTDOMAIN_A_RANCTOR_ATTRID) ;
+    CU_ASSERT(result == MICCA_PORTAL_NO_CLASS) ;
+
+    result = mrt_PortalClassAttributeSize(&testdomain__PORTAL,
+            TESTDOMAIN_A_CLASSID, 1000) ;
+    CU_ASSERT(result == MICCA_PORTAL_NO_ATTR) ;
+}
+----
+
+[source,c]
+----
+<<portal functions test cases>>=
+{"get event name", mrtTest_GetEventName},
+
+<<test functions>>=
+static void
+mrtTest_GetEventName(void)
+{
+    char const *eventName ;
+    int result = mrt_PortalClassEventName(&testdomain__PORTAL,
+            TESTDOMAIN_AA_CLASSID, TESTDOMAIN_AA_E3_EVENT, &eventName) ;
+    CU_ASSERT_FALSE(result) ;
+    CU_ASSERT_STRING_EQUAL(eventName, "e3") ;
+
+    result = mrt_PortalClassEventName(&testdomain__PORTAL, 1000,
+            TESTDOMAIN_AA_E3_EVENT, &eventName) ;
+    CU_ASSERT(result == MICCA_PORTAL_NO_CLASS) ;
+
+    result = mrt_PortalClassEventName(&testdomain__PORTAL,
+            TESTDOMAIN_AA_CLASSID, 100, &eventName) ;
+    CU_ASSERT(result == MICCA_PORTAL_NO_EVENT) ;
+
+    result = mrt_PortalClassEventName(&testdomain__PORTAL,
+            TESTDOMAIN_V_CLASSID, 0, &eventName) ;
+    CU_ASSERT(result == MICCA_PORTAL_NO_STATE_MODEL) ;
+}
+----
+
+[source,c]
+----
+<<portal functions test cases>>=
+{"get state name", mrtTest_GetStateName},
+
+<<test functions>>=
+static void
+mrtTest_GetStateName(void)
+{
+    char const *stateName ;
+    int result = mrt_PortalClassStateName(&testdomain__PORTAL,
+            TESTDOMAIN_Q_CLASSID, 0, &stateName) ;
+    CU_ASSERT_FALSE(result) ;
+    CU_ASSERT_STRING_EQUAL(stateName, "s1") ;
+
+    result = mrt_PortalClassStateName(&testdomain__PORTAL, 1000, 0, &stateName) ;
+    CU_ASSERT(result == MICCA_PORTAL_NO_CLASS) ;
+
+    result = mrt_PortalClassStateName(&testdomain__PORTAL,
+            TESTDOMAIN_Q_CLASSID, 100, &stateName) ;
+    CU_ASSERT(result == MICCA_PORTAL_NO_STATE) ;
+
+    result = mrt_PortalClassStateName(&testdomain__PORTAL,
+            TESTDOMAIN_H_CLASSID, 0, &stateName) ;
+    CU_ASSERT(result == MICCA_PORTAL_NO_STATE_MODEL) ;
+}
+----
+
+=== Domain Access Functions
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class BD {
+    attribute FirstName {char[32]} ;
+    attribute LastName {char[32]} ;
+    attribute FullName {char[64]} -dependent {
+        size_t firstLen = strlen(self->FirstName) ;
+        size_t lastLen = strlen(self->LastName) ;
+        *FullName = '\0' ;
+        if (size >= firstLen + lastLen + 2) {
+            strcat(FullName, self->FirstName) ;
+            strcat(FullName, " ") ;
+            strcat(FullName, self->LastName) ;
+        }
+    }
+}
+
+<<test domain population>>=
+class BD {
+    instance bd1 FirstName {"Fred"} LastName {"Jones"}
+}
+----
+
+[source,c]
+----
+<<portal functions test cases>>=
+{"read dependent attribute", mrtTest_ReadDepAttr},
+
+<<test functions>>=
+static void
+mrtTest_ReadDepAttr(void)
+{
+    char fn[64] ;
+    int pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_BD_CLASSID,
+        TESTDOMAIN_BD_BD1_INSTID,
+        TESTDOMAIN_BD_FULLNAME_ATTRID,
+        fn, sizeof(fn)) ;
+    CU_ASSERT(pcode == sizeof(fn)) ;
+    CU_ASSERT(strcmp(fn, "Fred Jones") == 0) ;
+}
+----
+
+[source,tcl]
+----
+<<test domain configuration>>=
+class clerk {
+    attribute Available bool -default true
+}
+class client {
+    attribute Waiting bool -default true
+}
+class service {}
+
+association R19 -associator service clerk 0..1--0..1 client {
+    statemodel {
+        defaulttrans IG
+
+        state waitingForClient {} {
+            // Find a client that needs a clerk
+            <%client findWhere clref {clref->Waiting}%>
+            if (clref != NULL) {
+                <%my signal clientReady%>
+            }
+        }
+        transition waitingForClient - clientReady -> waitingForClerk
+
+        state waitingForClerk {} {
+            // Find a clerk that is available
+            <%clerk findWhere ckref {ckref->Available}%>
+            if (ckref != NULL) {
+                <%my signal clerkReady%>
+            }
+        }
+        transition waitingForClerk - clerkReady -> assigningClerk
+
+        state assigningClerk {} {
+            // Find a ready client
+            <%client findWhere clref {clref->Waiting}%>
+            CU_ASSERT_PTR_NOT_NULL(clref) ;
+            <%instance clref update Waiting false%>
+            // Find an available clerk
+            <%clerk findWhere ckref {ckref->Available}%>
+            CU_ASSERT_PTR_NOT_NULL(ckref) ;
+            <%instance ckref update Available false%>
+            // Assign the clerk to the client
+            <%service create svc R19 {client clref clerk ckref}%>
+            // Go back to look for more
+            <%my signal clerkAssigned%>
+            // End the test case
+            mrt_SyncToEventLoop() ;
+        }
+        transition assigningClerk - clerkAssigned -> waitingForClerk
+    }
+}
+
+<<test domain population>>=
+class clerk {
+    instance clerk1
+}
+class client {
+    instance client1
+}
+class service {
+    allocate 1
+}
+----
+
+[source,c]
+----
+<<portal functions test cases>>=
+{"signal assigner", mrtTest_SignalAssigner},
+
+<<test functions>>=
+static void
+mrtTest_SignalAssigner(void)
+{
+    int pcode = mrt_PortalSignalEventToAssigner(&testdomain__PORTAL,
+        TESTDOMAIN_R19_ASSIGNERID,
+        0,
+        TESTDOMAIN_R19_CLIENTREADY_EVENT,
+        NULL, 0) ;
+    CU_ASSERT(pcode == 0) ;
+
+    mrt_EventLoop() ;
+
+    bool status ;
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_CLERK_CLASSID,
+        TESTDOMAIN_CLERK_CLERK1_INSTID,
+        TESTDOMAIN_CLERK_AVAILABLE_ATTRID,
+        &status, sizeof(status)) ;
+    CU_ASSERT(pcode == sizeof(status)) ;
+    CU_ASSERT_FALSE(status) ;
+
+    pcode = mrt_PortalReadAttr(&testdomain__PORTAL,
+        TESTDOMAIN_CLIENT_CLASSID,
+        TESTDOMAIN_CLIENT_CLIENT1_INSTID,
+        TESTDOMAIN_CLIENT_WAITING_ATTRID,
+        &status, sizeof(status)) ;
+    CU_ASSERT(pcode == sizeof(status)) ;
+    CU_ASSERT_FALSE(status) ;
+
+    pcode = mrt_PortalSignalEventToAssigner(&testdomain__PORTAL,
+        100,
+        0,
+        TESTDOMAIN_R19_CLIENTREADY_EVENT,
+        NULL, 0) ;
+    CU_ASSERT(pcode == MICCA_PORTAL_NO_CLASS) ;
+
+    pcode = mrt_PortalSignalEventToAssigner(&testdomain__PORTAL,
+        TESTDOMAIN_R19_ASSIGNERID,
+        1,
+        TESTDOMAIN_R19_CLIENTREADY_EVENT,
+        NULL, 0) ;
+    CU_ASSERT(pcode == MICCA_PORTAL_NO_INST) ;
+
+    pcode = mrt_PortalSignalEventToAssigner(&testdomain__PORTAL,
+        TESTDOMAIN_R19_ASSIGNERID,
+        0,
+        100,
+        NULL, 0) ;
+    CU_ASSERT(pcode == MICCA_PORTAL_NO_EVENT) ;
+
+    int cs = mrt_PortalAssignerCurrentState(&testdomain__PORTAL,
+        TESTDOMAIN_R19_ASSIGNERID,
+        0) ;
+    CU_ASSERT(cs == TESTDOMAIN_R19_WAITINGFORCLERK_STATE) ;
+}
+----
+
+== Fatal Errors
+
+[source,c]
+----
+<<test suites>>=
+{"fatal errors", NULL, NULL, NULL, NULL, fatalErrorSuiteTests},
+----
+
+[source,c]
+----
+<<suite tests>>=
+<<fatal errors suite tests>>
+
+<<fatal errors suite tests>>=
+static CU_TestInfo fatalErrorSuiteTests[] = {
+    <<fatal errors test cases>>
+    CU_TEST_INFO_NULL,
+} ;
+----
+
+=== Out of Bounds Instance Index
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void outOfBounds {} {
+    <%AA idtoref 100 aaref%>
+    (void)aaref ;
+}
+----
+
+[source,c]
+----
+<<fatal errors test cases>>=
+{"instance index out of range", mrtTest_InstIndexRange},
+
+<<test functions>>=
+static void
+mrtTest_InstIndexRange(void)
+{
+    int code = catchFatalDomainOp(testdomain_outOfBounds) ;
+    CU_ASSERT(code == mrtNoInstSlot) ;
+}
+----
+
+=== Linking Static Relationship
+
+[source,tcl]
+----
+<<test domain configuration>>=
+domainop void staticLinkage {} {
+    <%KKK findWhere kkkref2 {kkkref2->count == 2}%>
+    <%LLL findWhere lllref1 {lllref1->count == 1}%>
+    <%JJJ create jjjref R31 {KKK kkkref2 LLL lllref1}%>
+    (void)jjjref ;
+}
+----
+
+[source,c]
+----
+<<fatal errors test cases>>=
+{"linking static relationship", mrtTest_LinkStaticRel},
+
+<<test functions>>=
+static void
+mrtTest_LinkStaticRel(void)
+{
+    int code = catchFatalDomainOp(testdomain_staticLinkage) ;
+    CU_ASSERT(code == mrtStaticRelationship) ;
+}
+----

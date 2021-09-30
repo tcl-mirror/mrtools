@@ -18,7 +18,7 @@ rolling back the changes to a known good state.
 == Introduction [[introduction,Introduction]]
 
 This document is about a Tcl package named, +rosea+.
-+Rosea+ is a data and execution domain that is intended as the
++Rosea+ is a model execution domain that is intended as the
 target for translating
 http://en.wikipedia.com/wiki/Executable_UML[Executable UML]
 (XUML) models using Tcl as the implementation language.
@@ -118,7 +118,7 @@ source code files needed by the Tcl interpreter.
 
 This document contains a lot of material.
 It contains the complete source code, test cases and a runnable example.
-Reading the document from beginning to end in order would be an
+Reading the document in order from beginning to end would be an
 exceptional undertaking.
 Skipping around is encouraged.
 For example,
@@ -2855,7 +2855,7 @@ test update-1.0 {
             Temp [expr {[tuple extract $newtuple Temp] + 10}]\
             Volume [expr {[tuple extract $newtuple Volume] * 2.0}]
     }]
-    log::debug [relformat $newvalues newvalues]
+    log::debug "\n[relformat $newvalues newvalues]"
     set ref [rosea::ClassCmds::update [namespace current]::foo::c1 $newvalues]
     # Extract one of the instances and make sure the attribute values
     # were properly updated.
@@ -2940,7 +2940,7 @@ R4 link $wm $wc
 ///////
 
 [float]
-===== Implementation
+===== Implementation [[simple-link]]
 
 The figure below shows the architectural relvars required to
 link instances.
@@ -3112,7 +3112,7 @@ but there can only be one referenced instance.
 ----
 <<linkSimple: determine reference direction>>=
 if {[relation cardinality $toinst] != 1} {
-    tailcall MUST_BE_SINGULAR $torelvar [relation cardinality $toinst]
+    tailcall DeclError MUST_BE_SINGULAR $torelvar [relation cardinality $toinst]
 }
 ----
 
@@ -3527,6 +3527,249 @@ test linkAssoc-1.0 {
 } -result {1}
 ----
 
+==== Updating Class Based Associations
+
+For class based asssociations,
+the references of the associator class can be updated.
+This is sometimes preferred over deleting and creating a new
+association class, especially if there is a state model associated
+with the class.
+
+*****
+_relationship_ +reference+ _assocref_ _instref_ ? _direction_ ?
+
+`assocref`::
+    An instance reference of the associator class of _relationship_.
+`instref`::
+    An instance reference of a class that participates in _relationship_.
+`direction`::
+    An optional argument used for reflexive associations which takes on
+    values of _forward_ or _reverse_.
+    The argument is used to resolve the ambiguity of reflexive relationships
+    and specifies the direction of reference that the update should make.
+*****
+
+///////
+----
+<<manual architecture relationship commands>>=
+[call [arg relationship] [cmd reference] [arg assocref] [arg instref]]
+
+For class based associations,
+the [cmd reference] command will update [arg assoref] so that it
+will refer to [arg instref].
+If the association is reflexive, then
+[arg direction] must be specified as [emph forward] or [emph backward].
+----
+///////
+
+[float]
+===== Implementation
+
+The implementation of the `reference` command is similar to that of the
+`link` command for <<simple-link,simple associations>>.
+
+(((rosea,RelCmds,referenceAssoc)))
+[source,tcl]
+----
+<<relationship commands>>=
+proc referenceAssoc {rname assocref instref {dir {}}} {
+    <<referenceAssoc: validate arguments>>
+    <<referenceAssoc: look up link info>>
+    <<referenceAssoc: determine reference direction>>
+    <<referenceAssoc: obtain referenced values>>
+    <<referenceAssoc: update referring values>>
+}
+----
+
+We will only deal with singular references in this command
+and, as usual, not permit cross domain linking.
+
+[source,tcl]
+----
+<<referenceAssoc: validate arguments>>=
+if {![isRefSingular $assocref]} {
+    tailcall DeclError SINGLE_REF_REQUIRED [refMultiplicity $assocref]
+}
+lassign $assocref assocrelvar associnst
+SplitRelvarName $assocrelvar assocdomain assocclass
+
+if {![isRefSingular $instref]} {
+    tailcall DeclError SINGLE_REF_REQUIRED [refMultiplicity $instref]
+}
+lassign $instref instrelvar inst
+SplitRelvarName $instrelvar instdomain instclass
+
+if {$assocdomain ne $instdomain} {
+    tailcall DeclError NO_CROSS_DOMAIN $domain1 $domain2
+}
+----
+
+The architectural relvar for associative references has the information
+about which attributes are used to realize the relationship.
+
+[source,tcl]
+----
+<<referenceAssoc: look up link info>>=
+set assocref [relvar restrictone ${instdomain}::__Arch_AssocRef\
+        Relationship $rname]
+if {[relation isempty $assocref]} {
+    tailcall DeclError UNKNOWN_RELATIONSHIP $rname
+}
+
+relation assign $assocref\
+    {AssocClass assocClass}\
+    {References references}
+
+if {$assocClass ne $assocclass} {
+    tailcall DeclError NOT_IN_ASSOCIATION $assocclass $rname
+}
+----
+
+Now we must check to see if we are dealing with a reflexive association
+and resolve that ambiguity using the _direction_ argument.
+
+[source,tcl]
+----
+<<referenceAssoc: determine reference direction>>=
+set ref [relation restrictwith $references {$Participant eq $instclass}]
+set refcard [relation cardinality $ref]
+if {$refcard == 2} {
+    switch -exact -- $dir {
+        forward {
+            set role target
+        }
+        backward {
+            set role source
+        }
+        default {
+            tailcall DeclError DIRECTION_REQUIRED $dir
+        }
+    }
+    set ref [relation restrictwith $ref {$Role eq $role}]
+} elseif {$refcard == 0} {
+    tailcall DeclError NOT_IN_ASSOCIATION $instclass $rname
+}
+----
+
+(((error code,DIRECTION_REQUIRED)))
+[source,tcl]
+----
+<<error code formats>>=
+DIRECTION_REQUIRED  {direction argument is required: got "%s"}
+----
+
+The update strategy is the same as that used for simple associations.
+We extend the relation holding the referring and referenced attribute
+names with the values from the referred to instance.
+We can then create a dictionary of attribute name / value pairs
+that provide the values needed to set the referring attributes.
+
+[source,tcl]
+----
+<<referenceAssoc: obtain referenced values>>=
+set referringAttrs [relation extract $ref ReferringAttrs]
+
+set refedvalue [relation semijoin $inst [relvar set $instrelvar]]
+
+set tovalues [pipe {
+    relation extend $referringAttrs rfa RefValue string {
+        [relation extract $refedvalue\
+            [tuple extract $rfa ReferencedAttribute]]} |
+    relation dict ~ ReferringAttribute RefValue
+}]
+----
+
+Finally,
+an update of the associator class relvar changes which instances is
+referenced by the associator class instance.
+
+[source,tcl]
+----
+<<referenceAssoc: update referring values>>=
+relvar updateone $assocrelvar assoctup [tuple get [relation tuple $associnst]] {
+    tuple update $assoctup {*}$tovalues
+}
+----
+
+[float]
+===== Tests
+[source,tcl]
+----
+<<class command tests>>=
+test referenceAssoc-1.0 {
+    Modify associative links.
+} -setup {
+    rosea configure {
+        domain assoc {
+            class Dog {
+                attribute Name string -id 1
+                attribute Breed string
+            }
+            class Owner {
+                attribute Name string -id 1
+                attribute Age int
+            }
+            class Ownership {
+                attribute DogName string -id 1
+                attribute OwnerName string -id 1
+                reference R1 Owner -link {OwnerName Name}
+                reference R1 Dog -link {DogName Name}
+            }
+
+            association R1 Owner 0..*--0..* Dog -associator Ownership
+        }
+    }
+    rosea generate
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::assoc
+} -body {
+    set d1 [assoc::Dog create Name Fluffy Breed Poodle]
+    set d2 [assoc::Dog create Name Tiger Breed Mut]
+    set owner [assoc::Owner create Name Fred Age 32]
+    set ownership [assoc::R1 link $d1 $owner]
+    assoc::R1 reference $ownership $d2
+    set owneddog [rosea::InstCmds::findRelated $owner R1]
+    rosea::InstCmds::readAttribute $owneddog Name
+} -result {Tiger}
+----
+
+[source,tcl]
+----
+<<class command tests>>=
+test referenceAssoc-2.0 {
+    Modify reflexive associative links.
+} -setup {
+    rosea configure {
+        domain assoc {
+            class A {
+                attribute prevP int -id 1
+                attribute nextP int -id 1
+                reference R1 P -link {prevP ID} -link {nextP ID}
+            }
+            class P {
+                attribute ID int -id 1
+            }
+
+            association R1 P 0..*--0..* P -associator A -path {prevP nextP}
+        }
+    }
+    rosea generate
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::assoc
+} -body {
+    set p1 [assoc::P create ID 1]
+    set p2 [assoc::P create ID 2]
+    set p3 [assoc::P create ID 3]
+    set a1 [assoc::R1 link $p1 $p2]
+    assoc::R1 reference $a1 $p3 forward
+    set related [rosea::InstCmds::findRelated $p1 R1]
+    rosea::InstCmds::readAttribute $related ID
+} -result {3}
+----
+
+
 ==== Unlinking Simple Associations
 
 The inverse of linking instances in a relationship is to unlink them.
@@ -3911,12 +4154,12 @@ proc migrate {rname instref subclass args} {
     # We use the class commands to delete the old subclass instance and create
     # the new one. This will make sure that if the subclass has a state model
     # that the initial state is set correctly.
-    relvar eval {
-        ::rosea::InstCmds::delete $instref
-        set ref [::rosea::ClassCmds::create ${domns}::$subclass\
-                {*}[dict merge $args $refedvalues]]
-    }
-    return $ref
+    # N.B. this is _not_ done in a relvar transaction. The transaction
+    # boundaries should be set by the current thread of control or domain
+    # operation.
+    ::rosea::InstCmds::delete $instref
+    return [::rosea::ClassCmds::create ${domns}::$subclass\
+            {*}[dict merge $args $refedvalues]]
 }
 ----
 
@@ -4009,8 +4252,9 @@ _relationship_ +signal+ _idvalues_ _event_ _?param1 param2 ...?_
 +idvalues+::
     A dictionary keyed by attribute names whose values identify
     an instance of the multiple assigner associated with _relationship_.
-    The attribute names must be the same as those given when the
-    multiple assigner was defined.
+    The attribute names will be the same as the attribute names of the
+    identifier implied by the `identifyby` command which is used
+    to mark an assigner as a multi-assigner.
 +paramN+::
     Optional event parameters are passed as additional arguments.
 *****
@@ -4027,6 +4271,9 @@ state machine identified by [arg idvalues].
 The [arg idvalues] argument is a dictionary whose keys are the attributes
 names of the assigner identifier and whose corresponding values
 match those of some assigner for [arg relationship].
+The attribute names will be the same as the attribute names of the
+identifier implied by the [method identifyby] command which is used
+to mark an assigner as a multi-assigner.
 Any optional event parameters are given by the [arg paramN] arguments.
 ----
 ///////
@@ -4054,7 +4301,7 @@ proc signalMultiAssigner {rname idvalues event args} {
     if {![relvar exists $assignrelvar]} {
         tailcall DeclError NO_ASSIGNER $rname
     }
-    set idattrs [lindex [relvar identifiers $assignrelvar] 0]
+    set idattrs [MultiAssignerIDAttrs $domain $relationship]
     # We will insist that the idvalues contain the necessary identifying
     # attributes.
     if {![struct::set equal [dict keys $idvalues] $idattrs]} {
@@ -4094,6 +4341,27 @@ NO_IDENTIFIER       {bad identifying attributes, expected "%s", got "%s"}
 UNKNOWN_ASSIGNER    {unknown assigner instance, "%s", for relationship, "%s"}
 ----
 
+A helper command determines the proper set of attribute names that
+match those of the identifying class and have the correct ID number.
+
+(((rosea,Helpers,SelfInstRef)))
+[source,tcl]
+----
+<<helper commands>>=
+proc MultiAssignerIDAttrs {domain relationship} {
+    if {[string range $domain 0 1] eq "::"} {
+        set domain [string range $domain 2 end]
+    }
+    return [pipe {
+        relvar restrictone ::rosea::Config::MultipleAssigner\
+            Domain $domain Relationship $relationship |
+        relation semijoin ~ $::rosea::Config::Identifier\
+            $::rosea::Config::IdentifyingAttribute |
+        relation list ~ Attribute
+    }]
+}
+----
+
 ==== Creating a Multi-Assigner
 
 Since associations can have multi-assigners,
@@ -4105,6 +4373,9 @@ _relationship_ +create+ _?attr1 value1 attr2 value2 ...?_
 +attrN valueN+::
     Attribute name / value pairs that form the identifier for an
     instance of the multi-assigner associated with _relationship_.
+    The attribute names will be the same as the attribute names of the
+    identifier implied by the `identifyby` command which is used
+    to mark an assigner as a multi-assigner.
 *****
 
 ///////
@@ -4116,6 +4387,9 @@ _relationship_ +create+ _?attr1 value1 attr2 value2 ...?_
 For associations that have a multiple assigner state model,
 the [cmd create] command creates an instance of the assigner
 that is identified by the [arg attrN] / [arg valueN] names and values.
+The attribute names will be the same as the attribute names of the
+identifier implied by the [method identifyby] command which is used
+to mark an assigner as a multi-assigner.
 ----
 ///////
 
@@ -4134,11 +4408,66 @@ proc createMultiAssigner {rname args} {
     if {![relvar exists $assignrelvar]} {
         tailcall DeclError NO_ASSIGNER $rname
     }
-    set idattrs [lindex [relvar identifiers $assignrelvar] 0]
+    set idattrs [MultiAssignerIDAttrs $domain $relationship]
     if {![struct::set equal [dict keys $args] $idattrs]} {
         tailcall DeclError NO_IDENTIFIER [dict keys $args] $idattrs
     }
     CreateInInitialState $domain $relationship $args
+}
+----
+
+==== Deleting a Multi-Assigner
+
+Since multi-assigners can be dynamically created,
+we must provide a means to delete instances of the assigners.
+
+*****
+_relationship_ +delete+ _?attr1 value1 attr2 value2 ...?_
+
++attrN valueN+::
+    Attribute name / value pairs that form the identifier for an
+    instance of the multi-assigner associated with _relationship_.
+    The attribute names will be the same as the attribute names of the
+    identifier implied by the `identifyby` command which is used
+    to mark an assigner as a multi-assigner.
+*****
+
+///////
+----
+<<manual architecture relationship commands>>=
+[call [arg relationship] [cmd delete]\
+    [opt [arg "attr1 value1 attr2 value2 ..."]]]
+
+For associations that have a multiple assigner state model,
+the [cmd delete] command deletes an instance of the assigner
+that is identified by the [arg attrN] / [arg valueN] names and values.
+The attribute names will be the same as the attribute names of the
+identifier implied by the [method identifyby] command which is used
+to mark an assigner as a multi-assigner.
+----
+///////
+
+[float]
+===== Implementation
+(((rosea,RelCmds,createMultiAssigner)))
+[source,tcl]
+----
+<<relationship commands>>=
+proc deleteMultiAssigner {rname args} {
+    if {[llength $args] % 2 != 0} {
+        tailcall DeclError ARG_FORMAT $args
+    }
+    SplitRelvarName $rname domain relationship
+    set assignrelvar ${domain}::${relationship}__STATEINST
+    if {![relvar exists $assignrelvar]} {
+        tailcall DeclError NO_ASSIGNER $rname
+    }
+    set idattrs [MultiAssignerIDAttrs $domain $relationship]
+    if {![struct::set equal [dict keys $args] $idattrs]} {
+        tailcall DeclError NO_IDENTIFIER [dict keys $args] $idattrs
+    }
+    relvar deleteone $assignrelvar {*}$args
+    return
 }
 ----
 
@@ -4409,7 +4738,7 @@ associative linkage and would be handled by the associative traversal code.
 set partdst [relvar restrictone ${domain}::__Arch_PartitionDst\
     Name $lname SrcClass $class DstClass $dst]
 if {[relation isempty $partdst]} {
-    tailcall DeclError PATH_ERROR $lname $class $DstClass $dst
+    tailcall DeclError GEN_PATH_ERROR $class $lname $dst
 }
 relation assign $partdst DstClass Attrs
 set related [eval $relatedQuery]
@@ -4417,11 +4746,14 @@ set related [eval $relatedQuery]
 
 (((error code,UNKNOWN_LINKAGE)))
 (((error code,PATH_ERROR)))
+(((error code,GEN_PATH_ERROR)))
 [source,tcl]
 ----
 <<error code formats>>=
 UNKNOWN_LINKAGE {unknown relationship, "%s", for class, "%s"}
 PATH_ERROR      {relationship, "%s", from "%s" to "%s", does not end at "%s"}
+GEN_PATH_ERROR  {navigating from superclass, "%s", along generalization "%s",\
+                does not have "%s" as a subclass}
 ----
 
 The set of commands intended for state activities are just
@@ -4894,6 +5226,86 @@ test findRelated-3.0 {
 } -result {::rosea::test::foo::X {{X1 int} {{X1 5}}}} -match ref
 ----
 
+[source,tcl]
+----
+<<instance command tests>>=
+test findRelated-3.1 {
+    Navigate a generalization -- bad subclass
+} -setup {
+    setupDomain foo
+    addClass foo S {S1 int S2 string} S1
+    addClass foo X {X1 int X2 string} X1
+    addClass foo Y {Y1 int Y2 string} Y1
+
+    addAssocLink foo {Name R1 SrcClass X}\
+        {Name R1 SrcClass X DstClass S Attrs {X1 S1} PrevSrcClass {}}
+    addAssocLink foo {Name R1 SrcClass Y}\
+        {Name R1 SrcClass Y DstClass S Attrs {Y1 S1} PrevSrcClass {}}
+    relvar eval {
+        addParitionLink foo {Name ~R1 SrcClass S}
+        addPartitionDst foo {Name ~R1 SrcClass S DstClass X Attrs {S1 X1}}
+        addPartitionDst foo {Name ~R1 SrcClass S DstClass Y Attrs {S1 Y1}}
+    }
+
+    set ref [rosea::ClassCmds::create [namespace current]::foo::S S1 5 S2 baz]
+    rosea::ClassCmds::create [namespace current]::foo::X X1 5 X2 bar
+} -cleanup {
+    cleanupDomain foo
+} -body {
+    ::rosea::InstCmds::findRelated $ref {~R1 Z}
+} -result {navigating from superclass, "S", along generalization "~R1",\
+    does not have "Z" as a subclass} -returnCodes error
+----
+
+==== Finding the Partitioning Instance of a Multi-Assigner
+
+Multi-assigners are partitioned by a class, so for each instance of
+the partitioning class there is an instance of the multi-assigner.
+Assigner state models usually need to find this instance of the
+partitioning class to implement the serialization of an association.
+This command provides that search.
+
+///////
+----
+<<manual architecture instance commands>>=
+[call [cmd idInstance] [arg asgnref]]]
+
+For associations that have a multiple assigner state model,
+the [cmd idInstance] command finds the instance of the partitioning
+class whose identifying attribute values match those of the
+assigner instance.
+----
+///////
+
+[float]
+===== Implementation
+(((rosea,InstCmds,idInstance)))
+[source,tcl]
+----
+<<relationship commands>>=
+<<instance commands>>=
+proc idInstance {instref} {
+    lassign $instref relvar insts
+    SplitRelvarName $relvar domain relationship
+    set assignrelvar ${domain}::${relationship}__STATEINST
+    if {![relvar exists $assignrelvar]} {
+        tailcall DeclError NO_ASSIGNER $rname
+    }
+
+    set idclass [pipe {
+        relvar restrictone [namespace parent]::Config::MultipleAssigner\
+                Domain [string trim $domain :] Relationship $relationship |
+        relation extract ~ Class
+    }]
+
+    return [pipe {
+        relvar set ${domain}::$idclass |
+        relation semijoin $insts ~ |
+        ToRef ${domain}::$idclass ~
+    }]
+}
+----
+
 ==== Updating Attributes
 
 Another fundamental data operation is to update the values of attributes.
@@ -4959,7 +5371,7 @@ if {[llength $args] % 2 != 0} {
 
 lassign $instref relvar insts
 if {[relation cardinality $insts] != 1} {
-    tailcall MUST_BE_SINGULAR $relvar [relation cardinality $insts]
+    tailcall DeclError MUST_BE_SINGULAR $relvar [relation cardinality $insts]
 }
 ----
 
@@ -5018,7 +5430,7 @@ foreach {attr value} $args {
     if {![dict exists $heading $attr]} {
         tailcall DeclError UNKNOWN_ATTRIBUTE $attr
     }
-    lappend extcmd $attr [dict get $heading $attr] \"$value\"
+    lappend extcmd $attr [dict get $heading $attr] \{$value\}
 }
 ----
 
@@ -5110,6 +5522,22 @@ test updateAttribute-1.3 {
 } -body {
     ::rosea::InstCmds::updateAttribute $ref C3 27
 } -result {unknown attribute, "C3"} -returnCodes error
+----
+[source,tcl]
+----
+<<instance command tests>>=
+test updateAttribute-1.4 {
+    Update single attribute value containing Tcl metacharacters
+} -setup {
+    setupDomain bar
+    addClass bar c1 {A1 int A2 string} A1
+    set ref [rosea::ClassCmds::create [namespace current]::bar::c1 A1 5 A2 baz]
+} -cleanup {
+    cleanupDomain bar
+} -body {
+    ::rosea::InstCmds::updateAttribute $ref A2 {foo[27]}
+    relation extract [::rosea::InstCmds::deRef $ref] A2
+} -result {foo[27]}
 ----
 
 ==== Modifying Attributes
@@ -5217,7 +5645,7 @@ if {[llength $args] < 2} {
 
 lassign $instref relvar insts
 if {[relation cardinality $insts] != 1} {
-    tailcall MUST_BE_SINGULAR $relvar [relation cardinality $insts]
+    tailcall DeclError MUST_BE_SINGULAR $relvar [relation cardinality $insts]
 }
 
 set body [lindex $args end]
@@ -5287,7 +5715,7 @@ set heading [relation heading [relvar set $relvar]]
 foreach attr $attrnames var $varnames {
     if {[uplevel 1 [list info exists $var]]} {
         upvar 1 $var varvalue
-        lappend extcmd $attr [dict get $heading $attr] \"$varvalue\"
+        lappend extcmd $attr [dict get $heading $attr] \{$varvalue\}
     }
 }
 ----
@@ -5831,10 +6259,7 @@ into the Tcl event loop.
 <<instance commands>>=
 proc signal {dstset event args} {
     set srcref [SelfInstRef]
-    if {![::rosea::Dispatch::MapPolymorphicEvent ::rosea::Dispatch::SignalEvent\
-            $srcref $dstset $event $args]} {
-        ::rosea::Dispatch::SignalEvent $srcref $dstset $event $args
-    }
+    ::rosea::Dispatch::SignalEvent $srcref $dstset $event $args
     return
 }
 ----
@@ -5901,11 +6326,7 @@ proc delaysignal {time dstset event args} {
         tailcall DeclError INVALID_TIME $time
     }
     set srcref [SelfInstRef]
-    if {![::rosea::Dispatch::MapPolymorphicEvent\
-            [list ::rosea::Dispatch::SignalDelayedEvent $time]\
-            $srcref $dstset $event $args]} {
-        ::rosea::Dispatch::SignalDelayedEvent $time $srcref $dstset $event $args
-    }
+    ::rosea::Dispatch::SignalDelayedEvent $time $srcref $dstset $event $args
     return
 }
 ----
@@ -6327,7 +6748,7 @@ proc SignalEvent {srcref dstset event arglist} {
 
     set callback [namespace code DispatchEvent]
     set eventInfo [dict create\
-        type ordinary\
+        type $eventType\
         src $srcref\
         event $event\
         params $arglist\
@@ -6386,9 +6807,35 @@ sure that the class instances accept the event.
 <<SignalEvent: validate event>>=
 lassign $dstset relvar insts
 SplitRelvarName $relvar domain class
-if {[relation isempty [relvar restrictone ${domain}::__Arch_Event\
-        Class $class Event $event]]} {
+if {[relation isnotempty [relvar restrictone ${domain}::__Arch_Event\
+    Class $class Event $event]]} {
+    set eventType ordinary
+} elseif {[IsPolymorphicEvent $domain $class $event]} {
+    set eventType polymorphic
+} else {
     tailcall DeclError UNKNOWN_EVENT $event $class
+}
+----
+
+We use the *PolymorphicEvent* relvar to determine if is the event
+is polymorphic.
+
+[source,tcl]
+----
+<<arch relvar definitions>>=
+ral relvar create __Arch_PolymorphicEvent {
+    Class           string
+    Event           string
+} {Class Event}
+----
+
+[source,tcl]
+----
+<<SignalEvent: validate event>>=
+<<dispatch commands>>=
+proc IsPolymorphicEvent {domain class event} {
+    return [relation isnotempty [relvar restrictone\
+        ${domain}::__Arch_PolymorphicEvent Class $class Event $event]]
 }
 ----
 
@@ -6425,7 +6872,7 @@ for {set eqindex 0} {$eqindex < [llength $event_queue]} {incr eqindex} {
     }
 }
 set event_queue [linsert [K $event_queue [set event_queue {}]]\
-        $eqindex $eventInfo] ; # <1>
+    $eqindex $eventInfo] ; # <1>
 ----
 <1> This code uses the K combinator trick. This is an optimization
 that exploits a particular design characteristic of Tcl.
@@ -6497,10 +6944,7 @@ event to be ignored or treated as an error.
 <<dispatch commands>>=
 proc DispatchEvent {} {
     <<DispatchEvent: select event>>
-    <<DispatchEvent: handle creation events>>
-    <<DispatchEvent: get current state>>
-    <<DispatchEvent: determine new state>>
-    <<DispatchEvent: execute state action>>
+    <<DispatchEvent: handle event types>>
     return
 }
 ----
@@ -6520,167 +6964,23 @@ then there is nothing to do and we simply return.
 variable event_queue
 variable toc_queue
 
-if {[llength $event_queue] != 0} {
-    set eventInfo [lindex $event_queue 0]
-    set event_queue [lrange [K $event_queue [set event_queue {}]] 1 end] ; # <1>
-} elseif {[llength $toc_queue] != 0} {
-    set eventInfo [lindex $toc_queue 0]
-    set toc_queue [lrange [K $toc_queue [set toc_queue {}]] 1 end]
-    relvar transaction begin ; # <2>
-} else {
-    return
-}
-----
-<1> Note the use of the `K` trick here and below.
-<2> Each time we start a new thread of control, we begin a transaction.
-
-The event dictionary has a `type` key that determines if the event
-is just an ordinary event or is a creation event.
-For a creation event we must actually create an class instance before we
-dispatch the event to it.
-
-[source,tcl]
-----
-<<DispatchEvent: handle creation events>>=
-if {[dict get $eventInfo type] eq "creation"} {
-    try {
-        set dstref [::rosea::ClassCmds::createin\
-                [dict get $eventInfo dstClass] @\
-                {*}[dict get $eventInfo dstAttrs]] ; # <1>
-    } on error {result} {
-        catch {
-            if {[llength $event_queue] == 0} {
-                relvar transaction end
-            }
-        }
-        tailcall DeclError ASYNC_CREATION_FAILED [dict get $eventInfo dstClass]\
-            [dict get $eventInfo dstAttrs] $result
-    }
-    dict set eventInfo dst $dstref ; # <2>
-    ::rosea::Trace::TraceCreation [dict get $eventInfo src]\
-        [dict get $eventInfo event] $dstref
-}
-----
-<1> Here is where the new instance is created in the pseudo-initial, `@`,
-state.
-<2> Note that we are just setting the `dst` dictionary key so that now
-all the members are in place to look just like an ordinary event.
-The rest of the code simply ignores the dictionary members that it is not
-concerned with.
-
-(((error code,ASYNC_CREATION_FAILED)))
-[source,tcl]
-----
-<<error code formats>>=
-ASYNC_CREATION_FAILED     {asynchronous creation of an instance of class, "%s",\
-    with attributes, "%s", failed: %s}
-----
-
-Each class that has a state model also has an additional relvar that is used to
-hold the value of the current state for the instances of the class.
-That relvar is named, `<class>__STATEINST`, where +<class>+ is replaced
-by the class name.
-The heading of the current state relvar consists of the attributes of the first
-identifier of the class plus an attribute named, `__State`, which holds the
-current state.
-So obtaining the current state means that we +semijoin+ the instance reference
-to the value of the `<class>__STATEINST` relvar.
-
-[source,tcl]
-----
-<<DispatchEvent: get current state>>=
-set dstref [dict get $eventInfo dst]
-lassign $dstref relvar ref
-SplitRelvarName $relvar domain class
-
-set instrelvar ${domain}::${class}__STATEINST
-set state [relation semijoin $ref [relvar set $instrelvar]]
-if {[relation isempty $state]} {
-    tailcall DeclError EVENT_IN_FLIGHT [dict get $eventInfo event] $ref
-}
-set currstate [relation extract $state __State]
-----
-
-(((error code,EVENT_IN_FLIGHT)))
-[source,tcl]
-----
-<<error code formats>>=
-EVENT_IN_FLIGHT     {event, "%s", sent to "%s", which does not exist}
-----
-
-It is possible for an event to be signaled to an instance that
-has been deleted before the event is actually delivered.
-This is known as the _event in flight_ error and is one of the few
-run-time errors that is diagnosed by +rosea+.
-This is considered an analysis error detected at run time.
-Correct analysis models must insure that no events are in flight to
-an instance before deleting it.
-In general, deletion protocols within a domain model can be quite
-complicated as the model is responsible for all the compensatory
-operations needed to make the instance population consistent with
-the relationship constraints.
-
-To obtain the new state,
-we query the *Transition* relvar that was shown above.
-When the *Transition* relvar value is set up,
-it is the Cartesian product of the states and events for the class.
-So it can be considered the complete transition matrix and the
-query below will always find a tuple with the new state.
-
-[source,tcl]
-----
-<<dispatch data>>=
-pipe {
-    relvar restrictone ${domain}::__Arch_Transition\
-        Class $class State $currstate Event $event |
-    relation extract ~ NewState
-} transitionQuery
-----
-
-Combining the event name and the current state we perform the
-query to find the new state.
-
-[source,tcl]
-----
-<<DispatchEvent: determine new state>>=
-set event [dict get $eventInfo event]
-variable transitionQuery
-set newState [eval $transitionQuery]
-
-::rosea::Trace::TraceTransition [dict get $eventInfo src]\
-    $event $dstref $currstate $newState [dict get $eventInfo params] ; # <1>
-----
-<1> Note that we trace the transition _before_ we take any action on it.
-It is a simpler control path.
-We will have much more to say about state machine tracing.
-
-Finally, we get to the heart of the event dispatch code.
-There are three cases to consider:
-
-* The event causes a CH (Can't Happen) transition and that is considered
-a serious error.
-* The event causes an IG (Ignore) transition and we do nothing.
-* We transition to the new state and execute the state activity.
-
-In the end,
-we must decide if the thread of control has ended and if so then
-the transaction is also ended.
-
-[source,tcl]
-----
-<<DispatchEvent: execute state action>>=
 try {
-    if {$newState eq "CH"} {
-        <<DispatchEvent: handle transition error>>
-    } elseif {$newState ne "IG"} {
-        <<DispatchEvent: transition to new state>>
+    if {[llength $event_queue] != 0} {
+        set event_queue [lassign $event_queue eventInfo]
+        TransitionEvent $eventInfo
+    } elseif {[llength $toc_queue] != 0} {
+        set toc_queue [lassign $toc_queue eventInfo]
+        relvar transaction begin ;                              # <1>
+        try {
+            TransitionEvent $eventInfo
+        } on error {result opts} {
+            catch {relvar transaction end} ;                    # <2>
+            return -level 0 -options $opts $result
+        }
+    } else {
+        return
     }
 } on error {result opts} {
-    catch {
-        if {[llength $event_queue] == 0} {
-            relvar transaction end
-        }
-    } ; # <1>
     return -options $opts $result
 }
 
@@ -6688,121 +6988,13 @@ if {[llength $event_queue] == 0} {
     relvar transaction end
 }
 ----
-<1> If there is an error executing a state activity, we may still need
+<1> Each time we start a new thread of control, we begin a transaction.
+<2> If there is an error in the transition, we need
 to end the thread of control (and hence the `relvar transaction`).
 In general,
 the transaction will fail since the state activity did not complete.
 We don't want the transaction failure to throw another error
 which would mask the reason the state activity failed in the first place.
-
-The *CH* (can't happen) transition deserves special consideration.
-You can think of a *CH* transition as an analogy to the +assert+ macro
-in ordinary ``C'' code.
-Triggering a *CH* transition is a serious error that should never
-happen in production code.
-If it does, usually there is no clear way to proceed and how to
-handle such situations is very application dependent.
-Often the only recourse is to exit or reset to some saved checkpoint.
-However during development and testing,
-the *CH* transition can uncover a wealth of analysis errors and
-misunderstandings.
-Consequently,
-it is very useful to have some control over what happens should
-a *CH* transition occur.
-We delegate the error handling for *CH* transitions to
-the +TransitionError+ footnote:[The fully qualified name is
-+::rosea::Dispatch::TransitionError+]
-procedure.
-
-[source,tcl]
-----
-<<DispatchEvent: handle transition error>>=
-TransitionError [dict get $eventInfo src] $event $dstref $currstate
-----
-
-We supply a default implementation of +TransitionError+ which simply
-throws an error.
-Application can redefine this procedure to gain control over the error
-handling.
-
-(((rosea,Dispatch,TransitionError)))
-[source,tcl]
-----
-<<dispatch commands>>=
-proc TransitionError {src event dst currstate} {
-    tailcall DeclError CANT_HAPPEN_EVENT $src $event $dst $currstate
-}
-----
-
-(((error code,CANT_HAPPEN_EVENT)))
-[source,tcl]
-----
-<<error code formats>>=
-CANT_HAPPEN_EVENT   {can't happen transition, %s - %s -> %s ==> %s -> CH}
-----
-
-When transitioning to the new state,
-we update the value of the current state of the instance to be the newly
-determined state value.
-The identifiers of the `<class>__STATEINST` relvar are just the
-attributes of the instance reference for the instance.
-Note that the current state is updated to the new state _before_ the
-state activity is executed.
-Some architectures wait until after the state activity is executed.
-Which is better or correct is hard to determine and in practice does
-not matter since state activities are strongly discouraged from having knowledge
-of their own state.
-
-[source,tcl]
-----
-<<DispatchEvent: transition to new state>>=
-set idattrs [tuple get [relation tuple $ref]]
-relvar updateone $instrelvar is $idattrs {
-    tuple update $is __State $newState
-}
-----
-
-At last we execute the state activity.
-State activities are ordinary Tcl procedures named the same as the state and
-placed in the `__Activity` namespace that is a child of the
-namespace associated to the class.
-The instance reference of the event target is passed as the
-value of the +self+ parameter and any other parameters carried along
-with the event are also given to the activity procedure.
-Here is the explicit reason that the parameters carried with the
-event must match the arguments that the state activity expects
-or Tcl will throw an error.
-
-[source,tcl]
-----
-<<DispatchEvent: transition to new state>>=
-try {
-    ${relvar}::__Activity::$newState $dstref\
-            {*}[dict get $eventInfo params] ; # <1>
-} on error {result opts} {
-    return -options $opts $result
-} finally {
-    set term [relvar restrictone ${domain}::__Arch_TerminalState\
-            Class $class State $newState]
-    if {[relation isnotempty $term]} {
-        relvar deleteone $relvar {*}$idattrs
-        relvar deleteone $instrelvar {*}$idattrs
-    }
-}
-----
-<1> This command invocation has a lot of variable substitution.
-Each state activity is actually a procedure.
-Those procedures are placed in the `__Activity` child namespace
-of the class so that there is no naming conflict.
-The value of +dstref+ becomes +self+ in the state activity.
-Finally, we expand out the list of event parameters to be
-any additional arguments to the state activity procedure.
-
-After executing the state activity,
-we look to see if new state is a terminal state.
-If the state was marked as terminal when the state model was defined,
-the the system automatically deletes the class instance.
-Of course, we must also delete the tuple that records the current state.
 
 [float]
 ===== Testing
@@ -7235,7 +7427,317 @@ test SignalTimeRemaining-1.0 {
 } -result {1}
 ----
 
-==== Dispatching Polymorphic Events
+=== Event Transition
+
+In this section we present the implementation of transitioning events.
+When an event is directed at an instance,
+we must compute any transition the event causes.
+
+==== TransitionEvent
+
+The event dictionary has a `type` key that determines if the event
+is an ordinary event, a polymorphic event, or is a creation event.
+
+[source,tcl]
+----
+<<dispatch commands>>=
+proc TransitionEvent {eventInfo} {
+    switch -exact -- [dict get $eventInfo type] {
+        ordinary {
+            TransitionOrdinaryEvent $eventInfo
+        }
+        creation {
+            TransitionCreationEvent $eventInfo
+        }
+        polymorphic {
+            TransitionPolymorphicEvent $eventInfo
+        }
+        default {
+            tailcall DeclError UNKNOWN_EVENT_TYPE [dict get $eventInfo type]
+        }
+    }
+}
+----
+
+(((error code,UNKNOWN_EVENT_TYPE)))
+[source,tcl]
+----
+<<error code formats>>=
+UNKNOWN_EVENT_TYPE     {unknown event type, \"%s\"}
+----
+
+==== TransitionOrdinaryEvent
+
+Events immediately dispatched from the event queue are termed
+_ordinary_ events to distinguish them from events such as _creation_
+events or _polymorphic_ events which have further semantics associated
+with them.
+
+(((rosea,Dispatch,TransitionOrdinaryEvent)))
+[source,tcl]
+----
+<<dispatch commands>>=
+proc TransitionOrdinaryEvent {eventInfo} {
+    variable event_queue
+    <<TransitionOrdinaryEvent: get current state>>
+    <<TransitionOrdinaryEvent: determine new state>>
+    <<TransitionOrdinaryEvent: execute state action>>
+    return
+}
+----
+
+Each class that has a state model also has an additional relvar that is used to
+hold the value of the current state for the instances of the class.
+That relvar is named, `<class>__STATEINST`, where +<class>+ is replaced
+by the class name.
+The heading of the current state relvar consists of the attributes of the first
+identifier of the class plus an attribute named, `__State`, which holds the
+current state.
+So obtaining the current state means that we +semijoin+ the instance reference
+to the value of the `<class>__STATEINST` relvar.
+
+[source,tcl]
+----
+<<TransitionOrdinaryEvent: get current state>>=
+set dstref [dict get $eventInfo dst]
+lassign $dstref relvar ref
+SplitRelvarName $relvar domain class
+
+set instrelvar ${domain}::${class}__STATEINST
+set state [relation semijoin $ref [relvar set $instrelvar]]
+if {[relation isempty $state]} {
+    tailcall DeclError EVENT_IN_FLIGHT [dict get $eventInfo event] $ref
+}
+set currstate [relation extract $state __State]
+----
+
+(((error code,EVENT_IN_FLIGHT)))
+[source,tcl]
+----
+<<error code formats>>=
+EVENT_IN_FLIGHT     {event, "%s", sent to "%s", which does not exist}
+----
+
+It is possible for an event to be signaled to an instance that
+has been deleted before the event is actually delivered.
+This is known as the _event in flight_ error and is one of the few
+run-time errors that is diagnosed by +rosea+.
+This is considered an analysis error detected at run time.
+Correct analysis models must insure that no events are in flight to
+an instance before deleting it.
+In general, deletion protocols within a domain model can be quite
+complicated as the model is responsible for all the compensatory
+operations needed to make the instance population consistent with
+the relationship constraints.
+
+To obtain the new state,
+we query the *Transition* relvar that was shown above.
+When the *Transition* relvar value is set up,
+it is the Cartesian product of the states and events for the class.
+So it can be considered the complete transition matrix and the
+query below will always find a tuple with the new state.
+
+[source,tcl]
+----
+<<dispatch data>>=
+pipe {
+relvar restrictone ${domain}::__Arch_Transition\
+    Class $class State $currstate Event $event |
+    relation extract ~ NewState
+} transitionQuery
+----
+
+Combining the event name and the current state we perform the
+query to find the new state.
+
+[source,tcl]
+----
+<<TransitionOrdinaryEvent: determine new state>>=
+set event [dict get $eventInfo event]
+variable transitionQuery
+set newState [eval $transitionQuery]
+
+::rosea::Trace::TraceTransition [dict get $eventInfo src]\
+    $event $dstref $currstate $newState [dict get $eventInfo params] ; # <1>
+----
+<1> Note that we trace the transition _before_ we take any action on it.
+It is a simpler control path.
+We will have much more to say about state machine tracing.
+
+Finally, we get to the heart of the event dispatch code.
+There are three cases to consider:
+
+* The event causes a CH (Can't Happen) transition and that is considered
+a serious error.
+* The event causes an IG (Ignore) transition and we do nothing.
+* We transition to the new state and execute the state activity.
+
+In the end,
+we must decide if the thread of control has ended and if so then
+the transaction is also ended.
+
+[source,tcl]
+----
+<<TransitionOrdinaryEvent: execute state action>>=
+if {$newState eq "CH"} {
+    <<TransitionOrdinaryEvent: handle transition error>>
+} elseif {$newState ne "IG"} {
+    <<TransitionOrdinaryEvent: transition to new state>>
+}
+----
+
+The *CH* (can't happen) transition deserves special consideration.
+You can think of a *CH* transition as an analogy to the +assert+ macro
+in ordinary ``C'' code.
+Triggering a *CH* transition is a serious error that should never
+happen in production code.
+If it does, usually there is no clear way to proceed and how to
+handle such situations is very application dependent.
+Often the only recourse is to exit or reset to some saved checkpoint.
+However during development and testing,
+the *CH* transition can uncover a wealth of analysis errors and
+misunderstandings.
+Consequently,
+it is very useful to have some control over what happens should
+a *CH* transition occur.
+We delegate the error handling for *CH* transitions to
+the +TransitionError+ footnote:[The fully qualified name is
++::rosea::Dispatch::TransitionError+]
+procedure.
+
+[source,tcl]
+----
+<<TransitionOrdinaryEvent: handle transition error>>=
+TransitionError [dict get $eventInfo src] $event $dstref $currstate
+----
+
+We supply a default implementation of +TransitionError+ which simply
+throws an error.
+Application can redefine this procedure to gain control over the error
+handling.
+
+(((rosea,Dispatch,TransitionError)))
+[source,tcl]
+----
+<<dispatch commands>>=
+proc TransitionError {src event dst currstate} {
+    tailcall DeclError CANT_HAPPEN_EVENT $src $event $dst $currstate
+}
+----
+
+(((error code,CANT_HAPPEN_EVENT)))
+[source,tcl]
+----
+<<error code formats>>=
+CANT_HAPPEN_EVENT   {can't happen transition, %s - %s -> %s ==> %s -> CH}
+----
+
+When transitioning to the new state,
+we update the value of the current state of the instance to be the newly
+determined state value.
+The identifiers of the `<class>__STATEINST` relvar are just the
+attributes of the instance reference for the instance.
+Note that the current state is updated to the new state _before_ the
+state activity is executed.
+Some architectures wait until after the state activity is executed.
+Which is better or correct is hard to determine and in practice does
+not matter since state activities are strongly discouraged from having knowledge
+of their own state.
+
+[source,tcl]
+----
+<<TransitionOrdinaryEvent: transition to new state>>=
+set idattrs [tuple get [relation tuple $ref]]
+relvar updateone $instrelvar is $idattrs {
+    tuple update $is __State $newState
+}
+----
+
+At last we execute the state activity.
+State activities are ordinary Tcl procedures named the same as the state and
+placed in the `__Activity` namespace that is a child of the
+namespace associated to the class.
+The instance reference of the event target is passed as the
+value of the +self+ parameter and any other parameters carried along
+with the event are also given to the activity procedure.
+Here is the explicit reason that the parameters carried with the
+event must match the arguments that the state activity expects
+or Tcl will throw an error.
+
+[source,tcl]
+----
+<<TransitionOrdinaryEvent: transition to new state>>=
+try {
+    ${relvar}::__Activity::$newState $dstref\
+            {*}[dict get $eventInfo params] ; # <1>
+} on error {result opts} {
+    chan puts stderr $::errorInfo
+    return -options $opts $result
+} finally {
+    set term [relvar restrictone ${domain}::__Arch_TerminalState\
+            Class $class State $newState]
+    if {[relation isnotempty $term]} {
+        relvar deleteone $relvar {*}$idattrs
+        relvar deleteone $instrelvar {*}$idattrs
+    }
+}
+----
+<1> This command invocation has a lot of variable substitution.
+Each state activity is actually a procedure.
+Those procedures are placed in the `__Activity` child namespace
+of the class so that there is no naming conflict.
+The value of +dstref+ becomes +self+ in the state activity.
+Finally, we expand out the list of event parameters to be
+any additional arguments to the state activity procedure.
+
+After executing the state activity,
+we look to see if new state is a terminal state.
+If the state was marked as terminal when the state model was defined,
+the the system automatically deletes the class instance.
+Of course, we must also delete the tuple that records the current state.
+
+==== TransitionCreationEvent
+
+For a creation event we must actually create an class instance before we
+cause the event transition.
+
+[source,tcl]
+----
+<<dispatch commands>>=
+proc TransitionCreationEvent {eventInfo} {
+    try {
+        set dstref [::rosea::ClassCmds::createin\
+                [dict get $eventInfo dstClass] @\
+                {*}[dict get $eventInfo dstAttrs]] ; # <1>
+    } on error {result opts} {
+        tailcall DeclError ASYNC_CREATION_FAILED\
+                [dict get $eventInfo dstClass]\
+                [dict get $eventInfo dstAttrs] $result
+        return -options $opts $result
+    }
+    ::rosea::Trace::TraceCreation [dict get $eventInfo src]\
+        [dict get $eventInfo event] $dstref [dict get $eventInfo params]
+    dict set eventInfo type ordinary
+    dict set eventInfo dst $dstref ; # <2>
+    TransitionOrdinaryEvent $eventInfo
+}
+----
+<1> Here is where the new instance is created in the pseudo-initial, `@`,
+state.
+<2> Note that we are just setting the `dst` dictionary key so that now
+all the members are in place to look just like an ordinary event.
+The rest of the code simply ignores the dictionary members that it is not
+concerned with.
+
+(((error code,ASYNC_CREATION_FAILED)))
+[source,tcl]
+----
+<<error code formats>>=
+ASYNC_CREATION_FAILED     {asynchronous creation of an instance of class, "%s",\
+with attributes, "%s", failed: %s}
+----
+
+==== TransitionPolymorphicEvent
 
 We now consider the job of dispatching polymorphic events.
 Polymorphic events are events directed at the superclass of a generalization
@@ -7298,84 +7800,25 @@ from all the generalization for which the class is a subclass.
 Note that some care might have to be taken to insure that the polymorphic
 event names of the multiple hierarchies are distinct.
 
-==== MapPolymorphicEvent
-
-The +MapPolymorphicEvent+ procedure is called by the instance commands
-that deal with signaling events to determine if the event
-is indeed polymorphic.
-It is,
-then the the event is recursively signaled to the currently related
-subclass instance.
-Otherwise,
-+MapPolymorphicEvent+ returns an indication that the event is not
-polymorphic and the instance signaling commands can then perform
-the operation of signaling an ordinary event.
-Ultimately,
-execution sequencing is only accomplished by delivering ordinary events.
-Event polymorphism is a convenience and optimization that prevents
-state activities from performing event mapping themselves.
+The +TransitionPolymorphicEvent+ procedure is called during event dispatch
+to map polymorphic events to local ordinary events in the
+subclasses of a generalization hierarchy.
 
 [float]
 ===== Implementation
 
-One consideration for the implementation of the +MapPolymorphicEvent+
-procedure is that we want to use this procedure to handle both
-immediate and delayed events.
-The function of mapping the event is the same.
-The only difference is how the mapped event is handled.
-So we will pass in a forwarding command prefix as an argument.
-Once the work is accomplished to determine which subclass instance
-is to be signaled,
-the forwarding command will determine if it is a delayed or immediate event.
-
-(((rosea,Dispatch,MapPolymorphicEvent)))
+(((rosea,Dispatch,TransitionPolymorphicEvent)))
 [source,tcl]
 ----
 <<dispatch commands>>=
-proc MapPolymorphicEvent {frwdcmd srcref dstrefs event arglist} {
-    <<MapPolymorphicEvent: check if event is polymorphic>>
-    <<MapPolymorphicEvent: find subclasses>>
-    <<MapPolymorphicEvent: map event>>
+proc TransitionPolymorphicEvent {eventInfo} {
+    lassign [dict get $eventInfo dst] dstrelvar inst
+    SplitRelvarName $dstrelvar domain dstclass
+    set event [dict get $eventInfo event]
 
-    return true
+    <<TransitionPolymorphicEvent: find subclasses>>
+    <<TransitionPolymorphicEvent: map event>>
 }
-----
-
-We use the *PolymorphicEvent* relvar to determine if is the event
-is polymorphic.
-If the event is not found here,
-then we just return and the event will be signaled as an ordinary event.
-
-[source,tcl]
-----
-<<arch relvar definitions>>=
-ral relvar create __Arch_PolymorphicEvent {
-    Class           string
-    Event           string
-} {Class Event}
-----
-
-[source,tcl]
-----
-<<MapPolymorphicEvent: check if event is polymorphic>>=
-lassign $dstrefs dstrelvar dstinsts
-SplitRelvarName $dstrelvar domain dstclass
-set polyevent [relvar restrictone ${domain}::__Arch_PolymorphicEvent\
-    Class $dstclass Event $event]
-if {[relation isempty $polyevent]} {
-    return false
-}
-----
-
-If we indeed have a polymorphic event,
-we need to determine the generalization hierarchies that are affected.
-We do that with a query.
-
-[source,tcl]
-----
-<<MapPolymorphicEvent: find subclasses>>=
-variable polymapQuery
-set partitions [eval $polymapQuery]
 ----
 
 [[polymapQuery,polymorphic event query]]
@@ -7412,19 +7855,24 @@ The heading of the result of this query will be:
 
 [width="50%",options="header",title="Heading of Polymorphic Event Mapping Query Result"]
 |=========================
-    |Name       |SrcClass   2+^h|DstLinks
-    |string     |string     2+^|Relation
+|Name       |SrcClass   2+^h|DstLinks
+|string     |string     2+^|Relation
 1.2+|       1.2+|             h|DstClass     h|Attrs
-                               |string        |list
+                           |string        |list
 |=========================
 
 Note that the *DstLinks* attribute is relation valued.footnote:[That is what
 the +group+ operation does.]
 
-The polymorphic event mapping operation consists of three nested iterations.
-The outside loop iterates over the target superclass instances
-since we may be signaling several instances in the same call.
-The next iteration is over all the hierarchies that originate from
+[source,tcl]
+----
+<<TransitionPolymorphicEvent: find subclasses>>=
+variable polymapQuery
+set partitions [eval $polymapQuery]
+----
+
+The polymorphic event mapping operation consists of two nested iterations.
+The outside iteration is over all the hierarchies that originate from
 the superclass.
 Typically, this is only one, but it can be several for a compound
 generalization.
@@ -7432,14 +7880,12 @@ Finally, we iterate over all the subclass links.
 
 [source,tcl]
 ----
-<<MapPolymorphicEvent: map event>>=
-relation foreach inst $dstinsts {
-    relation foreach partition $partitions {
-        relation assign $partition
-        relation foreach dstlink $DstLinks {
-            relation assign $dstlink
-            <<MapPolymorphicEvent: signal subclass>>
-        }
+<<TransitionPolymorphicEvent: map event>>=
+relation foreach partition $partitions {
+    relation assign $partition
+    relation foreach dstlink $DstLinks {
+        relation assign $dstlink
+        <<TransitionPolymorphicEvent: signal subclass>>
     }
 }
 ----
@@ -7450,13 +7896,14 @@ Note that we are semijoining to each subclass in the generalization until
 one is found.
 This is different from navigating the relationship in the context
 of the +findRelated+ command.
-There we determined whether the superclass instance is related to a specific
+In that case,
+we determined whether the superclass instance is related to a specific
 subclass instance.
 Here we are searching for the subclass instance to which the superclass
 instance is related.
 Once we know which is the related subclass instance we can formulate an
 instance reference to it and trace the polymorphic event dispatch.
-We _forward_ the event to the subclass instance by recursively signaling
+We _forward_ the event to the subclass instance by recursively transitioning
 the event.
 Once forwarding has happened, we can stop looking any further since
 we _know_ that there is exactly one subclass instance linked to any given
@@ -7464,68 +7911,37 @@ superclass instance because the partition constraint guarantees that.
 
 [source,tcl]
 ----
-<<MapPolymorphicEvent: signal subclass>>=
+<<TransitionPolymorphicEvent: signal subclass>>=
 set related [relation semijoin $inst\
     [relvar set ${domain}::$DstClass] -using $Attrs]
 if {[relation isnotempty $related]} {
-    set dstreference [ToRef ${domain}::$DstClass $related]
-    ::rosea::Trace::TracePolymorphic $srcref\
-        $event $dstreference ${domain}::SrcClass $Name
-    {*}$frwdcmd $srcref $dstreference $event $arglist ; # <1>
+    set dstreference [ToRef ${domain}::${DstClass} $related]
+    set target [ToRef $dstrelvar $inst]
+    set srcref [dict get $eventInfo src]
+    ::rosea::Trace::TracePolymorphic $srcref $event $target $dstreference $Name\
+            [dict get $eventInfo params]
+
+    set mappedInfo $eventInfo ;                                 # <1>
+    dict set mappedInfo src $target
+    dict set mappedInfo dst $dstreference
+    if {[IsPolymorphicEvent $domain $DstClass $event]} {
+        TransitionPolymorphicEvent $mappedInfo
+    } else {
+        dict set eventInfo type ordinary
+        TransitionOrdinaryEvent $mappedInfo
+    }
     break
 }
 ----
-<1> The forward command prefix will either be +SignalEvent+ or
-+SignalDelayedEvent <time>+ depending whether we arrived
-here via the +signal+ instance command or the +delaysignal+ instance command.
-
-[float]
-===== Testing
-
-[source,tcl]
-----
-<<test utility procs>>=
-proc addPolymorphic {domain args} {
-    relvar insert [namespace current]::${domain}::__Arch_PolymorphicEvent\
-            $args
-}
-
-proc polysignal {srcref dstref event paramlist} {
-    puts -nonewline [info level 0]
-}
-----
-
-[source,tcl]
-----
-<<dispatch command tests>>=
-test MapPolymorphicEvent-1.0 {
-    Map a polymorphic event
-} -setup {
-    setupDomain bar
-    addClass bar S {S1 int S2 string} S1
-    addClass bar X {X1 int X2 string} X1
-    addClass bar Y {Y1 int Y2 string} Y1
-
-    addAssocLink bar {Name R1 SrcClass X}\
-        {Name R1 SrcClass X DstClass S Attrs {X1 S1} PrevSrcClass {}}
-    addAssocLink bar {Name R1 SrcClass Y}\
-        {Name R1 SrcClass Y DstClass S Attrs {Y1 S1} PrevSrcClass {}}
-    relvar eval {
-        addParitionLink bar {Name ~R1 SrcClass S}
-        addPartitionDst bar {Name ~R1 SrcClass S DstClass X Attrs {S1 X1}}
-        addPartitionDst bar {Name ~R1 SrcClass S DstClass Y Attrs {S1 Y1}}
-    }
-
-    addPolymorphic bar Class S Event e1
-    set ref [rosea::ClassCmds::create [namespace current]::bar::S S1 5 S2 baz]
-    rosea::ClassCmds::create [namespace current]::bar::X X1 5 X2 bar
-} -cleanup {
-    cleanupDomain bar
-} -body {
-    rosea::Dispatch::MapPolymorphicEvent [namespace current]::polysignal\
-        {} $ref e1 {}
-} -result {true} -output {::rosea::test::polysignal {} {::rosea::test::bar::X {{X1 int} {{X1 5}}}} e1 {}}
-----
+<1> The event information we hand down the hierarchy is modified to
+reflect the polymorphic mapping.
+Note that we modify a copy of the event information, since in the case of
+a compound generalization, we need to preserve the original event information
+for another generalization hierachy that originates from the same
+superclass.
+This is the case where one event to a superclass causes multiple events
+to be transitioned when the superclass has multiple hierarchies extending
+from it.
 
 === Helper Commands
 
@@ -9373,7 +9789,7 @@ relvar eval {
         RequiresStateModel  false
     } {
         Name                findUnrelated
-        Command             ::rosea::InstCmds::findById
+        Command             ::rosea::InstCmds::findUnrelated
         RequiresStateModel  false
     } {
         Name                findRelatedWhere
@@ -13364,8 +13780,11 @@ relvar insert Config_DataError {
     RefClass            TransitionPlace
     RefType             refnone
     Format              {in domain, \"$Domain\", the state model for,\
-                        \"$Model\", contains a transition for event,\
-                        \"$Event\", but $Event was a polymorphic event\
+                        \"$Model\", contains a transition from state,\
+                        \"$State\", caused by event, \"$Event\",\
+                        but either $State is not defined or\
+                        $Event is not defined or\
+                        $Event was a polymorphic event\
                         consumed by a superclass of $Model}
 } {
     Relationship        R72
@@ -15692,6 +16111,8 @@ relation foreach reference $references {
                 ::rosea::RelCmds::signalMultiAssigner $rpath]
             dict set ensemblemap create [list\
                 ::rosea::RelCmds::createMultiAssigner $rpath]
+            dict set ensemblemap delete [list\
+                ::rosea::RelCmds::deleteMultiAssigner $rpath]
         }
     }
     # Create the relationship ensemble command.
@@ -16415,6 +16836,7 @@ relation foreach bothref $bothrefs {
 
     set ensemblemap [dict create\
         link [list ::rosea::RelCmds::linkAssoc $relationship]\
+        reference [list ::rosea::RelCmds::referenceAssoc $relationship]\
         unlink [list ::rosea::RelCmds::unlinkAssoc $relationship]\
     ]
     # Determine if we have any assigners
@@ -16432,6 +16854,8 @@ relation foreach bothref $bothrefs {
                 ::rosea::RelCmds::signalMultiAssigner $rpath]
             dict set ensemblemap create [list\
                 ::rosea::RelCmds::createMultiAssigner $rpath]
+            dict set ensemblemap delete [list\
+                ::rosea::RelCmds::deleteMultiAssigner $rpath]
         }
     }
     namespace ensemble create -command $rpath -map $ensemblemap
@@ -16926,7 +17350,7 @@ test generate-4.0 {
 [source,tcl]
 ----
 <<generate command tests>>=
-test generate-4.1 {
+test generate-4.1.1 {
     migrate subclass
 } -setup {
     rosea configure {
@@ -16959,8 +17383,117 @@ test generate-4.1 {
         foo::X create x1 a x2 b
     }
     set ref [foo::X findWhere {$x1 eq "a"}]
-    foo::R1 migrate $ref Y
+    relvar eval {
+        set result [foo::R1 migrate $ref Y]
+    }
+    set result
 } -result {::foo::Y {{y1 string y2 string} {{y1 a y2 b}}}} -match ref
+----
+
+[source,tcl]
+----
+<<generate command tests>>=
+test generate-4.1.2 {
+    migrate subclass under event control
+} -setup {
+    rosea configure {
+        domain foo {
+            class S {
+                attribute id string -id 1
+            }
+            class X {
+                attribute id string -id 1
+                attribute x1 int -default 20
+                attribute b_id string
+
+                reference R1 S -link id
+                reference R4 B -link {b_id id}
+            }
+            class Y {
+                attribute id string -id 1
+                attribute y1 int -default 30
+                attribute c_id string
+
+                reference R1 S -link id
+                reference R3 C -link {c_id id}
+
+                statemodel {
+                    state idle {} {
+                        signal [findRelated $self R3] stop
+                        R1 migrate $self X b_id [readAttribute $self c_id]
+                        after 200 [list ::rosea::test::syncToTest $self]
+                    }
+                    transition idle - run -> running
+
+                    state running {} {
+                        signal [findRelated $self R3] run
+                    }
+                    transition running - stop -> idle
+                }
+            }
+            generalization R1 S X Y
+
+            class A {
+                attribute id string -id 1
+            }
+            class B {
+                attribute id string -id 1
+                attribute b1 int -default 40
+
+                reference R2 A -link id
+            }
+            class C {
+                attribute id string -id 1
+                attribute c1 int -default 50
+
+                reference R2 A -link id
+
+                statemodel {
+                    state idle {} {
+                        R2 migrate $self B
+                    }
+                    transition idle - run -> running
+
+                    state running {} {
+                    }
+                    transition running - stop -> idle
+                }
+            }
+            generalization R2 A B C
+
+            association R3 Y 1--1 C
+            association R4 X 1--1 B
+        }
+    }
+    rosea generate
+    rosea populate {
+        domain foo {
+            class S id s1
+            class Y {id c_id} s1 a1
+
+            class A id a1
+            class C id a1
+        }
+    }
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::foo
+} -body {
+    rosea trace control clear
+    rosea trace control on
+    set yref [foo::Y findWhere {$id eq "s1"}]
+    rosea tunnel $yref signal run
+    after 400 [list rosea tunnel $yref signal stop]
+    waitForSync
+    rosea trace control off
+    puts [rosea trace format [rosea trace decode all]]
+
+    set xref [foo::X findWhere {$id eq "s1"}]
+    set bref [foo::B findWhere {$id eq "a1"}]
+    testConditions\
+        {[rosea tunnel $xref readAttribute x1] == 20}\
+        {[rosea tunnel $bref readAttribute b1] == 40}
+} -result {1}
 ----
 
 [source,tcl]
@@ -17163,8 +17696,12 @@ test generate-4.4 {
     }
 
     set ::rosea::test::states [list]
+    rosea trace control clear
+    rosea trace control on
     rosea tunnel $aref signal grow
     vwait ::rosea::test::states
+    rosea trace control off
+    puts [rosea trace format [rosea trace decode all]]
 
     testConditions\
         {"SeededFruit" in $::rosea::test::states}\
@@ -17363,6 +17900,57 @@ test generate-6.1 {
     after cancel $timer
     set ::done
 } -result {1}
+----
+
+[source,tcl]
+----
+<<generate command tests>>=
+test generate-6.2 {
+    delete a multi assigner
+} -setup {
+    rosea configure {
+        domain foo {
+            class Customer {
+                attribute Name string -id 1
+            }
+            class Clerk {
+                attribute Name string -id 1
+                attribute Customer string
+                attribute Department string
+                reference R1 Customer -link {Customer Name}
+                reference R2 Department -link {Department Name}
+            }
+            class Department {
+                attribute Name string -id 1
+            }
+            association R1 Clerk 0..1--0..1 Customer
+            association R2 Clerk 1..*--1 Department
+            assigner R1 {
+                identifyby Department
+                state s1 {a b} {
+                    puts $a $b
+                }
+                transition s1 - e1 -> s2
+
+                state s2 {} {
+                    puts "in s2"
+                        set ::done 1
+                }
+                transition s2 - e1 -> s1
+            }
+        }
+    }
+    rosea generate
+} -cleanup {
+    cleanupConfigData
+    removeDomain ::foo
+} -body {
+    ::foo::R1 create Name Shoes
+    ::foo::R1 delete Name Shoes
+    ::foo::R1 signal {Name Shoes} e1
+} -result\
+    {unknown assigner instance, "Name Shoes", for relationship, "::foo::R1"}\
+    -returnCodes error
 ----
 
 == Initial Instance Population
@@ -17715,6 +18303,12 @@ it can be more convenient to use multiple [arg value] arguments.
         M[incr cnt]         PermPress\ 
         M[incr cnt]         Delicate\ 
 }]
+[para]
+The return value of the command is a list of the inserted tuple values.
+Each tuple value is also a list of attribute name / attribute value
+pairs ([emph i.e.] a dictionary, keyed by attribute name).
+The returned list gives the actual inserted values and can be used
+to access system generated or defaulted attribute values.
 ----
 ///////
 
@@ -17774,7 +18368,7 @@ proc class {class heading args} {
         }]
     }
 
-    return
+    return [relation body $insts]
 }
 ----
 
@@ -19604,6 +20198,7 @@ relvar create Trace {
     Source      list
     Event       string
     Target      list
+    Params      list
 } Trace_Id
 
 relvar create Creation {
@@ -19612,7 +20207,7 @@ relvar create Creation {
 
 relvar create Polymorphic {
     Trace_Id    int
-    SuperClass  string
+    SubInst     string
     Linkage     string
 } Trace_Id
 
@@ -19620,7 +20215,6 @@ relvar create Transition {
     Trace_Id    int
     CurrState   string
     NewState    string
-    Params      list
 } Trace_Id
 
 relvar partition R1 Trace Trace_Id\
@@ -20057,11 +20651,11 @@ and logging the trace instance.
 [source,tcl]
 ----
 <<trace commands>>=
-proc TraceCreation {source event target} {
+proc TraceCreation {source event target params} {
     variable traceState
     if {$traceState} {
         relvar eval {
-            set trace [NewTrace $source $event $target]
+            set trace [NewTrace $source $event $target $params]
             relvar insert Creation [list\
                 Trace_Id    [relation extract $trace Trace_Id]\
             ]
@@ -20075,14 +20669,14 @@ proc TraceCreation {source event target} {
 [source,tcl]
 ----
 <<trace commands>>=
-proc TracePolymorphic {source event target super link} {
+proc TracePolymorphic {source event target sub link params} {
     variable traceState
     if {$traceState} {
         relvar eval {
-            set trace [NewTrace $source $event $target]
+            set trace [NewTrace $source $event $target $params]
             relvar insert Polymorphic [list\
                 Trace_Id    [relation extract $trace Trace_Id]\
-                SuperClass  $super\
+                SubInst     $sub\
                 Linkage     $link\
             ]
         }
@@ -20099,12 +20693,11 @@ proc TraceTransition {source event target curr new params} {
     variable traceState
     if {$traceState} {
         relvar eval {
-            set trace [NewTrace $source $event $target]
+            set trace [NewTrace $source $event $target $params]
             relvar insert Transition [list\
                 Trace_Id    [relation extract $trace Trace_Id]\
                 CurrState   $curr\
                 NewState    $new\
-                Params      $params\
             ]
         }
         LogTrace $trace
@@ -20119,7 +20712,7 @@ factored to a separate procedure.
 [source,tcl]
 ----
 <<trace commands>>=
-proc NewTrace {src event target} {
+proc NewTrace {src event target params} {
     variable traceNumber
     return [relvar insert Trace [list\
         Trace_Id    [incr traceNumber]\
@@ -20127,6 +20720,7 @@ proc NewTrace {src event target} {
         Source      $src\
         Event       $event\
         Target      $target\
+        Params      $params\
     ]]
 }
 ----
@@ -20453,6 +21047,7 @@ proc TracesToRecords {traces} {
             source  $Source\
             event   $Event\
             target  $Target\
+            params  $Params\
             class   [lindex $Target 0]\
         ] ; # <3>
         if {[relation isnotempty $Transition]} { # <4>
@@ -20460,11 +21055,10 @@ proc TracesToRecords {traces} {
             dict set labeled type transition
             dict set labeled current $CurrState
             dict set labeled new $NewState
-            dict set labeled params $Params
         } elseif {[relation isnotempty $Polymorphic]} {
             relation assign $Polymorphic
             dict set labeled type polymorphic
-            dict set labeled super $SuperClass
+            dict set labeled sub $SubInst
             dict set labeled link $Linkage
         } elseif {[relation isnotempty $Creation]} {
             dict set labeled type creation
@@ -20817,23 +21411,21 @@ proc FormatTraceRec {rec} {
             transition {
                 append result\
                     "Transition: "\
-                    "[FormatInstRef $source] - $event"\
-                    [expr {[llength $params] != 0 ?\
-                        "\([join $params {, }]\)" : {}}]\
-                    " -> [FormatInstRef $target] ==> "\
-                    "$current -> $new"
+                    [FormatTransition $source $event $params $target]\
+                    " ==> $current -> $new"
             }
             polymorphic {
                 append result\
                     "Polymorphic : "\
-                    "[FormatInstRef $source] - $event -> $super ==> "\
-                    "$link -> [FormatInstRef $target]"
+                    [FormatTransition $source $event $params $target]\
+                    " ==> $link -> [FormatInstRef $sub]"
             }
             creation {
                 append result\
                     "Creation: "\
-                    "[FormatInstRef $source] - $event -> $class ==>\
-                        [FormatInstRef $target]"
+                    "[FormatInstRef $source] - "\
+                    "[FormatEvent $event $params] -> $class"\
+                    " ==> [FormatInstRef $target]"
             }
             default {
                 DeclError BAD_TRACETYPE $type
@@ -20844,25 +21436,61 @@ proc FormatTraceRec {rec} {
 }
 ----
 
+(((error code,BAD_TRACETYPE)))
+[source,tcl]
+----
+<<error code formats>>=
+BAD_TRACETYPE   {unknown trace type, "%s"}
+----
+
+A number of formatting commands can be factored out to operate on the
+pieces of a trace record.
+
+(((rosea,Trace,FormatTransition)))
+[source,tcl]
+----
+<<trace commands>>=
+proc FormatTransition {source event params target} {
+    return "[FormatInstRef $source] - [FormatEvent $event $params] ->\
+        [FormatInstRef $target]"
+}
+----
+
 (((rosea,Trace,FormatInstRef)))
 [source,tcl]
 ----
 <<trace commands>>=
 proc FormatInstRef {instref} {
     lassign $instref relvar inst
-    if {$relvar eq {}} {
-        return {{}}
-    } else {
-        return "$relvar\{[tuple get [relation tuple $inst]]\}"
-    }
+    return [expr {$relvar eq {} ? "()" :
+            "$relvar\([FormatNVPairs [tuple get [relation tuple $inst]]]\)"}]
 }
 ----
 
-(((error code,BAD_TRACETYPE)))
+(((rosea,Trace,FormatEvent)))
 [source,tcl]
 ----
-<<error code formats>>=
-BAD_TRACETYPE   {unknown trace type, "%s"}
+<<trace commands>>=
+proc FormatEvent {event params} {
+    set result $event
+
+    if {[llength $params] != 0} {
+        append result "\([join $params {, }]\)"
+    }
+    return $result
+}
+----
+
+(((rosea,Trace,FormatEvent)))
+[source,tcl]
+----
+<<trace commands>>=
+proc FormatNVPairs {pairs} {
+    return [pipe {
+        lmap {attr val} $pairs {string cat $attr ": " $val} |
+        join ~ {, }
+    }]
+}
 ----
 
 ==== Format Time Stamp
@@ -20936,15 +21564,12 @@ proc DiagTraces {traces args} {
             set Source [namespace tail [lindex $Source 0]]
         }
         set Target [namespace tail [lindex $Target 0]]
-        if {[relation isnotempty $Transition]} {
-            relation assign $Transition Params
-            set evtlabel $Event[expr {[llength $Params] != 0 ?\
-                "\([join $Params {, }]\)" : {}}]
-        } elseif {[relation isnotempty $Polymorphic]} {
-            relation assign $Transition Linkage
-            set evtlabel "$Event <<Polymorphic $Linkage>>"
+        set evtlabel [FormatEvent $Event $Params]
+        if {[relation isnotempty $Polymorphic]} {
+            relation assign $Polymorphic Linkage
+            append evtlabel " <<Polymorphic $Linkage>>"
         } elseif {[relation isnotempty $Creation]} {
-            set evtlabel "$Event <<Creation>>"
+            append evtlabel " <<Creation>>"
         }
         append result "    $Source ->> $Target \[label=\"$evtlabel\"\];\n"
     }
@@ -22587,7 +23212,7 @@ The figure below shows the trace information in sequence diagram form.
 This diagram was produced using +rosea diagram all+ to generate
 a file suitable for the +seqdiag+ program to render a graphic.
 
-image::wmctrl-seqdiag.pdf[title="Example Sequence Diagram"]
+image::wmctrl-seqdiag.png[title="Example Sequence Diagram"]
 
 The track labeled *EXTERNAL* shows events that originate outside of the
 domain.
@@ -22618,7 +23243,7 @@ It is licensed in the same manner as Tcl itself.
 # DO NOT EDIT THIS FILE!
 # THIS FILE IS AUTOMATICALLY GENERATED FROM A LITERATE PROGRAM SOURCE FILE.
 #
-# This software is copyrighted 2014-2015 by G. Andrew Mangogna.
+# This software is copyrighted 2014-2020 by G. Andrew Mangogna.
 # The following terms apply to all files associated with the software unless
 # explicitly disclaimed in individual files.
 # 
@@ -22678,7 +23303,7 @@ namespace eval ::rosea {
     <<rosea exports>>
     namespace ensemble create
 
-    variable version 1.6.2
+    variable version 1.10.2
 
     logger::initNamespace [namespace current]
 
@@ -22702,7 +23327,7 @@ We also provide a root chunk to extract a package index file.
 [source,tcl]
 ----
 <<pkgIndex.tcl>>=
-package ifneeded rosea 1.6.1 [list source [file join $dir rosea.tcl]]
+package ifneeded rosea 1.10.2 [list source [file join $dir rosea.tcl]]
 ----
 
 === Unit Tests
@@ -22816,14 +23441,14 @@ rosea populate {
 [source,tcl]
 ----
 <<rosea.man>>=
-[manpage_begin rosea n 1.6.2]
+[manpage_begin rosea n 1.10.1]
 [comment {
 <<copyright info>>
 }]
 [moddesc "XUML Data and Execution Architecture"]
 [titledesc "Relation Oriented Software Execution Architecture"]
-[copyright "2014-2015 by G. Andrew Mangogna"]
-[require rosea [opt 1.6.1]]
+[copyright "2014-2020 by G. Andrew Mangogna"]
+[require rosea [opt 1.10.1]]
 [description]
 <<manual description>>
 [section "Package Commands"]
