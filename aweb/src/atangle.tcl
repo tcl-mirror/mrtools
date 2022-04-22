@@ -1,4 +1,4 @@
-# This software is copyrighted 2013 by G. Andrew Mangogna.
+# This software is copyrighted 2013 - 2021 by G. Andrew Mangogna.
 # The following terms apply to all files associated with the software unless
 # explicitly disclaimed in individual files.
 # 
@@ -93,12 +93,12 @@ namespace eval ::atangle {
     namespace import ::ral::*
     namespace import ::ralutil::*
 
-    variable version 1.3.1
+    variable version 1.3.3
 
     variable optlist {
         {version {Print version and license, then exit}}
         {level.arg warn {Log debug level}}
-        {output.arg - {Output file name}}
+        {output.arg - {Output file name or directory}}
         {root.arg * {Comma separated list of root chunks to output}}
         {line.arg {} {Emit line markers}}
         {report {Issue chuck report}}
@@ -114,40 +114,82 @@ proc ::atangle::main {} {
     global argv
 
     # Parse options
-    array set options [::cmdline::getoptions ::argv $optlist]
+    try {
+        array set options [::cmdline::getoptions ::argv $optlist]
+    } on error {result} {
+        puts stderr $result
+        exit 1
+    }
+
     if {$options(version)} {
         versionInfo
         exit
     }
 
-    # First scan the input asciidoc file finding the chunks.
     variable infilename [lindex $argv 0]
     if {$infilename eq {}} {
         set infilename -
     }
 
+    # Emit the tangled code
+    # If the "-root" argument is a list, then interpret
+    # the "-output" as a directory and create distinct
+    # files for each requested root.
+    # Otherwise, "-output" is interpreted as a file name
+
+    set roots [lmap r [split\
+            [string trim $options(root) ", "] ,] {string trim $r}]
+
+    if {[llength $roots] > 1} {
+        if {$options(output) eq "-"} {
+            chan puts stderr "-output option must be supplied for\
+                multiple roots: got, \"$options(output)\""
+            exit 1 ;
+        }
+        if {[file exists $options(output)]} {
+            if {![file isdirectory $options(output)]} {
+                chan puts stderr "when tangling multiple rootrs,\
+                    $options(output), must be a directory"
+                exit 1 ;
+            }
+        } else {
+            file mkdir $options(output)
+        }
+    }
+
+    # First scan the input asciidoc file finding the chunks.
     tangler create t
     t loglevel $options(level)
     t parse $infilename
     t reportUndefined
 
-    # Emit the tangled code
-    if {$options(output) ne "-"} {
-        set ochan [open $options(output) w]
-    } else {
-        set ochan stdout
-    }
-    try {
-        set roots [lmap r [split $options(root) ,] {string trim $r}]
-        foreach root $roots {
-            t tangle $ochan $root
-        }
-    } on error {result opts} {
-        chan puts stderr $result
-        return -options $opts
-    } finally {
-        if {$ochan ne "stdout"} {
+    if {[llength $roots] > 1} {
+        try {
+            foreach root $roots {
+                set ochan [open [file join $options(output) $root] w]
+                t tangle $ochan $root
+                chan close $ochan
+            }
+        } on error {result opts} {
             chan close $ochan
+            chan puts stderr $result
+            return -options $opts $result
+        }
+    } else {
+        if {$options(output) ne "-"} {
+            set ochan [open $options(output) w]
+        } else {
+            set ochan stdout
+        }
+        try {
+            t tangle $ochan [lindex $roots 0]
+        } on error {result opts} {
+            chan puts stderr $result
+            return -options $opts $result
+        } finally {
+            if {$ochan ne "stdout"} {
+                chan close $ochan
+            }
         }
     }
 
@@ -166,7 +208,7 @@ proc ::atangle::versionInfo {} {
     variable version
     puts "atangle: version: $version"
     puts {
-This software is copyrighted 2013-2015 by G. Andrew Mangogna.
+This software is copyrighted 2013-2021 by G. Andrew Mangogna.
 The following terms apply to all files associated with the software unless
 explicitly disclaimed in individual files.
 

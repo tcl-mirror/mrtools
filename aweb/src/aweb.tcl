@@ -363,7 +363,7 @@ namespace eval ::aweb {
                             set infile $incfile
                             set lineno 1
                         } on error {result} {
-                            log::error $result
+                            log::warn $result
                         }
                         continue
                     }
